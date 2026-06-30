@@ -1,0 +1,92 @@
+{
+  "model": "Qwen/Qwen3.5-9B",
+  "policies": [
+    {
+      "by_role": {
+        "low": {
+          "estimated_output_bytes": 4009623552,
+          "input_bytes": 14256439296,
+          "tensors": 255
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "estimated_output_to_input_ratio": 0.46924785658633944,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-all-g16.json",
+      "policy_id": "all-g16",
+      "total_estimated_output_bytes": 9059400672,
+      "total_tensor_bytes": 19306216416
+    },
+    {
+      "by_role": {
+        "high": {
+          "estimated_output_bytes": 393216000,
+          "input_bytes": 1258291200,
+          "tensors": 51
+        },
+        "low": {
+          "estimated_output_bytes": 3655729152,
+          "input_bytes": 12998148096,
+          "tensors": 204
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "estimated_output_to_input_ratio": 0.47128458916784166,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json",
+      "policy_id": "p4p6",
+      "total_estimated_output_bytes": 9098722272,
+      "total_tensor_bytes": 19306216416
+    },
+    {
+      "by_role": {
+        "high": {
+          "estimated_output_bytes": 2658140160,
+          "input_bytes": 8506048512,
+          "tensors": 126
+        },
+        "low": {
+          "estimated_output_bytes": 1617297408,
+          "input_bytes": 5750390784,
+          "tensors": 129
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "estimated_output_to_input_ratio": 0.48301616883729437,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p9.json",
+      "policy_id": "p4p9",
+      "total_estimated_output_bytes": 9325214688,
+      "total_tensor_bytes": 19306216416
+    },
+    {
+      "by_role": {
+        "high": {
+          "estimated_output_bytes": 4455137280,
+          "input_bytes": 14256439296,
+          "tensors": 255
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "estimated_output_to_input_ratio": 0.49232403673475944,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-all-g8.json",
+      "policy_id": "all-g8",
+      "total_estimated_output_bytes": 9504914400,
+      "total_tensor_bytes": 19306216416
+    }
+  ],
+  "schema_version": "ullm-quant-policy-size-summary-v0.1"
+}

@@ -526,6 +526,22 @@ explicit in the full-model conversion plan. The estimated output size excludes
 container metadata and shared codebook overhead, so it is a payload estimate,
 not a final `.ullm` file size.
 
+The same planner was run for the main policy presets:
+
+- summary:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-policy-size-summary-qwen35-9b.json`
+
+| policy | estimated output bytes | output/input ratio | delta vs all-g16 |
+| --- | ---: | ---: | ---: |
+| all-g16 | 9,059,400,672 | 0.469248 | 0 |
+| p4p6 | 9,098,722,272 | 0.471285 | +39,321,600 |
+| p4p9 | 9,325,214,688 | 0.483016 | +265,814,016 |
+| all-g8 | 9,504,914,400 | 0.492324 | +445,513,728 |
+
+Combined with the policy10 logit smoke, p4p6 is currently the most attractive
+candidate because its estimated size is close to all-g16 while its logit
+relative MSE and KL were better in the 10-module smoke.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
