@@ -1,0 +1,65 @@
+ullm-quant skeleton
+kernel_version=0.1.0
+threads=64
+io_threads=2
+max_working_memory_mib=4096
+aq_policy=all-g16
+aq_low_format=aq4_e4m3_g16_ts_flloyd16
+aq_high_format=aq4_e4m3_g8_ts_flloyd16
+aq_high_families=
+dry_run=true
+pack_smoke=ok [16, 33, 15, 120]
+plan_model_dir=/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B
+plan_tensor_count=775
+plan_supported_tensor_count=255
+plan_passthrough_tensor_count=520
+plan_total_tensor_bytes=19306216416
+plan_total_estimated_output_bytes=9059400672
+plan_estimated_output_to_input_ratio=0.469248
+inspect_codebook_json=/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted.json
+inspect_codebook_family=attn_q
+inspect_codebook_candidate=aq4_e4m3_g16_ts_flloyd16
+inspect_codebook_entries=16
+inspect_codebook_min=-0.971876442
+inspect_codebook_max=0.971458733
+inspect_codebook_values=-0.971876442,-0.736995339,-0.554989278,-0.401153356,-0.309010893,-0.211199462,-0.123857126,-0.037059467,0.024832180,0.105907224,0.205696568,0.310382098,0.426185906,0.572797716,0.746346116,0.971458733
+prototype_output_dir=/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families.ullm.parts/010-model_language_model_layers_11_self_attn_q_proj_weight.ullm.d
+prototype_manifest=/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families.ullm.parts/010-model_language_model_layers_11_self_attn_q_proj_weight.ullm.d/manifest.json
+prototype_tensor=model.language_model.layers.11.self_attn.q_proj.weight
+prototype_index_file=tensors/model_language_model_layers_11_self_attn_q_proj_weight.idx4
+prototype_scale_file=tensors/model_language_model_layers_11_self_attn_q_proj_weight.scale_u8
+prototype_codebook_file=codebooks/attn_q__aq4_e4m3_g16_ts_flloyd16.f32
+prototype_relative_mse=0.005336517833
+prototype_tensor_scale_source=estimated
+prototype_max_abs_error=0.018474087
+prototype_verify_elements=33554432
+prototype_verify_groups=2097152
+prototype_verify_mse=0.000001338664
+prototype_verify_relative_mse=0.005336517833
+prototype_verify_max_abs_error=0.018474087
+prototype_verify_index_file_bytes=16777216
+prototype_verify_scale_file_bytes=2097152
+prototype_verify_codebook_entries=16
+	Command being timed: "target/release/ullm-quant --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --inspect-tensor model.language_model.layers.11.self_attn.q_proj.weight --skip-inspect --inspect-aq-format aq4_e4m3_g16_ts_flloyd16 --codebook-json /home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted.json --inspect-codebook-family attn_q --inspect-codebook-candidate aq4_e4m3_g16_ts_flloyd16 --chunk-bytes 1048576 --scale-window 4 --prototype-output-dir /tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families.ullm.parts/010-model_language_model_layers_11_self_attn_q_proj_weight.ullm.d --dry-run"
+	User time (seconds): 5.07
+	System time (seconds): 0.08
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:05.15
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 21188
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 8631
+	Voluntary context switches: 1
+	Involuntary context switches: 77
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 36888
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

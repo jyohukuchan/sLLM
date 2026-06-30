@@ -210,6 +210,14 @@
   - merged p4p6 smoke summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-mlp-up-attn-k.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k-merged.ullm.d`; tensor count `4`, shared codebooks `2`, total file bytes `61872608`.
   - added `--verify-prototype-dir` and `--verify-prototype-all` to verify existing prototype manifests.
   - merged 4-tensor prototype verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-mlp-up-attn-k.txt`; all 4 tensors verified with matching relative MSE; elapsed `0.74 s`, max RSS `29764 KiB`.
+  - extended `tools/export-aq-family-codebooks.py` with explicit `--missing-activation-stats unweighted` fallback for weighted codebook export.
+  - full p4p6 family codebook export: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted.json`; log `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted.log`.
+  - full export contains 24 codebooks: 12 families times 2 candidates. 16 are activation-weighted; 8 use `unweighted_missing_activation_stats` because current activation stats include `linear_attn.out_proj` but not `linear_attn.in_proj_qkv/a/b/z`.
+  - full export resource use: elapsed `11.31 s`, max RSS `617952 KiB`.
+  - expanded p4p6 prototype smoke to one tensor per quantized family. Summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families.json`; driver log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families-driver.log`; per-tensor logs in `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-all-families-logs/`.
+  - all-family smoke converted and verified 12/12 tensors. Relative MSE ranged from `0.003642895769` (`attn_o` g8) to `0.005458763018` (`linear_attn_b` g16); largest per-tensor RSS was `31148 KiB`; driver elapsed `42.75 s`.
+  - merged all-family smoke summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-all-families.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families-merged.ullm.d`; tensor count `12`, codebook count `12`, total file bytes `158503771`.
+  - merged all-family verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-all-families.txt`; all 12 tensors verified; elapsed `2.16 s`, max RSS `101196 KiB`.
 
 ## Current Interpretation
 
@@ -220,7 +228,8 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 ## Next
 
 - Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
+- Add activation-stat support for `linear_attn.in_proj_*` or keep those families explicitly unweighted until model-level evidence requires otherwise.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Move merge behavior into `ullm-quant` itself so multi-tensor output does not require per-tensor temporary directories.
-- Extend the smoke from `mlp_up/attn_k` to all tensors selected by the p4p6 plan.
+- Extend from one tensor per p4p6 family to more tensors per family, then all 255 quantized tensors selected by the p4p6 plan.

@@ -777,6 +777,85 @@ Verified relative MSE values matched the prototype write metrics:
 - `attn_k` layer11: `0.003723889112`
 - `attn_k` layer15: `0.003702330162`
 
+### Full-Family Prototype Policy Smoke
+
+The first p4p6 prototype smoke covered only `mlp_up` and `attn_k`. A wider
+export was then generated for all p4p6 quantized families:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted.json`
+- log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted.log`
+
+The export contains 24 codebooks: 12 families times 2 candidates. Activation
+stats currently exist for `mlp`, dense self-attention, and `linear_attn.out_proj`.
+They do not exist for `linear_attn.in_proj_qkv`, `in_proj_a`, `in_proj_b`, or
+`in_proj_z`, because the current activation collector recorded only
+`linear_attn.out_proj` for those modules. The export therefore uses weighted
+codebooks where stats exist and records an explicit
+`unweighted_missing_activation_stats` fallback for the linear-attention in-proj
+families.
+
+Export resource use:
+
+| item | value |
+| --- | ---: |
+| codebooks | 24 |
+| weighted codebooks | 16 |
+| fallback unweighted codebooks | 8 |
+| elapsed wall time | 11.31 s |
+| maximum RSS | 617,952 KiB |
+
+Using this codebook set, the p4p6 prototype smoke was expanded to one tensor per
+quantized family:
+
+- summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families.json`
+- driver log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families-driver.log`
+- per-tensor logs:
+  `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-all-families-logs/`
+
+All 12 selected tensors returned success and passed per-tensor verification.
+
+| family | candidate | relative MSE | elapsed | max RSS |
+| --- | --- | ---: | ---: | ---: |
+| `linear_attn_a` | `aq4_e4m3_g16_ts_flloyd16` | 0.005253958207 | 0:00.03 | 3,112 KiB |
+| `linear_attn_b` | `aq4_e4m3_g16_ts_flloyd16` | 0.005458763018 | 0:00.02 | 3,112 KiB |
+| `linear_attn_qkv` | `aq4_e4m3_g16_ts_flloyd16` | 0.005195938521 | 0:05.02 | 20,916 KiB |
+| `linear_attn_z` | `aq4_e4m3_g16_ts_flloyd16` | 0.005203894074 | 0:02.85 | 13,108 KiB |
+| `linear_attn_out` | `aq4_e4m3_g8_ts_flloyd16` | 0.003765302590 | 0:02.63 | 15,444 KiB |
+| `mlp_down` | `aq4_e4m3_g16_ts_flloyd16` | 0.005318504789 | 0:07.75 | 30,248 KiB |
+| `mlp_gate` | `aq4_e4m3_g16_ts_flloyd16` | 0.005198360634 | 0:08.05 | 30,536 KiB |
+| `mlp_up` | `aq4_e4m3_g16_ts_flloyd16` | 0.005245190541 | 0:07.20 | 31,148 KiB |
+| `attn_k` | `aq4_e4m3_g8_ts_flloyd16` | 0.003724312490 | 0:00.66 | 7,204 KiB |
+| `attn_o` | `aq4_e4m3_g8_ts_flloyd16` | 0.003642895769 | 0:02.54 | 16,424 KiB |
+| `attn_q` | `aq4_e4m3_g16_ts_flloyd16` | 0.005336517833 | 0:05.15 | 21,188 KiB |
+| `attn_v` | `aq4_e4m3_g8_ts_flloyd16` | 0.003817673166 | 0:00.73 | 7,244 KiB |
+
+The 12 per-family prototype directories were then merged:
+
+- merge summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-all-families.json`
+- output:
+  `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families-merged.ullm.d`
+
+| item | value |
+| --- | ---: |
+| tensor count | 12 |
+| codebook count | 12 |
+| total file bytes | 158,503,771 |
+
+Merged verification also passed:
+
+- verify log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-all-families.txt`
+
+| item | value |
+| --- | ---: |
+| verified tensors | 12 |
+| elapsed wall time | 2.16 s |
+| maximum RSS | 101,196 KiB |
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -791,8 +870,8 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 
 ## Next Actions
 
-1. Add activation-stat collection for selected Qwen3.5-9B linear modules.
-2. Expand calibration with longer contexts or an external text set after the current 32-prompt smoke.
-3. Use the family-policy summary to choose candidates for model-level checks.
-4. Expand the module-level logit smoke to more prompts/modules and then full-model replacement.
-5. Extend `ullm-quant` from skeleton to safetensors metadata planning and then chunked CPU quantization.
+1. Add activation-stat collection for `linear_attn.in_proj_*`, or explicitly decide that those families use unweighted codebooks until model-level evidence says otherwise.
+2. Move merge behavior into `ullm-quant` itself so the full conversion path does not depend on per-tensor temporary directories.
+3. Replace or approximate the exact tensor-scale pre-pass before scaling from 12 tensors to all p4p6 tensors.
+4. Run a wider p4p6 prototype conversion with more tensors per family, then all 255 quantized tensors.
+5. Add SIMD and multithreaded scheduling only after the scalar C++ semantics remain stable across wider conversion.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import datetime as dt
 import importlib.util
 import json
@@ -13,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+from safetensors import safe_open
 
 
 DEFAULT_CANDIDATES = [
@@ -47,12 +49,99 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tensors-per-family", type=int, default=4)
     parser.add_argument("--max-elements-per-tensor", type=int, default=262144)
     parser.add_argument("--weighted-codebook", action="store_true")
+    parser.add_argument(
+        "--missing-activation-stats",
+        choices=("error", "unweighted"),
+        default="error",
+        help="Behavior for --weighted-codebook tensors without activation stats.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--torch-threads", type=int, default=64)
     parser.add_argument("--torch-interop-threads", type=int, default=1)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--note", action="append", default=[])
     return parser.parse_args()
+
+
+def build_family_codebooks(
+    sampler,
+    args: argparse.Namespace,
+    tensors: list[tuple[str, Path]],
+    candidates,
+    activation_stats: dict[str, torch.Tensor],
+):
+    codebooks: dict[tuple[str, str], torch.Tensor] = {}
+    weighting: dict[tuple[str, str], str] = {}
+    fallbacks: list[dict[str, str]] = []
+
+    for candidate_index, candidate in enumerate(candidates):
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(args.seed + 100_000 + candidate_index)
+        family_values: dict[str, list[torch.Tensor]] = defaultdict(list)
+        family_weights: dict[str, list[torch.Tensor]] = defaultdict(list)
+        family_missing_stats: set[str] = set()
+        for tensor_name, path in tensors:
+            family = sampler.family_for_tensor(tensor_name)
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                tensor = handle.get_tensor(tensor_name)
+            if tensor.ndim < 2 or not tensor.is_floating_point():
+                continue
+            tensor_shape = tuple(int(dim) for dim in tensor.shape)
+            groups, columns = sampler.sample_groups_with_columns(
+                tensor,
+                candidate.group_size,
+                args.max_elements_per_tensor,
+                generator,
+            )
+            group_weights = None
+            if args.weighted_codebook:
+                if columns is None:
+                    raise ValueError(f"cannot apply activation stats to non-2D tensor {tensor_name}")
+                try:
+                    activation_second_moment = sampler.activation_stats_for_tensor(
+                        tensor_name,
+                        tensor_shape,
+                        activation_stats,
+                    )
+                except ValueError as exc:
+                    if args.missing_activation_stats != "unweighted":
+                        raise
+                    family_missing_stats.add(family)
+                    fallbacks.append(
+                        {
+                            "candidate_id": candidate.candidate_id,
+                            "family": family,
+                            "tensor": tensor_name,
+                            "reason": str(exc),
+                        }
+                    )
+                else:
+                    group_weights = activation_second_moment.index_select(0, columns.flatten()).view_as(groups)
+            values, weights = sampler.normalized_values_and_weights(groups, group_weights)
+            family_values[family].append(values)
+            if weights is not None:
+                family_weights[family].append(weights)
+            del tensor, groups
+
+        for family, chunks in family_values.items():
+            values = torch.cat(chunks) if len(chunks) > 1 else chunks[0]
+            weights = None
+            weight_mode = "unweighted"
+            if args.weighted_codebook and family not in family_missing_stats:
+                weight_chunks = family_weights[family]
+                weights = torch.cat(weight_chunks) if len(weight_chunks) > 1 else weight_chunks[0]
+                weight_mode = "weighted"
+            elif args.weighted_codebook:
+                weight_mode = "unweighted_missing_activation_stats"
+            key = (family, candidate.candidate_id)
+            codebooks[key] = sampler.codebook_from_normalized_values(
+                values,
+                candidate.codebook_mode,
+                weights,
+            )
+            weighting[key] = weight_mode
+
+    return codebooks, weighting, fallbacks
 
 
 def main() -> int:
@@ -82,8 +171,15 @@ def main() -> int:
         seed=args.seed,
         max_elements_per_tensor=args.max_elements_per_tensor,
         weighted_codebook=args.weighted_codebook,
+        missing_activation_stats=args.missing_activation_stats,
     )
-    codebooks = sampler.build_family_codebooks(build_args, tensors, candidates, activation_stats)
+    codebooks, weighting, fallbacks = build_family_codebooks(
+        sampler,
+        build_args,
+        tensors,
+        candidates,
+        activation_stats,
+    )
 
     rows = []
     for (family, candidate_id), codebook in sorted(codebooks.items()):
@@ -93,6 +189,7 @@ def main() -> int:
                 "family": family,
                 "candidate_id": candidate_id,
                 "entry_count": len(values),
+                "weighting": weighting[(family, candidate_id)],
                 "values_f32": values,
                 "min": min(values),
                 "max": max(values),
@@ -105,6 +202,8 @@ def main() -> int:
         "model_dir": str(args.model_dir),
         "activation_stats": str(args.activation_stats) if args.activation_stats else None,
         "weighted_codebook": args.weighted_codebook,
+        "missing_activation_stats": args.missing_activation_stats,
+        "activation_weighting_fallbacks": fallbacks,
         "seed": args.seed,
         "max_elements_per_tensor": args.max_elements_per_tensor,
         "max_tensors": args.max_tensors,

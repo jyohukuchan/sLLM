@@ -360,6 +360,36 @@ Rust implementation status:
   - verified tensors: `4`
   - elapsed wall time: `0.74 s`
   - peak RSS: `29764 KiB`
+- Full-family p4p6 codebook export:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted.json`
+  - 24 codebooks: 12 families times 2 candidates.
+  - 16 codebooks are activation-weighted.
+  - 8 codebooks use an explicit `unweighted_missing_activation_stats` fallback
+    for `linear_attn.in_proj_qkv/a/b/z`, because current activation stats only
+    cover `linear_attn.out_proj` for those modules.
+  - export wall time: `11.31 s`
+  - export peak RSS: `617952 KiB`
+- Full-family p4p6 prototype smoke:
+  - summary:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families.json`
+  - families: all 12 quantized p4p6 families
+  - tensors: 12, one per family
+  - all per-tensor prototype writes and verifications succeeded.
+  - relative MSE range: `0.003642895769` to `0.005458763018`
+  - driver wall time: `42.75 s`
+  - largest per-tensor RSS: `31148 KiB`
+- Full-family merged prototype:
+  - merge summary:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-all-families.json`
+  - output:
+    `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families-merged.ullm.d`
+  - tensor count: `12`
+  - codebook count: `12`
+  - total file bytes: `158503771`
+  - verify log:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-all-families.txt`
+  - merged verification wall time: `2.16 s`
+  - merged verification peak RSS: `101196 KiB`
 
 ## Output Directory Prototype
 
@@ -439,12 +469,16 @@ Performance tests:
 
 1. Add larger golden tests that compare C++ chunk output against Python or Rust
    scalar output across multiple random seeds.
-2. Avoid the exact tensor-scale pre-pass where possible. The current pre-pass
+2. Add activation-stat support for `linear_attn.in_proj_*`, or keep those
+   families explicitly unweighted until broader model-level evidence requires
+   otherwise.
+3. Avoid the exact tensor-scale pre-pass where possible. The current pre-pass
    mostly hurts memory rather than wall time on one tensor, but it will matter
    more for multi-tensor scheduling.
-3. Add SIMD kernels after the scalar C++ semantics are locked.
 4. Move merge behavior into `ullm-quant` itself so multi-tensor output does not
    require per-tensor temporary directories.
-5. Extend from the `mlp_up/attn_k` smoke to all tensors selected by the p4p6 plan.
-6. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
+5. Add SIMD kernels after the scalar C++ semantics are locked.
+6. Extend from one tensor per p4p6 family to more tensors per family, then all
+   255 quantized tensors selected by the p4p6 plan.
+7. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.
