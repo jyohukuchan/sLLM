@@ -104,7 +104,7 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
                     fmt(metrics.get("decode_tokens_per_second")),
                     fmt(consumed_gib),
                     fmt(product),
-                    Path(row.get("_source_file", "-")).name,
+                    f"`{Path(row.get('_source_file', '-')).name}`",
                 ]
             )
             + " |"
