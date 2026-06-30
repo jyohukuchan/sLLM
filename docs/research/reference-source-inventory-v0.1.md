@@ -24,6 +24,7 @@ reference-src/
 | vLLM | `reference-src/vllm` | `5b4cb6952310` | 144M | Apache-2.0 license found | serving architecture, scheduler, paged attention, benchmark comparison |
 | SGLang | `reference-src/sglang` | `3add35e26dc0` | 125M | Apache-2.0 license found | high-throughput serving, RadixAttention, prefill/decode disaggregation |
 | ATOM | `reference-src/atom` | `cce1a6e56dcd` | 15M | MIT license found | ROCm/HIP kernel and serving comparison |
+| AITER | `reference-src/aiter` | `71829a74bc26` | 793M | MIT license found | ATOM ROCm kernel dependency, gfx1201 source build validation |
 | TensorRT-LLM | `reference-src/tensorrt-llm` | `92147d6e01d7` | 320M | Apache-2.0 license found, with third-party notices | FP8 serving, engine/runtime comparison, benchmark comparison |
 
 ## Rules

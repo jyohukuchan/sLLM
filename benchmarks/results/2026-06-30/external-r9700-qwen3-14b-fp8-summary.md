@@ -14,17 +14,14 @@
 
 | Status | Engine | Model | Family | Quant | Target | Workload | Decode tok/s | Consumed GiB | Decode x GiB | Source |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |
-| failed | ATOM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | - | 16.13 | - | `2026-06-30-atom-r9700-qwen3-14b-fp8.jsonl` |
-| failed | ATOM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | - | 16.13 | - | `2026-06-30-atom-r9700-qwen3-14b-fp8.jsonl` |
-| failed | ATOM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | - | 15.66 | - | `2026-06-30-atom-r9700-qwen3-14b-fp8.jsonl` |
-| failed | SGLang | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | - | 16.58 | - | `2026-06-30-sglang-r9700-qwen3-14b-fp8.jsonl` |
-| failed | SGLang | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | - | 16.59 | - | `2026-06-30-sglang-r9700-qwen3-14b-fp8.jsonl` |
+| ok | ATOM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | 11.86 | 24.11 | 285.98 | `2026-06-30-atom-r9700-qwen3-14b-fp8.jsonl` |
+| ok | ATOM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp512/tg128/b1 | 9.15 | 24.17 | 221.14 | `2026-06-30-atom-r9700-qwen3-14b-fp8.jsonl` |
 | ok | SGLang | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | 19.12 | 16.75 | 320.37 | `2026-06-30-sglang-r9700-qwen3-14b-fp8.jsonl` |
 | ok | SGLang | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp512/tg128/b1 | 24.99 | 16.81 | 420.12 | `2026-06-30-sglang-r9700-qwen3-14b-fp8.jsonl` |
-| unsupported | vLLM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | - | 0.00 | - | `2026-06-30-vllm-r9700-qwen3-14b-fp8.jsonl` |
-| failed | vLLM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | - | 0.00 | - | `2026-06-30-vllm-r9700-qwen3-14b-fp8.jsonl` |
 | ok | vLLM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | 5.98 | 28.72 | 171.75 | `2026-06-30-vllm-r9700-qwen3-14b-fp8.jsonl` |
 | ok | vLLM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp512/tg128/b1 | 23.67 | 28.72 | 679.79 | `2026-06-30-vllm-r9700-qwen3-14b-fp8.jsonl` |
+
+Earlier failed compatibility attempts remain in the raw JSONL files. This table lists the usable rows.
 
 ## Representative Rows
 
@@ -32,7 +29,7 @@
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | vLLM | ok | pp512/tg128/tp1/pp1 | 94.66 | 23.67 | 118.33 | 28.72 | 679.79 |
 | SGLang | ok | pp512/tg128/tp1/pp1 | 49.50 | 24.99 | 74.49 | 16.81 | 420.12 |
-| ATOM | failed | smoke only | - | - | - | 15.66-16.13 | - |
+| ATOM | ok | pp512/tg128/tp1/pp1 | 36.60 | 9.15 | 45.75 | 24.17 | 221.14 |
 
 ## Environment Notes
 
@@ -42,12 +39,17 @@
   - `sgl-kernel/setup_rocm.py` was widened to allow experimental `gfx1201`.
   - `python/sglang/srt/layers/layernorm.py` was adjusted to call the installed vLLM ROCm `fused_add_rms_norm(input, residual, weight, eps)` ABI.
 - ATOM used source commit `cce1a6e56dcd8cb300183f81901fdaed6090d951` in `build/envs/atom-rocm`.
-- ATOM required a local ignored fallback import because the installed `amd-aiter==0.1.16.post2` wheel lacks `aiter.ops.shuffle.moe_shuffle_scale`; `shuffle_scale` was aliased for this dense Qwen3 smoke attempt.
-- ATOM still failed before readiness with ModelRunner `exitcode=-11` during warmup, even with `--enforce-eager`, `--max-model-len 256`, `--max-num-batched-tokens 256`, and `--max-num-seqs 1`.
-- ATOM's Dockerfile builds AITER from GitHub HEAD. A proper ATOM rerun should build AITER from source for `gfx1201` before treating this as an engine limitation.
+- ATOM failed with wheel `amd-aiter==0.1.16.post2`; that wheel lacked `aiter.ops.shuffle.moe_shuffle_scale` and ModelRunner later exited during warmup.
+- AITER was then cloned to `reference-src/aiter` and installed into `build/envs/atom-rocm` as editable source:
+  - AITER commit `71829a74bc2600bfbce4c05f85ecbe0eeb994323`
+  - version `amd-aiter==0.1.17.dev155+g71829a74b`
+  - install mode: `AITER_USE_SYSTEM_TRITON=1 BUILD_TARGET=rocm GPU_ARCHS=gfx1201 PREBUILD_KERNELS=0`
+  - `PREBUILD_KERNELS=1` was not used because the FlyDSL AOT path started compiling a large `gfx950` set despite `GPU_ARCHS=gfx1201`.
+- ATOM source AITER run used `--enforce-eager`, `--block-size 64`, `--kv_cache_dtype bf16`, `--max-num-seqs 1`, and `--max-num-batched-tokens 640` for the representative row.
+- ATOM `benchmark_serving` requires percentile `99` when saving the PyTorch benchmark sidecar; `50,95` alone produced a post-benchmark `KeyError: 'p99_ttft_ms'` even though the request completed.
 
 ## Interpretation
 
 - vLLM is currently the best R9700 FP8 baseline by `decode tok/s x consumed GiB` for the representative single-request row, but it consumes about 28.72 GiB.
-- SGLang reaches slightly higher representative decode tok/s with much lower consumed VRAM, but only after local compatibility patches.
-- ATOM is not runnable for this exact local 14B FP8 setup with the wheel-based AITER environment. The failure is recorded rather than omitted.
+- SGLang reaches the highest representative decode tok/s with much lower consumed VRAM than vLLM, but only after local compatibility patches.
+- ATOM becomes runnable on R9700/gfx1201 after replacing the wheel AITER with source AITER HEAD. In this single-request representative row it is slower than vLLM and SGLang and consumes about 24.17 GiB.
