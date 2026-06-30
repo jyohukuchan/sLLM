@@ -3078,9 +3078,10 @@ mod tests {
     use super::{
         AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport, Options,
         PrototypeManifest, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, bytes_to_lower_hex,
-        default_threads, effective_bpp, empty_aq_quant_metrics, estimate_output_bytes,
-        family_for_tensor, merge_prototype_dirs, new_aq_group_stats, new_numeric_stats,
-        new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
+        choose_best_scale_index_for_group, decode_numeric_value, default_threads, effective_bpp,
+        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, max_codebook_abs,
+        merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats, new_numeric_stats,
+        new_quant_dry_run_stats, numeric_element_size, quant_assignment, read_safetensors_metadata,
         read_tensor_payload_chunk, resolve_aq_policy, select_codebook, ullm_aq_quantize_chunk_v1,
         update_aq_group_stats, update_numeric_stats, update_quant_dry_run_stats,
     };
@@ -3917,6 +3918,197 @@ mod tests {
         );
         for (left, right) in rust_stats.index_counts.iter().zip(cxx_metrics.index_counts) {
             assert_eq!(*left, right as usize);
+        }
+    }
+
+    fn next_lcg_u32(state: &mut u64) -> u32 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*state >> 32) as u32
+    }
+
+    fn make_pseudo_random_16bit_payload(dtype: &str, seed: u64, elements: usize) -> Vec<u8> {
+        let mut state = seed;
+        let mut payload = Vec::with_capacity(elements * 2);
+        for index in 0..elements {
+            let word = next_lcg_u32(&mut state);
+            let raw = if index % 19 == 0 {
+                0u16
+            } else if dtype == "BF16" {
+                let sign = ((word >> 31) as u16) << 15;
+                let exp = 123u16 + ((word >> 8) as u16 % 9);
+                let frac = (word as u16) & 0x007f;
+                sign | (exp << 7) | frac
+            } else {
+                let sign = ((word >> 31) as u16) << 15;
+                let exp = 11u16 + ((word >> 8) as u16 % 9);
+                let frac = (word as u16) & 0x03ff;
+                sign | (exp << 10) | frac
+            };
+            payload.extend_from_slice(&raw.to_le_bytes());
+        }
+        payload
+    }
+
+    fn reference_quantize_bytes(
+        dtype: &str,
+        payload: &[u8],
+        group_size: usize,
+        scales: &[f32],
+        codebook: &[f32],
+        tensor_scale: f32,
+        scale_window: usize,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let element_size = numeric_element_size(dtype).expect("numeric dtype");
+        let group_bytes = group_size * element_size;
+        assert_eq!(payload.len() % group_bytes, 0);
+        let elements = payload.len() / element_size;
+        let mut packed = vec![0u8; elements.div_ceil(2)];
+        let mut scale_indices = Vec::with_capacity(payload.len() / group_bytes);
+        let max_code = max_codebook_abs(codebook);
+
+        for (group_index, group) in payload.chunks_exact(group_bytes).enumerate() {
+            let (_, best_scale_index) = choose_best_scale_index_for_group(
+                dtype,
+                group,
+                element_size,
+                scales,
+                codebook,
+                tensor_scale,
+                scale_window,
+                max_code,
+            )
+            .expect("best scale");
+            scale_indices.push(best_scale_index as u8);
+            let combined_scale = scales[best_scale_index] * tensor_scale;
+            for (item_index, item) in group.chunks_exact(element_size).enumerate() {
+                let element_index = group_index * group_size + item_index;
+                let value = decode_numeric_value(dtype, item).expect("numeric value");
+                let codebook_index = if value.is_nan() {
+                    0
+                } else {
+                    nearest_codebook_index(value / combined_scale, codebook)
+                };
+                let nibble = (codebook_index & 0x0f) as u8;
+                if element_index & 1 == 0 {
+                    packed[element_index / 2] = nibble;
+                } else {
+                    packed[element_index / 2] |= nibble << 4;
+                }
+            }
+        }
+        (packed, scale_indices)
+    }
+
+    fn assert_cxx_metrics_match_rust_scalar(
+        rust_stats: &super::QuantDryRunStats,
+        cxx_metrics: &AqQuantMetrics,
+    ) {
+        assert_eq!(rust_stats.elements, cxx_metrics.elements as usize);
+        assert_eq!(rust_stats.groups, cxx_metrics.groups as usize);
+        assert!((rust_stats.sse - cxx_metrics.sse).abs() < 1e-9);
+        assert!((rust_stats.ref_sse - cxx_metrics.ref_sse).abs() < 1e-9);
+        assert!((rust_stats.max_abs_error - cxx_metrics.max_abs_error).abs() < 1e-6);
+        assert_eq!(
+            rust_stats.scale_index_min,
+            cxx_metrics.scale_index_min as usize
+        );
+        assert_eq!(
+            rust_stats.scale_index_max,
+            cxx_metrics.scale_index_max as usize
+        );
+        assert_eq!(
+            rust_stats.scale_window_improved_groups,
+            cxx_metrics.scale_window_improved_groups as usize
+        );
+        for (left, right) in rust_stats.index_counts.iter().zip(cxx_metrics.index_counts) {
+            assert_eq!(*left, right as usize);
+        }
+    }
+
+    #[test]
+    fn cxx_v1_kernel_matches_rust_scalar_outputs_on_pseudo_random_chunks() {
+        let scales = [0.25f32, 0.5, 1.0, 2.0, 4.0, 8.0];
+        let codebook = [
+            -1.75f32, -1.25, -0.875, -0.625, -0.375, -0.125, 0.0, 0.125, 0.375, 0.625, 0.875,
+            1.125, 1.5, 1.875, 2.25, 2.75,
+        ];
+        let cases = [
+            ("BF16", ULLM_AQ_DTYPE_BF16, 0x9e37_79b9_7f4a_7c15, 4, 0, 1.0),
+            (
+                "BF16",
+                ULLM_AQ_DTYPE_BF16,
+                0x243f_6a88_85a3_08d3,
+                8,
+                2,
+                0.75,
+            ),
+            ("F16", ULLM_AQ_DTYPE_F16, 0x1319_8a2e_0370_7344, 4, 1, 1.25),
+            ("F16", ULLM_AQ_DTYPE_F16, 0xa409_3822_299f_31d0, 8, 2, 0.5),
+        ];
+
+        for (dtype, dtype_id, seed, group_size, scale_window, tensor_scale) in cases {
+            let payload = make_pseudo_random_16bit_payload(dtype, seed, group_size * 9);
+            let (expected_packed, expected_scale_indices) = reference_quantize_bytes(
+                dtype,
+                &payload,
+                group_size,
+                &scales,
+                &codebook,
+                tensor_scale,
+                scale_window,
+            );
+            let mut rust_stats =
+                new_quant_dry_run_stats(codebook.len(), tensor_scale, scale_window);
+            update_quant_dry_run_stats(
+                dtype,
+                &payload,
+                group_size,
+                &scales,
+                &codebook,
+                tensor_scale,
+                scale_window,
+                &mut rust_stats,
+            )
+            .expect("rust scalar dry run");
+
+            let mut packed = vec![0u8; expected_packed.len()];
+            let mut scale_indices = vec![0u8; expected_scale_indices.len()];
+            let mut cxx_metrics = empty_aq_quant_metrics();
+            let request = AqQuantizeChunkRequestV1 {
+                struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+                dtype: dtype_id,
+                reserved0: 0,
+                input: payload.as_ptr(),
+                input_bytes: payload.len(),
+                group_size,
+                scale_values: scales.as_ptr(),
+                scale_count: scales.len(),
+                codebook: codebook.as_ptr(),
+                codebook_count: codebook.len(),
+                tensor_scale,
+                reserved1: 0,
+                scale_window,
+                packed_indices: packed.as_mut_ptr(),
+                packed_indices_bytes: packed.len(),
+                scale_indices: scale_indices.as_mut_ptr(),
+                scale_indices_bytes: scale_indices.len(),
+            };
+            let status = unsafe {
+                ullm_aq_quantize_chunk_v1(
+                    &request,
+                    &mut cxx_metrics,
+                    std::mem::size_of::<AqQuantMetrics>(),
+                )
+            };
+            assert_eq!(status, 0, "{dtype} seed {seed:#x}");
+            assert_eq!(packed, expected_packed, "{dtype} seed {seed:#x} packed");
+            assert_eq!(
+                scale_indices, expected_scale_indices,
+                "{dtype} seed {seed:#x} scale indices"
+            );
+            assert_cxx_metrics_match_rust_scalar(&rust_stats, &cxx_metrics);
         }
     }
 

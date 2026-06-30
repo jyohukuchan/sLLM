@@ -309,6 +309,10 @@
   - resource use: elapsed `17:46.24`, max RSS `16364436 KiB`, no OOM or failed rows.
   - token-weighted loss deltas: all-g16 `-0.002063170`, all-g8 `+0.002981722`, p4p6 `-0.001536354`, p4p46 `-0.000982895`, p4p65 `+0.000413813`.
   - interpretation update: all-g16 remains best overall; among mixed policies, p4p6 is still best, p4p46 is second, and p4p65 is third. This keeps p4p6 as the conservative policy and p4p46 as the strongest in-proj follow-up despite p4p65's tensor-MSE/KL strengths.
+- C++ kernel golden coverage:
+  - added deterministic pseudo-random BF16/F16 chunk tests in `crates/ullm-quant/src/main.rs`.
+  - coverage now checks multiple seeds, group sizes `4` and `8`, scale windows `0`, `1`, and `2`, non-unit tensor scales, packed idx4 bytes, scale-index bytes, and metrics against the Rust scalar reference.
+  - verification: `cargo fmt -p ullm-quant --check`, `cargo test -p ullm-quant`, and `cargo build -p ullm-quant --release` passed. Unit tests now pass `23` tests.
 
 ## Current Interpretation
 
@@ -318,7 +322,7 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
+- Add real-tensor or cross-process golden tests if the C++ kernel changes again; the first pseudo-random BF16/F16 byte-level golden is now in place.
 - Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65, preferably after the full-model loader path is available.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
