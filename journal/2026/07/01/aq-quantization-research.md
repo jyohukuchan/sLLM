@@ -13,6 +13,8 @@
   - family-balanced tensor selection,
   - Lloyd-refined codebook candidates,
   - group-size sweep candidates.
+- Added CPU full-quantizer design:
+  - `docs/plans/aq-full-quantizer-design-v0.1.md`
 
 ## Results
 
@@ -45,6 +47,12 @@
   - g16 / 4.50 bpp free Lloyd16: `0.005241`
   - sample-local g16 result was `0.005244`; no meaningful penalty was observed with 3 tensors per family.
 
+- CPU full quantizer design:
+  - Rust orchestration plus C++20 numeric kernels.
+  - One explicit compute thread pool; avoid Rayon/OpenMP/thread-pool oversubscription.
+  - Chunked tensor processing to avoid whole-model RAM use.
+  - First implementation target: `aq4_e4m3_g16_ts_flloyd16`, plus `g8` as a 5.0 bpp accuracy point.
+
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
@@ -55,5 +63,5 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 - Add family-level LUT aggregation to the sampler.
 - Expand family-level LUT testing to more tensors per family.
-- Start a full quantizer design that avoids Python element loops and supports chunked CPU-multithreaded execution.
+- Create the first `ullm-quant` skeleton from the CPU full-quantizer design.
 - Add a small model-level check after tensor-level candidate narrowing.
