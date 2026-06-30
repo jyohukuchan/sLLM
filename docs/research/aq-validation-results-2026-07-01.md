@@ -182,8 +182,8 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 
 ## Next Actions
 
-1. Add family-level LUT aggregation and compare it against sample-local LUTs.
-2. Add a row/block-aware optimizer that can optimize codebook and scale jointly for each candidate.
-3. Expand family-level LUT checks to more layers and then compare per-family versus per-tensor LUT metadata.
-4. Run a small perplexity or logit-difference check for the top aq candidates after tensor-level narrowing.
-5. Start designing the full CPU multithreaded quantizer path in Rust/C++ or a Python driver plus C++ worker, avoiding Python element loops.
+1. Add activation-stat collection for selected Qwen3.5-9B linear modules.
+2. Add activation-weighted error rows for NVFP4, Unsloth Dynamic, and the current aq family-LUT candidates.
+3. Try activation-weighted Lloyd and clipped-scale variants before changing the runtime format.
+4. Run a small logit-difference or perplexity check for the top candidates after weighted tensor narrowing.
+5. Extend `ullm-quant` from skeleton to safetensors metadata planning and then chunked CPU quantization.

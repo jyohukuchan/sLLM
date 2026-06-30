@@ -62,15 +62,25 @@
   - `cargo test -p ullm-quant` passed.
   - `cargo run -p ullm-quant -- --dry-run --threads 64 --io-threads 2 --max-working-memory-mib 4096` printed `pack_smoke=ok [16, 33, 15, 120]`.
 
+- Firecrawl literature survey:
+  - created `docs/research/quantization-method-survey-2026-07-01.md`.
+  - checked GPTQ, SmoothQuant, AWQ, OmniQuant, AQLM, QuIP#, QuaRot, and FP4/MXFP4 papers through arXiv pages.
+  - Firecrawl search returned empty results for exact paper-title queries; direct arXiv scraping worked.
+  - main conclusion: tensor MSE is not enough; activation-weighted error and logit/perplexity smoke tests are needed before treating an aq row as a format candidate.
+
+- Activation-aware plan:
+  - created `docs/plans/aq-activation-aware-validation-v0.1.md`.
+  - next tool targets are `tools/collect-activation-stats.py` and `tools/run-aq-weighted-sample.py`.
+  - activation stats should store only streaming reductions such as per-input-channel second moments, not raw activations.
+
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The first family-level LUT test did not show a penalty, but it only used 3 tensors per family, so a larger check is still needed before treating it as a real format result.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior.
 
 ## Next
 
-- Add family-level LUT aggregation to the sampler.
-- Start activation/logit-level checks for the current top aq candidates.
+- Start activation-weighted and logit-level checks for the current top aq candidates.
 - Extend `ullm-quant` from skeleton to safetensors metadata planning.
 - Add a small model-level check after tensor-level candidate narrowing.
