@@ -482,6 +482,16 @@ Rust implementation status:
     tensors while ignoring `passthrough_tensors`.
   - full-package verifier log:
     `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-package.txt`
+- Rust passthrough verifier:
+  - CLI flag: `--verify-passthrough`
+  - streams each passthrough payload and checks byte length plus SHA-256.
+  - release verify log:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-passthrough-qwen35-9b-p4p6-full-package.txt`
+  - verified quantized tensors: `255`
+  - verified passthrough tensors: `520`
+  - verified passthrough payload bytes: `5049777120`
+  - verification wall time: `55.37 s`
+  - verification peak RSS: `104596 KiB`
 
 ## Output Directory Prototype
 
@@ -573,5 +583,4 @@ Performance tests:
 6. Move full-package merge behavior into `ullm-quant` itself so multi-tensor
    output no longer depends on per-tensor temporary directories or the Python
    merge tool.
-7. Add explicit Rust passthrough verification for payload size and hash.
-8. Run a full Qwen3.5-9B package conversion from a single `ullm-quant` command.
+7. Run a full Qwen3.5-9B package conversion from a single `ullm-quant` command.

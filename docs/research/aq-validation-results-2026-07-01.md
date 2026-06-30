@@ -1070,6 +1070,24 @@ field:
 | verify elapsed wall time | 48.63 s |
 | verify maximum RSS | 103,296 KiB |
 
+`ullm-quant` was then extended with explicit passthrough payload verification:
+
+- CLI flag:
+  - `--verify-passthrough`
+- release verify log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-passthrough-qwen35-9b-p4p6-full-package.txt`
+
+The verifier streams each passthrough payload, checks its byte length, and
+compares SHA-256 against `payload_sha256` without materializing the payloads.
+
+| item | value |
+| --- | ---: |
+| verified quantized tensors | 255 |
+| verified passthrough tensors | 520 |
+| verified passthrough payload bytes | 5,049,777,120 |
+| elapsed wall time | 55.37 s |
+| maximum RSS | 104,596 KiB |
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

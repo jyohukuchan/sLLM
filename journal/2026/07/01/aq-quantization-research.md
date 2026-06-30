@@ -234,6 +234,9 @@
   - full-package prototype summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-package.json`; merge log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-package.log`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-package.ullm.d`.
   - full-package prototype has 255 quantized tensors, 520 passthrough tensors, 12 codebooks, passthrough payload bytes `5049777120`, total file bytes `9099409599`, directory size `8.5 GiB`. Merge elapsed `8.71 s`, max RSS `36240 KiB`.
   - existing Rust verifier accepts the passthrough-extended manifest and verifies the 255 quantized tensors while ignoring `passthrough_tensors`: log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-package.txt`; elapsed `48.63 s`, max RSS `103296 KiB`.
+  - added explicit Rust passthrough verification via `--verify-passthrough`; `sha2` dependency added for SHA-256. The verifier streams payload files and checks byte length plus `payload_sha256`.
+  - passthrough verification log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-passthrough-qwen35-9b-p4p6-full-package.txt`; verified 255 quantized tensors and 520 passthrough tensors; passthrough payload bytes `5049777120`; elapsed `55.37 s`, max RSS `104596 KiB`.
+  - `cargo test -p ullm-quant` passes 20 tests after adding manifest default and hex encoding tests.
 
 ## Current Interpretation
 
@@ -248,4 +251,4 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Move merge behavior into `ullm-quant` itself so multi-tensor output does not require per-tensor temporary directories.
-- Move full-package merge behavior into `ullm-quant` itself and add explicit passthrough verifier for payload size/hash.
+- Move full-package merge behavior into `ullm-quant` itself; passthrough payload size/hash verification now exists.

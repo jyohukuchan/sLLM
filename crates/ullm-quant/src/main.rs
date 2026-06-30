@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -82,6 +83,7 @@ struct Options {
     prototype_verify: bool,
     verify_prototype_dir: Option<PathBuf>,
     verify_prototype_all: bool,
+    verify_passthrough: bool,
     tensor_scale_override: Option<f32>,
     chunk_bytes: usize,
     scale_window: usize,
@@ -232,6 +234,22 @@ struct PrototypeManifest {
     source_model_dir: String,
     tensors: Vec<PrototypeTensorManifest>,
     codebooks: Vec<PrototypeCodebookManifest>,
+    #[serde(default)]
+    passthrough_tensors: Vec<PrototypePassthroughTensorManifest>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PrototypePassthroughTensorManifest {
+    name: String,
+    source_file: String,
+    dtype: String,
+    shape: Vec<usize>,
+    family: String,
+    elements: usize,
+    payload_file: String,
+    payload_encoding: String,
+    payload_bytes: usize,
+    payload_sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -341,6 +359,7 @@ fn parse_options() -> Result<Options, String> {
         prototype_verify: true,
         verify_prototype_dir: None,
         verify_prototype_all: false,
+        verify_passthrough: false,
         tensor_scale_override: None,
         chunk_bytes: 64 * 1024 * 1024,
         scale_window: 0,
@@ -412,6 +431,7 @@ fn parse_options() -> Result<Options, String> {
                     })?));
             }
             "--verify-prototype-all" => options.verify_prototype_all = true,
+            "--verify-passthrough" => options.verify_passthrough = true,
             "--tensor-scale-override" => {
                 options.tensor_scale_override =
                     Some(parse_positive_f32("--tensor-scale-override", args.next())?)
@@ -475,6 +495,9 @@ fn print_help() {
     println!("  --prototype-skip-verify       skip prototype re-read/dequant verification");
     println!("  --verify-prototype-dir <PATH> verify an existing prototype .ullm.d directory");
     println!("  --verify-prototype-all        verify all tensors in --verify-prototype-dir");
+    println!(
+        "  --verify-passthrough          verify passthrough payloads in --verify-prototype-dir"
+    );
     println!("  --tensor-scale-override <F>   skip tensor-scale estimation for prototype output");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
@@ -1727,6 +1750,7 @@ fn write_prototype_tensor(
             encoding: "f32_le".to_string(),
             entries: codebook.len(),
         }],
+        passthrough_tensors: Vec::new(),
     };
     let manifest_path = output_dir.join("manifest.json");
     let manifest_text = serde_json::to_string_pretty(&manifest)
@@ -1879,6 +1903,81 @@ fn prototype_tensor_count(output_dir: &Path) -> Result<usize, String> {
     let manifest: PrototypeManifest = serde_json::from_str(&manifest_text)
         .map_err(|err| format!("failed to parse {}: {err}", manifest_path.display()))?;
     Ok(manifest.tensors.len())
+}
+
+#[derive(Debug)]
+struct PassthroughVerifyResult {
+    count: usize,
+    payload_bytes: usize,
+}
+
+fn bytes_to_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
+fn verify_passthrough_tensors(
+    output_dir: &Path,
+    buffer_bytes: usize,
+) -> Result<PassthroughVerifyResult, String> {
+    let manifest_path = output_dir.join("manifest.json");
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|err| format!("failed to read {}: {err}", manifest_path.display()))?;
+    let manifest: PrototypeManifest = serde_json::from_str(&manifest_text)
+        .map_err(|err| format!("failed to parse {}: {err}", manifest_path.display()))?;
+    let mut total_bytes = 0usize;
+    for (index, tensor) in manifest.passthrough_tensors.iter().enumerate() {
+        if tensor.payload_encoding != "raw_safetensors_payload" {
+            return Err(format!(
+                "passthrough tensor {} has unsupported encoding {}",
+                tensor.name, tensor.payload_encoding
+            ));
+        }
+        let payload_path = output_dir.join(&tensor.payload_file);
+        let mut file = fs::File::open(&payload_path)
+            .map_err(|err| format!("failed to open {}: {err}", payload_path.display()))?;
+        let actual_len = file
+            .metadata()
+            .map_err(|err| format!("failed to stat {}: {err}", payload_path.display()))?
+            .len();
+        if actual_len != tensor.payload_bytes as u64 {
+            return Err(format!(
+                "{} has {actual_len} bytes, expected {}",
+                payload_path.display(),
+                tensor.payload_bytes
+            ));
+        }
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; buffer_bytes.max(1)];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|err| format!("failed to read {}: {err}", payload_path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let actual_hash = bytes_to_lower_hex(&hasher.finalize());
+        if actual_hash != tensor.payload_sha256 {
+            return Err(format!(
+                "passthrough tensor {index} {} sha256 mismatch: {} != {}",
+                tensor.name, actual_hash, tensor.payload_sha256
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(tensor.payload_bytes)
+            .ok_or_else(|| "passthrough payload byte count overflows".to_string())?;
+    }
+    Ok(PassthroughVerifyResult {
+        count: manifest.passthrough_tensors.len(),
+        payload_bytes: total_bytes,
+    })
 }
 
 fn inspect_tensor_chunks(
@@ -2467,6 +2566,14 @@ fn run() -> Result<(), String> {
                 verification.codebook_entries
             );
         }
+        if options.verify_passthrough {
+            let verification = verify_passthrough_tensors(output_dir, options.chunk_bytes)?;
+            println!("verify_passthrough_tensor_count={}", verification.count);
+            println!(
+                "verify_passthrough_payload_bytes={}",
+                verification.payload_bytes
+            );
+        }
     }
     if let (Some(plan), Some(output)) = (&plan, options.plan_output.as_deref()) {
         let text = serde_json::to_string_pretty(plan)
@@ -2497,11 +2604,12 @@ fn main() -> ExitCode {
 mod tests {
     use super::{
         AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport, Options,
-        ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, default_threads, effective_bpp,
-        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, new_aq_group_stats,
-        new_numeric_stats, new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
-        read_tensor_payload_chunk, resolve_aq_policy, select_codebook, ullm_aq_quantize_chunk_v1,
-        update_aq_group_stats, update_numeric_stats, update_quant_dry_run_stats,
+        PrototypeManifest, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, bytes_to_lower_hex,
+        default_threads, effective_bpp, empty_aq_quant_metrics, estimate_output_bytes,
+        family_for_tensor, new_aq_group_stats, new_numeric_stats, new_quant_dry_run_stats,
+        quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
+        select_codebook, ullm_aq_quantize_chunk_v1, update_aq_group_stats, update_numeric_stats,
+        update_quant_dry_run_stats,
     };
     use std::fs;
     use std::io::Write;
@@ -2541,6 +2649,7 @@ mod tests {
             prototype_verify: true,
             verify_prototype_dir: None,
             verify_prototype_all: false,
+            verify_passthrough: false,
             tensor_scale_override: None,
             chunk_bytes: 1024,
             scale_window: 0,
@@ -2598,6 +2707,23 @@ mod tests {
         assert_eq!(chunk, vec![2, 3]);
 
         fs::remove_file(path).expect("remove temp safetensors");
+    }
+
+    #[test]
+    fn prototype_manifest_defaults_missing_passthrough_tensors() {
+        let text = r#"{
+            "schema_version": "ullm-prototype-manifest-v0.1",
+            "source_model_dir": "/tmp/model",
+            "tensors": [],
+            "codebooks": []
+        }"#;
+        let manifest: PrototypeManifest = serde_json::from_str(text).expect("manifest");
+        assert!(manifest.passthrough_tensors.is_empty());
+    }
+
+    #[test]
+    fn bytes_to_lower_hex_uses_two_digits_per_byte() {
+        assert_eq!(bytes_to_lower_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
     }
 
     #[test]
