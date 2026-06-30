@@ -327,8 +327,11 @@ struct PrototypePolicySmokeSummary {
 
 #[derive(Debug, Deserialize)]
 struct PrototypePolicySmokeResult {
+    #[serde(default)]
     returncode: i32,
     output_dir: String,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -375,6 +378,7 @@ struct PrototypeConvertResult {
     family: String,
     candidate: String,
     status: String,
+    returncode: i32,
     output_dir: String,
     error: Option<String>,
     manifest: Option<PrototypeTensorManifest>,
@@ -2150,6 +2154,7 @@ fn failed_convert_result(
         family: tensor.family.clone(),
         candidate,
         status: "failed".to_string(),
+        returncode: 1,
         output_dir: output_dir.display().to_string(),
         error: Some(error),
         manifest: None,
@@ -2218,6 +2223,7 @@ fn run_one_prototype_convert(
             family: tensor.family.clone(),
             candidate: candidate.to_string(),
             status: "ok".to_string(),
+            returncode: 0,
             output_dir: output_dir.display().to_string(),
             error: None,
             manifest: Some(tensor_manifest),
@@ -2712,6 +2718,13 @@ fn merge_passthrough_tensors(
     Ok(passthrough)
 }
 
+fn merge_source_result_succeeded(result: &PrototypePolicySmokeResult) -> bool {
+    match result.status.as_deref() {
+        Some(status) => status == "ok",
+        None => result.returncode == 0,
+    }
+}
+
 fn merge_prototype_dirs(
     policy_summary_path: &Path,
     plan_json_path: Option<&Path>,
@@ -2741,10 +2754,10 @@ fn merge_prototype_dirs(
     let mut source_model_dir: Option<String> = None;
 
     for (result_index, result) in summary.results.iter().enumerate() {
-        if result.returncode != 0 {
+        if !merge_source_result_succeeded(result) {
             return Err(format!(
-                "cannot merge failed result {result_index}: returncode={} output_dir={}",
-                result.returncode, result.output_dir
+                "cannot merge failed result {result_index}: returncode={} status={:?} output_dir={}",
+                result.returncode, result.status, result.output_dir
             ));
         }
         let src_dir = PathBuf::from(&result.output_dir);
@@ -4000,7 +4013,7 @@ mod tests {
                 "returncode": 0,
                 "output_dir": part_dir.display().to_string()
             }, {
-                "returncode": 0,
+                "status": "ok",
                 "output_dir": part_dir2.display().to_string()
             }]
         });

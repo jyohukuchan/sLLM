@@ -367,12 +367,23 @@
     - output root: `/tmp/ullm-quant-convert-smoke-p4p6-reservoir65536-jobs2.ullm.parts`.
     - result: selected `4`, failures `0`, aq policy `p4p6`, jobs `2`, elapsed `0:08.80`, max RSS `168256 KiB`, CPU `194%`.
     - relative MSE values exactly matched the jobs=1 run in the same selected order.
+  - Rust convert summary can now be consumed by the existing Rust merge path.
+    - convert rows now include `returncode`, and the merge input parser accepts either Python-driver `returncode` rows or Rust-convert `status` rows.
+    - the merge unit test now mixes one `returncode: 0` row and one `status: "ok"` row.
+  - convert+merge+merged-verify same-process smoke:
+    - convert summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-merge-smoke-qwen35-9b-p4p6-reservoir65536-family2-jobs2.json`.
+    - merge summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-merge-smoke-rust-merged-qwen35-9b-p4p6-reservoir65536-family2-jobs2.json`.
+    - time log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-merge-smoke-qwen35-9b-p4p6-reservoir65536-family2-jobs2.time`.
+    - output roots: parts `/tmp/ullm-quant-convert-merge-smoke-p4p6-reservoir65536-jobs2.ullm.parts`; merged `/tmp/ullm-quant-convert-merge-smoke-p4p6-reservoir65536-jobs2-merged.ullm.d`.
+    - result: convert selected `4`, failures `0`, returncodes all `0`; merge tensor count `4`, passthrough `0`, codebooks `2`, total file bytes `61872601`.
+    - merged verify checked all 4 tensors; relative MSE values matched the convert summary.
+    - resource use: elapsed `0:09.58`, max RSS `169020 KiB`, CPU `187%`.
 
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, but repeated-prompt and both 22-module/44-module project-text next-token loss smokes keep p4p6 as the safer policy. The 44-module run ranks p4p46 second among mixed policies, so p4p46 remains the main follow-up candidate. The Rust multi-tensor conversion path now replaces the Python per-tensor driver for bounded conversion smokes and supports explicit tensor-level parallel jobs, but it still writes per-tensor directories rather than a directly merged full package.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, but repeated-prompt and both 22-module/44-module project-text next-token loss smokes keep p4p6 as the safer policy. The 44-module run ranks p4p46 second among mixed policies, so p4p46 remains the main follow-up candidate. The Rust multi-tensor conversion path now replaces the Python per-tensor driver for bounded conversion smokes, supports explicit tensor-level parallel jobs, and can feed the Rust merge path in the same process. It still writes per-tensor directories before merge, so direct streaming full-package output remains a future optimization.
 
 ## Next
 
@@ -380,7 +391,7 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Add real-tensor or cross-process golden tests if the C++ kernel changes again; the first pseudo-random BF16/F16 byte-level golden is now in place.
 - Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65, preferably after the full-model loader path is available.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.
-- Extend the Rust conversion command toward direct full-package output, including quantized tensors, passthrough tensors, and merge/verify in one path.
+- Extend the Rust conversion command toward direct streaming full-package output. The current same-process convert+merge+verify path works, but it still writes per-tensor intermediate directories before merge.
 - Tune controlled CPU parallelism for full conversion. `--convert-jobs 2` is validated on a 4-tensor smoke, but larger jobs need memory and I/O measurements before using them as defaults.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.

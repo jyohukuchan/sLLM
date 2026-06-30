@@ -1,0 +1,55 @@
+{
+  "schema_version": "ullm-prototype-merge-summary-v0.1",
+  "policy_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-merge-smoke-qwen35-9b-p4p6-reservoir65536-family2-jobs2.json",
+  "output_dir": "/tmp/ullm-quant-convert-merge-smoke-p4p6-reservoir65536-jobs2-merged.ullm.d",
+  "tensor_count": 4,
+  "passthrough_tensor_count": 0,
+  "codebook_count": 2,
+  "total_file_bytes": 61872601,
+  "files": [
+    {
+      "path": "tensors/000-model_language_model_layers_0_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/000-model_language_model_layers_0_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "codebooks/mlp_up__aq4_e4m3_g16_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/001-model_language_model_layers_1_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/001-model_language_model_layers_1_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/002-model_language_model_layers_11_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/002-model_language_model_layers_11_self_attn_k_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/003-model_language_model_layers_15_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/003-model_language_model_layers_15_self_attn_k_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "manifest.json",
+      "bytes": 6489
+    }
+  ]
+}

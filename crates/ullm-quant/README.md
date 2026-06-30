@@ -104,6 +104,8 @@ without matching exported codebooks are skipped. Use `--convert-family`,
 full conversion. `--convert-jobs` enables tensor-level parallelism, but the
 default is `1` so conversion memory stays predictable unless a run explicitly
 opts in.
+The generated convert summary can be passed to `--merge-policy-summary` in the
+same or a later `ullm-quant` invocation.
 
 Policy presets:
 
