@@ -218,8 +218,7 @@ def normalized_values(groups: torch.Tensor) -> torch.Tensor:
     return (groups[mask] / amax[mask, None]).flatten()
 
 
-def codebook_from_groups(groups: torch.Tensor, mode: str) -> torch.Tensor:
-    norm = normalized_values(groups)
+def codebook_from_normalized_values(norm: torch.Tensor, mode: str) -> torch.Tensor:
     if mode in {"zero_free15", "zero_lloyd15"}:
         nonzero = norm[norm.abs() > 0]
         if nonzero.numel() == 0:
@@ -250,6 +249,10 @@ def codebook_from_groups(groups: torch.Tensor, mode: str) -> torch.Tensor:
     return codebook.to(torch.float32)
 
 
+def codebook_from_groups(groups: torch.Tensor, mode: str) -> torch.Tensor:
+    return codebook_from_normalized_values(normalized_values(groups), mode)
+
+
 def lloyd_refine_codebook(
     values: torch.Tensor,
     initial: torch.Tensor,
@@ -278,6 +281,36 @@ def lloyd_refine_codebook(
     return codebook.sort().values
 
 
+def build_family_codebooks(
+    args: argparse.Namespace,
+    tensors: list[tuple[str, Path]],
+    candidates: list[Candidate],
+) -> dict[tuple[str, str], torch.Tensor]:
+    result: dict[tuple[str, str], torch.Tensor] = {}
+    for candidate_index, candidate in enumerate(candidates):
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(args.seed + 100_000 + candidate_index)
+        family_values: dict[str, list[torch.Tensor]] = defaultdict(list)
+        for tensor_name, path in tensors:
+            family = family_for_tensor(tensor_name)
+            with safe_open(path, framework="pt", device="cpu") as handle:
+                tensor = handle.get_tensor(tensor_name)
+            if tensor.ndim < 2 or not tensor.is_floating_point():
+                continue
+            groups = sample_groups(
+                tensor,
+                candidate.group_size,
+                args.max_elements_per_tensor,
+                generator,
+            )
+            family_values[family].append(normalized_values(groups))
+            del tensor, groups
+        for family, chunks in family_values.items():
+            values = torch.cat(chunks) if len(chunks) > 1 else chunks[0]
+            result[(family, candidate.candidate_id)] = codebook_from_normalized_values(values, candidate.codebook_mode)
+    return result
+
+
 def choose_tensor_scale(groups: torch.Tensor, candidate: Candidate, scales: torch.Tensor, codebook: torch.Tensor) -> float:
     if candidate.tensor_scale == "none":
         return 1.0
@@ -304,9 +337,14 @@ def nearest_scale_indices(target: torch.Tensor, scales: torch.Tensor) -> torch.T
     return torch.where(choose_prev, prev, idx)
 
 
-def evaluate_candidate(groups: torch.Tensor, candidate: Candidate, scale_window: int) -> dict[str, float | int | str]:
+def evaluate_candidate(
+    groups: torch.Tensor,
+    candidate: Candidate,
+    scale_window: int,
+    codebook_override: torch.Tensor | None = None,
+) -> dict[str, float | int | str]:
     scales = scale_values(candidate.scale_format)
-    codebook = codebook_from_groups(groups, candidate.codebook_mode)
+    codebook = codebook_override if codebook_override is not None else codebook_from_groups(groups, candidate.codebook_mode)
     tensor_scale = choose_tensor_scale(groups, candidate, scales, codebook)
     scaled_groups = groups / tensor_scale
     max_code = codebook.abs().max().clamp_min(1e-12)
@@ -399,7 +437,7 @@ def row_for_result(
             "codebook": {
                 "mode": candidate.codebook_mode,
                 "storage_dtype": "bf16",
-                "granularity": candidate.codebook_granularity,
+                "granularity": args.codebook_granularity,
                 "entry_count": 16,
             },
             "scale": {
@@ -422,6 +460,7 @@ def row_for_result(
             "tensor_pattern": args.tensor_pattern,
             "family_filter": args.family,
             "max_tensors_per_family": args.max_tensors_per_family,
+            "codebook_granularity": args.codebook_granularity,
             "torch_threads": args.torch_threads,
             "torch_interop_threads": args.torch_interop_threads,
         },
@@ -444,6 +483,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tensors", type=int, default=8)
     parser.add_argument("--max-tensors-per-family", type=int, default=None)
     parser.add_argument("--max-elements-per-tensor", type=int, default=262144)
+    parser.add_argument(
+        "--codebook-granularity",
+        choices=("per_tensor_sample", "per_family_sample"),
+        default="per_tensor_sample",
+    )
     parser.add_argument("--scale-window", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--torch-threads", type=int, default=default_threads)
@@ -482,6 +526,10 @@ def main() -> int:
     if not tensors:
         raise SystemExit("no tensors matched")
 
+    family_codebooks: dict[tuple[str, str], torch.Tensor] = {}
+    if args.codebook_granularity == "per_family_sample":
+        family_codebooks = build_family_codebooks(args, tensors, candidates)
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     generator = torch.Generator(device="cpu")
     generator.manual_seed(args.seed)
@@ -503,7 +551,8 @@ def main() -> int:
                         args.max_elements_per_tensor,
                         generator,
                     )
-                    metrics = evaluate_candidate(groups, candidate, args.scale_window)
+                    codebook_override = family_codebooks.get((family, candidate.candidate_id))
+                    metrics = evaluate_candidate(groups, candidate, args.scale_window, codebook_override)
                     row = row_for_result(
                         args,
                         tensor_name,
@@ -540,6 +589,7 @@ def main() -> int:
                             "tensor_pattern": args.tensor_pattern,
                             "family_filter": args.family,
                             "max_tensors_per_family": args.max_tensors_per_family,
+                            "codebook_granularity": args.codebook_granularity,
                             "torch_threads": args.torch_threads,
                             "torch_interop_threads": args.torch_interop_threads,
                         },

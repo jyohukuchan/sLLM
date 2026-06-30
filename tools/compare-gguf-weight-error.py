@@ -120,6 +120,62 @@ def gguf_to_hf_name(gguf_name: str) -> str | None:
     return f"model.language_model.layers.{layer}.{mapped}"
 
 
+def load_qwen35_linear_config(model_dir: Path) -> dict[str, int] | None:
+    config_path = model_dir / "config.json"
+    if not config_path.exists():
+        return None
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    text_config = config.get("text_config", config)
+    required = [
+        "linear_key_head_dim",
+        "linear_value_head_dim",
+        "linear_num_key_heads",
+        "linear_num_value_heads",
+    ]
+    if not all(key in text_config for key in required):
+        return None
+    return {key: int(text_config[key]) for key in required}
+
+
+def reorder_v_heads(tensor: torch.Tensor, dim: int, num_k_heads: int, num_v_per_k: int, head_dim: int) -> torch.Tensor:
+    shape = list(tensor.shape)
+    if dim < 0:
+        dim += len(shape)
+    new_shape = shape[:dim] + [num_k_heads, num_v_per_k, head_dim] + shape[dim + 1 :]
+    reshaped = tensor.reshape(*new_shape)
+    perm = list(range(len(new_shape)))
+    perm[dim], perm[dim + 1] = perm[dim + 1], perm[dim]
+    return reshaped.permute(*perm).contiguous().reshape(*shape)
+
+
+def transform_qwen35_linear_reference(hf_name: str, tensor: torch.Tensor, config: dict[str, int] | None) -> torch.Tensor:
+    if config is None or ".linear_attn." not in hf_name:
+        return tensor
+    num_k_heads = config["linear_num_key_heads"]
+    num_v_heads = config["linear_num_value_heads"]
+    if num_k_heads <= 0 or num_v_heads <= 0 or num_k_heads == num_v_heads:
+        return tensor
+    num_v_per_k = num_v_heads // num_k_heads
+    head_k_dim = config["linear_key_head_dim"]
+    head_v_dim = config["linear_value_head_dim"]
+
+    if hf_name.endswith(".linear_attn.in_proj_qkv.weight"):
+        q_dim = head_k_dim * num_k_heads
+        k_dim = head_k_dim * num_k_heads
+        q = tensor[:q_dim]
+        k = tensor[q_dim : q_dim + k_dim]
+        v = tensor[q_dim + k_dim :]
+        v = reorder_v_heads(v, 0, num_k_heads, num_v_per_k, head_v_dim)
+        return torch.cat([q, k, v], dim=0)
+    if hf_name.endswith(".linear_attn.in_proj_z.weight"):
+        return reorder_v_heads(tensor, 0, num_k_heads, num_v_per_k, head_v_dim)
+    if hf_name.endswith((".linear_attn.in_proj_a.weight", ".linear_attn.in_proj_b.weight")):
+        return reorder_v_heads(tensor, 0, num_k_heads, num_v_per_k, 1)
+    if hf_name.endswith(".linear_attn.out_proj.weight"):
+        return reorder_v_heads(tensor, 1, num_k_heads, num_v_per_k, head_v_dim)
+    return tensor
+
+
 def is_float_qtype(qtype_name: str) -> bool:
     return qtype_name in {"F32", "F16", "BF16", "F64"}
 
@@ -325,6 +381,7 @@ def main() -> int:
 
     reader = GGUFReader(args.gguf_path, "r")
     base_map = build_tensor_file_map(args.base_model_dir)
+    qwen35_linear_config = load_qwen35_linear_config(args.base_model_dir)
     tensor_pattern = re.compile(args.tensor_pattern)
     tensors = discover_tensors(reader, args, tensor_pattern)
     if not tensors:
@@ -347,6 +404,7 @@ def main() -> int:
                 base_path = base_map[hf_name]
                 with safe_open(base_path, framework="pt", device="cpu") as base_handle:
                     base = base_handle.get_tensor(hf_name).to(torch.float32)
+                base = transform_qwen35_linear_reference(hf_name, base, qwen35_linear_config)
                 start = time.perf_counter()
                 quantized = dequantize_gguf_tensor(tensor, dequantize)
                 dequant_seconds = time.perf_counter() - start

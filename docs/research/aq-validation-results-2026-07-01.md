@@ -56,34 +56,35 @@ NVFP4 is a useful first target for aq because it is a simple 4.5 bpp reference p
 
 ### Unsloth Dynamic Q4_K_XL GGUF
 
-Result file used for reliable summary:
+Result file used for all-family summary:
 
-- `benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b-mlp-selfattn.jsonl`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b-reordered.jsonl`
 
-24 tensor samples across MLP and full-attention projection tensors:
+36 tensor samples across MLP, Qwen3.5 linear attention, and full-attention projection tensors. The comparison applies llama.cpp's Qwen3.5 V-head reorder to the HF reference for linear-attention tensors.
 
 | metric | value |
 | --- | ---: |
-| relative MSE mean | 0.004175 |
-| relative MSE min | 0.000318 |
+| relative MSE mean | 0.002857 |
+| relative MSE min | 0.000030 |
 | relative MSE max | 0.005902 |
-| cosine similarity mean | 0.997911 |
-| mean abs error mean | 0.000602 |
+| cosine similarity mean | 0.998570 |
+| mean abs error mean | 0.000512 |
 
 Breakdown by GGML type:
 
 | type | mean bpp | tensors | relative MSE mean |
 | --- | ---: | ---: | ---: |
 | IQ4_XS | 4.25 | 2 | 0.005901 |
-| Q4_K | 4.50 | 16 | 0.005336 |
-| Q5_K | 5.50 | 1 | 0.001351 |
+| Q4_K | 4.50 | 14 | 0.005324 |
+| Q5_K | 5.50 | 11 | 0.001342 |
 | Q6_K | 6.5625 | 5 | 0.000331 |
+| Q8_0 | 8.50 | 4 | 0.000030 |
 
-The broader GGUF run including Qwen3.5 linear attention tensors is stored at:
+The earlier run without the Qwen3.5 V-head reorder is stored at:
 
 - `benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b.jsonl`
 
-That run found very large errors for `linear_attn_*` name mappings. Treat those rows as unresolved mapping/packing validation, not as Unsloth quality measurements.
+Treat its `linear_attn_*` rows as invalid comparison rows. The issue was a reference-layout mismatch, not an Unsloth quality issue.
 
 ## aq Candidate Results
 
@@ -140,6 +141,22 @@ All rows use `E4M3 + BF16 tensor scale + free Lloyd16 codebook`.
 
 At the same nominal 4.5 bpp, the current aq g16 free-Lloyd candidate slightly beats the sampled UD `Q4_K` rows (`0.00524` vs `0.00534`) and clearly beats the sampled NVFP4 rows (`0.00524` vs `0.00900`). Caveat: aq currently uses sample-local codebooks, so this is not yet a final storage-format result.
 
+### Family-Level LUT Check
+
+Result file:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-lut-qwen35-9b-balanced.jsonl`
+
+The current top codebook mode was tested with one shared LUT per family instead of one sample-local LUT per tensor.
+
+| candidate | effective bpp | sample-local relative MSE | family-LUT relative MSE |
+| --- | ---: | ---: | ---: |
+| `aq4_e4m3_g32_ts_flloyd16` | 4.25 | 0.006873 | 0.006873 |
+| `aq4_e4m3_g16_ts_flloyd16` | 4.50 | 0.005244 | 0.005241 |
+| `aq4_e4m3_g8_ts_flloyd16` | 5.00 | 0.003573 | 0.003573 |
+
+With 3 tensors per family, the free-Lloyd codebook is stable enough that family-level sharing did not meaningfully hurt tensor reconstruction. This needs a larger tensor set before becoming a format decision, but it reduces the concern that sample-local codebooks are hiding a large penalty.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -150,12 +167,12 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 - The current Python tool is acceptable for tensor sampling, but not for final full-model quantization.
 - Family-level or tensor-level LUT aggregation must be tested because sample-local codebooks are too optimistic for final format decisions.
 - Zero-preserving versus free16 codebooks must be evaluated with model-level quality, not only MSE.
-- GGUF linear-attention mapping needs separate validation before using those rows as external baseline data.
+- GGUF linear-attention comparison must apply the Qwen3.5 V-head reorder used by llama.cpp conversion.
 
 ## Next Actions
 
 1. Add family-level LUT aggregation and compare it against sample-local LUTs.
 2. Add a row/block-aware optimizer that can optimize codebook and scale jointly for each candidate.
-3. Resolve GGUF Qwen3.5 linear-attention tensor mapping before comparing those tensors.
+3. Expand family-level LUT checks to more layers and then compare per-family versus per-tensor LUT metadata.
 4. Run a small perplexity or logit-difference check for the top aq candidates after tensor-level narrowing.
 5. Start designing the full CPU multithreaded quantizer path in Rust/C++ or a Python driver plus C++ worker, avoiding Python element loops.
