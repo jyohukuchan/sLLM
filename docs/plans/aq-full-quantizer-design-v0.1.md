@@ -305,14 +305,17 @@ Rust implementation status:
   - throughput: about `5.75M` elements/s
   - note: source tensor is read twice because tensor-scale estimation is still
     a pre-pass.
-- First C++20 BF16 chunk kernel:
-  - ABI entry: `ullm_aq_quantize_bf16_chunk`
+- First C++20 chunk kernel:
+  - ABI entry: `ullm_aq_quantize_chunk_v1`
+  - request struct carries `struct_size`, explicit dtype id, pointers, buffer
+    sizes, group size, scale table, codebook, tensor scale, and scale window.
   - owns best-scale search, nearest-codebook assignment, idx4 packing,
     scale-index output, and chunk metric accumulation.
   - Rust still owns safetensors I/O, tensor-scale estimation, manifest writing,
     and prototype re-read/dequant verification.
-  - requires BF16 input, 16-entry codebook, `scale_count <= 256`, group-aligned
-    input chunks, and preallocated output buffers.
+  - currently supports BF16 only; other dtype ids return unsupported status.
+  - requires a 16-entry codebook, `scale_count <= 256`, group-aligned input
+    chunks, and preallocated output buffers.
 - C++ scalar baseline benchmark:
   - `mlp_up` g16 write-only: `7.13 s`, `21516 KiB`, about `7.06M`
     elements/s, same relative MSE `0.005283509762`.
@@ -397,10 +400,9 @@ Performance tests:
 
 ## Immediate Steps
 
-1. Generalize the C++ ABI from BF16-only to a versioned `quantize_chunk_v1`
-   with an explicit dtype enum and struct size/version fields.
-2. Add C++/Rust golden tests for invalid buffers, all-zero groups, NaN groups,
+1. Add C++/Rust golden tests for all-zero groups, NaN groups,
    and scale/codebook argument validation.
+2. Add F16 support to `quantize_chunk_v1` after BF16 semantics are stable.
 3. Avoid the tensor-scale pre-pass where possible by either storing group amax
    summaries or fusing estimation with a bounded histogram.
 4. Add SIMD kernels after the scalar C++ semantics are locked.

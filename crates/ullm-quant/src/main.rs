@@ -30,24 +30,37 @@ struct AqQuantMetrics {
     scale_window_improved_groups: u64,
 }
 
+const ULLM_AQ_DTYPE_BF16: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct AqQuantizeChunkRequestV1 {
+    struct_size: usize,
+    dtype: u32,
+    reserved0: u32,
+    input: *const u8,
+    input_bytes: usize,
+    group_size: usize,
+    scale_values: *const f32,
+    scale_count: usize,
+    codebook: *const f32,
+    codebook_count: usize,
+    tensor_scale: f32,
+    reserved1: u32,
+    scale_window: usize,
+    packed_indices: *mut u8,
+    packed_indices_bytes: usize,
+    scale_indices: *mut u8,
+    scale_indices_bytes: usize,
+}
+
 unsafe extern "C" {
     fn ullm_aq_get_kernel_version() -> KernelVersion;
     fn ullm_aq_pack_nibbles(low: *const u8, high: *const u8, output: *mut u8, len: usize) -> usize;
-    fn ullm_aq_quantize_bf16_chunk(
-        input: *const u8,
-        input_bytes: usize,
-        group_size: usize,
-        scale_values: *const f32,
-        scale_count: usize,
-        codebook: *const f32,
-        codebook_count: usize,
-        tensor_scale: f32,
-        scale_window: usize,
-        packed_indices: *mut u8,
-        packed_indices_bytes: usize,
-        scale_indices: *mut u8,
-        scale_indices_bytes: usize,
+    fn ullm_aq_quantize_chunk_v1(
+        request: *const AqQuantizeChunkRequestV1,
         metrics: *mut AqQuantMetrics,
+        metrics_size: usize,
     ) -> i32;
 }
 
@@ -1337,6 +1350,7 @@ fn cxx_error_message(code: i32) -> &'static str {
         -2 => "invalid argument",
         -3 => "invalid input byte layout",
         -4 => "output buffer is too small",
+        -5 => "unsupported dtype",
         _ => "unknown error",
     }
 }
@@ -1377,22 +1391,30 @@ fn quantize_chunk_to_writers<WIndex: Write, WScale: Write>(
         let mut packed_indices = vec![0u8; elements.div_ceil(2)];
         let mut scale_indices = vec![0u8; groups];
         let mut metrics = empty_aq_quant_metrics();
+        let request = AqQuantizeChunkRequestV1 {
+            struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+            dtype: ULLM_AQ_DTYPE_BF16,
+            reserved0: 0,
+            input: bytes.as_ptr(),
+            input_bytes: bytes.len(),
+            group_size,
+            scale_values: scale_values.as_ptr(),
+            scale_count: scale_values.len(),
+            codebook: codebook.as_ptr(),
+            codebook_count: codebook.len(),
+            tensor_scale,
+            reserved1: 0,
+            scale_window,
+            packed_indices: packed_indices.as_mut_ptr(),
+            packed_indices_bytes: packed_indices.len(),
+            scale_indices: scale_indices.as_mut_ptr(),
+            scale_indices_bytes: scale_indices.len(),
+        };
         let status = unsafe {
-            ullm_aq_quantize_bf16_chunk(
-                bytes.as_ptr(),
-                bytes.len(),
-                group_size,
-                scale_values.as_ptr(),
-                scale_values.len(),
-                codebook.as_ptr(),
-                codebook.len(),
-                tensor_scale,
-                scale_window,
-                packed_indices.as_mut_ptr(),
-                packed_indices.len(),
-                scale_indices.as_mut_ptr(),
-                scale_indices.len(),
+            ullm_aq_quantize_chunk_v1(
+                &request,
                 &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
             )
         };
         if status != 0 {
@@ -2345,10 +2367,11 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        CodebookEntry, CodebookExport, Options, default_threads, effective_bpp,
-        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, new_aq_group_stats,
-        new_numeric_stats, new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
-        read_tensor_payload_chunk, resolve_aq_policy, select_codebook, ullm_aq_quantize_bf16_chunk,
+        AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport, Options,
+        ULLM_AQ_DTYPE_BF16, default_threads, effective_bpp, empty_aq_quant_metrics,
+        estimate_output_bytes, family_for_tensor, new_aq_group_stats, new_numeric_stats,
+        new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
+        read_tensor_payload_chunk, resolve_aq_policy, select_codebook, ullm_aq_quantize_chunk_v1,
         update_aq_group_stats, update_numeric_stats, update_quant_dry_run_stats,
     };
     use std::fs;
@@ -2541,22 +2564,30 @@ mod tests {
         let mut packed = [0u8; 2];
         let mut scale_indices = [0u8; 1];
         let mut metrics = empty_aq_quant_metrics();
+        let request = AqQuantizeChunkRequestV1 {
+            struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+            dtype: ULLM_AQ_DTYPE_BF16,
+            reserved0: 0,
+            input: payload.as_ptr(),
+            input_bytes: payload.len(),
+            group_size: 4,
+            scale_values: scales.as_ptr(),
+            scale_count: scales.len(),
+            codebook: codebook.as_ptr(),
+            codebook_count: codebook.len(),
+            tensor_scale: 1.0,
+            reserved1: 0,
+            scale_window: 1,
+            packed_indices: packed.as_mut_ptr(),
+            packed_indices_bytes: packed.len(),
+            scale_indices: scale_indices.as_mut_ptr(),
+            scale_indices_bytes: scale_indices.len(),
+        };
         let status = unsafe {
-            ullm_aq_quantize_bf16_chunk(
-                payload.as_ptr(),
-                payload.len(),
-                4,
-                scales.as_ptr(),
-                scales.len(),
-                codebook.as_ptr(),
-                codebook.len(),
-                1.0,
-                1,
-                packed.as_mut_ptr(),
-                packed.len(),
-                scale_indices.as_mut_ptr(),
-                scale_indices.len(),
+            ullm_aq_quantize_chunk_v1(
+                &request,
                 &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
             )
         };
         assert_eq!(status, 0);
@@ -2566,6 +2597,54 @@ mod tests {
         assert_eq!(metrics.elements, 4);
         assert_eq!(metrics.scale_window_improved_groups, 1);
         assert_eq!(metrics.index_counts[1], 4);
+    }
+
+    #[test]
+    fn cxx_v1_kernel_rejects_unsupported_dtype_and_short_output() {
+        let payload = [0u8; 8];
+        let scales = [1.0f32];
+        let codebook = [0.0f32; 16];
+        let mut packed = [0u8; 1];
+        let mut scale_indices = [0u8; 1];
+        let mut metrics = empty_aq_quant_metrics();
+        let mut request = AqQuantizeChunkRequestV1 {
+            struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+            dtype: 2,
+            reserved0: 0,
+            input: payload.as_ptr(),
+            input_bytes: payload.len(),
+            group_size: 4,
+            scale_values: scales.as_ptr(),
+            scale_count: scales.len(),
+            codebook: codebook.as_ptr(),
+            codebook_count: codebook.len(),
+            tensor_scale: 1.0,
+            reserved1: 0,
+            scale_window: 0,
+            packed_indices: packed.as_mut_ptr(),
+            packed_indices_bytes: packed.len(),
+            scale_indices: scale_indices.as_mut_ptr(),
+            scale_indices_bytes: scale_indices.len(),
+        };
+        let unsupported = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(unsupported, -5);
+
+        request.dtype = ULLM_AQ_DTYPE_BF16;
+        request.packed_indices_bytes = 1;
+        let short_output = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(short_output, -4);
     }
 
     #[test]

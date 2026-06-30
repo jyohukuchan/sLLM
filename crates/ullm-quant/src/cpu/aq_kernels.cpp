@@ -94,9 +94,7 @@ void reset_metrics(ullm_aq_quant_metrics * metrics, std::size_t scale_count) {
     metrics->scale_window_improved_groups = 0;
 }
 
-} // namespace
-
-int ullm_aq_quantize_bf16_chunk(
+int quantize_bf16_chunk_impl(
     const std::uint8_t * input,
     std::size_t input_bytes,
     std::size_t group_size,
@@ -210,6 +208,71 @@ int ullm_aq_quantize_bf16_chunk(
     }
 
     return 0;
+}
+
+} // namespace
+
+int ullm_aq_quantize_chunk_v1(
+    const ullm_aq_quantize_chunk_request_v1 * request,
+    ullm_aq_quant_metrics * metrics,
+    std::size_t metrics_size) {
+    if (request == nullptr || metrics == nullptr) {
+        return -1;
+    }
+    if (request->struct_size < sizeof(ullm_aq_quantize_chunk_request_v1) ||
+        metrics_size < sizeof(ullm_aq_quant_metrics)) {
+        return -2;
+    }
+    if (request->dtype != ULLM_AQ_DTYPE_BF16) {
+        return -5;
+    }
+    return quantize_bf16_chunk_impl(
+        request->input,
+        request->input_bytes,
+        request->group_size,
+        request->scale_values,
+        request->scale_count,
+        request->codebook,
+        request->codebook_count,
+        request->tensor_scale,
+        request->scale_window,
+        request->packed_indices,
+        request->packed_indices_bytes,
+        request->scale_indices,
+        request->scale_indices_bytes,
+        metrics);
+}
+
+int ullm_aq_quantize_bf16_chunk(
+    const std::uint8_t * input,
+    std::size_t input_bytes,
+    std::size_t group_size,
+    const float * scale_values,
+    std::size_t scale_count,
+    const float * codebook,
+    std::size_t codebook_count,
+    float tensor_scale,
+    std::size_t scale_window,
+    std::uint8_t * packed_indices,
+    std::size_t packed_indices_bytes,
+    std::uint8_t * scale_indices,
+    std::size_t scale_indices_bytes,
+    ullm_aq_quant_metrics * metrics) {
+    return quantize_bf16_chunk_impl(
+        input,
+        input_bytes,
+        group_size,
+        scale_values,
+        scale_count,
+        codebook,
+        codebook_count,
+        tensor_scale,
+        scale_window,
+        packed_indices,
+        packed_indices_bytes,
+        scale_indices,
+        scale_indices_bytes,
+        metrics);
 }
 
 }
