@@ -337,6 +337,37 @@ This does not prove model quality, but it changes the next aq direction:
 - model-level logit/perplexity checks are now needed before further tensor-only
   optimization.
 
+### Module-Level Logit Smoke
+
+Tool:
+
+- `tools/run-aq-module-logit-smoke.py`
+
+Result file:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-linear-attn-out-r9700-calib32-qwen35-9b.jsonl`
+
+Scope:
+
+- model: Qwen3.5-9B CausalLM
+- device: R9700 through `build/envs/vllm-rocm-nightly`
+- module quantized: `model.layers.0.linear_attn.out_proj`
+- prompt count: 1
+- sequence length cap: 64
+- comparison: final-token logits against BF16 reference
+
+| variant | logit relative MSE | mean abs error | max abs error | KL(ref, candidate) | top1 match | top10 overlap |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| g16 unweighted scale/codebook | 0.002045509 | 0.094623752 | 0.625000000 | 0.001206253 | true | 10 |
+| g16 weighted scale + codebook | 0.000198949 | 0.028513012 | 0.203125000 | 0.000491175 | true | 10 |
+| g8 weighted scale + codebook | 0.000101244 | 0.020070247 | 0.125000000 | 0.001576327 | true | 10 |
+
+This is not a full-model quality result, but it confirms that the
+activation-weighted variants also reduce logit error for the most suspicious
+single module from the tensor analysis. The KL result is not strictly monotonic
+with logit MSE in this one-prompt smoke, so the next check should use more
+prompts and eventually full-model replacement.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -354,5 +385,5 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 1. Add activation-stat collection for selected Qwen3.5-9B linear modules.
 2. Expand calibration with longer contexts or an external text set after the current 32-prompt smoke.
 3. Use the family-policy summary to choose candidates for model-level checks.
-4. Run a small logit-difference or perplexity check for the top weighted candidates.
+4. Expand the module-level logit smoke to more prompts/modules and then full-model replacement.
 5. Extend `ullm-quant` from skeleton to safetensors metadata planning and then chunked CPU quantization.

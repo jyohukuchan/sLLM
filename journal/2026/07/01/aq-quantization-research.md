@@ -113,6 +113,15 @@
   - policy artifact: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-policy-r9700-calib32-qwen35-9b.json`.
   - next evidence should be model-level logit/perplexity, not only tensor metrics.
 
+- Module-level logit smoke:
+  - added `tools/run-aq-module-logit-smoke.py`.
+  - quantized only `model.layers.0.linear_attn.out_proj` and compared final-token logits against BF16.
+  - result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-linear-attn-out-r9700-calib32-qwen35-9b.jsonl`.
+  - g16 unweighted logit relative MSE: `0.002045509`.
+  - g16 weighted scale + codebook logit relative MSE: `0.000198949`.
+  - g8 weighted scale + codebook logit relative MSE: `0.000101244`.
+  - all three preserved top1 and top10 on the single prompt.
+
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
@@ -121,5 +130,5 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Use the family-policy artifact to select candidates for a small model-level logit/perplexity check.
+- Expand module-level logit smoke to more prompts/modules, then plan full-model replacement.
 - Extend `ullm-quant` from skeleton to safetensors metadata planning.

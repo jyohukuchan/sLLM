@@ -202,3 +202,14 @@ Weighted codebook fitting was then tested with the same calib32 stats:
 
 The next step should be a model-level logit or perplexity check for the weighted
 scale + weighted codebook candidates, plus an explicit family-policy artifact.
+
+A first module-level logit smoke was completed for
+`model.layers.0.linear_attn.out_proj`. Weighted variants reduced final-token
+logit relative MSE versus the unweighted g16 variant:
+
+- g16 unweighted: `0.002045509`
+- g16 weighted scale + codebook: `0.000198949`
+- g8 weighted scale + codebook: `0.000101244`
+
+All three variants preserved top1 and top10 for the single prompt. This should
+be expanded before treating it as a model-quality result.
