@@ -257,6 +257,41 @@ bpp comparison: this 32-row subset averages `5.4668` bpp and stores
 `0.000249632`. This strongly suggests aq needs family-specific bit/scale policy
 experiments, not only one uniform g16/g8 setting.
 
+### R9700 Calib32 Stability Check
+
+The 4-prompt calibration was expanded to a small 32-prompt calibration file:
+
+- `benchmarks/calibration/qwen35-aq-smoke-prompts-v0.1.txt`
+- stats output:
+  - `benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512/`
+- samples: 32 prompts
+- tokens seen: 14061
+- modules with stats: 152
+
+Result files:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-r9700-calib32-qwen35-9b-family4.jsonl`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-scale-search-r9700-calib32-qwen35-9b-family4.jsonl`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-nvfp4-weighted-r9700-calib32-qwen35-9b-family4.jsonl`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-weighted-r9700-calib32-qwen35-9b-family4.jsonl`
+
+| candidate / format | mean bpp | mean relative MSE | mean weighted relative MSE | `linear_attn_out` weighted relative MSE |
+| --- | ---: | ---: | ---: | ---: |
+| aq g16, unweighted scale search | 4.5000 | 0.005269024 | 0.007682577 | 0.018924633 |
+| aq g16, weighted scale search | 4.5000 | 0.005900905 | 0.004622421 | 0.009085352 |
+| aq g8, unweighted scale search | 5.0000 | 0.003647685 | 0.006697035 | 0.019346728 |
+| aq g8, weighted scale search | 5.0000 | 0.004163366 | 0.003439578 | 0.007488695 |
+| ModelOpt NVFP4 | 4.5000 | 0.008967095 | 0.009864150 | 0.013873237 |
+| Unsloth Dynamic Q4_K_XL mixed | 5.4668 | 0.003607886 | 0.002471176 | 0.000153408 |
+
+The direction remained stable after expanding calibration:
+
+- weighted scale search improves aq weighted error substantially,
+- aq g16 with weighted scale search beats NVFP4 at the same 4.5 bpp on this metric,
+- aq g8 with weighted scale search closes part of the gap to Unsloth Dynamic,
+- Unsloth Dynamic remains ahead because it uses mixed precision and protects
+  sensitive families such as `linear_attn_out`.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -272,7 +307,7 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 ## Next Actions
 
 1. Add activation-stat collection for selected Qwen3.5-9B linear modules.
-2. Expand activation-stat calibration beyond the current 4-prompt R9700 smoke.
+2. Expand calibration with longer contexts or an external text set after the current 32-prompt smoke.
 3. Try activation-weighted Lloyd, clipped-scale variants, and family-specific bpp policy before changing the runtime format.
 4. Run a small logit-difference or perplexity check for the top candidates after weighted tensor narrowing.
 5. Extend `ullm-quant` from skeleton to safetensors metadata planning and then chunked CPU quantization.

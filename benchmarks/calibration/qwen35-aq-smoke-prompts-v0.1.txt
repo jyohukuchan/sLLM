@@ -1,0 +1,32 @@
+Explain how prefill and decode differ in a transformer inference engine.
+Summarize the trade-off between tensor parallelism and pipeline parallelism for LLM serving.
+Write a concise note about activation-aware post-training quantization.
+Describe why linear layers with outlier input channels can be hard to quantize.
+Compare FP8, INT8, and 4-bit weight-only quantization for inference.
+Give a practical checklist for benchmarking token throughput on a GPU server.
+Explain how a key-value cache changes memory use during autoregressive decoding.
+Write pseudocode for measuring relative MSE between two weight tensors.
+Describe the purpose of a calibration dataset in post-training quantization.
+Explain why a model format might store per-group scales and per-tensor scales.
+Summarize the risks of using a tiny calibration set for quantization.
+Write a short Python function that computes a weighted mean squared error.
+Explain how a lookup table can map 4-bit indices to floating point values.
+Describe why preserving a few important channels can improve quantized accuracy.
+Compare uniform quantization with learned codebook quantization.
+Explain what it means for a quantization format to be memory-bandwidth bound.
+大規模言語モデルの推論でprefillとdecodeを分ける理由を説明してください。
+量子化においてactivationの外れ値が問題になる理由を日本語で要約してください。
+GPUでLLMをベンチマークするときに記録すべき項目を列挙してください。
+低ビット量子化でscaleの粒度を小さくすると何が改善し、何が悪化しますか。
+Qwen系モデルのlinear attentionに対応する推論エンジン設計を説明してください。
+重みだけを4bitにした場合とactivationも量子化した場合の違いを説明してください。
+CPUで巨大モデルを量子化するときにメモリ使用量を抑える方法を説明してください。
+AVX-512を使った4bit unpack処理の実装方針を説明してください。
+Rustで推論エンジン全体を制御し、C++で演算カーネルを書く利点を説明してください。
+モデルの一部familyだけ高精度にする混合量子化の利点と欠点を説明してください。
+Unsloth Dynamic量子化と独自aq形式を比較する評価観点を整理してください。
+weighted relative MSEが通常のrelative MSEと異なる理由を説明してください。
+サーバー向けLLM推論でtotal token throughputを改善する方法を説明してください。
+NPU、GPU、CPUを同じモデル形式で扱うときの抽象化の注意点を説明してください。
+長いコンテキストでメモリ消費量が増える理由と測定方法を説明してください。
+量子化済みモデルの配布形式に必要なmetadataを列挙してください。

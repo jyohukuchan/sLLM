@@ -1,0 +1,630 @@
+{
+  "device": "cuda:0",
+  "dtype": "bfloat16",
+  "max_samples": 32,
+  "model_class": "auto_model",
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "module_count": 152,
+  "module_pattern": "(self_attn|linear_attn|mlp).*(q_proj|k_proj|v_proj|o_proj|in_proj|out_proj|gate_proj|up_proj|down_proj)$",
+  "modules": {
+    "language_model.layers.0.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.0.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.0.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.0.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.1.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.1.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.1.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.1.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.10.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.10.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.10.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.10.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.11.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.11.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.11.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.11.self_attn.k_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.11.self_attn.o_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.11.self_attn.q_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.11.self_attn.v_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.12.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.12.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.12.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.12.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.13.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.13.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.13.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.13.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.14.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.14.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.14.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.14.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.15.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.15.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.15.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.15.self_attn.k_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.15.self_attn.o_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.15.self_attn.q_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.15.self_attn.v_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.16.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.16.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.16.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.16.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.17.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.17.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.17.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.17.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.18.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.18.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.18.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.18.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.19.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.19.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.19.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.19.self_attn.k_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.19.self_attn.o_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.19.self_attn.q_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.19.self_attn.v_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.2.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.2.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.2.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.2.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.20.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.20.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.20.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.20.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.21.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.21.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.21.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.21.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.22.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.22.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.22.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.22.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.23.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.23.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.23.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.23.self_attn.k_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.23.self_attn.o_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.23.self_attn.q_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.23.self_attn.v_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.24.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.24.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.24.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.24.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.25.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.25.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.25.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.25.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.26.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.26.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.26.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.26.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.27.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.27.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.27.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.27.self_attn.k_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.27.self_attn.o_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.27.self_attn.q_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.27.self_attn.v_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.28.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.28.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.28.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.28.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.29.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.29.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.29.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.29.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.3.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.3.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.3.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.3.self_attn.k_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.3.self_attn.o_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.3.self_attn.q_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.3.self_attn.v_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.30.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.30.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.30.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.30.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.31.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.31.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.31.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.31.self_attn.k_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.31.self_attn.o_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.31.self_attn.q_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.31.self_attn.v_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.4.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.4.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.4.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.4.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.5.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.5.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.5.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.5.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.6.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.6.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.6.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.6.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.7.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.7.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.7.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.7.self_attn.k_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.7.self_attn.o_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.7.self_attn.q_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.7.self_attn.v_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.8.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.8.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.8.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.8.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.9.linear_attn.out_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.9.mlp.down_proj": {
+      "activation_count": 14061,
+      "input_features": 12288
+    },
+    "language_model.layers.9.mlp.gate_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    },
+    "language_model.layers.9.mlp.up_proj": {
+      "activation_count": 14061,
+      "input_features": 4096
+    }
+  },
+  "notes": [
+    "r9700_rocr_visible_devices_1_calib32"
+  ],
+  "prompt_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/calibration/qwen35-aq-smoke-prompts-v0.1.txt",
+  "repeat_to_length": true,
+  "run_id": "qwen35-9b-r9700-activation-calib32-s512",
+  "samples_seen": 32,
+  "schema_version": "aq-activation-stats-v0.1",
+  "sequence_length": 512,
+  "timestamp_utc": "2026-06-30T16:13:16.122936+00:00",
+  "tokens_seen": 14061
+}

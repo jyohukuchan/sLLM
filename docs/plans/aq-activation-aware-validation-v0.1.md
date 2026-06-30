@@ -179,3 +179,14 @@ from 4 prompts / 1403 tokens. In the family4 weighted comparison:
 - ModelOpt NVFP4 measured `0.010255294`.
 - Unsloth Dynamic Q4_K_XL mixed measured `0.002460200`, but at mean `5.4668`
   bpp and with `linear_attn_out` stored as `Q8_0`.
+
+The 32-prompt calibration rerun collected 14061 tokens and preserved the same
+direction:
+
+- aq g16 weighted scale search: `0.004622421`
+- aq g8 weighted scale search: `0.003439578`
+- ModelOpt NVFP4: `0.009864150`
+- Unsloth Dynamic Q4_K_XL mixed: `0.002471176`
+
+The next aq-specific tests should target activation-weighted codebook fitting
+and family-specific precision policy, especially for `linear_attn_out`.
