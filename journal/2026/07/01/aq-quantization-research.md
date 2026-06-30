@@ -329,6 +329,10 @@
   - logs: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-{exact,reservoir}-{attn-k,linear-attn-out,linear-attn-a}.log`.
   - family4 summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-summary-family4.json`.
   - family4 result: reservoir65536 exactly matched exact tensor scale and relative MSE for `attn_k`, `linear_attn_out`, and `linear_attn_a`; RSS deltas were `-2000 KiB`, `-8196 KiB`, and `+48 KiB` respectively. The only observed estimator drift so far is still the large `mlp_up` tensor.
+  - expanded MLP smoke to layer0 `mlp_gate` and `mlp_down`.
+  - logs: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-{exact,reservoir}-{mlp-gate,mlp-down}.log`.
+  - MLP3 summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-summary-mlp3.json`.
+  - MLP result: reservoir65536 exactly matched exact tensor scale and relative MSE for `mlp_gate` and `mlp_down`; RSS deltas were `-8200 KiB` and `-7164 KiB`. Among checked layer0 MLP tensors, only `mlp_up` showed drift, and its relative-MSE drift remained tiny.
 
 ## Current Interpretation
 
@@ -338,7 +342,7 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Check reservoir tensor-scale estimation on more large MLP tensors before changing the default away from exact.
+- Check reservoir tensor-scale estimation across more layers before changing the default away from exact.
 - Add real-tensor or cross-process golden tests if the C++ kernel changes again; the first pseudo-random BF16/F16 byte-level golden is now in place.
 - Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65, preferably after the full-model loader path is available.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.

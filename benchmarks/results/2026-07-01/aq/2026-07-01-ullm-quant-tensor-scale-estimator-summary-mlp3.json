@@ -1,0 +1,153 @@
+{
+  "schema_version": "ullm-quant-tensor-scale-estimator-mlp-smoke-v0.1",
+  "model": "Qwen/Qwen3.5-9B",
+  "codebook_json": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.json",
+  "chunk_bytes": 67108864,
+  "scale_window": 4,
+  "comparisons": [
+    {
+      "label": "mlp-up",
+      "tensor": "model.language_model.layers.0.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "candidate": "aq4_e4m3_g16_ts_flloyd16",
+      "runs": [
+        {
+          "estimator": "exact",
+          "reservoir_size": null,
+          "log": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-exact-mlp-up.log",
+          "tensor_scale": 0.014780922793,
+          "relative_mse": 0.005245190541,
+          "scale_index_min": 43,
+          "scale_index_max": 80,
+          "scale_window_improved_groups": 1597692,
+          "wall": "0:09.79",
+          "max_rss_kib": 75864,
+          "tensor_scale_delta_vs_exact": 0.0,
+          "relative_tensor_scale_delta_vs_exact": 0.0,
+          "relative_mse_delta_vs_exact": 0.0,
+          "relative_mse_relative_delta_vs_exact": 0.0,
+          "max_rss_delta_kib_vs_exact": 0
+        },
+        {
+          "estimator": "reservoir",
+          "reservoir_size": 1024,
+          "log": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-reservoir1024-mlp-up.log",
+          "tensor_scale": 0.014612956904,
+          "relative_mse": 0.005245375575,
+          "scale_index_min": 43,
+          "scale_index_max": 82,
+          "scale_window_improved_groups": 1603975,
+          "wall": "0:09.90",
+          "max_rss_kib": 67624,
+          "tensor_scale_delta_vs_exact": -0.00016796588899999944,
+          "relative_tensor_scale_delta_vs_exact": -0.01136369436146066,
+          "relative_mse_delta_vs_exact": 1.8503399999963283e-07,
+          "relative_mse_relative_delta_vs_exact": 3.527688814224772e-05,
+          "max_rss_delta_kib_vs_exact": -8240
+        },
+        {
+          "estimator": "reservoir",
+          "reservoir_size": 65536,
+          "log": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-reservoir65536-mlp-up.log",
+          "tensor_scale": 0.014696939848,
+          "relative_mse": 0.005245252663,
+          "scale_index_min": 43,
+          "scale_index_max": 80,
+          "scale_window_improved_groups": 1602367,
+          "wall": "0:09.08",
+          "max_rss_kib": 68648,
+          "tensor_scale_delta_vs_exact": -8.398294499999993e-05,
+          "relative_tensor_scale_delta_vs_exact": -0.005681847214557732,
+          "relative_mse_delta_vs_exact": 6.21219999998382e-08,
+          "relative_mse_relative_delta_vs_exact": 1.1843611688507809e-05,
+          "max_rss_delta_kib_vs_exact": -7216
+        }
+      ]
+    },
+    {
+      "label": "mlp-gate",
+      "tensor": "model.language_model.layers.0.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "candidate": "aq4_e4m3_g16_ts_flloyd16",
+      "runs": [
+        {
+          "estimator": "exact",
+          "reservoir_size": null,
+          "log": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-exact-mlp-gate.log",
+          "tensor_scale": 0.015569289215,
+          "relative_mse": 0.005198360634,
+          "scale_index_min": 40,
+          "scale_index_max": 88,
+          "scale_window_improved_groups": 1583661,
+          "wall": "0:08.77",
+          "max_rss_kib": 75812,
+          "tensor_scale_delta_vs_exact": 0.0,
+          "relative_tensor_scale_delta_vs_exact": 0.0,
+          "relative_mse_delta_vs_exact": 0.0,
+          "relative_mse_relative_delta_vs_exact": 0.0,
+          "max_rss_delta_kib_vs_exact": 0
+        },
+        {
+          "estimator": "reservoir",
+          "reservoir_size": 65536,
+          "log": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-reservoir-mlp-gate.log",
+          "tensor_scale": 0.015569289215,
+          "relative_mse": 0.005198360634,
+          "scale_index_min": 40,
+          "scale_index_max": 88,
+          "scale_window_improved_groups": 1583661,
+          "wall": "0:08.52",
+          "max_rss_kib": 67612,
+          "tensor_scale_delta_vs_exact": 0.0,
+          "relative_tensor_scale_delta_vs_exact": 0.0,
+          "relative_mse_delta_vs_exact": 0.0,
+          "relative_mse_relative_delta_vs_exact": 0.0,
+          "max_rss_delta_kib_vs_exact": -8200
+        }
+      ]
+    },
+    {
+      "label": "mlp-down",
+      "tensor": "model.language_model.layers.0.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "candidate": "aq4_e4m3_g16_ts_flloyd16",
+      "runs": [
+        {
+          "estimator": "exact",
+          "reservoir_size": null,
+          "log": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-exact-mlp-down.log",
+          "tensor_scale": 0.015316329896,
+          "relative_mse": 0.00531850479,
+          "scale_index_min": 42,
+          "scale_index_max": 98,
+          "scale_window_improved_groups": 1617330,
+          "wall": "0:09.43",
+          "max_rss_kib": 75812,
+          "tensor_scale_delta_vs_exact": 0.0,
+          "relative_tensor_scale_delta_vs_exact": 0.0,
+          "relative_mse_delta_vs_exact": 0.0,
+          "relative_mse_relative_delta_vs_exact": 0.0,
+          "max_rss_delta_kib_vs_exact": 0
+        },
+        {
+          "estimator": "reservoir",
+          "reservoir_size": 65536,
+          "log": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-reservoir-mlp-down.log",
+          "tensor_scale": 0.015316329896,
+          "relative_mse": 0.00531850479,
+          "scale_index_min": 42,
+          "scale_index_max": 98,
+          "scale_window_improved_groups": 1617330,
+          "wall": "0:09.16",
+          "max_rss_kib": 68648,
+          "tensor_scale_delta_vs_exact": 0.0,
+          "relative_tensor_scale_delta_vs_exact": 0.0,
+          "relative_mse_delta_vs_exact": 0.0,
+          "relative_mse_relative_delta_vs_exact": 0.0,
+          "max_rss_delta_kib_vs_exact": -7164
+        }
+      ]
+    }
+  ],
+  "interpretation": "reservoir65536 exactly matched exact tensor_scale and relative MSE on layer0 mlp_gate and mlp_down. layer0 mlp_up remains the only checked tensor with reservoir drift, and its relative-MSE drift is tiny. Keep exact as default until layer diversity is checked."
+}
