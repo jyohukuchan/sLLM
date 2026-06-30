@@ -198,6 +198,16 @@ def sample_groups(
     max_elements: int,
     generator: torch.Generator,
 ) -> torch.Tensor:
+    groups, _ = sample_groups_with_columns(tensor, group_size, max_elements, generator)
+    return groups
+
+
+def sample_groups_with_columns(
+    tensor: torch.Tensor,
+    group_size: int,
+    max_elements: int,
+    generator: torch.Generator,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     flat = tensor.detach().flatten().to(torch.float32)
     usable = (flat.numel() // group_size) * group_size
     if usable == 0:
@@ -205,9 +215,18 @@ def sample_groups(
     grouped = flat[:usable].view(-1, group_size)
     max_groups = max(1, max_elements // group_size)
     if grouped.shape[0] <= max_groups:
-        return grouped.contiguous()
-    ids = torch.randint(grouped.shape[0], (max_groups,), generator=generator)
-    return grouped.index_select(0, ids).contiguous()
+        ids = torch.arange(grouped.shape[0], dtype=torch.long)
+        selected = grouped.contiguous()
+    else:
+        ids = torch.randint(grouped.shape[0], (max_groups,), generator=generator)
+        selected = grouped.index_select(0, ids).contiguous()
+
+    columns = None
+    if tensor.ndim == 2:
+        cols = int(tensor.shape[1])
+        offsets = torch.arange(group_size, dtype=torch.long)
+        columns = (ids[:, None] * group_size + offsets[None, :]) % cols
+    return selected, columns
 
 
 def normalized_values(groups: torch.Tensor) -> torch.Tensor:
@@ -342,7 +361,8 @@ def evaluate_candidate(
     candidate: Candidate,
     scale_window: int,
     codebook_override: torch.Tensor | None = None,
-) -> dict[str, float | int | str]:
+    group_weights: torch.Tensor | None = None,
+) -> dict[str, float | int | str | None]:
     scales = scale_values(candidate.scale_format)
     codebook = codebook_override if codebook_override is not None else codebook_from_groups(groups, candidate.codebook_mode)
     tensor_scale = choose_tensor_scale(groups, candidate, scales, codebook)
@@ -373,6 +393,16 @@ def evaluate_candidate(
     diff = groups - best_recon
     mse = float(diff.square().mean())
     denom = float(groups.square().mean().clamp_min(1e-30))
+    weighted_mse = None
+    weighted_relative_mse = None
+    if group_weights is not None:
+        weights = group_weights.to(torch.float32).clamp_min(0)
+        mean_weight = weights.mean().clamp_min(1e-30)
+        weights = weights / mean_weight
+        weighted_sse = (diff.square() * weights).sum()
+        weighted_denom = (groups.square() * weights).sum().clamp_min(1e-30)
+        weighted_mse = float(weighted_sse / weights.sum().clamp_min(1e-30))
+        weighted_relative_mse = float(weighted_sse / weighted_denom)
     dot = float((groups * best_recon).sum())
     norm = float(groups.square().sum().sqrt() * best_recon.square().sum().sqrt())
     zero_mask = groups == 0
@@ -388,7 +418,8 @@ def evaluate_candidate(
         "effective_bpp": effective_bpp,
         "mse": mse,
         "relative_mse": mse / denom,
-        "weighted_mse": None,
+        "weighted_mse": weighted_mse,
+        "weighted_relative_mse": weighted_relative_mse,
         "max_abs_error": float(diff.abs().max()),
         "cosine_similarity": dot / norm if norm > 0 else 1.0,
         "saturation_rate": float(saturation),
@@ -408,7 +439,7 @@ def row_for_result(
     tensor_dtype: str,
     family: str,
     candidate: Candidate,
-    metrics: dict[str, float | int | str],
+    metrics: dict[str, float | int | str | None],
 ) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -450,10 +481,10 @@ def row_for_result(
             },
             "group_layout": {"axis": "contiguous", "tile_shape": None},
             "optimizer": {
-                "objective": "mse",
-                "weighted": False,
+                "objective": "activation_weighted_mse" if args.activation_stats else "mse",
+                "weighted": bool(args.activation_stats),
                 "scale_search": f"nearest_plus_minus_{args.scale_window}",
-                "codebook_update": "quantile_init_only",
+                "codebook_update": "lloyd" if "lloyd" in candidate.codebook_mode else "quantile_init_only",
             },
         },
         "inputs": {
@@ -463,6 +494,7 @@ def row_for_result(
             "codebook_granularity": args.codebook_granularity,
             "torch_threads": args.torch_threads,
             "torch_interop_threads": args.torch_interop_threads,
+            "activation_stats": str(args.activation_stats) if args.activation_stats else None,
         },
         "metrics": metrics,
         "artifacts": {},
@@ -493,8 +525,61 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--torch-threads", type=int, default=default_threads)
     parser.add_argument("--torch-interop-threads", type=int, default=1)
     parser.add_argument("--candidate", action="append", help="Candidate ID to run; default is round1.")
+    parser.add_argument(
+        "--activation-stats",
+        type=Path,
+        default=None,
+        help="Optional activation second-moment stats as a safetensors file or directory.",
+    )
     parser.add_argument("--note", action="append", default=[])
     return parser.parse_args()
+
+
+def load_activation_stats(path: Path | None) -> dict[str, torch.Tensor]:
+    if path is None:
+        return {}
+    path = path.expanduser().resolve()
+    if path.is_dir():
+        path = path / "activation_second_moments.safetensors"
+    if not path.exists():
+        raise SystemExit(f"activation stats not found: {path}")
+    if path.suffix != ".safetensors":
+        raise SystemExit("--activation-stats currently expects a safetensors file or directory")
+
+    stats: dict[str, torch.Tensor] = {}
+    with safe_open(path, framework="pt", device="cpu") as handle:
+        for key in handle.keys():
+            stats[key] = handle.get_tensor(key).to(torch.float32).flatten().contiguous()
+    return stats
+
+
+def activation_stats_for_tensor(
+    tensor_name: str,
+    tensor_shape: tuple[int, ...],
+    stats: dict[str, torch.Tensor],
+) -> torch.Tensor | None:
+    if not stats:
+        return None
+    key_stem = tensor_name.removesuffix(".weight")
+    candidates = (
+        tensor_name,
+        key_stem,
+        f"{tensor_name}.input_second_moment",
+        f"{key_stem}.input_second_moment",
+    )
+    for key in candidates:
+        values = stats.get(key)
+        if values is None:
+            continue
+        if len(tensor_shape) != 2:
+            raise ValueError(f"activation stats require a 2D tensor, got shape {tensor_shape}")
+        in_features = int(tensor_shape[1])
+        if values.numel() != in_features:
+            raise ValueError(
+                f"activation stats for {tensor_name} have {values.numel()} values, expected {in_features}"
+            )
+        return values
+    raise ValueError(f"activation stats are missing for tensor {tensor_name}")
 
 
 def main() -> int:
@@ -508,7 +593,9 @@ def main() -> int:
     torch.set_num_threads(args.torch_threads)
     torch.set_num_interop_threads(args.torch_interop_threads)
     args.model_dir = args.model_dir.expanduser().resolve()
+    args.activation_stats = args.activation_stats.expanduser().resolve() if args.activation_stats else None
     args.model_name = args.model_name or args.model_dir.name
+    activation_stats = load_activation_stats(args.activation_stats)
     tensor_pattern = re.compile(args.tensor_pattern)
     candidates = ROUND1_CANDIDATES
     if args.candidate:
@@ -543,16 +630,36 @@ def main() -> int:
             tensor_dtype = str(tensor.dtype).replace("torch.", "")
             if tensor.ndim < 2 or not tensor.is_floating_point():
                 continue
+            activation_second_moment = None
+            activation_stats_error: Exception | None = None
+            if activation_stats:
+                try:
+                    activation_second_moment = activation_stats_for_tensor(tensor_name, tensor_shape, activation_stats)
+                except Exception as exc:  # noqa: BLE001 - record one failure row per candidate below.
+                    activation_stats_error = exc
             for candidate in candidates:
                 try:
-                    groups = sample_groups(
+                    if activation_stats_error is not None:
+                        raise activation_stats_error
+                    groups, columns = sample_groups_with_columns(
                         tensor,
                         candidate.group_size,
                         args.max_elements_per_tensor,
                         generator,
                     )
+                    group_weights = None
+                    if activation_second_moment is not None:
+                        if columns is None:
+                            raise ValueError(f"cannot apply activation stats to non-2D tensor {tensor_name}")
+                        group_weights = activation_second_moment.index_select(0, columns.flatten()).view_as(groups)
                     codebook_override = family_codebooks.get((family, candidate.candidate_id))
-                    metrics = evaluate_candidate(groups, candidate, args.scale_window, codebook_override)
+                    metrics = evaluate_candidate(
+                        groups,
+                        candidate,
+                        args.scale_window,
+                        codebook_override,
+                        group_weights=group_weights,
+                    )
                     row = row_for_result(
                         args,
                         tensor_name,
@@ -592,6 +699,7 @@ def main() -> int:
                             "codebook_granularity": args.codebook_granularity,
                             "torch_threads": args.torch_threads,
                             "torch_interop_threads": args.torch_interop_threads,
+                            "activation_stats": str(args.activation_stats) if args.activation_stats else None,
                         },
                         "metrics": {},
                         "artifacts": {},

@@ -32,7 +32,16 @@ All aq runs record CPU thread settings. The current WRX80 default is `--torch-th
 - `tools/run-aq-tensor-sample.py`
   - Samples BF16 reference tensors and simulates aq candidates.
   - Supports family-balanced tensor selection with `--max-tensors-per-family`.
-  - Current codebooks are still sample-local, not final family-level LUTs.
+  - Supports sample-local and family-level LUT construction.
+  - Supports optional `--activation-stats` for activation-weighted metrics.
+
+- `tools/collect-activation-stats.py`
+  - Collects per-module input second moments for activation-weighted aq evaluation.
+  - Stores reductions only, not raw activations.
+
+- `tools/run-aq-weighted-sample.py`
+  - Thin entry point over `tools/run-aq-tensor-sample.py`.
+  - Intended for runs that pass `--activation-stats`.
 
 ## External Baselines
 

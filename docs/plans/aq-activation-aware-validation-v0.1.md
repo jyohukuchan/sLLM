@@ -29,6 +29,14 @@ Add a calibration tool:
 tools/collect-activation-stats.py
 ```
 
+Initial implementation status:
+
+- Added.
+- Writes `activation_second_moments.safetensors` plus `metadata.json`.
+- Uses forward pre-hooks on matching `torch.nn.Linear` modules.
+- Stores reductions only: second moment, mean absolute value, and max absolute value.
+- Defaults to `AutoModel` instead of `AutoModelForCausalLM` to avoid materializing huge logits.
+
 For each selected linear module, collect:
 
 - module name,
@@ -59,6 +67,13 @@ Add a weighted evaluator:
 ```text
 tools/run-aq-weighted-sample.py
 ```
+
+Initial implementation status:
+
+- Added as a thin entry point over `tools/run-aq-tensor-sample.py`.
+- `tools/run-aq-tensor-sample.py` now accepts `--activation-stats`.
+- When stats are present, result rows include `weighted_mse` and `weighted_relative_mse`.
+- The optimizer metadata switches from `mse` to `activation_weighted_mse`.
 
 For a weight matrix `W` with shape `[out_features, in_features]`, and activation
 second moments `h_j`, compute:
@@ -119,3 +134,19 @@ This phase is complete when:
 
 Only after that should aq candidate discussions move from "tensor-level
 candidate" to "format candidate".
+
+## Current Verification
+
+The weighted path was smoke-tested on one Qwen3.5-9B tensor:
+
+```text
+model.language_model.layers.14.mlp.down_proj.weight
+```
+
+With unit activation weights and candidate `aq4_e4m3_g16_ts_flloyd16`,
+`weighted_relative_mse` was `0.005159932654350996`, matching the unweighted
+relative MSE as expected for all-one weights.
+
+The default Python environment currently has CPU-only PyTorch, so full
+activation collection should be run later in an R9700-capable environment or as
+a deliberately small CPU smoke.

@@ -73,6 +73,14 @@
   - next tool targets are `tools/collect-activation-stats.py` and `tools/run-aq-weighted-sample.py`.
   - activation stats should store only streaming reductions such as per-input-channel second moments, not raw activations.
 
+- Activation-aware tooling:
+  - added `tools/collect-activation-stats.py`.
+  - added `tools/run-aq-weighted-sample.py`.
+  - extended `tools/run-aq-tensor-sample.py` with `--activation-stats`, `weighted_mse`, and `weighted_relative_mse`.
+  - `python3 -m py_compile tools/run-aq-tensor-sample.py tools/run-aq-weighted-sample.py tools/collect-activation-stats.py` passed.
+  - one-tensor smoke with unit activation weights on `model.language_model.layers.14.mlp.down_proj.weight` passed; weighted relative MSE was `0.005159932654350996`.
+  - default Python has `torch 2.12.0+cpu` and no CUDA/ROCm-visible device, so full activation collection should use an R9700-capable environment or stay as a small CPU smoke.
+
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
