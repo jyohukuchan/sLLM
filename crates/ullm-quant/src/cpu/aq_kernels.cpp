@@ -41,6 +41,49 @@ float decode_bf16(const std::uint8_t * input) {
     return value;
 }
 
+float decode_f16(const std::uint8_t * input) {
+    const std::uint16_t raw =
+        static_cast<std::uint16_t>(input[0]) |
+        static_cast<std::uint16_t>(static_cast<std::uint16_t>(input[1]) << 8);
+    const std::uint32_t sign = static_cast<std::uint32_t>(raw & 0x8000U) << 16;
+    const std::uint16_t exp = static_cast<std::uint16_t>((raw >> 10) & 0x1fU);
+    const std::uint16_t frac = static_cast<std::uint16_t>(raw & 0x03ffU);
+    std::uint32_t bits = 0;
+    if (exp == 0) {
+        if (frac == 0) {
+            bits = sign;
+        } else {
+            std::uint16_t frac_norm = frac;
+            int exp_unbiased = -14;
+            while ((frac_norm & 0x0400U) == 0) {
+                frac_norm = static_cast<std::uint16_t>(frac_norm << 1);
+                exp_unbiased -= 1;
+            }
+            frac_norm = static_cast<std::uint16_t>(frac_norm & 0x03ffU);
+            bits = sign |
+                (static_cast<std::uint32_t>(exp_unbiased + 127) << 23) |
+                (static_cast<std::uint32_t>(frac_norm) << 13);
+        }
+    } else if (exp == 0x1fU) {
+        bits = sign | 0x7f800000U | (static_cast<std::uint32_t>(frac) << 13);
+    } else {
+        const int exp_f32 = static_cast<int>(exp) - 15 + 127;
+        bits = sign |
+            (static_cast<std::uint32_t>(exp_f32) << 23) |
+            (static_cast<std::uint32_t>(frac) << 13);
+    }
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+float decode_16bit(const std::uint8_t * input, std::uint32_t dtype) {
+    if (dtype == ULLM_AQ_DTYPE_F16) {
+        return decode_f16(input);
+    }
+    return decode_bf16(input);
+}
+
 std::size_t nearest_scale_index(float target, const float * scales, std::size_t scale_count) {
     if (target <= scales[0]) {
         return 0;
@@ -94,7 +137,8 @@ void reset_metrics(ullm_aq_quant_metrics * metrics, std::size_t scale_count) {
     metrics->scale_window_improved_groups = 0;
 }
 
-int quantize_bf16_chunk_impl(
+int quantize_16bit_chunk_impl(
+    std::uint32_t dtype,
     const std::uint8_t * input,
     std::size_t input_bytes,
     std::size_t group_size,
@@ -137,7 +181,7 @@ int quantize_bf16_chunk_impl(
         const std::uint8_t * group = input + group_index * group_bytes;
         float absmax = 0.0f;
         for (std::size_t item = 0; item < group_size; ++item) {
-            const float value = decode_bf16(group + item * element_size);
+            const float value = decode_16bit(group + item * element_size, dtype);
             if (!std::isnan(value)) {
                 absmax = std::max(absmax, std::fabs(value));
             }
@@ -154,7 +198,7 @@ int quantize_bf16_chunk_impl(
             const float combined_scale = scale_values[scale_index] * tensor_scale;
             double group_sse = 0.0;
             for (std::size_t item = 0; item < group_size; ++item) {
-                const float value = decode_bf16(group + item * element_size);
+                const float value = decode_16bit(group + item * element_size, dtype);
                 if (std::isnan(value)) {
                     continue;
                 }
@@ -183,7 +227,7 @@ int quantize_bf16_chunk_impl(
         const float combined_scale = scale_values[best_scale_index] * tensor_scale;
         for (std::size_t item = 0; item < group_size; ++item) {
             const std::size_t element_index = group_index * group_size + item;
-            const float value = decode_bf16(group + item * element_size);
+            const float value = decode_16bit(group + item * element_size, dtype);
             std::size_t codebook_index = 0;
             if (!std::isnan(value)) {
                 const float normalized = value / combined_scale;
@@ -223,10 +267,11 @@ int ullm_aq_quantize_chunk_v1(
         metrics_size < sizeof(ullm_aq_quant_metrics)) {
         return -2;
     }
-    if (request->dtype != ULLM_AQ_DTYPE_BF16) {
+    if (request->dtype != ULLM_AQ_DTYPE_BF16 && request->dtype != ULLM_AQ_DTYPE_F16) {
         return -5;
     }
-    return quantize_bf16_chunk_impl(
+    return quantize_16bit_chunk_impl(
+        request->dtype,
         request->input,
         request->input_bytes,
         request->group_size,
@@ -258,7 +303,8 @@ int ullm_aq_quantize_bf16_chunk(
     std::uint8_t * scale_indices,
     std::size_t scale_indices_bytes,
     ullm_aq_quant_metrics * metrics) {
-    return quantize_bf16_chunk_impl(
+    return quantize_16bit_chunk_impl(
+        ULLM_AQ_DTYPE_BF16,
         input,
         input_bytes,
         group_size,

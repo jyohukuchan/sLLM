@@ -313,7 +313,7 @@ Rust implementation status:
     scale-index output, and chunk metric accumulation.
   - Rust still owns safetensors I/O, tensor-scale estimation, manifest writing,
     and prototype re-read/dequant verification.
-  - currently supports BF16 only; other dtype ids return unsupported status.
+  - currently supports BF16 and F16; other dtype ids return unsupported status.
   - requires a 16-entry codebook, `scale_count <= 256`, group-aligned input
     chunks, and preallocated output buffers.
 - C++ scalar baseline benchmark:
@@ -404,13 +404,12 @@ Performance tests:
 
 ## Immediate Steps
 
-1. Add F16 support to `quantize_chunk_v1` after BF16 semantics are stable.
-2. Add larger golden tests that compare C++ chunk output against Python or Rust
+1. Add larger golden tests that compare C++ chunk output against Python or Rust
    scalar output across multiple random seeds.
-3. Avoid the exact tensor-scale pre-pass where possible. The current pre-pass
+2. Avoid the exact tensor-scale pre-pass where possible. The current pre-pass
    mostly hurts memory rather than wall time on one tensor, but it will matter
    more for multi-tensor scheduling.
-4. Add SIMD kernels after the scalar C++ semantics are locked.
-5. Extend from one tensor to all tensors selected by the p4p6 plan.
-6. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
+3. Add SIMD kernels after the scalar C++ semantics are locked.
+4. Extend from one tensor to all tensors selected by the p4p6 plan.
+5. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.

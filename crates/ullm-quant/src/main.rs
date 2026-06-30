@@ -31,6 +31,7 @@ struct AqQuantMetrics {
 }
 
 const ULLM_AQ_DTYPE_BF16: u32 = 1;
+const ULLM_AQ_DTYPE_F16: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -907,9 +908,36 @@ fn fnv1a64_update(mut hash: u64, bytes: &[u8]) -> u64 {
 fn numeric_element_size(dtype: &str) -> Option<usize> {
     match dtype {
         "BF16" => Some(2),
+        "F16" => Some(2),
         "F32" => Some(4),
         _ => None,
     }
+}
+
+fn f16_to_f32(raw: u16) -> f32 {
+    let sign = (u32::from(raw & 0x8000)) << 16;
+    let exp = (raw >> 10) & 0x1f;
+    let frac = raw & 0x03ff;
+    let bits = if exp == 0 {
+        if frac == 0 {
+            sign
+        } else {
+            let mut frac_norm = frac;
+            let mut exp_unbiased = -14i32;
+            while (frac_norm & 0x0400) == 0 {
+                frac_norm <<= 1;
+                exp_unbiased -= 1;
+            }
+            frac_norm &= 0x03ff;
+            sign | (((exp_unbiased + 127) as u32) << 23) | (u32::from(frac_norm) << 13)
+        }
+    } else if exp == 0x1f {
+        sign | 0x7f80_0000 | (u32::from(frac) << 13)
+    } else {
+        let exp_f32 = i32::from(exp) - 15 + 127;
+        sign | ((exp_f32 as u32) << 23) | (u32::from(frac) << 13)
+    };
+    f32::from_bits(bits)
 }
 
 fn decode_numeric_value(dtype: &str, bytes: &[u8]) -> Result<f32, String> {
@@ -917,6 +945,10 @@ fn decode_numeric_value(dtype: &str, bytes: &[u8]) -> Result<f32, String> {
         "BF16" => {
             let raw = u16::from_le_bytes([bytes[0], bytes[1]]);
             Ok(f32::from_bits(u32::from(raw) << 16))
+        }
+        "F16" => {
+            let raw = u16::from_le_bytes([bytes[0], bytes[1]]);
+            Ok(f16_to_f32(raw))
         }
         "F32" => Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
         _ => Err(format!("numeric stats are not supported for dtype {dtype}")),
@@ -1373,6 +1405,14 @@ fn cxx_error_message(code: i32) -> &'static str {
     }
 }
 
+fn cxx_dtype_id(dtype: &str) -> Option<u32> {
+    match dtype {
+        "BF16" => Some(ULLM_AQ_DTYPE_BF16),
+        "F16" => Some(ULLM_AQ_DTYPE_F16),
+        _ => None,
+    }
+}
+
 fn quantize_chunk_to_writers<WIndex: Write, WScale: Write>(
     dtype: &str,
     bytes: &[u8],
@@ -1401,9 +1441,9 @@ fn quantize_chunk_to_writers<WIndex: Write, WScale: Write>(
     }
 
     let groups = bytes.len() / group_bytes;
-    if dtype == "BF16" {
+    if let Some(dtype_id) = cxx_dtype_id(dtype) {
         if codebook.len() != 16 {
-            return Err("C++ BF16 prototype kernel requires 16 codebook entries".to_string());
+            return Err("C++ prototype kernel requires 16 codebook entries".to_string());
         }
         let elements = bytes.len() / element_size;
         let mut packed_indices = vec![0u8; elements.div_ceil(2)];
@@ -1411,7 +1451,7 @@ fn quantize_chunk_to_writers<WIndex: Write, WScale: Write>(
         let mut metrics = empty_aq_quant_metrics();
         let request = AqQuantizeChunkRequestV1 {
             struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
-            dtype: ULLM_AQ_DTYPE_BF16,
+            dtype: dtype_id,
             reserved0: 0,
             input: bytes.as_ptr(),
             input_bytes: bytes.len(),
@@ -2398,9 +2438,9 @@ fn main() -> ExitCode {
 mod tests {
     use super::{
         AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport, Options,
-        ULLM_AQ_DTYPE_BF16, default_threads, effective_bpp, empty_aq_quant_metrics,
-        estimate_output_bytes, family_for_tensor, new_aq_group_stats, new_numeric_stats,
-        new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
+        ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, default_threads, effective_bpp,
+        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, new_aq_group_stats,
+        new_numeric_stats, new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
         read_tensor_payload_chunk, resolve_aq_policy, select_codebook, ullm_aq_quantize_chunk_v1,
         update_aq_group_stats, update_numeric_stats, update_quant_dry_run_stats,
     };
@@ -2508,6 +2548,24 @@ mod tests {
             0x40, 0x40, // 3.0
         ];
         update_numeric_stats("BF16", &payload, &mut stats).expect("bf16 stats");
+        assert_eq!(stats.elements, 3);
+        assert_eq!(stats.finite_elements, 3);
+        assert_eq!(stats.nan_elements, 0);
+        assert_eq!(stats.min, -2.0);
+        assert_eq!(stats.max, 3.0);
+        assert_eq!(stats.max_abs, 3.0);
+        assert_eq!(stats.sum_abs, 6.0);
+    }
+
+    #[test]
+    fn f16_numeric_stats_are_decoded_from_little_endian_payload() {
+        let mut stats = new_numeric_stats();
+        let payload = [
+            0x00, 0x3c, // 1.0
+            0x00, 0xc0, // -2.0
+            0x00, 0x42, // 3.0
+        ];
+        update_numeric_stats("F16", &payload, &mut stats).expect("f16 stats");
         assert_eq!(stats.elements, 3);
         assert_eq!(stats.finite_elements, 3);
         assert_eq!(stats.nan_elements, 0);
@@ -2640,7 +2698,7 @@ mod tests {
         let mut metrics = empty_aq_quant_metrics();
         let mut request = AqQuantizeChunkRequestV1 {
             struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
-            dtype: 2,
+            dtype: 99,
             reserved0: 0,
             input: payload.as_ptr(),
             input_bytes: payload.len(),
@@ -2722,6 +2780,58 @@ mod tests {
         assert_eq!(metrics.sse, 0.0);
         assert_eq!(metrics.ref_sse, 0.0);
         assert_eq!(metrics.index_counts[0], 4);
+    }
+
+    #[test]
+    fn cxx_v1_kernel_quantizes_f16_chunk() {
+        let payload = [
+            0x00, 0xbc, // -1.0
+            0x00, 0x38, // 0.5
+            0x00, 0x3c, // 1.0
+            0x00, 0x00, // 0.0
+        ];
+        let scales = [1.0f32];
+        let codebook = [
+            -1.0f32, -0.5, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ];
+        let mut packed = [0u8; 2];
+        let mut scale_indices = [0u8; 1];
+        let mut metrics = empty_aq_quant_metrics();
+        let request = AqQuantizeChunkRequestV1 {
+            struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+            dtype: ULLM_AQ_DTYPE_F16,
+            reserved0: 0,
+            input: payload.as_ptr(),
+            input_bytes: payload.len(),
+            group_size: 4,
+            scale_values: scales.as_ptr(),
+            scale_count: scales.len(),
+            codebook: codebook.as_ptr(),
+            codebook_count: codebook.len(),
+            tensor_scale: 1.0,
+            reserved1: 0,
+            scale_window: 0,
+            packed_indices: packed.as_mut_ptr(),
+            packed_indices_bytes: packed.len(),
+            scale_indices: scale_indices.as_mut_ptr(),
+            scale_indices_bytes: scale_indices.len(),
+        };
+        let status = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(packed, [0x30, 0x24]);
+        assert_eq!(scale_indices, [0]);
+        assert_eq!(metrics.elements, 4);
+        assert_eq!(metrics.sse, 0.0);
+        assert_eq!(metrics.index_counts[0], 1);
+        assert_eq!(metrics.index_counts[2], 1);
+        assert_eq!(metrics.index_counts[3], 1);
+        assert_eq!(metrics.index_counts[4], 1);
     }
 
     #[test]

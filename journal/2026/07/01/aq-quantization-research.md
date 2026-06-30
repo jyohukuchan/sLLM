@@ -201,6 +201,8 @@
   - added `--tensor-scale-override` for prototype output to skip exact tensor-scale estimation when a correct tensor scale is already known.
   - C++ one-pass `mlp_up` g16 benchmark with tensor scale override `0.014789051376`: relative MSE `0.005283509762`, elapsed `6.99 s`, max RSS `4180 KiB`, about `7.20M` elements/s, log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-write-benchmark-cxx-onepass-qwen35-9b-layer0-mlp-up-g16-scale-window4.txt`.
   - interpretation: one-pass override only improved wall time slightly versus C++ pre-pass (`7.13 s -> 6.99 s`), but significantly reduced peak RSS (`21516 KiB -> 4180 KiB`).
+  - added F16 decode support to Rust numeric stats and C++ `quantize_chunk_v1`.
+  - `cargo test -p ullm-quant` passes 18 tests including F16 numeric decode and F16 C++ quantization/packing smoke.
 
 ## Current Interpretation
 
@@ -210,7 +212,6 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Add F16 support to `quantize_chunk_v1` after BF16 semantics are stable.
 - Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.

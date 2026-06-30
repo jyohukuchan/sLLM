@@ -669,7 +669,7 @@ The chunk hot loop was then moved behind a C++20 BF16 kernel for:
 
 The Rust side still owns metadata, safetensors reads, tensor-scale estimation,
 manifest writing, and verification. The C++ kernel currently requires a
-16-entry codebook and BF16 input. Rust calls it through
+16-entry codebook and supports BF16/F16 input. Rust calls it through
 `ullm_aq_quantize_chunk_v1`, whose request struct includes a `struct_size`
 field and an explicit dtype id; unsupported dtype ids currently return an
 unsupported status.
