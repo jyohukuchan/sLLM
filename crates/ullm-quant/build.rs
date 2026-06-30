@@ -11,4 +11,3 @@ fn main() {
         .flag_if_supported("-Wextra")
         .compile("ullm_aq_kernels");
 }
-

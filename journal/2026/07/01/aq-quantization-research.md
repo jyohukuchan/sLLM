@@ -151,6 +151,9 @@
   - generated `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b.json`.
   - Qwen3.5-9B plan: total tensors `775`, default quantize tensors `255`, passthrough tensors `520`, total tensor bytes `19306216416`.
   - default quantize target is known text linear families only; embeddings, lm head, vision, conv, MTP, and unknown tensors pass through for now.
+  - added aq policy planning options: `--aq-policy all-g16|all-g8|p4p6|p4p9|custom`, `--aq-high-family`, `--aq-low-format`, `--aq-high-format`.
+  - generated p4p6 plan: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json`.
+  - p4p6 plan schema `ullm-quant-plan-v0.2`; low tensors `204`, high tensors `51`, passthrough tensors `520`.
 
 ## Current Interpretation
 

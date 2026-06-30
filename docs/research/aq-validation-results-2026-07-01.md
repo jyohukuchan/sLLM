@@ -504,6 +504,25 @@ For policy10, p4p6 improved both logit relative MSE and KL over all-g16 and
 all-g8. This supports treating `mlp_up` as a family that may not benefit from
 spending g8 budget as early as attention-sensitive families.
 
+`ullm-quant` was then connected to the p4p6 policy at the planning level:
+
+- CLI options added:
+  - `--aq-policy all-g16|all-g8|p4p6|p4p9|custom`
+  - `--aq-high-family FAMILY` for custom policies
+  - `--aq-low-format` / `--aq-high-format`
+- plan schema version: `ullm-quant-plan-v0.2`
+- p4p6 plan:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json`
+
+| plan item | count |
+| --- | ---: |
+| quantize low / `aq4_e4m3_g16_ts_flloyd16` | 204 |
+| quantize high / `aq4_e4m3_g8_ts_flloyd16` | 51 |
+| passthrough | 520 |
+
+This does not quantize payloads yet, but it makes the candidate p4p6 policy
+explicit in the full-model conversion plan.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
