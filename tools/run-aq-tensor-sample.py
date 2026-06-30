@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -44,6 +45,18 @@ ROUND1_CANDIDATES = [
     Candidate("aq4_e5m2_g32_ts_zf15", "e5m2", 32, "bf16", "none", "zero_free15"),
     Candidate("aq4_ue5m3_g32_ts_zf15", "ue5m3", 32, "bf16", "none", "zero_free15"),
     Candidate("aq4_e8m0_g64_sym7", "e8m0", 64, "none", "none", "symmetric7"),
+    Candidate("aq4_e4m3_g8_ts_flloyd16", "e4m3", 8, "bf16", "none", "free_lloyd16"),
+    Candidate("aq4_e4m3_g16_ts_free16", "e4m3", 16, "bf16", "none", "free16"),
+    Candidate("aq4_e4m3_g16_ts_zlloyd15", "e4m3", 16, "bf16", "none", "zero_lloyd15"),
+    Candidate("aq4_e4m3_g16_ts_flloyd16", "e4m3", 16, "bf16", "none", "free_lloyd16"),
+    Candidate("aq4_e4m3_g32_ts_zlloyd15", "e4m3", 32, "bf16", "none", "zero_lloyd15"),
+    Candidate("aq4_e4m3_g32_ts_flloyd16", "e4m3", 32, "bf16", "none", "free_lloyd16"),
+    Candidate("aq4_e4m3_g64_ts_flloyd16", "e4m3", 64, "bf16", "none", "free_lloyd16"),
+    Candidate("aq4_e5m2_g16_ts_zf15", "e5m2", 16, "bf16", "none", "zero_free15"),
+    Candidate("aq4_e5m2_g16_ts_zlloyd15", "e5m2", 16, "bf16", "none", "zero_lloyd15"),
+    Candidate("aq4_ue5m3_g16_ts_zf15", "ue5m3", 16, "bf16", "none", "zero_free15"),
+    Candidate("aq4_ue5m3_g16_ts_zlloyd15", "ue5m3", 16, "bf16", "none", "zero_lloyd15"),
+    Candidate("aq4_e8m0_g16_zlloyd15", "e8m0", 16, "none", "none", "zero_lloyd15"),
 ]
 
 
@@ -76,6 +89,26 @@ def discover_tensors(model_dir: Path, tensor_pattern: re.Pattern[str]) -> list[t
     return tensors
 
 
+def limit_tensors_by_family(
+    tensors: list[tuple[str, Path]],
+    max_tensors: int,
+    max_tensors_per_family: int | None,
+) -> list[tuple[str, Path]]:
+    if max_tensors_per_family is None:
+        return tensors[:max_tensors]
+    counts: dict[str, int] = defaultdict(int)
+    selected: list[tuple[str, Path]] = []
+    for name, path in tensors:
+        family = family_for_tensor(name)
+        if counts[family] >= max_tensors_per_family:
+            continue
+        selected.append((name, path))
+        counts[family] += 1
+        if len(selected) >= max_tensors:
+            break
+    return selected
+
+
 def family_for_tensor(name: str) -> str:
     if "self_attn.q_proj" in name:
         return "attn_q"
@@ -85,6 +118,16 @@ def family_for_tensor(name: str) -> str:
         return "attn_v"
     if "self_attn.o_proj" in name:
         return "attn_o"
+    if "linear_attn.in_proj_qkv" in name:
+        return "linear_attn_qkv"
+    if "linear_attn.in_proj_a" in name:
+        return "linear_attn_a"
+    if "linear_attn.in_proj_b" in name:
+        return "linear_attn_b"
+    if "linear_attn.in_proj_z" in name:
+        return "linear_attn_z"
+    if "linear_attn.out_proj" in name:
+        return "linear_attn_out"
     if "mlp.gate_proj" in name:
         return "mlp_gate"
     if "mlp.up_proj" in name:
@@ -177,7 +220,7 @@ def normalized_values(groups: torch.Tensor) -> torch.Tensor:
 
 def codebook_from_groups(groups: torch.Tensor, mode: str) -> torch.Tensor:
     norm = normalized_values(groups)
-    if mode == "zero_free15":
+    if mode in {"zero_free15", "zero_lloyd15"}:
         nonzero = norm[norm.abs() > 0]
         if nonzero.numel() == 0:
             values = torch.zeros(15, dtype=torch.float32)
@@ -185,6 +228,8 @@ def codebook_from_groups(groups: torch.Tensor, mode: str) -> torch.Tensor:
             q = torch.linspace(0.03, 0.97, 15)
             values = torch.quantile(nonzero, q)
         codebook = torch.cat([torch.zeros(1), values]).sort().values
+        if mode == "zero_lloyd15":
+            codebook = lloyd_refine_codebook(norm, codebook, fixed_zero=True)
     elif mode == "symmetric7":
         abs_values = norm.abs()
         abs_values = abs_values[abs_values > 0]
@@ -195,12 +240,42 @@ def codebook_from_groups(groups: torch.Tensor, mode: str) -> torch.Tensor:
             pos = torch.quantile(abs_values, q).clamp_min(0)
         codebook = torch.cat([-pos.flip(0), torch.zeros(1), pos, torch.tensor([1.0])])
         codebook = codebook[:16].sort().values
-    elif mode == "free16":
+    elif mode in {"free16", "free_lloyd16"}:
         q = torch.linspace(0.02, 0.98, 16)
         codebook = torch.quantile(norm, q).sort().values
+        if mode == "free_lloyd16":
+            codebook = lloyd_refine_codebook(norm, codebook, fixed_zero=False)
     else:
         raise ValueError(f"unknown codebook mode: {mode}")
     return codebook.to(torch.float32)
+
+
+def lloyd_refine_codebook(
+    values: torch.Tensor,
+    initial: torch.Tensor,
+    fixed_zero: bool,
+    iterations: int = 8,
+) -> torch.Tensor:
+    codebook = initial.to(torch.float32).clone()
+    zero_index = None
+    if fixed_zero:
+        zero_index = int(codebook.abs().argmin())
+        codebook[zero_index] = 0.0
+    for _ in range(iterations):
+        nearest = (values[:, None] - codebook[None, :]).square().argmin(dim=1)
+        updated = codebook.clone()
+        for idx in range(codebook.numel()):
+            if fixed_zero and idx == zero_index:
+                updated[idx] = 0.0
+                continue
+            mask = nearest == idx
+            if bool(mask.any()):
+                updated[idx] = values[mask].mean()
+        codebook = updated.sort().values
+        if fixed_zero:
+            zero_index = int(codebook.abs().argmin())
+            codebook[zero_index] = 0.0
+    return codebook.sort().values
 
 
 def choose_tensor_scale(groups: torch.Tensor, candidate: Candidate, scales: torch.Tensor, codebook: torch.Tensor) -> float:
@@ -346,6 +421,7 @@ def row_for_result(
         "inputs": {
             "tensor_pattern": args.tensor_pattern,
             "family_filter": args.family,
+            "max_tensors_per_family": args.max_tensors_per_family,
             "torch_threads": args.torch_threads,
             "torch_interop_threads": args.torch_interop_threads,
         },
@@ -366,6 +442,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor-pattern", default=r"\.weight$")
     parser.add_argument("--family", action="append", help="Family to include; can be repeated.")
     parser.add_argument("--max-tensors", type=int, default=8)
+    parser.add_argument("--max-tensors-per-family", type=int, default=None)
     parser.add_argument("--max-elements-per-tensor", type=int, default=262144)
     parser.add_argument("--scale-window", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
@@ -382,6 +459,8 @@ def main() -> int:
         raise SystemExit("--torch-threads must be >= 1")
     if args.torch_interop_threads < 1:
         raise SystemExit("--torch-interop-threads must be >= 1")
+    if args.max_tensors_per_family is not None and args.max_tensors_per_family < 1:
+        raise SystemExit("--max-tensors-per-family must be >= 1")
     torch.set_num_threads(args.torch_threads)
     torch.set_num_interop_threads(args.torch_interop_threads)
     args.model_dir = args.model_dir.expanduser().resolve()
@@ -399,7 +478,7 @@ def main() -> int:
     if args.family:
         allowed = set(args.family)
         tensors = [(name, path) for name, path in tensors if family_for_tensor(name) in allowed]
-    tensors = tensors[: args.max_tensors]
+    tensors = limit_tensors_by_family(tensors, args.max_tensors, args.max_tensors_per_family)
     if not tensors:
         raise SystemExit("no tensors matched")
 
@@ -460,6 +539,9 @@ def main() -> int:
                         "inputs": {
                             "tensor_pattern": args.tensor_pattern,
                             "family_filter": args.family,
+                            "max_tensors_per_family": args.max_tensors_per_family,
+                            "torch_threads": args.torch_threads,
+                            "torch_interop_threads": args.torch_interop_threads,
                         },
                         "metrics": {},
                         "artifacts": {},
