@@ -10,6 +10,7 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 import torch
 import torch.nn.functional as F
@@ -32,6 +33,14 @@ VARIANTS = {
     "g16_weighted": Variant("g16_weighted", "aq4_e4m3_g16_ts_flloyd16", True, True),
     "g8_weighted": Variant("g8_weighted", "aq4_e4m3_g8_ts_flloyd16", True, True),
 }
+
+
+@dataclass(frozen=True)
+class Policy:
+    policy_id: str
+    low_variant: Variant
+    high_variant: Variant
+    high_families: frozenset[str]
 
 
 def utc_now() -> str:
@@ -114,6 +123,130 @@ def get_module(model: torch.nn.Module, name: str) -> torch.nn.Module:
 
 def module_to_tensor_name(module_name: str) -> str:
     return f"model.{module_name}.weight"
+
+
+def family_for_module(sampler, module_name: str) -> str:
+    return sampler.family_for_tensor(module_to_tensor_name(module_name))
+
+
+def parse_policy(value: str) -> tuple[str, frozenset[str]]:
+    if "=" not in value:
+        raise argparse.ArgumentTypeError("policy must be NAME=family1,family2")
+    name, family_list = value.split("=", 1)
+    if not name:
+        raise argparse.ArgumentTypeError("policy name must not be empty")
+    families = frozenset(item.strip() for item in family_list.split(",") if item.strip())
+    return name, families
+
+
+def make_policy_specs(args: argparse.Namespace) -> list[Policy]:
+    low = VARIANTS[args.policy_low_variant]
+    high = VARIANTS[args.policy_high_variant]
+    return [Policy(name, low, high, families) for name, families in args.policy]
+
+
+def variant_for_policy(policy: Policy, family: str) -> Variant:
+    return policy.high_variant if family in policy.high_families else policy.low_variant
+
+
+def variant_payload(variant: Variant) -> dict[str, object]:
+    return {
+        "variant_id": variant.variant_id,
+        "candidate_id": variant.candidate_id,
+        "weighted_scale_search": variant.weighted_scale_search,
+        "weighted_codebook": variant.weighted_codebook,
+    }
+
+
+def policy_payload(policy: Policy, module_entries: Iterable[dict[str, object]]) -> dict[str, object]:
+    module_variants = []
+    for entry in module_entries:
+        family = str(entry["family"])
+        variant = variant_for_policy(policy, family)
+        module_variants.append(
+            {
+                "module": str(entry["name"]),
+                "family": family,
+                "variant": variant_payload(variant),
+            }
+        )
+    return {
+        "policy_id": policy.policy_id,
+        "low_variant": variant_payload(policy.low_variant),
+        "high_variant": variant_payload(policy.high_variant),
+        "high_families": sorted(policy.high_families),
+        "module_variants": module_variants,
+    }
+
+
+def policy_variant_payload(policy: Policy) -> dict[str, object]:
+    return {
+        "variant_id": f"policy:{policy.policy_id}",
+        "candidate_id": "mixed",
+        "weighted_scale_search": "mixed",
+        "weighted_codebook": "mixed",
+    }
+
+
+def validate_policies_for_modules(policies: list[Policy], module_entries: Iterable[dict[str, object]]) -> None:
+    if not policies:
+        return
+    selected_families = {str(entry["family"]) for entry in module_entries}
+    for policy in policies:
+        matched = selected_families & policy.high_families
+        if not matched:
+            raise SystemExit(
+                f"policy {policy.policy_id!r} high families do not match selected module families; "
+                f"selected={','.join(sorted(selected_families))} "
+                f"high={','.join(sorted(policy.high_families))}"
+            )
+
+
+def collect_cumulative_module_entries(
+    sampler,
+    model: torch.nn.Module,
+    module_names: list[str],
+    stats: dict[str, torch.Tensor],
+    max_original_weight_mib: int,
+) -> tuple[list[dict[str, object]], int]:
+    entries: list[dict[str, object]] = []
+    total_original_bytes = 0
+    for module_name in module_names:
+        module = get_module(model, module_name)
+        original_bytes = int(module.weight.numel() * module.weight.element_size())
+        total_original_bytes += original_bytes
+        entries.append(
+            {
+                "name": module_name,
+                "module": module,
+                "family": family_for_module(sampler, module_name),
+                "original_weight_bytes": original_bytes,
+                "activation": activation_for_module(module_name, int(module.in_features), stats),
+            }
+        )
+
+    limit_bytes = int(max_original_weight_mib) * 1024 * 1024
+    if total_original_bytes > limit_bytes:
+        mib = total_original_bytes / (1024 * 1024)
+        raise SystemExit(
+            f"selected cumulative modules need {mib:.1f} MiB of original-weight storage; "
+            f"increase --max-original-weight-mib if this is intentional"
+        )
+
+    for entry in entries:
+        module = entry["module"]
+        assert isinstance(module, torch.nn.Linear)
+        entry["original"] = module.weight.detach().to("cpu").clone()
+    return entries, total_original_bytes
+
+
+def restore_cumulative_modules(module_entries: Iterable[dict[str, object]]) -> None:
+    for entry in module_entries:
+        module = entry["module"]
+        original = entry["original"]
+        assert isinstance(module, torch.nn.Linear)
+        assert isinstance(original, torch.Tensor)
+        module.weight.data.copy_(original.to(device=module.weight.device, dtype=module.weight.dtype))
 
 
 def activation_for_module(
@@ -250,7 +383,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--activation-stats", type=Path, required=True)
     parser.add_argument("--module", action="append", required=True)
-    parser.add_argument("--variant", choices=sorted(VARIANTS), action="append", required=True)
+    parser.add_argument("--variant", choices=sorted(VARIANTS), action="append", default=[])
+    parser.add_argument(
+        "--policy",
+        type=parse_policy,
+        action="append",
+        default=[],
+        help="Mixed cumulative policy as NAME=family1,family2; listed families use --policy-high-variant.",
+    )
+    parser.add_argument("--policy-low-variant", choices=sorted(VARIANTS), default="g16_weighted")
+    parser.add_argument("--policy-high-variant", choices=sorted(VARIANTS), default="g8_weighted")
     parser.add_argument("--cumulative", action="store_true", help="Quantize all selected modules together per variant.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
@@ -263,6 +405,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("auto", "float32", "bfloat16", "float16"), default="bfloat16")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--torch-threads", type=int, default=64)
+    parser.add_argument(
+        "--max-original-weight-mib",
+        type=int,
+        default=4096,
+        help="Refuse cumulative runs that would keep more original weights in CPU RAM.",
+    )
     parser.add_argument("--run-id", default="aq-module-logit-smoke")
     parser.add_argument("--note", action="append", default=[])
     return parser.parse_args()
@@ -270,6 +418,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not args.variant and not args.policy:
+        raise SystemExit("at least one --variant or --policy is required")
+    if args.policy and not args.cumulative:
+        raise SystemExit("--policy currently requires --cumulative")
+    if args.max_original_weight_mib < 1:
+        raise SystemExit("--max-original-weight-mib must be >= 1")
     torch.set_num_threads(args.torch_threads)
     args.model_dir = args.model_dir.expanduser().resolve()
     args.activation_stats = args.activation_stats.expanduser().resolve()
@@ -279,6 +433,7 @@ def main() -> int:
     tokenizer, model = load_model_and_tokenizer(args)
     device = next(model.parameters()).device
     prompts = load_prompts(args.prompt_file, args.prompt, args.max_prompts)
+    policies = make_policy_specs(args)
     reference_logits = [
         forward_last_logits(model, tokenizer, prompt, args.sequence_length, device)
         for prompt in prompts
@@ -287,31 +442,54 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("a", encoding="utf-8") as output:
         if args.cumulative:
-            module_entries = []
-            for module_name in args.module:
-                module = get_module(model, module_name)
-                module_entries.append(
-                    {
-                        "name": module_name,
-                        "module": module,
-                        "original": module.weight.detach().clone(),
-                        "activation": activation_for_module(module_name, int(module.in_features), stats),
-                    }
-                )
-            for variant_id in args.variant:
-                variant = VARIANTS[variant_id]
+            module_entries, total_original_bytes = collect_cumulative_module_entries(
+                sampler,
+                model,
+                args.module,
+                stats,
+                args.max_original_weight_mib,
+            )
+            validate_policies_for_modules(policies, module_entries)
+            run_specs: list[tuple[str, Variant | None, Policy | None]] = [
+                (variant_id, VARIANTS[variant_id], None) for variant_id in args.variant
+            ]
+            run_specs.extend((policy.policy_id, None, policy) for policy in policies)
+            module_names = [str(entry["name"]) for entry in module_entries]
+            module_families = {str(entry["name"]): str(entry["family"]) for entry in module_entries}
+
+            for spec_id, uniform_variant, policy in run_specs:
+                if uniform_variant is None:
+                    if policy is None:
+                        raise RuntimeError(f"invalid run spec: {spec_id}")
+                    row_variant = policy_variant_payload(policy)
+                    row_policy = policy_payload(policy, module_entries)
+                else:
+                    row_variant = variant_payload(uniform_variant)
+                    row_policy = None
                 try:
                     for entry in module_entries:
+                        original = entry["original"]
+                        module = entry["module"]
+                        activation = entry["activation"]
+                        assert isinstance(original, torch.Tensor)
+                        assert isinstance(module, torch.nn.Linear)
+                        assert isinstance(activation, torch.Tensor)
+                        if uniform_variant is None:
+                            if policy is None:
+                                raise RuntimeError(f"invalid run spec: {spec_id}")
+                            variant = variant_for_policy(policy, str(entry["family"]))
+                        else:
+                            variant = uniform_variant
                         quantized = quantize_weight(
                             sampler,
-                            entry["original"],
-                            entry["activation"],
+                            original,
+                            activation,
                             variant,
                             args.max_codebook_elements,
                             args.scale_window,
                             args.seed,
-                        ).to(device=entry["original"].device, dtype=entry["original"].dtype)
-                        entry["module"].weight.data.copy_(quantized)
+                        ).to(device=module.weight.device, dtype=module.weight.dtype)
+                        module.weight.data.copy_(quantized)
                     rows = []
                     for prompt_index, (prompt, reference) in enumerate(zip(prompts, reference_logits, strict=True)):
                         logits = forward_last_logits(model, tokenizer, prompt, args.sequence_length, device)
@@ -325,8 +503,11 @@ def main() -> int:
                                 "model_dir": str(args.model_dir),
                                 "activation_stats": str(args.activation_stats),
                                 "module_scope": "cumulative",
-                                "modules": [str(entry["name"]) for entry in module_entries],
-                                "variant": variant.__dict__,
+                                "modules": module_names,
+                                "module_families": module_families,
+                                "total_original_weight_bytes": total_original_bytes,
+                                "variant": row_variant,
+                                "policy": row_policy,
                                 "prompt": prompt,
                                 "prompt_index": prompt_index,
                                 "prompt_count": len(prompts),
@@ -346,8 +527,11 @@ def main() -> int:
                             "model_dir": str(args.model_dir),
                             "activation_stats": str(args.activation_stats),
                             "module_scope": "cumulative",
-                            "modules": [str(entry["name"]) for entry in module_entries],
-                            "variant": variant.__dict__,
+                            "modules": module_names,
+                            "module_families": module_families,
+                            "total_original_weight_bytes": total_original_bytes,
+                            "variant": row_variant,
+                            "policy": row_policy,
                             "prompt": None,
                             "prompt_count": len(prompts),
                             "prompt_file": str(args.prompt_file) if args.prompt_file else None,
@@ -358,8 +542,7 @@ def main() -> int:
                         }
                     ]
                 finally:
-                    for entry in module_entries:
-                        entry["module"].weight.data.copy_(entry["original"])
+                    restore_cumulative_modules(module_entries)
                 for row in rows:
                     output.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
                     output.write("\n")
@@ -367,7 +550,7 @@ def main() -> int:
 
         for module_name in args.module:
             module = get_module(model, module_name)
-            original = module.weight.detach().clone()
+            original = module.weight.detach().to("cpu").clone()
             activation = activation_for_module(module_name, int(module.in_features), stats)
             for variant_id in args.variant:
                 variant = VARIANTS[variant_id]
@@ -380,7 +563,7 @@ def main() -> int:
                         args.max_codebook_elements,
                         args.scale_window,
                         args.seed,
-                    ).to(device=original.device, dtype=original.dtype)
+                    ).to(device=module.weight.device, dtype=module.weight.dtype)
                     module.weight.data.copy_(quantized)
                     rows = []
                     for prompt_index, (prompt, reference) in enumerate(zip(prompts, reference_logits, strict=True)):
@@ -395,7 +578,7 @@ def main() -> int:
                                 "model_dir": str(args.model_dir),
                                 "activation_stats": str(args.activation_stats),
                                 "module": module_name,
-                                "variant": variant.__dict__,
+                                "variant": variant_payload(variant),
                                 "prompt": prompt,
                                 "prompt_index": prompt_index,
                                 "prompt_count": len(prompts),
@@ -415,7 +598,7 @@ def main() -> int:
                             "model_dir": str(args.model_dir),
                             "activation_stats": str(args.activation_stats),
                             "module": module_name,
-                            "variant": variant.__dict__,
+                            "variant": variant_payload(variant),
                             "prompt": None,
                             "prompt_count": len(prompts),
                             "prompt_file": str(args.prompt_file) if args.prompt_file else None,
@@ -426,7 +609,7 @@ def main() -> int:
                         }
                     ]
                 finally:
-                    module.weight.data.copy_(original)
+                    module.weight.data.copy_(original.to(device=module.weight.device, dtype=module.weight.dtype))
                 for row in rows:
                     output.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
                     output.write("\n")

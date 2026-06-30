@@ -417,6 +417,57 @@ For this cumulative three-module smoke, g8 weighted was best by logit relative
 MSE and KL. The result is still far from a full-model replacement, but it
 supports carrying weighted g16/g8 policies into the next stage.
 
+`tools/run-aq-module-logit-smoke.py` was then extended with mixed family policy
+support:
+
+- `--policy NAME=family1,family2` uses `g8_weighted` for the listed families
+  and `g16_weighted` for the remaining selected modules.
+- cumulative runs now keep original selected weights on CPU and refuse runs
+  above `--max-original-weight-mib` to avoid accidental GPU/host memory spikes.
+- policy rows include per-module family and selected variant metadata.
+
+Two mixed-policy smokes were run with the same 8 prompts:
+
+- layer0 policy result:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-layer0-policy-r9700-calib32-qwen35-9b-prompts8.jsonl`
+- policy5 result:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-policy5-r9700-calib32-qwen35-9b-prompts8.jsonl`
+
+Layer0 scope:
+
+- `model.layers.0.linear_attn.out_proj`
+- `model.layers.0.mlp.gate_proj`
+- `model.layers.0.mlp.up_proj`
+- `model.layers.0.mlp.down_proj`
+
+| variant / policy | mean logit relative MSE | mean abs error | mean KL(ref, candidate) | top1 matches | mean top10 overlap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all g16 weighted | 0.000299323 | 0.032173163 | 0.001534273 | 8 / 8 | 9.625 |
+| all g8 weighted | 0.000198038 | 0.026597451 | 0.000739757 | 8 / 8 | 10.0 |
+| p4p6: g8 for `linear_attn_out`; MLP g16 | 0.000302250 | 0.032795076 | 0.001551366 | 8 / 8 | 10.0 |
+| p4p9: g8 for `linear_attn_out,mlp_gate,mlp_up`; `mlp_down` g16 | 0.000192349 | 0.026307318 | 0.001143397 | 8 / 8 | 10.0 |
+
+Policy5 scope:
+
+- `model.layers.0.linear_attn.out_proj`
+- `model.layers.3.self_attn.k_proj`
+- `model.layers.3.self_attn.v_proj`
+- `model.layers.3.self_attn.o_proj`
+- `model.layers.0.mlp.up_proj`
+
+| variant / policy | mean logit relative MSE | mean abs error | mean KL(ref, candidate) | top1 matches | mean top10 overlap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all g16 weighted | 0.000286738 | 0.031830961 | 0.001103859 | 8 / 8 | 9.75 |
+| all g8 weighted | 0.000284312 | 0.031472139 | 0.001183611 | 8 / 8 | 9.75 |
+| p4p6: g8 for `attn_k,attn_o,attn_v,linear_attn_out`; `mlp_up` g16 | 0.000225818 | 0.028638312 | 0.001248148 | 8 / 8 | 9.875 |
+| p4p9: same as all g8 for this scope | 0.000284312 | 0.031472139 | 0.001183611 | 8 / 8 | 9.75 |
+
+The policy5 result is a useful early signal for mixed precision: keeping
+`mlp_up` at g16 while moving the attention-sensitive families to g8 reduced
+logit relative MSE against both all-g16 and all-g8 in this small smoke. KL did
+not improve, so the result should be treated as a candidate-ordering signal,
+not a quality conclusion.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

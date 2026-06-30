@@ -132,6 +132,13 @@
   - cumulative3 result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-cumulative3-r9700-calib32-qwen35-9b-prompts8.jsonl`.
   - cumulative3 mean logit relative MSE: g16 unweighted `0.002544046`, g16 weighted `0.000297915`, g8 weighted `0.000249932`.
   - cumulative3 mean KL: g16 unweighted `0.005718965`, g16 weighted `0.001522995`, g8 weighted `0.001281331`.
+  - added mixed family policy support to `tools/run-aq-module-logit-smoke.py` via `--policy NAME=family1,family2`.
+  - cumulative runs now store selected original weights on CPU and have `--max-original-weight-mib` as a guard.
+  - layer0 mixed policy result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-layer0-policy-r9700-calib32-qwen35-9b-prompts8.jsonl`.
+  - layer0 mean logit relative MSE: all-g16 `0.000299323`, all-g8 `0.000198038`, p4p6 `0.000302250`, p4p9 `0.000192349`.
+  - policy5 mixed policy result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-policy5-r9700-calib32-qwen35-9b-prompts8.jsonl`.
+  - policy5 mean logit relative MSE: all-g16 `0.000286738`, all-g8 `0.000284312`, p4p6 `0.000225818`, p4p9 `0.000284312`.
+  - interpretation: p4p6 improved policy5 logit relative MSE by keeping `mlp_up` at g16 while using g8 for `attn_k,attn_o,attn_v,linear_attn_out`; KL still did not improve, so this is an ordering signal, not a quality conclusion.
 
 - `ullm-quant` metadata planner:
   - added safetensors header planning without reading tensor payloads.
