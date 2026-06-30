@@ -906,6 +906,57 @@ The 24-tensor prototype was also merged and verified:
 | verify elapsed wall time | 4.09 s |
 | verify maximum RSS | 101,216 KiB |
 
+The smoke was then widened again to four tensors per family, matching the
+sampling width used for the full-family codebook export:
+
+- summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family4.json`
+- driver log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family4-driver.log`
+- per-tensor logs:
+  `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-family4-logs/`
+
+All 48 selected tensors returned success and passed per-tensor verification.
+
+| family | tensors | relative MSE min | relative MSE max | max RSS |
+| --- | ---: | ---: | ---: | ---: |
+| `attn_k` | 4 | 0.003689322353 | 0.003779590027 | 8,232 KiB |
+| `attn_o` | 4 | 0.003639662156 | 0.003662249925 | 16,464 KiB |
+| `attn_q` | 4 | 0.005322125903 | 0.005344111781 | 22,184 KiB |
+| `attn_v` | 4 | 0.003816023096 | 0.003853964074 | 8,232 KiB |
+| `linear_attn_a` | 4 | 0.005253958207 | 0.005408427461 | 3,156 KiB |
+| `linear_attn_b` | 4 | 0.005458763018 | 0.005741676939 | 3,156 KiB |
+| `linear_attn_out` | 4 | 0.003732074646 | 0.003765302590 | 16,416 KiB |
+| `linear_attn_qkv` | 4 | 0.005195938521 | 0.005247204745 | 22,952 KiB |
+| `linear_attn_z` | 4 | 0.005192328385 | 0.005217610417 | 12,784 KiB |
+| `mlp_down` | 4 | 0.005318504789 | 0.005344374105 | 31,456 KiB |
+| `mlp_gate` | 4 | 0.005196248710 | 0.005224491836 | 32,076 KiB |
+| `mlp_up` | 4 | 0.005245190541 | 0.005280311022 | 31,252 KiB |
+
+Family4 driver resource use:
+
+| item | value |
+| --- | ---: |
+| selected tensors | 48 |
+| successful tensors | 48 |
+| elapsed wall time | 2:45.31 |
+| maximum RSS | 32,076 KiB |
+
+The 48-tensor prototype was also merged and verified:
+
+- merge summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-family4.json`
+- verify log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-family4.txt`
+
+| item | value |
+| --- | ---: |
+| tensor count | 48 |
+| codebook count | 12 |
+| total file bytes | 634,004,817 |
+| verify elapsed wall time | 8.12 s |
+| verify maximum RSS | 101,252 KiB |
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
