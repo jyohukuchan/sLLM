@@ -95,7 +95,7 @@ Initial implementation status:
   normalization tensors, non-linear MTP tensors, and unknown families.
 - Plan schema `ullm-quant-plan-v0.3` records aq policy assignment, estimated
   output bytes, and estimated effective bpp.
-- Current best policy candidate is `p4p6`:
+- Conservative baseline policy candidate is `p4p6`:
   - high format `aq4_e4m3_g8_ts_flloyd16` for `attn_k`, `attn_o`, `attn_v`,
     and `linear_attn_out`,
   - low format `aq4_e4m3_g16_ts_flloyd16` for other quantizable families.
@@ -107,6 +107,18 @@ Initial implementation status:
   - all-g8 estimated output bytes: `9504914400`
 - `p4p6` is only `39321600` bytes above all-g16 in the current payload estimate
   and performed best in the 10-module logit smoke.
+- After the in-projection activation-stat fix, two named follow-up policies are
+  also available in `ullm-quant`:
+  - `p4p46_inproj`: high families
+    `attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_z`
+  - `p4p65_inproj`: high families
+    `attn_k,attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_qkv`
+- Updated in-proj policy size summary:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-policy-size-summary-qwen35-9b-inproj.json`
+  - p4p46_inproj estimated output bytes: `9121922016`
+  - p4p65_inproj estimated output bytes: `9149447136`
+  - p4p46_inproj is `23199744` bytes above p4p6; p4p65_inproj is `50724864`
+    bytes above p4p6.
 
 ### Phase 1: Calibration
 

@@ -1,0 +1,229 @@
+{
+  "model": {
+    "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "passthrough_tensor_count": 520,
+    "supported_tensor_count": 255,
+    "tensor_count": 775,
+    "total_tensor_bytes": 19306216416
+  },
+  "policies": [
+    {
+      "aq_policy": {
+        "high_families": [],
+        "high_format": "aq4_e4m3_g8_ts_flloyd16",
+        "low_format": "aq4_e4m3_g16_ts_flloyd16",
+        "policy_id": "all-g16"
+      },
+      "by_role": {
+        "low": {
+          "estimated_output_bytes": 4009623552,
+          "input_bytes": 14256439296,
+          "tensors": 255
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "delta_vs_all_g16": 0,
+      "estimated_output_to_input_ratio": 0.46924785658633944,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-all-g16.json",
+      "policy_id": "all-g16",
+      "total_estimated_output_bytes": 9059400672,
+      "total_tensor_bytes": 19306216416
+    },
+    {
+      "aq_policy": {
+        "high_families": [
+          "attn_k",
+          "attn_o",
+          "attn_v",
+          "linear_attn_out"
+        ],
+        "high_format": "aq4_e4m3_g8_ts_flloyd16",
+        "low_format": "aq4_e4m3_g16_ts_flloyd16",
+        "policy_id": "p4p6"
+      },
+      "by_role": {
+        "high": {
+          "estimated_output_bytes": 393216000,
+          "input_bytes": 1258291200,
+          "tensors": 51
+        },
+        "low": {
+          "estimated_output_bytes": 3655729152,
+          "input_bytes": 12998148096,
+          "tensors": 204
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "delta_vs_all_g16": 39321600,
+      "estimated_output_to_input_ratio": 0.47128458916784166,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json",
+      "policy_id": "p4p6",
+      "total_estimated_output_bytes": 9098722272,
+      "total_tensor_bytes": 19306216416
+    },
+    {
+      "aq_policy": {
+        "high_families": [
+          "attn_o",
+          "attn_v",
+          "linear_attn_a",
+          "linear_attn_b",
+          "linear_attn_out",
+          "linear_attn_z"
+        ],
+        "high_format": "aq4_e4m3_g8_ts_flloyd16",
+        "low_format": "aq4_e4m3_g16_ts_flloyd16",
+        "policy_id": "p4p46_inproj"
+      },
+      "by_role": {
+        "high": {
+          "estimated_output_bytes": 625213440,
+          "input_bytes": 2000683008,
+          "tensors": 114
+        },
+        "low": {
+          "estimated_output_bytes": 3446931456,
+          "input_bytes": 12255756288,
+          "tensors": 141
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "delta_vs_all_g16": 62521344,
+      "estimated_output_to_input_ratio": 0.4724862613909279,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p46-inproj.json",
+      "policy_id": "p4p46_inproj",
+      "total_estimated_output_bytes": 9121922016,
+      "total_tensor_bytes": 19306216416
+    },
+    {
+      "aq_policy": {
+        "high_families": [
+          "attn_k",
+          "attn_o",
+          "attn_v",
+          "linear_attn_a",
+          "linear_attn_b",
+          "linear_attn_out",
+          "linear_attn_qkv"
+        ],
+        "high_format": "aq4_e4m3_g8_ts_flloyd16",
+        "low_format": "aq4_e4m3_g16_ts_flloyd16",
+        "policy_id": "p4p65_inproj"
+      },
+      "by_role": {
+        "high": {
+          "estimated_output_bytes": 900464640,
+          "input_bytes": 2881486848,
+          "tensors": 123
+        },
+        "low": {
+          "estimated_output_bytes": 3199205376,
+          "input_bytes": 11374952448,
+          "tensors": 132
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "delta_vs_all_g16": 90046464,
+      "estimated_output_to_input_ratio": 0.4739119741979795,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p65-inproj.json",
+      "policy_id": "p4p65_inproj",
+      "total_estimated_output_bytes": 9149447136,
+      "total_tensor_bytes": 19306216416
+    },
+    {
+      "aq_policy": {
+        "high_families": [
+          "attn_k",
+          "attn_o",
+          "attn_q",
+          "attn_v",
+          "linear_attn_out",
+          "mlp_gate",
+          "mlp_up"
+        ],
+        "high_format": "aq4_e4m3_g8_ts_flloyd16",
+        "low_format": "aq4_e4m3_g16_ts_flloyd16",
+        "policy_id": "p4p9"
+      },
+      "by_role": {
+        "high": {
+          "estimated_output_bytes": 2658140160,
+          "input_bytes": 8506048512,
+          "tensors": 126
+        },
+        "low": {
+          "estimated_output_bytes": 1617297408,
+          "input_bytes": 5750390784,
+          "tensors": 129
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "delta_vs_all_g16": 265814016,
+      "estimated_output_to_input_ratio": 0.48301616883729437,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p9.json",
+      "policy_id": "p4p9",
+      "total_estimated_output_bytes": 9325214688,
+      "total_tensor_bytes": 19306216416
+    },
+    {
+      "aq_policy": {
+        "high_families": [
+          "attn_k",
+          "attn_o",
+          "attn_q",
+          "attn_v",
+          "linear_attn_a",
+          "linear_attn_b",
+          "linear_attn_out",
+          "linear_attn_qkv",
+          "linear_attn_z",
+          "mlp_down",
+          "mlp_gate",
+          "mlp_up"
+        ],
+        "high_format": "aq4_e4m3_g8_ts_flloyd16",
+        "low_format": "aq4_e4m3_g16_ts_flloyd16",
+        "policy_id": "all-g8"
+      },
+      "by_role": {
+        "high": {
+          "estimated_output_bytes": 4455137280,
+          "input_bytes": 14256439296,
+          "tensors": 255
+        },
+        "passthrough": {
+          "estimated_output_bytes": 5049777120,
+          "input_bytes": 5049777120,
+          "tensors": 520
+        }
+      },
+      "delta_vs_all_g16": 445513728,
+      "estimated_output_to_input_ratio": 0.49232403673475944,
+      "plan_path": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-all-g8.json",
+      "policy_id": "all-g8",
+      "total_estimated_output_bytes": 9504914400,
+      "total_tensor_bytes": 19306216416
+    }
+  ],
+  "schema_version": "ullm-quant-policy-size-summary-v0.2"
+}

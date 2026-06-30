@@ -77,4 +77,9 @@ Policy presets:
   high-budget format; other quantizable families use the low-budget format.
 - `p4p9`: `attn_k`, `attn_o`, `attn_q`, `attn_v`, `linear_attn_out`,
   `mlp_gate`, and `mlp_up` use the high-budget format.
+- `p4p46_inproj`: `attn_o`, `attn_v`, `linear_attn_a`, `linear_attn_b`,
+  `linear_attn_out`, and `linear_attn_z` use the high-budget format.
+- `p4p65_inproj`: `attn_k`, `attn_o`, `attn_v`, `linear_attn_a`,
+  `linear_attn_b`, `linear_attn_out`, and `linear_attn_qkv` use the
+  high-budget format.
 - `custom`: use repeated `--aq-high-family <FAMILY>`.

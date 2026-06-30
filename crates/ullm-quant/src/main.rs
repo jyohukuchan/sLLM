@@ -582,7 +582,9 @@ fn print_help() {
     println!("  --tensor-scale-override <F>   skip tensor-scale estimation for prototype output");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
-    println!("  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, or custom");
+    println!(
+        "  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, p4p46_inproj, p4p65_inproj, or custom"
+    );
     println!("  --aq-high-family <FAMILY>     high-format family for custom policy; repeatable");
     println!("  --aq-low-format <ID>          low-budget aq candidate id");
     println!("  --aq-high-format <ID>         high-budget aq candidate id");
@@ -688,10 +690,33 @@ fn resolve_aq_policy(options: &Options) -> Result<AqPolicyPlan, String> {
         .into_iter()
         .map(str::to_string)
         .collect(),
+        "p4p46" | "p4p46_inproj" => [
+            "attn_o",
+            "attn_v",
+            "linear_attn_a",
+            "linear_attn_b",
+            "linear_attn_out",
+            "linear_attn_z",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        "p4p65" | "p4p65_inproj" => [
+            "attn_k",
+            "attn_o",
+            "attn_v",
+            "linear_attn_a",
+            "linear_attn_b",
+            "linear_attn_out",
+            "linear_attn_qkv",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
         "custom" => options.aq_high_families.iter().cloned().collect(),
         unknown => {
             return Err(format!(
-                "unknown --aq-policy {unknown}; expected all-g16, all-g8, p4p6, p4p9, or custom"
+                "unknown --aq-policy {unknown}; expected all-g16, all-g8, p4p6, p4p9, p4p46_inproj, p4p65_inproj, or custom"
             ));
         }
     };
@@ -3126,6 +3151,30 @@ mod tests {
         let (format, role) = quant_assignment(true, "mlp_up", &policy);
         assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
         assert_eq!(role.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn inproj_policy_presets_assign_expected_families() {
+        let policy = resolve_aq_policy(&test_options("p4p46_inproj")).expect("p4p46 policy");
+        let (format, role) = quant_assignment(true, "linear_attn_a", &policy);
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g8_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("high"));
+        let (format, role) = quant_assignment(true, "linear_attn_qkv", &policy);
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("low"));
+
+        let alias_policy = resolve_aq_policy(&test_options("p4p46")).expect("p4p46 alias");
+        assert_eq!(policy.high_families, alias_policy.high_families);
+
+        let policy = resolve_aq_policy(&test_options("p4p65_inproj")).expect("p4p65 policy");
+        let (format, role) = quant_assignment(true, "linear_attn_qkv", &policy);
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g8_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("high"));
+        let (format, role) = quant_assignment(true, "linear_attn_z", &policy);
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("low"));
+        let alias_policy = resolve_aq_policy(&test_options("p4p65")).expect("p4p65 alias");
+        assert_eq!(policy.high_families, alias_policy.high_families);
     }
 
     #[test]

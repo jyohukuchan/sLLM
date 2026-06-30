@@ -171,6 +171,12 @@
   - estimated output bytes: all-g16 `9059400672`, p4p6 `9098722272`, p4p9 `9325214688`, all-g8 `9504914400`.
   - size interpretation: p4p6 is only `39321600` bytes above all-g16, while p4p9 is `265814016` bytes above all-g16.
   - updated `docs/plans/aq-full-quantizer-design-v0.1.md` with current p4p6 policy, plan size results, chunk inspection status, and revised immediate Rust implementation steps.
+  - added named aq policy presets `p4p46_inproj` and `p4p65_inproj` to `ullm-quant`; short aliases `p4p46` and `p4p65` use the same high-family sets.
+  - generated p4p46 plan: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p46-inproj.json`; high tensors `114`, low tensors `141`, passthrough tensors `520`, estimated output bytes `9121922016`, output/input ratio `0.472486`.
+  - generated p4p65 plan: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p65-inproj.json`; high tensors `123`, low tensors `132`, passthrough tensors `520`, estimated output bytes `9149447136`, output/input ratio `0.473912`.
+  - generated updated size summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-policy-size-summary-qwen35-9b-inproj.json`.
+  - size interpretation: p4p46 is `23199744` estimated bytes above p4p6; p4p65 is `50724864` estimated bytes above p4p6. Both are much smaller than p4p9's delta.
+  - verification after policy preset change: `cargo fmt -p ullm-quant`, `cargo test -p ullm-quant`, and `cargo build -p ullm-quant --release` pass. Tests now pass 22 unit tests.
   - added exported codebook loading to `ullm-quant` inspection.
   - added streamed one-tensor quantization dry-run: direct E4M3 group scale plus nearest 4-bit family LUT assignment.
   - dry-run result for `model.language_model.layers.0.mlp.up_proj.weight` with `aq4_e4m3_g16_ts_flloyd16`: relative MSE `0.006231116836`, max abs error `0.006380409`, output path `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer0-mlp-up-g16.txt`.

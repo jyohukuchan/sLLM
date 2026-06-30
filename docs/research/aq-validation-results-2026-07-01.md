@@ -514,7 +514,7 @@ spending g8 budget as early as attention-sensitive families.
 `ullm-quant` was then connected to the p4p6 policy at the planning level:
 
 - CLI options added:
-  - `--aq-policy all-g16|all-g8|p4p6|p4p9|custom`
+  - `--aq-policy all-g16|all-g8|p4p6|p4p9|p4p46_inproj|p4p65_inproj|custom`
   - `--aq-high-family FAMILY` for custom policies
   - `--aq-low-format` / `--aq-high-format`
 - plan schema version: `ullm-quant-plan-v0.3`
@@ -548,6 +548,32 @@ The same planner was run for the main policy presets:
 Combined with the policy10 logit smoke, p4p6 is currently the most attractive
 candidate because its estimated size is close to all-g16 while its logit
 relative MSE and KL were better in the 10-module smoke.
+
+After the in-projection activation-stat fix, `ullm-quant` was extended with
+named policy presets for the strongest wider-smoke follow-up candidates:
+
+- `p4p46_inproj`: high format for
+  `attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_z`
+- `p4p65_inproj`: high format for
+  `attn_k,attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_qkv`
+- plan outputs:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p46-inproj.json`
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p65-inproj.json`
+- updated size summary:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-policy-size-summary-qwen35-9b-inproj.json`
+
+| policy | high tensors | low tensors | estimated output bytes | output/input ratio | delta vs all-g16 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all-g16 | 0 | 255 | 9,059,400,672 | 0.469248 | 0 |
+| p4p6 | 51 | 204 | 9,098,722,272 | 0.471285 | +39,321,600 |
+| p4p46_inproj | 114 | 141 | 9,121,922,016 | 0.472486 | +62,521,344 |
+| p4p65_inproj | 123 | 132 | 9,149,447,136 | 0.473912 | +90,046,464 |
+| p4p9 | 126 | 129 | 9,325,214,688 | 0.483016 | +265,814,016 |
+| all-g8 | 255 | 0 | 9,504,914,400 | 0.492324 | +445,513,728 |
+
+p4p46_inproj costs only `23,199,744` estimated bytes more than p4p6, while
+p4p65_inproj costs `50,724,864` more than p4p6. This makes both candidates
+small enough for the next full-policy prototype comparison.
 
 ### Rust `ullm-quant` Payload Dry-Run
 
