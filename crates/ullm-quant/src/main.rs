@@ -30,6 +30,9 @@ struct Options {
     plan_output: Option<PathBuf>,
     inspect_tensor: Option<String>,
     inspect_aq_format: Option<String>,
+    codebook_json: Option<PathBuf>,
+    inspect_codebook_family: Option<String>,
+    inspect_codebook_candidate: Option<String>,
     chunk_bytes: usize,
     aq_policy: String,
     aq_high_families: Vec<String>,
@@ -48,6 +51,18 @@ struct TensorHeader {
     dtype: String,
     shape: Vec<usize>,
     data_offsets: [usize; 2],
+}
+
+#[derive(Debug, Deserialize)]
+struct CodebookExport {
+    codebooks: Vec<CodebookEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodebookEntry {
+    family: String,
+    candidate_id: String,
+    values_f32: Vec<f32>,
 }
 
 #[derive(Debug)]
@@ -172,6 +187,9 @@ fn parse_options() -> Result<Options, String> {
         plan_output: None,
         inspect_tensor: None,
         inspect_aq_format: None,
+        codebook_json: None,
+        inspect_codebook_family: None,
+        inspect_codebook_candidate: None,
         chunk_bytes: 64 * 1024 * 1024,
         aq_policy: "all-g16".to_string(),
         aq_high_families: Vec::new(),
@@ -207,6 +225,24 @@ fn parse_options() -> Result<Options, String> {
                     args.next()
                         .ok_or_else(|| "--inspect-aq-format requires a value".to_string())?,
                 );
+            }
+            "--codebook-json" => {
+                options.codebook_json =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--codebook-json requires a value".to_string()
+                    })?));
+            }
+            "--inspect-codebook-family" => {
+                options.inspect_codebook_family = Some(
+                    args.next()
+                        .ok_or_else(|| "--inspect-codebook-family requires a value".to_string())?,
+                );
+            }
+            "--inspect-codebook-candidate" => {
+                options.inspect_codebook_candidate =
+                    Some(args.next().ok_or_else(|| {
+                        "--inspect-codebook-candidate requires a value".to_string()
+                    })?);
             }
             "--chunk-bytes" => options.chunk_bytes = parse_usize("--chunk-bytes", args.next())?,
             "--aq-policy" => {
@@ -256,6 +292,9 @@ fn print_help() {
         "  --inspect-tensor <NAME>       read one tensor payload in chunks and print checksum"
     );
     println!("  --inspect-aq-format <ID>      also compute group absmax stats for an aq format");
+    println!("  --codebook-json <PATH>        exported aq family codebook JSON");
+    println!("  --inspect-codebook-family <F> inspect one family from --codebook-json");
+    println!("  --inspect-codebook-candidate <ID>");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, or custom");
     println!("  --aq-high-family <FAMILY>     high-format family for custom policy; repeatable");
@@ -491,6 +530,34 @@ fn nearest_scale_index(target: f32, scales: &[f32]) -> (usize, bool, bool) {
     } else {
         (idx, false, false)
     }
+}
+
+fn load_codebook_export(path: &Path) -> Result<CodebookExport, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|err| format!("failed to parse codebook JSON {}: {err}", path.display()))
+}
+
+fn select_codebook<'a>(
+    export: &'a CodebookExport,
+    family: &str,
+    candidate_id: &str,
+) -> Result<&'a [f32], String> {
+    let entry = export
+        .codebooks
+        .iter()
+        .find(|entry| entry.family == family && entry.candidate_id == candidate_id)
+        .ok_or_else(|| {
+            format!("codebook not found for family={family}, candidate={candidate_id}")
+        })?;
+    if entry.values_f32.len() != 16 {
+        return Err(format!(
+            "codebook for family={family}, candidate={candidate_id} has {} entries, expected 16",
+            entry.values_f32.len()
+        ));
+    }
+    Ok(&entry.values_f32)
 }
 
 fn div_ceil(value: usize, divisor: usize) -> usize {
@@ -1092,6 +1159,42 @@ fn run() -> Result<(), String> {
             }
         }
     }
+    if options.codebook_json.is_some()
+        || options.inspect_codebook_family.is_some()
+        || options.inspect_codebook_candidate.is_some()
+    {
+        let path = options
+            .codebook_json
+            .as_deref()
+            .ok_or_else(|| "--codebook-json is required for codebook inspection".to_string())?;
+        let family = options
+            .inspect_codebook_family
+            .as_deref()
+            .ok_or_else(|| "--inspect-codebook-family is required".to_string())?;
+        let candidate_id = options
+            .inspect_codebook_candidate
+            .as_deref()
+            .ok_or_else(|| "--inspect-codebook-candidate is required".to_string())?;
+        let export = load_codebook_export(path)?;
+        let codebook = select_codebook(&export, family, candidate_id)?;
+        println!("inspect_codebook_json={}", path.display());
+        println!("inspect_codebook_family={family}");
+        println!("inspect_codebook_candidate={candidate_id}");
+        println!("inspect_codebook_entries={}", codebook.len());
+        if let (Some(min), Some(max)) = (
+            codebook.iter().copied().reduce(f32::min),
+            codebook.iter().copied().reduce(f32::max),
+        ) {
+            println!("inspect_codebook_min={min:.9}");
+            println!("inspect_codebook_max={max:.9}");
+        }
+        let values = codebook
+            .iter()
+            .map(|value| format!("{value:.9}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        println!("inspect_codebook_values={values}");
+    }
     if let (Some(plan), Some(output)) = (&plan, options.plan_output.as_deref()) {
         let text = serde_json::to_string_pretty(plan)
             .map_err(|err| format!("failed to serialize plan: {err}"))?;
@@ -1120,9 +1223,10 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        Options, default_threads, effective_bpp, estimate_output_bytes, family_for_tensor,
-        new_aq_group_stats, new_numeric_stats, quant_assignment, read_safetensors_metadata,
-        read_tensor_payload_chunk, resolve_aq_policy, update_aq_group_stats, update_numeric_stats,
+        CodebookEntry, CodebookExport, Options, default_threads, effective_bpp,
+        estimate_output_bytes, family_for_tensor, new_aq_group_stats, new_numeric_stats,
+        quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
+        select_codebook, update_aq_group_stats, update_numeric_stats,
     };
     use std::fs;
     use std::io::Write;
@@ -1154,6 +1258,9 @@ mod tests {
             plan_output: None,
             inspect_tensor: None,
             inspect_aq_format: None,
+            codebook_json: None,
+            inspect_codebook_family: None,
+            inspect_codebook_candidate: None,
             chunk_bytes: 1024,
             aq_policy: policy.to_string(),
             aq_high_families: Vec::new(),
@@ -1246,5 +1353,20 @@ mod tests {
         assert_eq!(stats.scale_format, "e4m3");
         assert_eq!(stats.scale_values.len(), 119);
         assert!(stats.scale_index_min <= stats.scale_index_max);
+    }
+
+    #[test]
+    fn exported_codebook_selection_requires_16_entries() {
+        let export = CodebookExport {
+            codebooks: vec![CodebookEntry {
+                family: "mlp_up".to_string(),
+                candidate_id: "aq4_e4m3_g16_ts_flloyd16".to_string(),
+                values_f32: (0..16).map(|value| value as f32).collect(),
+            }],
+        };
+        let values =
+            select_codebook(&export, "mlp_up", "aq4_e4m3_g16_ts_flloyd16").expect("codebook");
+        assert_eq!(values.len(), 16);
+        assert_eq!(values[15], 15.0);
     }
 }

@@ -1,0 +1,18 @@
+ullm-quant skeleton
+kernel_version=0.1.0
+threads=64
+io_threads=2
+max_working_memory_mib=4096
+aq_policy=all-g16
+aq_low_format=aq4_e4m3_g16_ts_flloyd16
+aq_high_format=aq4_e4m3_g8_ts_flloyd16
+aq_high_families=
+dry_run=true
+pack_smoke=ok [16, 33, 15, 120]
+inspect_codebook_json=benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-mlp-up-attn-k-weighted.json
+inspect_codebook_family=mlp_up
+inspect_codebook_candidate=aq4_e4m3_g16_ts_flloyd16
+inspect_codebook_entries=16
+inspect_codebook_min=-0.966317832
+inspect_codebook_max=0.968481123
+inspect_codebook_values=-0.966317832,-0.728607655,-0.556793213,-0.415682137,-0.297201693,-0.194260105,-0.105385222,-0.032799602,0.031088296,0.112165414,0.201768324,0.298005462,0.413556248,0.555131972,0.734994352,0.968481123

@@ -166,6 +166,7 @@
   - inspected `model.language_model.layers.3.self_attn.k_proj.weight` with `aq4_e4m3_g8_ts_flloyd16`: BF16 `[1024, 4096]`, group_size `8`, groups `524288`, group_absmax_mean `0.028590068`, group_absmax_max `0.277343750`, scale_index_min `0`, scale_index_max `40`, clamped_low `1`, clamped_high `0`, mean_relative_scale_error `0.024841432`.
   - added `tools/export-aq-family-codebooks.py` to export sampled family codebook values for Rust dry-runs.
   - exported codebook artifact: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-mlp-up-attn-k-weighted.json`; families `mlp_up,attn_k`; candidates `aq4_e4m3_g16_ts_flloyd16,aq4_e4m3_g8_ts_flloyd16`; weighted codebook with calib32 activation stats.
+  - Rust codebook inspection output: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-inspect-codebook-mlp-up-g16.txt`; loaded `mlp_up` + `aq4_e4m3_g16_ts_flloyd16`, 16 entries, min `-0.966317832`, max `0.968481123`.
   - generated policy size summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-policy-size-summary-qwen35-9b.json`.
   - estimated output bytes: all-g16 `9059400672`, p4p6 `9098722272`, p4p9 `9325214688`, all-g8 `9504914400`.
   - size interpretation: p4p6 is only `39321600` bytes above all-g16, while p4p9 is `265814016` bytes above all-g16.

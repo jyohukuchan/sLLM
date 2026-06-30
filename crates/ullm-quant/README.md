@@ -59,6 +59,16 @@ For scale-format dry runs, it reports direct group-absmax scale index range,
 clamp counts, and mean relative scale error. This is a range check, not the
 final quantizer scale search.
 
+Codebook inspection example:
+
+```text
+cargo run -p ullm-quant -- \
+  --codebook-json /path/to/codebooks.json \
+  --inspect-codebook-family mlp_up \
+  --inspect-codebook-candidate aq4_e4m3_g16_ts_flloyd16 \
+  --dry-run
+```
+
 Policy presets:
 
 - `all-g16`: all quantizable tensors use the low-budget format.
