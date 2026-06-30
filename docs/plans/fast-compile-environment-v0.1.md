@@ -122,6 +122,6 @@ Current verification:
 
 ## Notes
 
-- `apt update` currently reports duplicate Vivaldi apt source entries. It does not block compiler setup, but it should be cleaned later to reduce package-manager noise.
+- The duplicate Vivaldi apt source warning has been resolved by removing Vivaldi and its apt source files.
 - `build/` is ignored by Git.
 - `reference-src/` is ignored by Git.

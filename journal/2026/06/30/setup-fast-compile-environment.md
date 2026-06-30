@@ -24,4 +24,4 @@
 - The machine has 128 CPU threads and about 109GiB RAM.
 - Default CMake build parallelism is set to 24.
 - Default HIP build parallelism is set to 8 to avoid memory spikes.
-- `apt update` reported duplicate Vivaldi apt source entries.
+- `apt update` reported duplicate Vivaldi apt source entries during initial setup. This was resolved later by removing Vivaldi and its apt source files.
