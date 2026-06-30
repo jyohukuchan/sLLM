@@ -80,6 +80,8 @@ struct Options {
     inspect_codebook_candidate: Option<String>,
     prototype_output_dir: Option<PathBuf>,
     prototype_verify: bool,
+    verify_prototype_dir: Option<PathBuf>,
+    verify_prototype_all: bool,
     tensor_scale_override: Option<f32>,
     chunk_bytes: usize,
     scale_window: usize,
@@ -337,6 +339,8 @@ fn parse_options() -> Result<Options, String> {
         inspect_codebook_candidate: None,
         prototype_output_dir: None,
         prototype_verify: true,
+        verify_prototype_dir: None,
+        verify_prototype_all: false,
         tensor_scale_override: None,
         chunk_bytes: 64 * 1024 * 1024,
         scale_window: 0,
@@ -401,6 +405,13 @@ fn parse_options() -> Result<Options, String> {
                     })?));
             }
             "--prototype-skip-verify" => options.prototype_verify = false,
+            "--verify-prototype-dir" => {
+                options.verify_prototype_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--verify-prototype-dir requires a value".to_string()
+                    })?));
+            }
+            "--verify-prototype-all" => options.verify_prototype_all = true,
             "--tensor-scale-override" => {
                 options.tensor_scale_override =
                     Some(parse_positive_f32("--tensor-scale-override", args.next())?)
@@ -462,6 +473,8 @@ fn print_help() {
     println!("  --inspect-codebook-candidate <ID>");
     println!("  --prototype-output-dir <PATH> write one inspected tensor to a .ullm.d prototype");
     println!("  --prototype-skip-verify       skip prototype re-read/dequant verification");
+    println!("  --verify-prototype-dir <PATH> verify an existing prototype .ullm.d directory");
+    println!("  --verify-prototype-all        verify all tensors in --verify-prototype-dir");
     println!("  --tensor-scale-override <F>   skip tensor-scale estimation for prototype output");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
@@ -1859,6 +1872,15 @@ fn verify_prototype_tensor(
     })
 }
 
+fn prototype_tensor_count(output_dir: &Path) -> Result<usize, String> {
+    let manifest_path = output_dir.join("manifest.json");
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|err| format!("failed to read {}: {err}", manifest_path.display()))?;
+    let manifest: PrototypeManifest = serde_json::from_str(&manifest_text)
+        .map_err(|err| format!("failed to parse {}: {err}", manifest_path.display()))?;
+    Ok(manifest.tensors.len())
+}
+
 fn inspect_tensor_chunks(
     model_dir: &Path,
     tensor_name: &str,
@@ -2409,6 +2431,43 @@ fn run() -> Result<(), String> {
             println!("prototype_verify=skipped");
         }
     }
+    if let Some(output_dir) = options.verify_prototype_dir.as_deref() {
+        let count = if options.verify_prototype_all {
+            prototype_tensor_count(output_dir)?
+        } else {
+            1
+        };
+        println!("verify_prototype_dir={}", output_dir.display());
+        println!("verify_prototype_tensor_count={count}");
+        for tensor_index in 0..count {
+            let verification =
+                verify_prototype_tensor(output_dir, tensor_index, options.chunk_bytes)?;
+            println!("verify_prototype_tensor_index={tensor_index}");
+            println!("verify_prototype_elements={}", verification.elements);
+            println!("verify_prototype_groups={}", verification.groups);
+            println!("verify_prototype_mse={:.12}", verification.mse);
+            println!(
+                "verify_prototype_relative_mse={:.12}",
+                verification.relative_mse
+            );
+            println!(
+                "verify_prototype_max_abs_error={:.9}",
+                verification.max_abs_error
+            );
+            println!(
+                "verify_prototype_index_file_bytes={}",
+                verification.index_file_bytes
+            );
+            println!(
+                "verify_prototype_scale_file_bytes={}",
+                verification.scale_file_bytes
+            );
+            println!(
+                "verify_prototype_codebook_entries={}",
+                verification.codebook_entries
+            );
+        }
+    }
     if let (Some(plan), Some(output)) = (&plan, options.plan_output.as_deref()) {
         let text = serde_json::to_string_pretty(plan)
             .map_err(|err| format!("failed to serialize plan: {err}"))?;
@@ -2480,6 +2539,8 @@ mod tests {
             inspect_codebook_candidate: None,
             prototype_output_dir: None,
             prototype_verify: true,
+            verify_prototype_dir: None,
+            verify_prototype_all: false,
             tensor_scale_override: None,
             chunk_bytes: 1024,
             scale_window: 0,

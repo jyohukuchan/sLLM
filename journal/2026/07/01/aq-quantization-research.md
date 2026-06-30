@@ -208,6 +208,8 @@
   - p4p6 smoke converted 4 tensors: layer0/layer1 `mlp_up` g16 and layer11/layer15 `attn_k` g8. Relative MSE range `0.003702330162` to `0.005288028063`; elapsed times about `7.4-7.8 s` for `mlp_up` and `0.73 s` for `attn_k`.
   - added `tools/merge-ullm-prototype-dirs.py` to merge per-tensor prototype dirs into one shared `.ullm.d` directory.
   - merged p4p6 smoke summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-mlp-up-attn-k.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k-merged.ullm.d`; tensor count `4`, shared codebooks `2`, total file bytes `61872608`.
+  - added `--verify-prototype-dir` and `--verify-prototype-all` to verify existing prototype manifests.
+  - merged 4-tensor prototype verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-mlp-up-attn-k.txt`; all 4 tensors verified with matching relative MSE; elapsed `0.74 s`, max RSS `29764 KiB`.
 
 ## Current Interpretation
 

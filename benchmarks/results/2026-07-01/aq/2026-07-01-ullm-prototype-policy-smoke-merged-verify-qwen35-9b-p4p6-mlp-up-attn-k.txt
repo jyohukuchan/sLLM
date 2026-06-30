@@ -1,0 +1,72 @@
+ullm-quant skeleton
+kernel_version=0.1.0
+threads=64
+io_threads=2
+max_working_memory_mib=4096
+aq_policy=all-g16
+aq_low_format=aq4_e4m3_g16_ts_flloyd16
+aq_high_format=aq4_e4m3_g8_ts_flloyd16
+aq_high_families=
+dry_run=true
+pack_smoke=ok [16, 33, 15, 120]
+verify_prototype_dir=/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k-merged.ullm.d
+verify_prototype_tensor_count=4
+verify_prototype_tensor_index=0
+verify_prototype_elements=50331648
+verify_prototype_groups=3145728
+verify_prototype_mse=0.000000587570
+verify_prototype_relative_mse=0.005283509762
+verify_prototype_max_abs_error=0.005970601
+verify_prototype_index_file_bytes=25165824
+verify_prototype_scale_file_bytes=3145728
+verify_prototype_codebook_entries=16
+verify_prototype_tensor_index=1
+verify_prototype_elements=50331648
+verify_prototype_groups=3145728
+verify_prototype_mse=0.000000619982
+verify_prototype_relative_mse=0.005288028063
+verify_prototype_max_abs_error=0.007839996
+verify_prototype_index_file_bytes=25165824
+verify_prototype_scale_file_bytes=3145728
+verify_prototype_codebook_entries=16
+verify_prototype_tensor_index=2
+verify_prototype_elements=4194304
+verify_prototype_groups=524288
+verify_prototype_mse=0.000000875641
+verify_prototype_relative_mse=0.003723889112
+verify_prototype_max_abs_error=0.011718750
+verify_prototype_index_file_bytes=2097152
+verify_prototype_scale_file_bytes=524288
+verify_prototype_codebook_entries=16
+verify_prototype_tensor_index=3
+verify_prototype_elements=4194304
+verify_prototype_groups=524288
+verify_prototype_mse=0.000000827882
+verify_prototype_relative_mse=0.003702330162
+verify_prototype_max_abs_error=0.011114299
+verify_prototype_index_file_bytes=2097152
+verify_prototype_scale_file_bytes=524288
+verify_prototype_codebook_entries=16
+	Command being timed: "target/release/ullm-quant --verify-prototype-dir /tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k-merged.ullm.d --verify-prototype-all --chunk-bytes 1048576 --dry-run"
+	User time (seconds): 0.64
+	System time (seconds): 0.09
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.74
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 29764
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 14459
+	Voluntary context switches: 1
+	Involuntary context switches: 12
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 8
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

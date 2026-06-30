@@ -754,6 +754,29 @@ This is the first single-directory multi-tensor prototype. It still lacks
 passthrough tensors and full-model metadata, but it establishes the merge shape:
 one manifest, one `tensors/` directory, and shared `codebooks/`.
 
+`ullm-quant` can also verify an existing prototype directory from its manifest:
+
+- command mode:
+  - `--verify-prototype-dir`
+  - `--verify-prototype-all`
+- verify log:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-mlp-up-attn-k.txt`
+
+The merged 4-tensor prototype verified successfully:
+
+| item | value |
+| --- | ---: |
+| verified tensors | 4 |
+| elapsed wall time | 0.74 s |
+| maximum RSS | 29,764 KiB |
+
+Verified relative MSE values matched the prototype write metrics:
+
+- `mlp_up` layer0: `0.005283509762`
+- `mlp_up` layer1: `0.005288028063`
+- `attn_k` layer11: `0.003723889112`
+- `attn_k` layer15: `0.003702330162`
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

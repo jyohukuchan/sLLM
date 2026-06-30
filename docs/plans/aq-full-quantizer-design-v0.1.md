@@ -350,6 +350,16 @@ Rust implementation status:
   - tensor count: `4`
   - shared codebook count: `2`
   - total file bytes: `61872608`
+- Existing prototype verification mode:
+  - `--verify-prototype-dir`
+  - `--verify-prototype-all`
+  - verifies merged manifest entries by reading idx4, scale indices, shared
+    codebooks, and source safetensors payloads.
+- First merged verification log:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-mlp-up-attn-k.txt`
+  - verified tensors: `4`
+  - elapsed wall time: `0.74 s`
+  - peak RSS: `29764 KiB`
 
 ## Output Directory Prototype
 
