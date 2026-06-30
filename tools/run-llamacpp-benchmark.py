@@ -50,6 +50,10 @@ def parse_target(value: str) -> dict[str, str]:
     return {"label": label, "devices": devices, "split_mode": split_mode}
 
 
+def split_devices(value: str) -> list[str]:
+    return [item for item in re.split(r"[,/]", value) if item]
+
+
 def run_text(command: list[str], cwd: Path | None = None) -> str | None:
     try:
         completed = subprocess.run(
@@ -174,7 +178,7 @@ def build_hardware(
     driver: str | None,
     runtime: str | None,
 ) -> dict[str, Any]:
-    requested = [item.strip() for item in target["devices"].split(",") if item.strip()]
+    requested = split_devices(target["devices"])
     gpu_infos = []
     for device in requested:
         info = devices.get(device, {})
@@ -196,7 +200,7 @@ def build_hardware(
 
 
 def build_parallelism(target: dict[str, str]) -> dict[str, int]:
-    gpu_count = len([item for item in target["devices"].split(",") if item.strip()])
+    gpu_count = len(split_devices(target["devices"]))
     return {
         "tensor_parallel": gpu_count if target["split_mode"] == "tensor" else 1,
         "pipeline_parallel": 1,
@@ -242,7 +246,7 @@ def result_row(
     pp_ts = float(prefill.get("avg_ts", 0.0))
     tg_ts = float(decode.get("avg_ts", 0.0))
     split_mode = target["split_mode"]
-    gpu_count = len([item for item in target["devices"].split(",") if item.strip()])
+    gpu_count = len(split_devices(target["devices"]))
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
