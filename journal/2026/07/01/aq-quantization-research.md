@@ -167,6 +167,7 @@
   - generated policy size summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-policy-size-summary-qwen35-9b.json`.
   - estimated output bytes: all-g16 `9059400672`, p4p6 `9098722272`, p4p9 `9325214688`, all-g8 `9504914400`.
   - size interpretation: p4p6 is only `39321600` bytes above all-g16, while p4p9 is `265814016` bytes above all-g16.
+  - updated `docs/plans/aq-full-quantizer-design-v0.1.md` with current p4p6 policy, plan size results, chunk inspection status, and revised immediate Rust implementation steps.
 
 ## Current Interpretation
 

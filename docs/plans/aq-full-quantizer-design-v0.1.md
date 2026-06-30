@@ -79,16 +79,33 @@ Read only metadata first:
 Initial implementation status:
 
 - `crates/ullm-quant` can read safetensors headers without loading tensor payloads.
-- Plan output path:
-  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b.json`
+- Plan output paths:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-all-g16.json`
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json`
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p9.json`
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-all-g8.json`
 - Qwen3.5-9B plan result:
   - total tensors: `775`
   - default quantize tensors: `255`
   - passthrough tensors: `520`
   - total tensor bytes: `19306216416`
-- The default planner currently quantizes known text linear families only and
+- The planner currently quantizes known text linear families only and
   passes through embeddings, lm head, vision tensors, convolution tensors, MTP
   tensors, and unknown families.
+- Plan schema `ullm-quant-plan-v0.3` records aq policy assignment, estimated
+  output bytes, and estimated effective bpp.
+- Current best policy candidate is `p4p6`:
+  - high format `aq4_e4m3_g8_ts_flloyd16` for `attn_k`, `attn_o`, `attn_v`,
+    and `linear_attn_out`,
+  - low format `aq4_e4m3_g16_ts_flloyd16` for other quantizable families.
+- Policy size summary:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-policy-size-summary-qwen35-9b.json`
+  - all-g16 estimated output bytes: `9059400672`
+  - p4p6 estimated output bytes: `9098722272`
+  - p4p9 estimated output bytes: `9325214688`
+  - all-g8 estimated output bytes: `9504914400`
+- `p4p6` is only `39321600` bytes above all-g16 in the current payload estimate
+  and performed best in the 10-module logit smoke.
 
 ### Phase 1: Calibration
 
@@ -200,7 +217,8 @@ Rules:
 
 ## First Candidate To Implement
 
-Implement this candidate first:
+Implement the `p4p6` policy first, using this low-budget candidate for most
+quantizable families:
 
 ```text
 aq4_e4m3_g16_ts_flloyd16
@@ -213,7 +231,8 @@ Reason:
 - Family-level LUT did not show a penalty in the first 3-tensor/family check.
 - It maps naturally to 16-value groups.
 
-Also implement:
+And this high-budget candidate for `attn_k`, `attn_o`, `attn_v`, and
+`linear_attn_out`:
 
 ```text
 aq4_e4m3_g8_ts_flloyd16
@@ -222,7 +241,19 @@ aq4_e4m3_g8_ts_flloyd16
 Reason:
 
 - It gives a 5.0 bpp accuracy point.
-- It helps quantify the scale-granularity tradeoff before final format decisions.
+- It improved the current mixed-policy smoke when used selectively.
+
+Rust implementation status:
+
+- Chunked safetensors payload reader exists.
+- `--inspect-tensor` can read real tensor payloads in bounded chunks and compute
+  FNV-1a64 checksums.
+- BF16/F32 numeric stats can be computed during chunk inspection.
+- `--inspect-aq-format` can compute group count, group absmax stats, and direct
+  scale-index dry-run metrics for aq formats.
+- Real Qwen3.5 inspection outputs:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-inspect-qwen35-9b-layer0-mlp-up.txt`
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-inspect-qwen35-9b-layer3-attn-k-g8.txt`
 
 ## Output Directory Prototype
 
@@ -300,10 +331,18 @@ Performance tests:
 
 ## Immediate Steps
 
-1. Create a minimal Rust CLI crate for `ullm-quant`.
-2. Add a C++20 static library with the first CPU kernels.
-3. Implement a small safetensors tensor reader path or use a Rust safetensors crate from the CLI side.
-4. Implement calibration for `free_lloyd16` with bounded samples.
-5. Implement quantization for `aq4_e4m3_g16_ts_flloyd16`.
-6. Validate one tensor against the Python sampler.
-7. Run a full Qwen3.5-9B conversion once RSS and throughput are acceptable.
+1. Add a one-tensor quantization dry-run for `aq4_e4m3_g16_ts_flloyd16`:
+   decode BF16 chunks, compute group absmax, choose direct E4M3 group scale,
+   and emit scale indices without writing a full output file.
+2. Add codebook loading or generation for the same candidate:
+   first use a fixed codebook exported from the Python sampler, then replace it
+   with bounded Rust calibration.
+3. Assign 4-bit codebook indices for one tensor and compute sampled MSE against
+   the source tensor.
+4. Compare the Rust one-tensor result against the Python sampler on the same
+   tensor and candidate.
+5. Add packed index and scale output files under a prototype `.ullm.d/`
+   directory for one tensor.
+6. Extend from one tensor to all tensors selected by the p4p6 plan.
+7. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
+   reconstruction metrics are acceptable.
