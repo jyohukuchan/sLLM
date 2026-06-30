@@ -34,6 +34,7 @@ struct Options {
     inspect_codebook_family: Option<String>,
     inspect_codebook_candidate: Option<String>,
     chunk_bytes: usize,
+    scale_window: usize,
     aq_policy: String,
     aq_high_families: Vec<String>,
     aq_low_format: String,
@@ -129,6 +130,11 @@ struct QuantDryRunStats {
     ref_sse: f64,
     max_abs_error: f32,
     index_counts: Vec<usize>,
+    tensor_scale: f32,
+    scale_window: usize,
+    scale_index_min: usize,
+    scale_index_max: usize,
+    scale_window_improved_groups: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -188,6 +194,12 @@ fn parse_usize(flag: &str, value: Option<String>) -> Result<usize, String> {
     Ok(parsed)
 }
 
+fn parse_usize_zero_allowed(flag: &str, value: Option<String>) -> Result<usize, String> {
+    let raw = value.ok_or_else(|| format!("{flag} requires a value"))?;
+    raw.parse::<usize>()
+        .map_err(|_| format!("{flag} must be a non-negative integer"))
+}
+
 fn parse_options() -> Result<Options, String> {
     let mut args = env::args().skip(1);
     let mut options = Options {
@@ -202,6 +214,7 @@ fn parse_options() -> Result<Options, String> {
         inspect_codebook_family: None,
         inspect_codebook_candidate: None,
         chunk_bytes: 64 * 1024 * 1024,
+        scale_window: 0,
         aq_policy: "all-g16".to_string(),
         aq_high_families: Vec::new(),
         aq_low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
@@ -256,6 +269,9 @@ fn parse_options() -> Result<Options, String> {
                     })?);
             }
             "--chunk-bytes" => options.chunk_bytes = parse_usize("--chunk-bytes", args.next())?,
+            "--scale-window" => {
+                options.scale_window = parse_usize_zero_allowed("--scale-window", args.next())?
+            }
             "--aq-policy" => {
                 options.aq_policy = args
                     .next()
@@ -307,6 +323,7 @@ fn print_help() {
     println!("  --inspect-codebook-family <F> inspect one family from --codebook-json");
     println!("  --inspect-codebook-candidate <ID>");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
+    println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
     println!("  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, or custom");
     println!("  --aq-high-family <FAMILY>     high-format family for custom policy; repeatable");
     println!("  --aq-low-format <ID>          low-budget aq candidate id");
@@ -541,6 +558,26 @@ fn nearest_scale_index(target: f32, scales: &[f32]) -> (usize, bool, bool) {
     } else {
         (idx, false, false)
     }
+}
+
+fn lower_median(values: &mut [f32]) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|left, right| left.total_cmp(right));
+    Some(values[(values.len() - 1) / 2])
+}
+
+fn aq_uses_tensor_scale(format: &str) -> bool {
+    format.contains("_ts_")
+}
+
+fn max_codebook_abs(codebook: &[f32]) -> f32 {
+    codebook
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max)
+        .max(1e-12)
 }
 
 fn load_codebook_export(path: &Path) -> Result<CodebookExport, String> {
@@ -853,6 +890,107 @@ fn update_aq_group_stats(
     Ok(())
 }
 
+fn collect_group_target_scales(
+    dtype: &str,
+    bytes: &[u8],
+    group_size: usize,
+    max_code: f32,
+    target_scales: &mut Vec<f32>,
+) -> Result<(), String> {
+    let element_size = numeric_element_size(dtype)
+        .ok_or_else(|| format!("tensor scale estimation is not supported for dtype {dtype}"))?;
+    let group_bytes = group_size
+        .checked_mul(element_size)
+        .ok_or_else(|| "tensor scale group byte size overflows".to_string())?;
+    if bytes.len() % group_bytes != 0 {
+        return Err(format!(
+            "{dtype} tensor scale chunk has {} bytes, not divisible by group byte size {group_bytes}",
+            bytes.len()
+        ));
+    }
+    for group in bytes.chunks_exact(group_bytes) {
+        let mut absmax = 0.0f32;
+        for item in group.chunks_exact(element_size) {
+            let value = decode_numeric_value(dtype, item)?;
+            if !value.is_nan() {
+                absmax = absmax.max(value.abs());
+            }
+        }
+        if absmax > 0.0 {
+            target_scales.push(absmax / max_code);
+        }
+    }
+    Ok(())
+}
+
+fn estimate_tensor_scale(
+    location: &TensorLocation,
+    payload_bytes: usize,
+    chunk_bytes: usize,
+    group_size: usize,
+    scale_values: &[f32],
+    codebook: &[f32],
+) -> Result<f32, String> {
+    if codebook.is_empty() {
+        return Err("tensor scale estimation requires a non-empty codebook".to_string());
+    }
+    if scale_values.is_empty() {
+        return Err("tensor scale estimation requires at least one scale value".to_string());
+    }
+    let group_bytes = group_size
+        .checked_mul(numeric_element_size(&location.header.dtype).ok_or_else(|| {
+            format!(
+                "tensor scale is not supported for dtype {}",
+                location.header.dtype
+            )
+        })?)
+        .ok_or_else(|| "tensor scale group byte size overflows".to_string())?;
+    let estimated_groups = payload_bytes / group_bytes;
+    let mut target_scales = Vec::with_capacity(estimated_groups);
+    let max_code = max_codebook_abs(codebook);
+    let mut offset = 0usize;
+    while offset < payload_bytes {
+        let bytes = read_tensor_payload_chunk(
+            &location.source_file,
+            location.data_start,
+            &location.header,
+            offset,
+            chunk_bytes,
+        )?;
+        if bytes.is_empty() {
+            break;
+        }
+        collect_group_target_scales(
+            &location.header.dtype,
+            &bytes,
+            group_size,
+            max_code,
+            &mut target_scales,
+        )?;
+        offset += bytes.len();
+    }
+    let Some(target_median) = lower_median(&mut target_scales) else {
+        return Ok(1.0);
+    };
+    let mut scale_values_for_median = scale_values.to_vec();
+    let Some(scale_median) = lower_median(&mut scale_values_for_median) else {
+        return Ok(1.0);
+    };
+    if !target_median.is_finite()
+        || !scale_median.is_finite()
+        || target_median <= 0.0
+        || scale_median <= 0.0
+    {
+        return Ok(1.0);
+    }
+    let tensor_scale = target_median / scale_median;
+    if tensor_scale.is_finite() && tensor_scale > 0.0 {
+        Ok(tensor_scale)
+    } else {
+        Ok(1.0)
+    }
+}
+
 fn nearest_codebook_index(value: f32, codebook: &[f32]) -> usize {
     let mut best_index = 0usize;
     let mut best_error = f32::INFINITY;
@@ -866,7 +1004,11 @@ fn nearest_codebook_index(value: f32, codebook: &[f32]) -> usize {
     best_index
 }
 
-fn new_quant_dry_run_stats(codebook_len: usize) -> QuantDryRunStats {
+fn new_quant_dry_run_stats(
+    codebook_len: usize,
+    tensor_scale: f32,
+    scale_window: usize,
+) -> QuantDryRunStats {
     QuantDryRunStats {
         elements: 0,
         groups: 0,
@@ -874,6 +1016,11 @@ fn new_quant_dry_run_stats(codebook_len: usize) -> QuantDryRunStats {
         ref_sse: 0.0,
         max_abs_error: 0.0,
         index_counts: vec![0; codebook_len],
+        tensor_scale,
+        scale_window,
+        scale_index_min: usize::MAX,
+        scale_index_max: 0,
+        scale_window_improved_groups: 0,
     }
 }
 
@@ -883,6 +1030,8 @@ fn update_quant_dry_run_stats(
     group_size: usize,
     scale_values: &[f32],
     codebook: &[f32],
+    tensor_scale: f32,
+    scale_window: usize,
     stats: &mut QuantDryRunStats,
 ) -> Result<(), String> {
     if codebook.is_empty() {
@@ -890,6 +1039,9 @@ fn update_quant_dry_run_stats(
     }
     if scale_values.is_empty() {
         return Err("quant dry-run requires at least one scale value".to_string());
+    }
+    if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
+        return Err("quant dry-run requires a positive finite tensor scale".to_string());
     }
     let element_size = numeric_element_size(dtype)
         .ok_or_else(|| format!("quant dry-run is not supported for dtype {dtype}"))?;
@@ -902,11 +1054,7 @@ fn update_quant_dry_run_stats(
             bytes.len()
         ));
     }
-    let max_code = codebook
-        .iter()
-        .map(|value| value.abs())
-        .fold(0.0f32, f32::max)
-        .max(1e-12);
+    let max_code = max_codebook_abs(codebook);
     for group in bytes.chunks_exact(group_bytes) {
         let mut absmax = 0.0f32;
         for item in group.chunks_exact(element_size) {
@@ -915,17 +1063,47 @@ fn update_quant_dry_run_stats(
                 absmax = absmax.max(value.abs());
             }
         }
-        let scale_target = absmax / max_code;
-        let (scale_index, _, _) = nearest_scale_index(scale_target, scale_values);
-        let scale = scale_values[scale_index];
+        let scale_target = absmax / tensor_scale / max_code;
+        let (center_scale_index, _, _) = nearest_scale_index(scale_target, scale_values);
+        let scale_start = center_scale_index.saturating_sub(scale_window);
+        let scale_end = center_scale_index
+            .saturating_add(scale_window)
+            .min(scale_values.len() - 1);
+        let mut best_scale_index = center_scale_index;
+        let mut best_group_sse = f64::INFINITY;
+        for scale_index in scale_start..=scale_end {
+            let combined_scale = scale_values[scale_index] * tensor_scale;
+            let mut group_sse = 0.0f64;
+            for item in group.chunks_exact(element_size) {
+                let value = decode_numeric_value(dtype, item)?;
+                if value.is_nan() {
+                    continue;
+                }
+                let normalized = value / combined_scale;
+                let codebook_index = nearest_codebook_index(normalized, codebook);
+                let recon = codebook[codebook_index] * combined_scale;
+                let error = value - recon;
+                group_sse += f64::from(error * error);
+            }
+            if group_sse < best_group_sse {
+                best_group_sse = group_sse;
+                best_scale_index = scale_index;
+            }
+        }
+        if best_scale_index != center_scale_index {
+            stats.scale_window_improved_groups += 1;
+        }
+        stats.scale_index_min = stats.scale_index_min.min(best_scale_index);
+        stats.scale_index_max = stats.scale_index_max.max(best_scale_index);
+        let combined_scale = scale_values[best_scale_index] * tensor_scale;
         for item in group.chunks_exact(element_size) {
             let value = decode_numeric_value(dtype, item)?;
             if value.is_nan() {
                 continue;
             }
-            let normalized = value / scale;
+            let normalized = value / combined_scale;
             let codebook_index = nearest_codebook_index(normalized, codebook);
-            let recon = codebook[codebook_index] * scale;
+            let recon = codebook[codebook_index] * combined_scale;
             let error = value - recon;
             stats.elements += 1;
             stats.sse += f64::from(error * error);
@@ -944,6 +1122,7 @@ fn inspect_tensor_chunks(
     chunk_bytes: usize,
     aq_format: Option<&str>,
     codebook: Option<&[f32]>,
+    scale_window: usize,
 ) -> Result<TensorInspectResult, String> {
     let location = find_tensor_location(model_dir, tensor_name)?;
     let payload_bytes = tensor_payload_bytes(&location.header)?;
@@ -989,7 +1168,26 @@ fn inspect_tensor_chunks(
             "--inspect-aq-format is required for quant dry-run with a codebook".to_string(),
         );
     }
-    let mut quant_dry_run_stats = codebook.map(|values| new_quant_dry_run_stats(values.len()));
+    let quant_tensor_scale = if let (Some(format), Some(group_stats), Some(codebook_values)) =
+        (aq_format, aq_group_stats.as_ref(), codebook)
+    {
+        if aq_uses_tensor_scale(format) {
+            estimate_tensor_scale(
+                &location,
+                payload_bytes,
+                chunk_bytes,
+                group_stats.group_size,
+                &group_stats.scale_values,
+                codebook_values,
+            )?
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+    let mut quant_dry_run_stats = codebook
+        .map(|values| new_quant_dry_run_stats(values.len(), quant_tensor_scale, scale_window));
     let mut offset = 0usize;
     let mut chunks = 0usize;
     let mut hash = 0xcbf2_9ce4_8422_2325;
@@ -1022,6 +1220,8 @@ fn inspect_tensor_chunks(
                 group_stats.group_size,
                 &group_stats.scale_values,
                 codebook_values,
+                quant_tensor_scale,
+                scale_window,
                 stats,
             )?;
         }
@@ -1238,6 +1438,7 @@ fn run() -> Result<(), String> {
             options.chunk_bytes,
             options.inspect_aq_format.as_deref(),
             selected_codebook.as_deref(),
+            options.scale_window,
         )?;
         println!("inspect_tensor={}", inspect.name);
         println!("inspect_source_file={}", inspect.source_file.display());
@@ -1288,7 +1489,9 @@ fn run() -> Result<(), String> {
             }
         }
         if let Some(stats) = &inspect.quant_dry_run_stats {
-            println!("inspect_quant_dry_run=direct_group_scale_nearest_codebook");
+            println!("inspect_quant_dry_run=scale_window_nearest_codebook");
+            println!("inspect_quant_tensor_scale={:.12}", stats.tensor_scale);
+            println!("inspect_quant_scale_window={}", stats.scale_window);
             println!("inspect_quant_elements={}", stats.elements);
             println!("inspect_quant_groups={}", stats.groups);
             if stats.elements > 0 {
@@ -1304,6 +1507,14 @@ fn run() -> Result<(), String> {
                 );
             }
             println!("inspect_quant_max_abs_error={:.9}", stats.max_abs_error);
+            if stats.groups > 0 {
+                println!("inspect_quant_scale_index_min={}", stats.scale_index_min);
+                println!("inspect_quant_scale_index_max={}", stats.scale_index_max);
+                println!(
+                    "inspect_quant_scale_window_improved_groups={}",
+                    stats.scale_window_improved_groups
+                );
+            }
             println!(
                 "inspect_quant_index_counts={}",
                 stats
@@ -1420,6 +1631,7 @@ mod tests {
             inspect_codebook_family: None,
             inspect_codebook_candidate: None,
             chunk_bytes: 1024,
+            scale_window: 0,
             aq_policy: policy.to_string(),
             aq_high_families: Vec::new(),
             aq_low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
@@ -1522,13 +1734,39 @@ mod tests {
             0x80, 0xbf, // -1.0
         ];
         let codebook = [-1.0, -0.5, 0.5, 1.0];
-        let mut stats = new_quant_dry_run_stats(codebook.len());
-        update_quant_dry_run_stats("BF16", &payload, 2, &[1.0], &codebook, &mut stats)
+        let mut stats = new_quant_dry_run_stats(codebook.len(), 1.0, 0);
+        update_quant_dry_run_stats("BF16", &payload, 2, &[1.0], &codebook, 1.0, 0, &mut stats)
             .expect("quant dry run");
         assert_eq!(stats.elements, 4);
         assert_eq!(stats.groups, 2);
         assert_eq!(stats.sse, 0.0);
         assert_eq!(stats.index_counts, vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn quant_dry_run_scale_window_can_choose_lower_error_scale() {
+        let mut payload = Vec::new();
+        for value in [1.9f32, 0.75, 0.75, 0.75] {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        let codebook = [0.0, 1.0];
+        let mut stats = new_quant_dry_run_stats(codebook.len(), 1.0, 1);
+        update_quant_dry_run_stats(
+            "F32",
+            &payload,
+            4,
+            &[1.0, 2.0],
+            &codebook,
+            1.0,
+            1,
+            &mut stats,
+        )
+        .expect("quant dry run");
+        assert_eq!(stats.groups, 1);
+        assert_eq!(stats.scale_index_min, 0);
+        assert_eq!(stats.scale_index_max, 0);
+        assert_eq!(stats.scale_window_improved_groups, 1);
+        assert!((stats.sse - 0.9975).abs() < 1e-6);
     }
 
     #[test]

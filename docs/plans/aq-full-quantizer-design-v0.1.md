@@ -266,9 +266,18 @@ Rust implementation status:
     `aq4_e4m3_g16_ts_flloyd16`: relative MSE `0.006231116836`.
   - `model.language_model.layers.3.self_attn.k_proj.weight` with
     `aq4_e4m3_g8_ts_flloyd16`: relative MSE `0.004610619768`.
-- The current dry-run chooses direct nearest E4M3 group scales and nearest LUT
-  entries. It does not yet run per-group scale-window search or write packed
-  output files.
+- The dry-run now supports `_ts_` tensor-scale estimation and
+  `--scale-window N` per-group scale search.
+- Scale-window 4 results:
+  - `mlp_up` g16 relative MSE improved to `0.005283509762` with tensor scale
+    `0.014789051376`.
+  - `attn_k` g8 relative MSE improved to `0.003677692937` with tensor scale
+    `0.018260609359`.
+- Python reference tool:
+  - `tools/verify-aq-one-tensor.py`
+  - validates the Rust chunk path against a chunked PyTorch implementation
+    using the same exported family codebook and scale-window setting.
+- Remaining dry-run gap: it still does not write packed index/scale files.
 
 ## Output Directory Prototype
 
@@ -346,13 +355,10 @@ Performance tests:
 
 ## Immediate Steps
 
-1. Add per-group scale-window search to the Rust dry-run and compare direct
-   scale versus optimized scale on the same tensors.
-2. Compare the Rust one-tensor result against the Python sampler on the same
-   tensor, candidate, and exported family codebook.
-3. Add packed index and scale output files under a prototype `.ullm.d/`
+1. Add packed index and scale output files under a prototype `.ullm.d/`
    directory for one tensor.
-4. Add a re-read/dequant verification path for the prototype output files.
-5. Extend from one tensor to all tensors selected by the p4p6 plan.
-6. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
+2. Add a re-read/dequant verification path for the prototype output files.
+3. Record quantization throughput and peak RSS for the one-tensor output path.
+4. Extend from one tensor to all tensors selected by the p4p6 plan.
+5. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.

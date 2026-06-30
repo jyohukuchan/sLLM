@@ -176,6 +176,12 @@
   - dry-run result for `model.language_model.layers.0.mlp.up_proj.weight` with `aq4_e4m3_g16_ts_flloyd16`: relative MSE `0.006231116836`, max abs error `0.006380409`, output path `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer0-mlp-up-g16.txt`.
   - dry-run result for `model.language_model.layers.3.self_attn.k_proj.weight` with `aq4_e4m3_g8_ts_flloyd16`: relative MSE `0.004610619768`, max abs error `0.012256019`, output path `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer3-attn-k-g8.txt`.
   - `cargo test -p ullm-quant` passes 9 tests after adding a direct nearest-codebook reconstruction unit test.
+  - added `_ts_` tensor-scale estimation and `--scale-window` per-group scale search to `ullm-quant`.
+  - scale-window 4 result for `mlp_up` g16: tensor scale `0.014789051376`, relative MSE `0.005283509762`, improved groups `1612071`, output path `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer0-mlp-up-g16-scale-window4.txt`.
+  - scale-window 4 result for `attn_k` g8: tensor scale `0.018260609359`, relative MSE `0.003677692937`, improved groups `259635`, output path `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer3-attn-k-g8-scale-window4.txt`.
+  - added `tools/verify-aq-one-tensor.py` as a chunked Python reference for one full tensor with exported family codebooks.
+  - Python reference matched Rust for `attn_k` index counts exactly; `mlp_up` relative MSE matched within about `1.3e-10`, with only tiny count differences from tensor-scale rounding/ties.
+  - `cargo test -p ullm-quant` passes 10 tests; `python3 -m py_compile tools/verify-aq-one-tensor.py` passes.
 
 ## Current Interpretation
 
@@ -185,6 +191,6 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Add per-group scale-window search to the Rust dry-run and compare it against the direct-scale result.
-- Compare Rust one-tensor dry-run metrics against the Python sampler on the same tensor and exported family codebook.
 - Add prototype `.ullm.d/` packed index and scale output for one tensor, then re-read/dequant verification.
+- Record one-tensor quantization throughput and peak RSS.
+- Extend the output path from one tensor to all tensors selected by the p4p6 plan.

@@ -43,6 +43,13 @@ All aq runs record CPU thread settings. The current WRX80 default is `--torch-th
   - Thin entry point over `tools/run-aq-tensor-sample.py`.
   - Intended for runs that pass `--activation-stats`.
 
+- `tools/verify-aq-one-tensor.py`
+  - Chunked Python reference for one full tensor with an exported family
+    codebook.
+  - Uses bounded group chunks for scale-window search instead of expanding the
+    full tensor into one large distance matrix.
+  - Used to cross-check Rust `ullm-quant` dry-run metrics.
+
 ## External Baselines
 
 ### ModelOpt NVFP4
@@ -559,11 +566,31 @@ Dry-run result files:
 | `model.language_model.layers.0.mlp.up_proj.weight` | `aq4_e4m3_g16_ts_flloyd16` | 50,331,648 | 3,145,728 | 0.006231116836 | 0.006380409 |
 | `model.language_model.layers.3.self_attn.k_proj.weight` | `aq4_e4m3_g8_ts_flloyd16` | 4,194,304 | 524,288 | 0.004610619768 | 0.012256019 |
 
-This is a direct-scale dry-run, not the final optimized quantizer path. It does
-not yet scan nearby scale values per group or write packed indices/scales.
-Still, it verifies the Rust chunk reader, exported LUT loading, BF16 decode,
-group scale selection, and nearest-codebook assignment against real model
-payloads with bounded memory.
+The first dry-run used direct nearest group scales and did not apply the
+candidate tensor scale.
+
+`ullm-quant` was then extended to estimate tensor scale for `_ts_` candidates
+and scan nearby scale values per group with `--scale-window 4`.
+
+Scale-window result files:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer0-mlp-up-g16-scale-window4.txt`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer3-attn-k-g8-scale-window4.txt`
+
+| tensor | candidate | tensor scale | relative MSE | max abs error | groups changed by window |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `model.language_model.layers.0.mlp.up_proj.weight` | `aq4_e4m3_g16_ts_flloyd16` | 0.014789051376 | 0.005283509762 | 0.005970601 | 1,612,071 |
+| `model.language_model.layers.3.self_attn.k_proj.weight` | `aq4_e4m3_g8_ts_flloyd16` | 0.018260609359 | 0.003677692937 | 0.012858063 | 259,635 |
+
+Python reference check files:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-python-verify-qwen35-9b-layer0-mlp-up-g16-scale-window4.json`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-python-verify-qwen35-9b-layer3-attn-k-g8-scale-window4.json`
+
+The Python reference matched Rust for `attn_k` down to the index-count vector.
+For `mlp_up`, relative MSE matched within roughly `1.3e-10`; a few index counts
+and improved-group counts differ by 1-3 due to tensor-scale rounding and exact
+tie behavior. This is acceptable for validating the Rust chunk path.
 
 ## Interpretation
 
