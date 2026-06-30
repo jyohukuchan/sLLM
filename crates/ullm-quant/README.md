@@ -38,6 +38,8 @@ The current default planner marks known text linear families as `quantize` and
 leaves embeddings, lm head, vision tensors, convolution tensors, MTP tensors,
 and unknown families as `passthrough`.
 It also records an index+scale payload-size estimate for quantized tensors.
+The next conversion step should use the existing safetensors chunk reader so
+payload processing stays bounded by the working-memory budget.
 
 Policy presets:
 

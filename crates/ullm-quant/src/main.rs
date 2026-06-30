@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -45,6 +45,12 @@ struct TensorHeader {
     dtype: String,
     shape: Vec<usize>,
     data_offsets: [usize; 2],
+}
+
+#[derive(Debug)]
+struct SafetensorsMetadata {
+    data_start: u64,
+    tensors: BTreeMap<String, TensorHeader>,
 }
 
 #[derive(Debug, Serialize)]
@@ -378,7 +384,7 @@ fn tensor_elements(shape: &[usize]) -> Result<usize, String> {
     })
 }
 
-fn read_safetensors_header(path: &Path) -> Result<BTreeMap<String, TensorHeader>, String> {
+fn read_safetensors_metadata(path: &Path) -> Result<SafetensorsMetadata, String> {
     let mut file =
         fs::File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
     let mut len_bytes = [0u8; 8];
@@ -394,6 +400,9 @@ fn read_safetensors_header(path: &Path) -> Result<BTreeMap<String, TensorHeader>
             "safetensors header is unexpectedly large: {header_len} bytes"
         ));
     }
+    let data_start = 8u64
+        .checked_add(header_len as u64)
+        .ok_or_else(|| format!("safetensors data start overflows for {}", path.display()))?;
     let mut header_bytes = vec![0u8; header_len];
     file.read_exact(&mut header_bytes).map_err(|err| {
         format!(
@@ -421,7 +430,53 @@ fn read_safetensors_header(path: &Path) -> Result<BTreeMap<String, TensorHeader>
         })?;
         tensors.insert(name, header);
     }
-    Ok(tensors)
+    Ok(SafetensorsMetadata {
+        data_start,
+        tensors,
+    })
+}
+
+fn read_safetensors_header(path: &Path) -> Result<BTreeMap<String, TensorHeader>, String> {
+    Ok(read_safetensors_metadata(path)?.tensors)
+}
+
+fn tensor_payload_bytes(header: &TensorHeader) -> Result<usize, String> {
+    header
+        .data_offsets
+        .get(1)
+        .zip(header.data_offsets.first())
+        .map(|(end, start)| end.saturating_sub(*start))
+        .ok_or_else(|| "invalid safetensors data offsets".to_string())
+}
+
+fn read_tensor_payload_chunk(
+    path: &Path,
+    data_start: u64,
+    header: &TensorHeader,
+    offset: usize,
+    len: usize,
+) -> Result<Vec<u8>, String> {
+    let payload_len = tensor_payload_bytes(header)?;
+    if offset > payload_len {
+        return Err(format!(
+            "tensor chunk offset {offset} exceeds payload length {payload_len}"
+        ));
+    }
+    let read_len = len.min(payload_len - offset);
+    let tensor_start = data_start
+        .checked_add(header.data_offsets[0] as u64)
+        .ok_or_else(|| format!("tensor data start overflows for {}", path.display()))?;
+    let absolute_offset = tensor_start
+        .checked_add(offset as u64)
+        .ok_or_else(|| format!("tensor chunk offset overflows for {}", path.display()))?;
+    let mut file =
+        fs::File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
+    file.seek(SeekFrom::Start(absolute_offset))
+        .map_err(|err| format!("failed to seek {}: {err}", path.display()))?;
+    let mut bytes = vec![0u8; read_len];
+    file.read_exact(&mut bytes)
+        .map_err(|err| format!("failed to read tensor chunk from {}: {err}", path.display()))?;
+    Ok(bytes)
 }
 
 fn safetensor_files(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -468,12 +523,8 @@ fn build_model_plan(model_dir: &Path, aq_policy: &AqPolicyPlan) -> Result<ModelP
         let headers = read_safetensors_header(&path)?;
         for (name, header) in headers {
             let n_elements = tensor_elements(&header.shape)?;
-            let n_bytes = header
-                .data_offsets
-                .get(1)
-                .zip(header.data_offsets.first())
-                .map(|(end, start)| end.saturating_sub(*start))
-                .ok_or_else(|| format!("invalid data offsets for {name}"))?;
+            let n_bytes =
+                tensor_payload_bytes(&header).map_err(|err| format!("{err} for tensor {name}"))?;
             let family = family_for_tensor(&name).to_string();
             let supported_input = is_supported_input(&header.dtype, &header.shape, &family);
             let (quant_format, quant_role) = quant_assignment(supported_input, &family, aq_policy);
@@ -631,8 +682,11 @@ fn main() -> ExitCode {
 mod tests {
     use super::{
         Options, default_threads, effective_bpp, estimate_output_bytes, family_for_tensor,
-        quant_assignment, resolve_aq_policy,
+        quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
     };
+    use std::fs;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn default_thread_count_is_nonzero() {
@@ -688,5 +742,29 @@ mod tests {
         let g8_bytes = estimate_output_bytes(32, 64, Some("aq4_e4m3_g8_ts_flloyd16")).expect("g8");
         assert_eq!(g8_bytes, 20);
         assert_eq!(effective_bpp(32, g8_bytes), 5.0);
+    }
+
+    #[test]
+    fn safetensors_payload_chunk_reader_uses_data_offsets() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("ullm-quant-test-{unique}.safetensors"));
+        let header = br#"{"x":{"dtype":"U8","shape":[4],"data_offsets":[0,4]}}"#;
+        let mut file = fs::File::create(&path).expect("create temp safetensors");
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .expect("write header len");
+        file.write_all(header).expect("write header");
+        file.write_all(&[1, 2, 3, 4]).expect("write payload");
+        drop(file);
+
+        let metadata = read_safetensors_metadata(&path).expect("metadata");
+        let tensor = metadata.tensors.get("x").expect("tensor x");
+        let chunk = read_tensor_payload_chunk(&path, metadata.data_start, tensor, 1, 2)
+            .expect("payload chunk");
+        assert_eq!(chunk, vec![2, 3]);
+
+        fs::remove_file(path).expect("remove temp safetensors");
     }
 }
