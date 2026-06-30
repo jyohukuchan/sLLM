@@ -542,6 +542,29 @@ Combined with the policy10 logit smoke, p4p6 is currently the most attractive
 candidate because its estimated size is close to all-g16 while its logit
 relative MSE and KL were better in the 10-module smoke.
 
+### Rust `ullm-quant` Payload Dry-Run
+
+`ullm-quant` can now load the exported family codebook JSON, stream a real
+safetensors tensor payload in bounded chunks, choose direct E4M3 group scales,
+assign each value to the nearest 4-bit codebook entry, and accumulate
+reconstruction metrics without writing a converted output file.
+
+Dry-run result files:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer0-mlp-up-g16.txt`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer3-attn-k-g8.txt`
+
+| tensor | candidate | elements | groups | relative MSE | max abs error |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `model.language_model.layers.0.mlp.up_proj.weight` | `aq4_e4m3_g16_ts_flloyd16` | 50,331,648 | 3,145,728 | 0.006231116836 | 0.006380409 |
+| `model.language_model.layers.3.self_attn.k_proj.weight` | `aq4_e4m3_g8_ts_flloyd16` | 4,194,304 | 524,288 | 0.004610619768 | 0.012256019 |
+
+This is a direct-scale dry-run, not the final optimized quantizer path. It does
+not yet scan nearby scale values per group or write packed indices/scales.
+Still, it verifies the Rust chunk reader, exported LUT loading, BF16 decode,
+group scale selection, and nearest-codebook assignment against real model
+payloads with bounded memory.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

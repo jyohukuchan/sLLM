@@ -171,6 +171,11 @@
   - estimated output bytes: all-g16 `9059400672`, p4p6 `9098722272`, p4p9 `9325214688`, all-g8 `9504914400`.
   - size interpretation: p4p6 is only `39321600` bytes above all-g16, while p4p9 is `265814016` bytes above all-g16.
   - updated `docs/plans/aq-full-quantizer-design-v0.1.md` with current p4p6 policy, plan size results, chunk inspection status, and revised immediate Rust implementation steps.
+  - added exported codebook loading to `ullm-quant` inspection.
+  - added streamed one-tensor quantization dry-run: direct E4M3 group scale plus nearest 4-bit family LUT assignment.
+  - dry-run result for `model.language_model.layers.0.mlp.up_proj.weight` with `aq4_e4m3_g16_ts_flloyd16`: relative MSE `0.006231116836`, max abs error `0.006380409`, output path `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer0-mlp-up-g16.txt`.
+  - dry-run result for `model.language_model.layers.3.self_attn.k_proj.weight` with `aq4_e4m3_g8_ts_flloyd16`: relative MSE `0.004610619768`, max abs error `0.012256019`, output path `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer3-attn-k-g8.txt`.
+  - `cargo test -p ullm-quant` passes 9 tests after adding a direct nearest-codebook reconstruction unit test.
 
 ## Current Interpretation
 
@@ -180,5 +185,6 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Expand module-level logit smoke to more prompts/modules, then plan full-model replacement.
-- Extend `ullm-quant` from metadata planning to chunked tensor reads and calibration samples.
+- Add per-group scale-window search to the Rust dry-run and compare it against the direct-scale result.
+- Compare Rust one-tensor dry-run metrics against the Python sampler on the same tensor and exported family codebook.
+- Add prototype `.ullm.d/` packed index and scale output for one tensor, then re-read/dequant verification.

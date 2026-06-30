@@ -259,6 +259,16 @@ Rust implementation status:
   - exported families: `mlp_up`, `attn_k`
   - exported candidates: `aq4_e4m3_g16_ts_flloyd16`, `aq4_e4m3_g8_ts_flloyd16`
   - source tool: `tools/export-aq-family-codebooks.py`
+- `--codebook-json` plus `--inspect-codebook-family` and
+  `--inspect-codebook-candidate` can load exported 16-entry family LUTs.
+- One-tensor quantization dry-run exists for streamed real payloads:
+  - `model.language_model.layers.0.mlp.up_proj.weight` with
+    `aq4_e4m3_g16_ts_flloyd16`: relative MSE `0.006231116836`.
+  - `model.language_model.layers.3.self_attn.k_proj.weight` with
+    `aq4_e4m3_g8_ts_flloyd16`: relative MSE `0.004610619768`.
+- The current dry-run chooses direct nearest E4M3 group scales and nearest LUT
+  entries. It does not yet run per-group scale-window search or write packed
+  output files.
 
 ## Output Directory Prototype
 
@@ -336,16 +346,13 @@ Performance tests:
 
 ## Immediate Steps
 
-1. Add a one-tensor quantization dry-run for `aq4_e4m3_g16_ts_flloyd16`:
-   decode BF16 chunks, compute group absmax, choose direct E4M3 group scale,
-   and emit scale indices without writing a full output file.
-2. Add codebook loading for the exported JSON artifact.
-3. Assign 4-bit codebook indices for one tensor and compute sampled MSE against
-   the source tensor.
-4. Compare the Rust one-tensor result against the Python sampler on the same
-   tensor and candidate.
-5. Add packed index and scale output files under a prototype `.ullm.d/`
+1. Add per-group scale-window search to the Rust dry-run and compare direct
+   scale versus optimized scale on the same tensors.
+2. Compare the Rust one-tensor result against the Python sampler on the same
+   tensor, candidate, and exported family codebook.
+3. Add packed index and scale output files under a prototype `.ullm.d/`
    directory for one tensor.
-6. Extend from one tensor to all tensors selected by the p4p6 plan.
-7. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
+4. Add a re-read/dequant verification path for the prototype output files.
+5. Extend from one tensor to all tensors selected by the p4p6 plan.
+6. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.

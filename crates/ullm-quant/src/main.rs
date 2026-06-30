@@ -90,6 +90,7 @@ struct TensorInspectResult {
     fnv1a64: u64,
     numeric_stats: Option<NumericStats>,
     aq_group_stats: Option<AqGroupStats>,
+    quant_dry_run_stats: Option<QuantDryRunStats>,
 }
 
 #[derive(Clone, Debug)]
@@ -118,6 +119,16 @@ struct AqGroupStats {
     scale_clamped_low: usize,
     scale_clamped_high: usize,
     sum_scale_relative_error: f64,
+}
+
+#[derive(Clone, Debug)]
+struct QuantDryRunStats {
+    elements: usize,
+    groups: usize,
+    sse: f64,
+    ref_sse: f64,
+    max_abs_error: f32,
+    index_counts: Vec<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -842,11 +853,97 @@ fn update_aq_group_stats(
     Ok(())
 }
 
+fn nearest_codebook_index(value: f32, codebook: &[f32]) -> usize {
+    let mut best_index = 0usize;
+    let mut best_error = f32::INFINITY;
+    for (index, entry) in codebook.iter().enumerate() {
+        let error = (value - *entry).abs();
+        if error < best_error {
+            best_error = error;
+            best_index = index;
+        }
+    }
+    best_index
+}
+
+fn new_quant_dry_run_stats(codebook_len: usize) -> QuantDryRunStats {
+    QuantDryRunStats {
+        elements: 0,
+        groups: 0,
+        sse: 0.0,
+        ref_sse: 0.0,
+        max_abs_error: 0.0,
+        index_counts: vec![0; codebook_len],
+    }
+}
+
+fn update_quant_dry_run_stats(
+    dtype: &str,
+    bytes: &[u8],
+    group_size: usize,
+    scale_values: &[f32],
+    codebook: &[f32],
+    stats: &mut QuantDryRunStats,
+) -> Result<(), String> {
+    if codebook.is_empty() {
+        return Err("quant dry-run requires a non-empty codebook".to_string());
+    }
+    if scale_values.is_empty() {
+        return Err("quant dry-run requires at least one scale value".to_string());
+    }
+    let element_size = numeric_element_size(dtype)
+        .ok_or_else(|| format!("quant dry-run is not supported for dtype {dtype}"))?;
+    let group_bytes = group_size
+        .checked_mul(element_size)
+        .ok_or_else(|| "quant dry-run group byte size overflows".to_string())?;
+    if bytes.len() % group_bytes != 0 {
+        return Err(format!(
+            "{dtype} quant dry-run chunk has {} bytes, not divisible by group byte size {group_bytes}",
+            bytes.len()
+        ));
+    }
+    let max_code = codebook
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, f32::max)
+        .max(1e-12);
+    for group in bytes.chunks_exact(group_bytes) {
+        let mut absmax = 0.0f32;
+        for item in group.chunks_exact(element_size) {
+            let value = decode_numeric_value(dtype, item)?;
+            if !value.is_nan() {
+                absmax = absmax.max(value.abs());
+            }
+        }
+        let scale_target = absmax / max_code;
+        let (scale_index, _, _) = nearest_scale_index(scale_target, scale_values);
+        let scale = scale_values[scale_index];
+        for item in group.chunks_exact(element_size) {
+            let value = decode_numeric_value(dtype, item)?;
+            if value.is_nan() {
+                continue;
+            }
+            let normalized = value / scale;
+            let codebook_index = nearest_codebook_index(normalized, codebook);
+            let recon = codebook[codebook_index] * scale;
+            let error = value - recon;
+            stats.elements += 1;
+            stats.sse += f64::from(error * error);
+            stats.ref_sse += f64::from(value * value);
+            stats.max_abs_error = stats.max_abs_error.max(error.abs());
+            stats.index_counts[codebook_index] += 1;
+        }
+        stats.groups += 1;
+    }
+    Ok(())
+}
+
 fn inspect_tensor_chunks(
     model_dir: &Path,
     tensor_name: &str,
     chunk_bytes: usize,
     aq_format: Option<&str>,
+    codebook: Option<&[f32]>,
 ) -> Result<TensorInspectResult, String> {
     let location = find_tensor_location(model_dir, tensor_name)?;
     let payload_bytes = tensor_payload_bytes(&location.header)?;
@@ -887,6 +984,12 @@ fn inspect_tensor_chunks(
     } else {
         None
     };
+    if codebook.is_some() && aq_group_stats.is_none() {
+        return Err(
+            "--inspect-aq-format is required for quant dry-run with a codebook".to_string(),
+        );
+    }
+    let mut quant_dry_run_stats = codebook.map(|values| new_quant_dry_run_stats(values.len()));
     let mut offset = 0usize;
     let mut chunks = 0usize;
     let mut hash = 0xcbf2_9ce4_8422_2325;
@@ -908,6 +1011,20 @@ fn inspect_tensor_chunks(
         if let Some(stats) = aq_group_stats.as_mut() {
             update_aq_group_stats(&location.header.dtype, &bytes, stats)?;
         }
+        if let (Some(group_stats), Some(codebook_values), Some(stats)) = (
+            aq_group_stats.as_ref(),
+            codebook,
+            quant_dry_run_stats.as_mut(),
+        ) {
+            update_quant_dry_run_stats(
+                &location.header.dtype,
+                &bytes,
+                group_stats.group_size,
+                &group_stats.scale_values,
+                codebook_values,
+                stats,
+            )?;
+        }
         offset += bytes.len();
         chunks += 1;
     }
@@ -922,6 +1039,7 @@ fn inspect_tensor_chunks(
         fnv1a64: hash,
         numeric_stats,
         aq_group_stats,
+        quant_dry_run_stats,
     })
 }
 
@@ -1063,6 +1181,16 @@ fn run() -> Result<(), String> {
         Some(model_dir) => Some(build_model_plan(model_dir, &aq_policy)?),
         None => None,
     };
+    let selected_codebook = if let (Some(path), Some(family), Some(candidate_id)) = (
+        options.codebook_json.as_deref(),
+        options.inspect_codebook_family.as_deref(),
+        options.inspect_codebook_candidate.as_deref(),
+    ) {
+        let export = load_codebook_export(path)?;
+        Some(select_codebook(&export, family, candidate_id)?.to_vec())
+    } else {
+        None
+    };
 
     println!("ullm-quant skeleton");
     println!(
@@ -1109,6 +1237,7 @@ fn run() -> Result<(), String> {
             tensor_name,
             options.chunk_bytes,
             options.inspect_aq_format.as_deref(),
+            selected_codebook.as_deref(),
         )?;
         println!("inspect_tensor={}", inspect.name);
         println!("inspect_source_file={}", inspect.source_file.display());
@@ -1158,6 +1287,33 @@ fn run() -> Result<(), String> {
                 }
             }
         }
+        if let Some(stats) = &inspect.quant_dry_run_stats {
+            println!("inspect_quant_dry_run=direct_group_scale_nearest_codebook");
+            println!("inspect_quant_elements={}", stats.elements);
+            println!("inspect_quant_groups={}", stats.groups);
+            if stats.elements > 0 {
+                println!(
+                    "inspect_quant_mse={:.12}",
+                    stats.sse / stats.elements as f64
+                );
+            }
+            if stats.ref_sse > 0.0 {
+                println!(
+                    "inspect_quant_relative_mse={:.12}",
+                    stats.sse / stats.ref_sse
+                );
+            }
+            println!("inspect_quant_max_abs_error={:.9}", stats.max_abs_error);
+            println!(
+                "inspect_quant_index_counts={}",
+                stats
+                    .index_counts
+                    .iter()
+                    .map(|count| count.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
     }
     if options.codebook_json.is_some()
         || options.inspect_codebook_family.is_some()
@@ -1175,8 +1331,9 @@ fn run() -> Result<(), String> {
             .inspect_codebook_candidate
             .as_deref()
             .ok_or_else(|| "--inspect-codebook-candidate is required".to_string())?;
-        let export = load_codebook_export(path)?;
-        let codebook = select_codebook(&export, family, candidate_id)?;
+        let codebook = selected_codebook
+            .as_deref()
+            .ok_or_else(|| "selected codebook was not loaded".to_string())?;
         println!("inspect_codebook_json={}", path.display());
         println!("inspect_codebook_family={family}");
         println!("inspect_codebook_candidate={candidate_id}");
@@ -1225,8 +1382,9 @@ mod tests {
     use super::{
         CodebookEntry, CodebookExport, Options, default_threads, effective_bpp,
         estimate_output_bytes, family_for_tensor, new_aq_group_stats, new_numeric_stats,
-        quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
-        select_codebook, update_aq_group_stats, update_numeric_stats,
+        new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
+        read_tensor_payload_chunk, resolve_aq_policy, select_codebook, update_aq_group_stats,
+        update_numeric_stats, update_quant_dry_run_stats,
     };
     use std::fs;
     use std::io::Write;
@@ -1353,6 +1511,24 @@ mod tests {
         assert_eq!(stats.scale_format, "e4m3");
         assert_eq!(stats.scale_values.len(), 119);
         assert!(stats.scale_index_min <= stats.scale_index_max);
+    }
+
+    #[test]
+    fn quant_dry_run_reconstructs_with_nearest_codebook_entry() {
+        let payload = [
+            0x80, 0x3f, // 1.0
+            0x00, 0xbf, // -0.5
+            0x00, 0x3f, // 0.5
+            0x80, 0xbf, // -1.0
+        ];
+        let codebook = [-1.0, -0.5, 0.5, 1.0];
+        let mut stats = new_quant_dry_run_stats(codebook.len());
+        update_quant_dry_run_stats("BF16", &payload, 2, &[1.0], &codebook, &mut stats)
+            .expect("quant dry run");
+        assert_eq!(stats.elements, 4);
+        assert_eq!(stats.groups, 2);
+        assert_eq!(stats.sse, 0.0);
+        assert_eq!(stats.index_counts, vec![1, 1, 1, 1]);
     }
 
     #[test]
