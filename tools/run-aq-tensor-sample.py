@@ -362,6 +362,7 @@ def evaluate_candidate(
     scale_window: int,
     codebook_override: torch.Tensor | None = None,
     group_weights: torch.Tensor | None = None,
+    weighted_scale_search: bool = False,
 ) -> dict[str, float | int | str | None]:
     scales = scale_values(candidate.scale_format)
     codebook = codebook_override if codebook_override is not None else codebook_from_groups(groups, candidate.codebook_mode)
@@ -384,7 +385,11 @@ def evaluate_candidate(
         nearest = distances.argmin(dim=2)
         quantized = codebook.index_select(0, nearest.flatten()).view_as(groups)
         recon = quantized * group_scale[:, None] * tensor_scale
-        error = (groups - recon).square().sum(dim=1)
+        square_error = (groups - recon).square()
+        if weighted_scale_search and group_weights is not None:
+            error = (square_error * group_weights.to(torch.float32).clamp_min(0)).sum(dim=1)
+        else:
+            error = square_error.sum(dim=1)
         mask = error < best_error
         best_error = torch.where(mask, error, best_error)
         best_scale = torch.where(mask, group_scale, best_scale)
@@ -481,8 +486,9 @@ def row_for_result(
             },
             "group_layout": {"axis": "contiguous", "tile_shape": None},
             "optimizer": {
-                "objective": "activation_weighted_mse" if args.activation_stats else "mse",
-                "weighted": bool(args.activation_stats),
+                "objective": "activation_weighted_mse" if args.weighted_scale_search else "mse",
+                "weighted_metrics": bool(args.activation_stats),
+                "weighted_scale_search": args.weighted_scale_search,
                 "scale_search": f"nearest_plus_minus_{args.scale_window}",
                 "codebook_update": "lloyd" if "lloyd" in candidate.codebook_mode else "quantile_init_only",
             },
@@ -530,6 +536,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional activation second-moment stats as a safetensors file or directory.",
+    )
+    parser.add_argument(
+        "--weighted-scale-search",
+        action="store_true",
+        help="Use activation weights, when provided, to choose the best group scale.",
     )
     parser.add_argument("--note", action="append", default=[])
     return parser.parse_args()
@@ -593,6 +604,8 @@ def main() -> int:
         raise SystemExit("--torch-interop-threads must be >= 1")
     if args.max_tensors_per_family is not None and args.max_tensors_per_family < 1:
         raise SystemExit("--max-tensors-per-family must be >= 1")
+    if args.weighted_scale_search and args.activation_stats is None:
+        raise SystemExit("--weighted-scale-search requires --activation-stats")
     torch.set_num_threads(args.torch_threads)
     torch.set_num_interop_threads(args.torch_interop_threads)
     args.model_dir = args.model_dir.expanduser().resolve()
@@ -662,6 +675,7 @@ def main() -> int:
                         args.scale_window,
                         codebook_override,
                         group_weights=group_weights,
+                        weighted_scale_search=args.weighted_scale_search,
                     )
                     row = row_for_result(
                         args,

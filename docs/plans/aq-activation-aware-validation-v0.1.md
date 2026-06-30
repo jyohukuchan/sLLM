@@ -95,6 +95,7 @@ Run these variants first:
 | --- | --- |
 | current family-LUT g16 | baseline 4.5 bpp aq row |
 | current family-LUT g8 | 5.0 bpp accuracy point |
+| weighted scale-search g16/g8 | test whether group scale selection should optimize activation-weighted error |
 | activation-weighted Lloyd g16 | test whether codebook centers should prefer high-activation channels |
 | clipped-scale g16 | test AWQ/OmniQuant-style outlier handling without changing runtime format |
 | zero-preserving g16 | check whether free16 codebooks hurt model-level behavior despite lower tensor MSE |
@@ -168,3 +169,13 @@ A real CPU activation-stat smoke also succeeded:
 The default Python environment currently has CPU-only PyTorch. Small CPU
 activation smoke runs work, but full activation collection should use an
 R9700-capable environment.
+
+An R9700 smoke in `build/envs/vllm-rocm-nightly` collected stats for 152 modules
+from 4 prompts / 1403 tokens. In the family4 weighted comparison:
+
+- aq g16 improved from weighted relative MSE `0.008698592` to `0.004922713`
+  when scale search used activation weights.
+- aq g8 improved from `0.007701098` to `0.003684397`.
+- ModelOpt NVFP4 measured `0.010255294`.
+- Unsloth Dynamic Q4_K_XL mixed measured `0.002460200`, but at mean `5.4668`
+  bpp and with `linear_attn_out` stored as `Q8_0`.

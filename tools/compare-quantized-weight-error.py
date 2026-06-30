@@ -119,6 +119,27 @@ def discover_modelopt_nvfp4_tensors(
     return tensors
 
 
+def limit_tensors_by_family(
+    tensors: list[str],
+    max_tensors: int,
+    max_tensors_per_family: int | None,
+) -> list[str]:
+    if max_tensors_per_family is None:
+        return tensors[:max_tensors]
+    counts: dict[str, int] = {}
+    selected: list[str] = []
+    for name in tensors:
+        family = family_for_tensor(name)
+        count = counts.get(family, 0)
+        if count >= max_tensors_per_family:
+            continue
+        selected.append(name)
+        counts[family] = count + 1
+        if len(selected) >= max_tensors:
+            break
+    return selected
+
+
 def unpack_e2m1_low_high(packed_bytes: torch.Tensor) -> torch.Tensor:
     low = packed_bytes & 0x0F
     high = (packed_bytes >> 4) & 0x0F
@@ -195,8 +216,10 @@ def metric_row(
         "inputs": {
             "tensor_pattern": args.tensor_pattern,
             "family_filter": args.family,
+            "max_tensors_per_family": args.max_tensors_per_family,
             "torch_threads": args.torch_threads,
             "torch_interop_threads": args.torch_interop_threads,
+            "activation_stats": str(args.activation_stats) if args.activation_stats else None,
         },
         "metrics": metrics,
         "artifacts": {},
@@ -220,8 +243,10 @@ def failure_row(args: argparse.Namespace, tensor_name: str, error_type: str, mes
         "inputs": {
             "tensor_pattern": args.tensor_pattern,
             "family_filter": args.family,
+            "max_tensors_per_family": args.max_tensors_per_family,
             "torch_threads": args.torch_threads,
             "torch_interop_threads": args.torch_interop_threads,
+            "activation_stats": str(args.activation_stats) if args.activation_stats else None,
         },
         "metrics": {},
         "artifacts": {},
@@ -236,6 +261,7 @@ def compare_tensor(
     tensor_name: str,
     max_groups: int,
     generator: torch.Generator,
+    activation_stats: dict[str, torch.Tensor],
 ) -> tuple[tuple[int, ...], int, dict[str, float | int | None]]:
     scale_key = tensor_name.removesuffix(".weight") + ".weight_scale"
     scale2_key = tensor_name.removesuffix(".weight") + ".weight_scale_2"
@@ -279,6 +305,17 @@ def compare_tensor(
     diff = base_groups - recon
     mse = float(diff.square().mean())
     denom = float(base_groups.square().mean().clamp_min(1e-30))
+    weighted_mse = None
+    weighted_relative_mse = None
+    activation_second_moment = activation_stats_for_tensor(tensor_name, (rows, cols), activation_stats)
+    if activation_second_moment is not None:
+        group_weights = activation_second_moment.index_select(0, base_cols.flatten()).view_as(base_groups)
+        group_weights = group_weights.to(torch.float32).clamp_min(0)
+        group_weights = group_weights / group_weights.mean().clamp_min(1e-30)
+        weighted_sse = (diff.square() * group_weights).sum()
+        weighted_denom = (base_groups.square() * group_weights).sum().clamp_min(1e-30)
+        weighted_mse = float(weighted_sse / group_weights.sum().clamp_min(1e-30))
+        weighted_relative_mse = float(weighted_sse / weighted_denom)
     dot = float((base_groups * recon).sum())
     norm = float(base_groups.square().sum().sqrt() * recon.square().sum().sqrt())
     abs_error = diff.abs().flatten()
@@ -290,6 +327,8 @@ def compare_tensor(
     metrics: dict[str, float | int | None] = {
         "mse": mse,
         "relative_mse": mse / denom,
+        "weighted_mse": weighted_mse,
+        "weighted_relative_mse": weighted_relative_mse,
         "mean_abs_error": float(abs_error.mean()),
         "p95_abs_error": float(torch.quantile(abs_error, 0.95)),
         "max_abs_error": float(abs_error.max()),
@@ -315,12 +354,69 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tensor-pattern", default=r"\.weight$")
     parser.add_argument("--family", action="append", help="Family to include; can be repeated.")
     parser.add_argument("--max-tensors", type=int, default=8)
+    parser.add_argument("--max-tensors-per-family", type=int, default=None)
     parser.add_argument("--max-groups-per-tensor", type=int, default=8192)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--torch-threads", type=int, default=default_threads)
     parser.add_argument("--torch-interop-threads", type=int, default=1)
+    parser.add_argument(
+        "--activation-stats",
+        type=Path,
+        default=None,
+        help="Optional activation second-moment stats as a safetensors file or directory.",
+    )
     parser.add_argument("--note", action="append", default=[])
     return parser.parse_args()
+
+
+def load_activation_stats(path: Path | None) -> dict[str, torch.Tensor]:
+    if path is None:
+        return {}
+    path = path.expanduser().resolve()
+    if path.is_dir():
+        path = path / "activation_second_moments.safetensors"
+    if not path.exists():
+        raise SystemExit(f"activation stats not found: {path}")
+    if path.suffix != ".safetensors":
+        raise SystemExit("--activation-stats currently expects a safetensors file or directory")
+
+    stats: dict[str, torch.Tensor] = {}
+    with safe_open(path, framework="pt", device="cpu") as handle:
+        for key in handle.keys():
+            stats[key] = handle.get_tensor(key).to(torch.float32).flatten().contiguous()
+    return stats
+
+
+def activation_stats_for_tensor(
+    tensor_name: str,
+    tensor_shape: tuple[int, ...],
+    stats: dict[str, torch.Tensor],
+) -> torch.Tensor | None:
+    if not stats:
+        return None
+    key_stem = tensor_name.removesuffix(".weight")
+    module_stem = key_stem.removeprefix("model.")
+    candidates = (
+        tensor_name,
+        key_stem,
+        module_stem,
+        f"{tensor_name}.input_second_moment",
+        f"{key_stem}.input_second_moment",
+        f"{module_stem}.input_second_moment",
+    )
+    for key in candidates:
+        values = stats.get(key)
+        if values is None:
+            continue
+        if len(tensor_shape) != 2:
+            raise ValueError(f"activation stats require a 2D tensor, got shape {tensor_shape}")
+        in_features = int(tensor_shape[1])
+        if values.numel() != in_features:
+            raise ValueError(
+                f"activation stats for {tensor_name} have {values.numel()} values, expected {in_features}"
+            )
+        return values
+    raise ValueError(f"activation stats are missing for tensor {tensor_name}")
 
 
 def main() -> int:
@@ -331,6 +427,8 @@ def main() -> int:
         raise SystemExit("--torch-interop-threads must be >= 1")
     if args.max_tensors < 1:
         raise SystemExit("--max-tensors must be >= 1")
+    if args.max_tensors_per_family is not None and args.max_tensors_per_family < 1:
+        raise SystemExit("--max-tensors-per-family must be >= 1")
     if args.max_groups_per_tensor < 1:
         raise SystemExit("--max-groups-per-tensor must be >= 1")
 
@@ -339,13 +437,16 @@ def main() -> int:
 
     args.base_model_dir = args.base_model_dir.expanduser().resolve()
     args.quant_model_path = args.quant_model_path.expanduser().resolve()
+    args.activation_stats = args.activation_stats.expanduser().resolve() if args.activation_stats else None
     args.base_model_name = args.base_model_name or args.base_model_dir.name
     args.quant_model_name = args.quant_model_name or args.quant_model_path.parent.name
+    activation_stats = load_activation_stats(args.activation_stats)
 
     tensor_pattern = re.compile(args.tensor_pattern)
     allowed_families = set(args.family) if args.family else None
     base_map = build_tensor_file_map(args.base_model_dir)
-    tensors = discover_modelopt_nvfp4_tensors(args.quant_model_path, tensor_pattern, allowed_families)[: args.max_tensors]
+    tensors = discover_modelopt_nvfp4_tensors(args.quant_model_path, tensor_pattern, allowed_families)
+    tensors = limit_tensors_by_family(tensors, args.max_tensors, args.max_tensors_per_family)
     if not tensors:
         raise SystemExit("no quantized tensors matched")
 
@@ -363,6 +464,7 @@ def main() -> int:
                     tensor_name,
                     args.max_groups_per_tensor,
                     generator,
+                    activation_stats,
                 )
                 row = metric_row(args, tensor_name, shape, sampled_groups, metrics)
             except Exception as exc:  # noqa: BLE001 - failed rows are useful in benchmark logs.

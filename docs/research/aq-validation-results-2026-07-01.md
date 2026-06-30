@@ -208,6 +208,55 @@ This is only a tool smoke, not a quality conclusion. It verifies that
 Transformers module names can be mapped to checkpoint tensor names and that the
 weighted metric path works with real activation reductions.
 
+### R9700 Activation-Weighted Comparison
+
+Activation stats:
+
+- `benchmarks/results/2026-07-01/aq/activation-r9700-smoke-qwen35-9b-s512/`
+- environment: `build/envs/vllm-rocm-nightly`
+- device selector: `ROCR_VISIBLE_DEVICES=1`
+- device reported by PyTorch: `cuda:0`
+- samples: 4 default prompts
+- tokens seen: 1403
+- modules with stats: 152
+
+Result files:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-r9700-stats-qwen35-9b-balanced.jsonl`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-scale-search-r9700-stats-qwen35-9b-balanced.jsonl`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-nvfp4-weighted-r9700-stats-qwen35-9b-family4.jsonl`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-weighted-r9700-stats-qwen35-9b-family4.jsonl`
+
+The comparison uses 4 tensors per family for:
+
+```text
+mlp_down, mlp_gate, mlp_up, linear_attn_out, attn_q, attn_k, attn_v, attn_o
+```
+
+| candidate / format | mean bpp | mean relative MSE | mean weighted relative MSE |
+| --- | ---: | ---: | ---: |
+| aq g16, unweighted scale search | 4.5000 | 0.005269024 | 0.008698592 |
+| aq g16, weighted scale search | 4.5000 | 0.005972846 | 0.004922713 |
+| aq g8, unweighted scale search | 5.0000 | 0.003647685 | 0.007701098 |
+| aq g8, weighted scale search | 5.0000 | 0.004234023 | 0.003684397 |
+| ModelOpt NVFP4 | 4.5000 | 0.008967095 | 0.010255294 |
+| Unsloth Dynamic Q4_K_XL mixed | 5.4668 | 0.003607886 | 0.002460200 |
+
+Weighted scale search is the first clear activation-aware improvement. For
+g16, it worsened ordinary tensor MSE from `0.005269024` to `0.005972846`, but
+improved weighted relative MSE from `0.008698592` to `0.004922713`. This is a
+better trade-off for aq if activation-weighted error tracks model behavior.
+
+The main outlier was `linear_attn_out`. With unweighted scale search, aq g16 had
+`linear_attn_out` weighted relative MSE `0.027143953`; weighted scale search
+reduced it to `0.011702844`. NVFP4 was `0.017121338` for the same family.
+
+Unsloth Dynamic is still ahead on this weighted sample, but it is not an equal
+bpp comparison: this 32-row subset averages `5.4668` bpp and stores
+`linear_attn_out` as `Q8_0`, giving that family weighted relative MSE
+`0.000249632`. This strongly suggests aq needs family-specific bit/scale policy
+experiments, not only one uniform g16/g8 setting.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -223,7 +272,7 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 ## Next Actions
 
 1. Add activation-stat collection for selected Qwen3.5-9B linear modules.
-2. Add activation-weighted error rows for NVFP4, Unsloth Dynamic, and the current aq family-LUT candidates.
-3. Try activation-weighted Lloyd and clipped-scale variants before changing the runtime format.
+2. Expand activation-stat calibration beyond the current 4-prompt R9700 smoke.
+3. Try activation-weighted Lloyd, clipped-scale variants, and family-specific bpp policy before changing the runtime format.
 4. Run a small logit-difference or perplexity check for the top candidates after weighted tensor narrowing.
 5. Extend `ullm-quant` from skeleton to safetensors metadata planning and then chunked CPU quantization.

@@ -198,7 +198,27 @@ def discover_tensors(reader, args: argparse.Namespace, tensor_pattern: re.Patter
         if is_float_qtype(qtype_name) and not args.include_float_tensors:
             continue
         selected.append(tensor)
-    return selected[: args.max_tensors]
+    return limit_tensors_by_family(selected, args.max_tensors, args.max_tensors_per_family)
+
+
+def limit_tensors_by_family(tensors: list, max_tensors: int, max_tensors_per_family: int | None) -> list:
+    if max_tensors_per_family is None:
+        return tensors[:max_tensors]
+    counts: dict[str, int] = {}
+    selected = []
+    for tensor in tensors:
+        hf_name = gguf_to_hf_name(tensor.name)
+        if hf_name is None:
+            continue
+        family = family_for_tensor(hf_name)
+        count = counts.get(family, 0)
+        if count >= max_tensors_per_family:
+            continue
+        selected.append(tensor)
+        counts[family] = count + 1
+        if len(selected) >= max_tensors:
+            break
+    return selected
 
 
 def dequantize_gguf_tensor(tensor, dequantize_fn) -> torch.Tensor:
@@ -215,7 +235,7 @@ def sample_values(
     quantized: torch.Tensor,
     max_elements: int,
     generator: torch.Generator,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     flat_base = base.flatten()
     flat_quant = quantized.flatten()
     if flat_base.numel() != flat_quant.numel():
@@ -225,13 +245,27 @@ def sample_values(
         ids = torch.arange(sampled, dtype=torch.long)
     else:
         ids = torch.randint(flat_base.numel(), (sampled,), generator=generator, dtype=torch.long)
-    return flat_base.index_select(0, ids), flat_quant.index_select(0, ids)
+    return flat_base.index_select(0, ids), flat_quant.index_select(0, ids), ids
 
 
-def compute_metrics(base_sample: torch.Tensor, quant_sample: torch.Tensor, dequant_seconds: float) -> dict[str, float | None]:
+def compute_metrics(
+    base_sample: torch.Tensor,
+    quant_sample: torch.Tensor,
+    dequant_seconds: float,
+    sample_weights: torch.Tensor | None,
+) -> dict[str, float | None]:
     diff = base_sample - quant_sample
     mse = float(diff.square().mean())
     denom = float(base_sample.square().mean().clamp_min(1e-30))
+    weighted_mse = None
+    weighted_relative_mse = None
+    if sample_weights is not None:
+        weights = sample_weights.to(torch.float32).clamp_min(0)
+        weights = weights / weights.mean().clamp_min(1e-30)
+        weighted_sse = (diff.square() * weights).sum()
+        weighted_denom = (base_sample.square() * weights).sum().clamp_min(1e-30)
+        weighted_mse = float(weighted_sse / weights.sum().clamp_min(1e-30))
+        weighted_relative_mse = float(weighted_sse / weighted_denom)
     dot = float((base_sample * quant_sample).sum())
     norm = float(base_sample.square().sum().sqrt() * quant_sample.square().sum().sqrt())
     abs_error = diff.abs()
@@ -242,6 +276,8 @@ def compute_metrics(base_sample: torch.Tensor, quant_sample: torch.Tensor, dequa
     return {
         "mse": mse,
         "relative_mse": mse / denom,
+        "weighted_mse": weighted_mse,
+        "weighted_relative_mse": weighted_relative_mse,
         "mean_abs_error": float(abs_error.mean()),
         "p95_abs_error": float(torch.quantile(abs_error, 0.95)),
         "max_abs_error": float(abs_error.max()),
@@ -299,6 +335,8 @@ def metric_row(
             "torch_threads": args.torch_threads,
             "torch_interop_threads": args.torch_interop_threads,
             "gguf_python_path": str(args.gguf_python_path),
+            "max_tensors_per_family": args.max_tensors_per_family,
+            "activation_stats": str(args.activation_stats) if args.activation_stats else None,
         },
         "metrics": metrics,
         "artifacts": {},
@@ -322,6 +360,8 @@ def failure_row(args: argparse.Namespace, tensor_name: str, hf_name: str | None,
             "torch_threads": args.torch_threads,
             "torch_interop_threads": args.torch_interop_threads,
             "gguf_python_path": str(args.gguf_python_path),
+            "max_tensors_per_family": args.max_tensors_per_family,
+            "activation_stats": str(args.activation_stats) if args.activation_stats else None,
         },
         "metrics": {},
         "artifacts": {},
@@ -346,13 +386,84 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-float-tensors", action="store_true")
     parser.add_argument("--include-embedding", action="store_true")
     parser.add_argument("--max-tensors", type=int, default=8)
+    parser.add_argument("--max-tensors-per-family", type=int, default=None)
     parser.add_argument("--max-elements-per-tensor", type=int, default=262144)
     parser.add_argument("--max-dequant-elements", type=int, default=200_000_000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--torch-threads", type=int, default=default_threads)
     parser.add_argument("--torch-interop-threads", type=int, default=1)
+    parser.add_argument(
+        "--activation-stats",
+        type=Path,
+        default=None,
+        help="Optional activation second-moment stats as a safetensors file or directory.",
+    )
     parser.add_argument("--note", action="append", default=[])
     return parser.parse_args()
+
+
+def load_activation_stats(path: Path | None) -> dict[str, torch.Tensor]:
+    if path is None:
+        return {}
+    path = path.expanduser().resolve()
+    if path.is_dir():
+        path = path / "activation_second_moments.safetensors"
+    if not path.exists():
+        raise SystemExit(f"activation stats not found: {path}")
+    if path.suffix != ".safetensors":
+        raise SystemExit("--activation-stats currently expects a safetensors file or directory")
+
+    stats: dict[str, torch.Tensor] = {}
+    with safe_open(path, framework="pt", device="cpu") as handle:
+        for key in handle.keys():
+            stats[key] = handle.get_tensor(key).to(torch.float32).flatten().contiguous()
+    return stats
+
+
+def activation_stats_for_tensor(
+    hf_name: str,
+    tensor_shape: tuple[int, ...],
+    stats: dict[str, torch.Tensor],
+    qwen35_linear_config: dict[str, int] | None,
+) -> torch.Tensor | None:
+    if not stats:
+        return None
+    key_stem = hf_name.removesuffix(".weight")
+    module_stem = key_stem.removeprefix("model.")
+    candidates = (
+        hf_name,
+        key_stem,
+        module_stem,
+        f"{hf_name}.input_second_moment",
+        f"{key_stem}.input_second_moment",
+        f"{module_stem}.input_second_moment",
+    )
+    for key in candidates:
+        values = stats.get(key)
+        if values is None:
+            continue
+        if len(tensor_shape) != 2:
+            raise ValueError(f"activation stats require a 2D tensor, got shape {tensor_shape}")
+        in_features = int(tensor_shape[1])
+        if values.numel() != in_features:
+            raise ValueError(f"activation stats for {hf_name} have {values.numel()} values, expected {in_features}")
+        return transform_qwen35_linear_activation_stats(hf_name, values, qwen35_linear_config)
+    raise ValueError(f"activation stats are missing for tensor {hf_name}")
+
+
+def transform_qwen35_linear_activation_stats(
+    hf_name: str,
+    stats: torch.Tensor,
+    config: dict[str, int] | None,
+) -> torch.Tensor:
+    if config is None or not hf_name.endswith(".linear_attn.out_proj.weight"):
+        return stats
+    num_k_heads = config["linear_num_key_heads"]
+    num_v_heads = config["linear_num_value_heads"]
+    if num_k_heads <= 0 or num_v_heads <= 0 or num_k_heads == num_v_heads:
+        return stats
+    num_v_per_k = num_v_heads // num_k_heads
+    return reorder_v_heads(stats, 0, num_k_heads, num_v_per_k, config["linear_value_head_dim"])
 
 
 def main() -> int:
@@ -363,6 +474,8 @@ def main() -> int:
         raise SystemExit("--torch-interop-threads must be >= 1")
     if args.max_tensors < 1:
         raise SystemExit("--max-tensors must be >= 1")
+    if args.max_tensors_per_family is not None and args.max_tensors_per_family < 1:
+        raise SystemExit("--max-tensors-per-family must be >= 1")
     if args.max_elements_per_tensor < 1:
         raise SystemExit("--max-elements-per-tensor must be >= 1")
 
@@ -372,8 +485,10 @@ def main() -> int:
     args.base_model_dir = args.base_model_dir.expanduser().resolve()
     args.gguf_path = args.gguf_path.expanduser().resolve()
     args.gguf_python_path = args.gguf_python_path.expanduser().resolve()
+    args.activation_stats = args.activation_stats.expanduser().resolve() if args.activation_stats else None
     args.base_model_name = args.base_model_name or args.base_model_dir.name
     args.quant_model_name = args.quant_model_name or args.gguf_path.stem
+    activation_stats = load_activation_stats(args.activation_stats)
 
     sys.path.insert(0, str(args.gguf_python_path))
     from gguf import GGUFReader  # noqa: PLC0415
@@ -410,8 +525,20 @@ def main() -> int:
                 dequant_seconds = time.perf_counter() - start
                 if tuple(base.shape) != tuple(quantized.shape):
                     raise ValueError(f"shape mismatch: reference={tuple(base.shape)} gguf={tuple(quantized.shape)}")
-                base_sample, quant_sample = sample_values(base, quantized, args.max_elements_per_tensor, generator)
-                metrics = compute_metrics(base_sample, quant_sample, dequant_seconds)
+                base_sample, quant_sample, sample_ids = sample_values(base, quantized, args.max_elements_per_tensor, generator)
+                sample_weights = None
+                activation_second_moment = activation_stats_for_tensor(
+                    hf_name,
+                    tuple(int(dim) for dim in base.shape),
+                    activation_stats,
+                    qwen35_linear_config,
+                )
+                if activation_second_moment is not None:
+                    if base.ndim != 2:
+                        raise ValueError(f"cannot apply activation stats to non-2D tensor {hf_name}")
+                    cols = int(base.shape[1])
+                    sample_weights = activation_second_moment.index_select(0, sample_ids % cols)
+                metrics = compute_metrics(base_sample, quant_sample, dequant_seconds, sample_weights)
                 row = metric_row(args, tensor, hf_name, tuple(int(dim) for dim in base.shape), int(base_sample.numel()), metrics)
             except Exception as exc:  # noqa: BLE001 - failed rows are useful in benchmark logs.
                 row = failure_row(args, tensor.name, hf_name, type(exc).__name__, str(exc))

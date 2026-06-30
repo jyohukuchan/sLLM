@@ -85,6 +85,15 @@
   - weighted smoke metrics for `aq4_e4m3_g16_ts_flloyd16`: unweighted relative MSE `0.0051582370266549235`, weighted relative MSE `0.004603734239935875`.
   - full activation collection should use an R9700-capable environment; small CPU smoke runs are feasible.
 
+- R9700 activation-weighted comparison:
+  - collected R9700 stats with `build/envs/vllm-rocm-nightly`, `ROCR_VISIBLE_DEVICES=1`, 4 prompts, 1403 tokens, 152 modules.
+  - aq g16 unweighted scale search: mean relative MSE `0.005269024`, weighted relative MSE `0.008698592`.
+  - aq g16 weighted scale search: mean relative MSE `0.005972846`, weighted relative MSE `0.004922713`.
+  - aq g8 weighted scale search: mean relative MSE `0.004234023`, weighted relative MSE `0.003684397`.
+  - ModelOpt NVFP4 family4 weighted relative MSE: `0.010255294`.
+  - Unsloth Dynamic Q4_K_XL mixed family4 weighted relative MSE: `0.002460200` at mean `5.4668` bpp; it stores `linear_attn_out` as `Q8_0`.
+  - interpretation: weighted scale search is a real aq optimization lever; Unsloth's result points toward family-specific bpp policy.
+
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
@@ -93,6 +102,6 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Start activation-weighted and logit-level checks for the current top aq candidates.
+- Expand calibration prompts and test activation-weighted Lloyd / clipped scale variants.
 - Extend `ullm-quant` from skeleton to safetensors metadata planning.
 - Add a small model-level check after tensor-level candidate narrowing.
