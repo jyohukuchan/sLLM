@@ -1463,6 +1463,39 @@ and the negative deltas should still not be read as true quality improvements,
 but the relative ordering strengthens the case that p4p6 is the safer policy
 until a larger evaluation says otherwise.
 
+The same corpus was then rerun with a wider 44-module cumulative selection:
+
+- selection:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj44-selfattn.json`
+- result:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-projecttext32-inproj44-selfattn-r9700-qwen35-9b-s256.jsonl`
+- summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-summary-projecttext32-inproj44-selfattn-r9700-qwen35-9b-s256.json`
+- scope: 44 modules across layers 0, 3, 6, 7, 12, 15, 18, and 23, covering
+  linear-attention in-projection/out-projection, self-attention q/k/v/o, and
+  `mlp_up`
+- prompts: 32
+- sequence length: 256
+- target tokens per variant: 7,136
+- repeat-to-length: false
+- elapsed wall time: 17:46.24
+- maximum RSS: 16,364,436 KiB
+
+| variant / policy | token-weighted ref loss | token-weighted candidate loss | token-weighted loss delta | relative delta |
+| --- | ---: | ---: | ---: | ---: |
+| all g16 weighted | 3.293687835 | 3.291624665 | -0.002063170 | -0.000626401 |
+| all g8 weighted | 3.293687835 | 3.296669558 | +0.002981722 | +0.000905284 |
+| p4p6 | 3.293687835 | 3.292151481 | -0.001536354 | -0.000466454 |
+| p4p46_inproj | 3.293687835 | 3.292704940 | -0.000982895 | -0.000298418 |
+| p4p65_inproj | 3.293687835 | 3.294101648 | +0.000413813 | +0.000125638 |
+
+The wider project-text smoke keeps the same high-level conclusion: all-g16 is
+still best among the tested variants, and p4p6 is still the best mixed policy.
+It moves p4p46 ahead of p4p65, so p4p46 remains the better follow-up candidate
+among the in-proj-heavy policies. p4p65 is still supported by tensor-level MSE
+and KL signals, but this real-text loss run does not support promoting it ahead
+of p4p6 or p4p46.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -1479,8 +1512,10 @@ However, a dedicated quantization-tool optimization track is necessary before fu
   conversion plus Rust-side merge/verify. Tensor-level full conversion favors
   p4p65, wider final-token logit relative MSE favors p4p46, but both
   repeated-prompt and project-text next-token loss smokes keep p4p6 as the
-  safer policy. The next policy decision should use a wider real-text
-  evaluation or full-model loader path, not another tensor-only metric.
+  safer policy. The wider 44-module project-text run ranks p4p46 second among
+  mixed policies and p4p65 third. The next policy decision should use a wider
+  real-text evaluation or full-model loader path, not another tensor-only
+  metric.
 
 ## Next Actions
 

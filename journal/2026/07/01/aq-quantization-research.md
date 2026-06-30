@@ -300,12 +300,21 @@
   - scope: same 22 modules as the wider in-proj + self-attn smoke; sequence length `256`; repeat-to-length `false`; elapsed `9:48.82`; max RSS `16367072 KiB`; rows `160`, all ok.
   - token-weighted loss deltas: all-g16 `-0.001098968`, all-g8 `+0.002915896`, p4p6 `-0.000170961`, p4p46 `+0.000850648`, p4p65 `+0.000413068`.
   - interpretation update: project-text loss ranks all-g16 first, p4p6 second, p4p65 third, p4p46 fourth, all-g8 last. Deltas are small and negative deltas are not proof of improvement, but this reinforces p4p6 as the safer policy for now.
+- Wider 44-module project-text loss smoke:
+  - selection: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj44-selfattn.json`.
+  - result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-projecttext32-inproj44-selfattn-r9700-qwen35-9b-s256.jsonl`.
+  - summary: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-summary-projecttext32-inproj44-selfattn-r9700-qwen35-9b-s256.json`.
+  - scope: 44 cumulative modules across layers `0,3,6,7,12,15,18,23`, covering linear-attention in-proj/out, self-attn q/k/v/o, and `mlp_up`.
+  - run settings: 32 project-text prompts, sequence length `256`, repeat-to-length `false`, 7136 target tokens per variant, rows `160`, all ok.
+  - resource use: elapsed `17:46.24`, max RSS `16364436 KiB`, no OOM or failed rows.
+  - token-weighted loss deltas: all-g16 `-0.002063170`, all-g8 `+0.002981722`, p4p6 `-0.001536354`, p4p46 `-0.000982895`, p4p65 `+0.000413813`.
+  - interpretation update: all-g16 remains best overall; among mixed policies, p4p6 is still best, p4p46 is second, and p4p65 is third. This keeps p4p6 as the conservative policy and p4p46 as the strongest in-proj follow-up despite p4p65's tensor-MSE/KL strengths.
 
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, but both repeated-prompt and project-text next-token loss keep p4p6 as the safer policy.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, but repeated-prompt and both 22-module/44-module project-text next-token loss smokes keep p4p6 as the safer policy. The 44-module run ranks p4p46 second among mixed policies, so p4p46 remains the main follow-up candidate.
 
 ## Next
 

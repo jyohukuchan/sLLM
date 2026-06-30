@@ -1,0 +1,68 @@
+{
+  "schema_version": "aq-module-loss-summary-v0.1",
+  "run_id": "aq-module-loss-projecttext32-inproj44-selfattn-qwen35-9b-s256",
+  "model": "Qwen/Qwen3.5-9B",
+  "result_jsonl": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-projecttext32-inproj44-selfattn-r9700-qwen35-9b-s256.jsonl",
+  "prompt_file": "benchmarks/calibration/qwen35-aq-project-text-v0.1.txt",
+  "prompt_count": 32,
+  "sequence_length": 256,
+  "repeat_to_length": false,
+  "selection_json": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj44-selfattn.json",
+  "activation_stats": "benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj",
+  "rows": 160,
+  "status_counts": {
+    "ok": 160
+  },
+  "total_tokens_per_variant": 7136,
+  "timing": {
+    "wall": "17:46.24",
+    "max_rss_kib": 16364436
+  },
+  "variants": [
+    {
+      "variant_id": "g16_weighted",
+      "rows": 32,
+      "tokens": 7136,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "token_weighted_candidate_loss": 3.291624665260315,
+      "token_weighted_loss_delta": -0.002063170075416565,
+      "relative_loss_delta": -0.0006264012191083258
+    },
+    {
+      "variant_id": "g8_weighted",
+      "rows": 32,
+      "tokens": 7136,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "token_weighted_candidate_loss": 3.2966695576906204,
+      "token_weighted_loss_delta": 0.002981722354888916,
+      "relative_loss_delta": 0.0009052838350070852
+    },
+    {
+      "variant_id": "p4p6",
+      "rows": 32,
+      "tokens": 7136,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "token_weighted_candidate_loss": 3.2921514809131622,
+      "token_weighted_loss_delta": -0.001536354422569275,
+      "relative_loss_delta": -0.00046645416911911795
+    },
+    {
+      "variant_id": "p4p46",
+      "rows": 32,
+      "tokens": 7136,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "token_weighted_candidate_loss": 3.292704939842224,
+      "token_weighted_loss_delta": -0.0009828954935073853,
+      "relative_loss_delta": -0.000298417926241391
+    },
+    {
+      "variant_id": "p4p65",
+      "rows": 32,
+      "tokens": 7136,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "token_weighted_candidate_loss": 3.2941016480326653,
+      "token_weighted_loss_delta": 0.00041381269693374634,
+      "relative_loss_delta": 0.0001256381046479973
+    }
+  ]
+}
