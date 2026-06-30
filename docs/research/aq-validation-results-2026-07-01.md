@@ -957,10 +957,12 @@ The 48-tensor prototype was also merged and verified:
 | verify elapsed wall time | 8.12 s |
 | verify maximum RSS | 101,252 KiB |
 
-Finally, all 255 p4p6 quantized tensors were converted. This run still excludes
-passthrough tensors, so it is a quantized-weight payload prototype, not a full
-model package. Per-tensor re-read verification was skipped during conversion to
-avoid duplicate verification work; the merged output was verified afterwards.
+Finally, all 255 p4p6 quantized tensors were converted. This includes 7 MTP
+linear tensors whose names match the existing `mlp_*` or `self_attn.*_proj`
+family rules. This run still excludes passthrough tensors, so it is a
+quantized-weight payload prototype, not a full model package. Per-tensor re-read
+verification was skipped during conversion to avoid duplicate verification work;
+the merged output was verified afterwards.
 
 - summary:
   `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized.json`

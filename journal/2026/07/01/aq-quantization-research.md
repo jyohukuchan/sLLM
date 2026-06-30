@@ -150,7 +150,7 @@
   - added safetensors header planning without reading tensor payloads.
   - generated `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b.json`.
   - Qwen3.5-9B plan: total tensors `775`, default quantize tensors `255`, passthrough tensors `520`, total tensor bytes `19306216416`.
-  - default quantize target is known text linear families only; embeddings, lm head, vision, conv, MTP, and unknown tensors pass through for now.
+  - default quantize target is known linear families; Qwen3.5 MTP linear weights are quantized when their names match `mlp_*` or `self_attn.*_proj`. Embeddings, lm head, vision, conv, normalization tensors, non-linear MTP tensors, and unknown tensors pass through for now.
   - added aq policy planning options: `--aq-policy all-g16|all-g8|p4p6|p4p9|custom`, `--aq-high-family`, `--aq-low-format`, `--aq-high-format`.
   - generated p4p6 plan: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json`.
   - p4p6 plan schema `ullm-quant-plan-v0.3`; low tensors `204`, high tensors `51`, passthrough tensors `520`.
@@ -227,7 +227,7 @@
   - merged family4 summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-family4.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-family4-merged.ullm.d`; tensor count `48`, codebook count `12`, total file bytes `634004817`.
   - merged family4 verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-family4.txt`; all 48 tensors verified; elapsed `8.12 s`, max RSS `101252 KiB`.
   - ran the full p4p6 quantized-tensor prototype conversion. Summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized.json`; driver log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-driver.log`; logs in `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-logs/`.
-  - full quantized conversion selected all 255 p4p6 quantized tensors and skipped per-tensor re-read verification; all 255 returned success. Relative MSE ranged from `0.003639662156` (`attn_o`) to `0.005783048676` (`linear_attn_a`). Driver elapsed `17:23.16`, max RSS `22616 KiB`, parts directory size `3.8 GiB`.
+  - full quantized conversion selected all 255 p4p6 quantized tensors, including 7 MTP linear tensors, and skipped per-tensor re-read verification; all 255 returned success. Relative MSE ranged from `0.003639662156` (`attn_o`) to `0.005783048676` (`linear_attn_a`). Driver elapsed `17:23.16`, max RSS `22616 KiB`, parts directory size `3.8 GiB`.
   - merged full quantized summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-quantized.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-merged.ullm.d`; tensor count `255`, codebook count `12`, total file bytes `4049329404`.
   - merged full quantized verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-quantized.txt`; all 255 tensors verified; elapsed `47.48 s`, max RSS `103892 KiB`; relative-MSE values matched summary with max delta about `1e-12`.
 

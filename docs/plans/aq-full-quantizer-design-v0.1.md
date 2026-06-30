@@ -89,9 +89,10 @@ Initial implementation status:
   - default quantize tensors: `255`
   - passthrough tensors: `520`
   - total tensor bytes: `19306216416`
-- The planner currently quantizes known text linear families only and
-  passes through embeddings, lm head, vision tensors, convolution tensors, MTP
-  tensors, and unknown families.
+- The planner currently quantizes known linear families, including Qwen3.5 MTP
+  linear weights when their module names match `mlp_*` or `self_attn.*_proj`.
+  It passes through embeddings, lm head, vision tensors, convolution tensors,
+  normalization tensors, non-linear MTP tensors, and unknown families.
 - Plan schema `ullm-quant-plan-v0.3` records aq policy assignment, estimated
   output bytes, and estimated effective bpp.
 - Current best policy candidate is `p4p6`:
@@ -434,6 +435,9 @@ Rust implementation status:
   - summary:
     `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized.json`
   - tensors: 255, all quantized tensors selected by the p4p6 plan
+  - includes 7 MTP linear tensors:
+    `mtp.layers.0.mlp.{down,gate,up}_proj` and
+    `mtp.layers.0.self_attn.{q,k,v,o}_proj`
   - passthrough tensors: not included yet
   - per-tensor re-read verification was skipped during conversion; merged
     verification was run afterwards.
