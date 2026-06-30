@@ -17,6 +17,7 @@ The large discrepancy is mostly explained by comparing different metrics and dif
 - The official recipe's `Output tok/s` matches a TPOT-derived metric, `1000 / mean_tpot_ms`.
 - `tools/run-external-benchmark.py` currently records `metrics.decode_tokens_per_second` from ATOM benchmark `output_throughput`, which includes TTFT/request duration for a one-request run. It is useful as an end-to-end throughput number, but it is not the same as the official table's decode-only TPOT metric.
 - The official-like local Qwen3-8B-FP8 CUDAGraph run reproduces the official result: `mean_tpot_ms=17.97`, so TPOT-derived output speed is `55.65 tok/s`.
+- A follow-up run using the official server/benchmark settings with only the model changed to Qwen3-14B-FP8 measured `mean_tpot_ms=55.46`, so TPOT-derived output speed is `18.03 tok/s`.
 - The earlier slow Qwen3-14B-FP8 representative row also used `--enforce-eager`. Removing that roughly doubled the pp512/tg128 row by the wrapper metric: `9.15 -> 18.27 tok/s`.
 - Qwen3-14B-FP8 is substantially heavier than Qwen3-8B-FP8. From the configs, the rough MLP work ratio is about `1.97x` and the attention/projection work ratio is about `1.74x`. The measured TPOT gap in the official-like BF16 KV runs is `55.65 / 17.82 = 3.12x`, so model shape and ATOM kernel path efficiency likely explain the rest.
 - FP8 KV did not improve this single-request 14B workload. With the correct `--block-size 128`, TPOT-derived speed fell to `9.80 tok/s`.
@@ -28,6 +29,7 @@ The large discrepancy is mostly explained by comparing different metrics and dif
 | Model | Condition | Workload | KV | Wrapper tok/s | TPOT tok/s | TPOT ms | TTFT ms | E2E ms | Consumed GiB | Note |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | Qwen3-8B-FP8 | official-like CUDAGraph | pp549/tg256 | BF16 | 35.84 | 55.65 | 17.97 | 2560.30 | 7142.77 | 27.26 | Reproduces official 52.9-class result by TPOT |
+| Qwen3-14B-FP8 | official settings, model only changed | pp549/tg256 | BF16 | 17.98 | 18.03 | 55.46 | 94.74 | 14236.69 | n/a | Same settings as official 8B run, with only model path changed |
 | Qwen3-8B-FP8 | official-like eager | pp549/tg256 | BF16 | 13.90 | 13.96 | 71.65 | 149.04 | 18420.57 | 27.11 | Local eager path is slower than official eager table |
 | Qwen3-14B-FP8 | official-like CUDAGraph | pp549/tg256 | BF16 | 16.62 | 17.82 | 56.10 | 1098.10 | 15404.10 | 26.42 | Direct 14B vs 8B comparison |
 | Qwen3-14B-FP8 | earlier representative eager | pp512/tg128 | BF16 | 9.15 | 10.97 | 91.19 | 2406.66 | 13987.37 | 24.17 | Previous slow row |
@@ -43,4 +45,4 @@ There is also a Qwen3-14B-FP8 FP8 KV run with `--block-size 64`, but ATOM logged
 | Qwen3-8B-FP8 | 36 | 4096 | 12288 | 32 | 8 | 128x128 |
 | Qwen3-14B-FP8 | 40 | 5120 | 17408 | 40 | 8 | 128x128 |
 
-The local 8B result rules out a basic gfx1201/R9700 incompatibility as the explanation for the official-vs-local gap. The remaining 14B slowness should be investigated as a 14B shape/kernel efficiency issue, not as proof that ATOM cannot reach the official 8B number on this class of GPU.
+The local 8B result rules out a basic gfx1201/R9700 incompatibility as the explanation for the official-vs-local gap. The model-only 14B run confirms that the official-settings 14B TPOT speed is about `18 tok/s`. The remaining 14B slowness should be investigated as a 14B shape/kernel efficiency issue, not as proof that ATOM cannot reach the official 8B number on this class of GPU.
