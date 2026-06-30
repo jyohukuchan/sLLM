@@ -342,6 +342,10 @@
   - conversion-level reservoir65536 summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.json`.
   - conversion comparison summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-compare-family4.json`.
   - conversion result: selected 4 p4p6 tensors (`linear_attn_out`, `mlp_down`, `mlp_gate`, `mlp_up`), and both exact and reservoir65536 returned success with verification. Reservoir65536 matched exact for the first three tensors. For layer0 `mlp_up`, tensor scale shifted by `-0.57%`, while relative MSE changed only by `+0.000000062122`.
+  - larger family2 exact-inproj summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2-exact-inproj.json`.
+  - larger family2 reservoir65536 summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2-reservoir65536.json`.
+  - larger family2 comparison: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2-tensor-scale-compare.json`.
+  - family2 result: 24 tensors, exact and reservoir65536 both had 0 failures and verification succeeded. Reservoir65536 relative-MSE delta range was `-7.05e-7` to `+8.75e-7`, mean `+3.69e-8`. Tensor-scale relative deltas ranged from about `-0.995%` to `+0.781%`. This is small enough for prototype conversion, but exact should remain the default until model-level quality is checked.
 
 ## Current Interpretation
 
@@ -351,7 +355,7 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Keep exact as the default for now; reservoir65536 is promising but should be tested on a larger conversion scope before becoming the default.
+- Keep exact as the default for now; reservoir65536 is promising for conversion memory, but model-level quality must be checked before making it the default.
 - Add real-tensor or cross-process golden tests if the C++ kernel changes again; the first pseudo-random BF16/F16 byte-level golden is now in place.
 - Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65, preferably after the full-model loader path is available.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.
