@@ -262,17 +262,23 @@
   - in-proj12 scope: layer0/layer1 `linear_attn.in_proj_a/b/qkv/z`, `linear_attn.out_proj`, and `mlp.up_proj`; 8 prompts; total original selected weight bytes `470810624`; elapsed `5:39.00`; max RSS `16365640 KiB`.
   - in-proj12 mean logit relative MSE / KL: all-g16 `0.000347698` / `0.001960925`; all-g8 `0.000402234` / `0.001103623`; old p4p6 `0.000416993` / `0.001656361`; p4p46_inproj `0.000349033` / `0.001686816`; p4p65_inproj `0.000361837` / `0.001986985`; p4p10_inproj `0.000403207` / `0.001373638`.
   - interpretation: tensor metrics strongly prefer promoting several in-proj families to g8, but this in-proj-heavy logit smoke still ranks all-g16 best by relative MSE and all-g8 best by KL. `p4p46_inproj` is the best mixed policy by relative MSE and clearly improves over old p4p6 in this scope, but it needs a wider module/perplexity run before replacing p4p6.
+  - wider self-attn + in-proj selection: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj22-selfattn.json`.
+  - wider self-attn + in-proj logit smoke result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8.jsonl`; log `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8.log`.
+  - wider scope: layer0/layer12 `linear_attn.in_proj_a/b/qkv/z`, `linear_attn.out_proj`, `mlp.up_proj`; layer3/layer7 `self_attn.q/k/v/o_proj`, `mlp.up_proj`; 22 modules; total original selected weight bytes `907018240`; elapsed `11:11.54`; max RSS `16367660 KiB`.
+  - wider mean logit relative MSE / KL: all-g16 `0.000579478` / `0.001758983`; all-g8 `0.000452192` / `0.002217304`; p4p6 `0.000392221` / `0.001303061`; p4p46_inproj `0.000384154` / `0.001293804`; p4p65_inproj `0.000412484` / `0.001134097`; p4p70_inproj `0.000387565` / `0.001182557`; p4p80_inproj `0.000426451` / `0.001241760`.
+  - interpretation update: with dense self-attn included, mixed policies beat all-g16/all-g8 on both relative MSE and KL. `p4p46_inproj` is best by relative MSE, `p4p65_inproj` is best by KL, and `p4p70_inproj` is close by relative MSE with full top10 overlap. Keep p4p6 as conservative baseline, but p4p46/p4p65 should become named follow-up candidates.
 
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, but it also confirmed that tensor-level weighted MSE and logit-level ranking can disagree.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and the wider self-attn smoke now supports p4p46/p4p65 as real policy candidates, but tensor-level weighted MSE and logit-level ranking still do not fully agree.
 
 ## Next
 
 - Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
-- Run a wider in-proj policy smoke that includes dense self-attention modules and non-adjacent layers; decide whether `p4p46_inproj` becomes a named candidate.
+- Add named plan support for `p4p46_inproj` and `p4p65_inproj`, or run equivalent custom full-policy conversions.
+- Run a small perplexity or next-token loss smoke for p4p6, p4p46, and p4p65.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Replace the current per-tensor temporary conversion driver with a single `ullm-quant` full-conversion command.

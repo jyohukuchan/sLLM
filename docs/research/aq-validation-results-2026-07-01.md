@@ -1268,6 +1268,43 @@ relative MSE from `0.000416993` to `0.000349033`. This supports keeping
 in-proj g8 promotion as an active candidate, but it does not justify replacing
 the main p4p6 policy before a wider module-level or perplexity run.
 
+The wider follow-up mixed linear-attention in-proj modules with dense
+self-attention modules from non-adjacent layers:
+
+- selection:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj22-selfattn.json`
+- result:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8.jsonl`
+- log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8.log`
+- scope:
+  - layer 0 and layer 12:
+    `linear_attn.in_proj_a/b/qkv/z`, `linear_attn.out_proj`, `mlp.up_proj`
+  - layer 3 and layer 7:
+    `self_attn.q/k/v/o_proj`, `mlp.up_proj`
+- prompts: 8
+- sequence length: 64
+- total original selected weight bytes: 907,018,240
+- elapsed wall time: 11:11.54
+- maximum RSS: 16,367,660 KiB
+
+| variant / policy | mean logit relative MSE | mean abs error | mean KL(ref, candidate) | top1 matches | mean top10 overlap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all g16 weighted | 0.000579478 | 0.046201342 | 0.001758983 | 8 / 8 | 10.000 |
+| all g8 weighted | 0.000452192 | 0.040764980 | 0.002217304 | 8 / 8 | 9.750 |
+| p4p6 | 0.000392221 | 0.037963312 | 0.001303061 | 8 / 8 | 9.875 |
+| p4p46: `attn_o,v` and `linear_attn_a,b,out,z` high | 0.000384154 | 0.037423817 | 0.001293804 | 8 / 8 | 9.875 |
+| p4p65: `attn_k,o,v` and `linear_attn_a,b,out,qkv` high | 0.000412484 | 0.039246285 | 0.001134097 | 8 / 8 | 9.875 |
+| p4p70: `attn_k,o,v` and `linear_attn_a,b,out,qkv,z` high | 0.000387565 | 0.037508543 | 0.001182557 | 8 / 8 | 10.000 |
+| p4p80: `attn_q,k,o,v` and all linear-attention families high | 0.000426451 | 0.039827092 | 0.001241760 | 8 / 8 | 9.875 |
+
+This wider result changes the interpretation. Once dense self-attention modules
+are included, mixed policies beat both all-g16 and all-g8 by logit relative MSE
+and KL. p4p46 is the best mixed policy by relative MSE, p4p65 is the best by
+KL, and p4p70 is close to p4p46 while preserving full top10 overlap. The
+current conservative p4p6 policy still performs well, but p4p46 is now a real
+candidate rather than only a tensor-MSE artifact.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -1281,19 +1318,19 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 - GGUF linear-attention comparison must apply the Qwen3.5 V-head reorder used by llama.cpp conversion.
 - Activation weighting now covers Qwen3.5 linear-attention in-projection
   modules, but tensor-level improvements and logit-level improvements do not
-  rank the same. The main policy should therefore stay conservative until a
-  wider module-level or perplexity run confirms an in-proj promotion.
+  rank the same. The wider self-attention smoke nevertheless supports treating
+  p4p46 and p4p65 as named follow-up candidates alongside the conservative
+  p4p6 policy.
 
 ## Next Actions
 
-1. Run a wider in-proj policy smoke that includes dense self-attention modules
-   and more non-adjacent layers, then decide whether p4p46 should become a
-   named candidate.
+1. Add named plan support for p4p46 and p4p65, or run an equivalent custom
+   full-policy conversion, then compare against the existing p4p6 package.
 2. Replace the current per-tensor temporary conversion driver with a single
    `ullm-quant` full-conversion command now that Rust-side merge exists.
 3. Replace or approximate the exact tensor-scale pre-pass before scaling from
    12 tensors to all policy-selected tensors.
-4. Rerun full prototype conversion with the in-proj-weighted codebooks for the
-   current conservative policy and compare against the previous p4p6 package.
+4. Run a small perplexity or next-token loss smoke for p4p6, p4p46, and p4p65;
+   logit relative MSE alone is not enough to settle the policy.
 5. Add SIMD and multithreaded scheduling only after the scalar C++ semantics
    remain stable across wider conversion.
