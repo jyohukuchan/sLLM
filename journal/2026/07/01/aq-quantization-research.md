@@ -313,6 +313,18 @@
   - added deterministic pseudo-random BF16/F16 chunk tests in `crates/ullm-quant/src/main.rs`.
   - coverage now checks multiple seeds, group sizes `4` and `8`, scale windows `0`, `1`, and `2`, non-unit tensor scales, packed idx4 bytes, scale-index bytes, and metrics against the Rust scalar reference.
   - verification: `cargo fmt -p ullm-quant --check`, `cargo test -p ullm-quant`, and `cargo build -p ullm-quant --release` passed. Unit tests now pass `23` tests.
+- Tensor-scale estimator work:
+  - added `--tensor-scale-estimator exact|reservoir` and `--tensor-scale-reservoir-size <N>` to `ullm-quant`.
+  - default remains `exact` for compatibility. `reservoir` mode uses deterministic bounded-memory sampling for positive group target scales before taking the lower median.
+  - README now documents the estimator modes and the compatibility caveat.
+  - added parser and collector tests; unit tests now pass `25` tests.
+  - exact/reservoir smoke logs for `model.language_model.layers.0.mlp.up_proj.weight`:
+    - exact: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-exact-mlp-up.log`.
+    - reservoir1024: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-reservoir1024-mlp-up.log`.
+    - reservoir65536: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-reservoir65536-mlp-up.log`.
+    - summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-tensor-scale-estimator-summary-mlp-up.json`.
+  - smoke result: exact tensor scale `0.014780922793`, relative MSE `0.005245190541`, max RSS `75864 KiB`; reservoir1024 tensor scale `0.014612956904`, relative MSE `0.005245375575`, max RSS `67624 KiB`; reservoir65536 tensor scale `0.014696939848`, relative MSE `0.005245252663`, max RSS `68648 KiB`.
+  - interpretation update: for this `mlp_up` tensor, reservoir mode saves about `7-8 MiB` RSS in the inspect workload and has tiny relative-MSE drift, but the tensor scale shifts by `-1.14%` at 1024 samples and `-0.57%` at 65536 samples. Keep exact as default until more families are checked.
 
 ## Current Interpretation
 
@@ -322,6 +334,7 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
+- Check reservoir tensor-scale estimation on more families before changing the default away from exact.
 - Add real-tensor or cross-process golden tests if the C++ kernel changes again; the first pseudo-random BF16/F16 byte-level golden is now in place.
 - Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65, preferably after the full-model loader path is available.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.

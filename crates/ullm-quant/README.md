@@ -59,6 +59,13 @@ For scale-format dry runs, it reports direct group-absmax scale index range,
 clamp counts, and mean relative scale error. This is a range check, not the
 final quantizer scale search.
 
+Tensor-scale estimation defaults to `--tensor-scale-estimator exact`, which
+keeps all positive group target scales so it can use the exact lower median.
+For lower-memory prototype runs, use `--tensor-scale-estimator reservoir` and
+optionally `--tensor-scale-reservoir-size <N>`. Reservoir mode is deterministic
+and bounds stored target scales to `N`, but it is an approximate estimator and
+should be compared against exact mode before changing production defaults.
+
 Codebook inspection example:
 
 ```text

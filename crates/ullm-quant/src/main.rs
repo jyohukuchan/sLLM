@@ -93,6 +93,8 @@ struct Options {
     merge_copy_buffer_bytes: usize,
     merge_overwrite: bool,
     tensor_scale_override: Option<f32>,
+    tensor_scale_estimator: TensorScaleEstimator,
+    tensor_scale_reservoir_size: usize,
     chunk_bytes: usize,
     scale_window: usize,
     aq_policy: String,
@@ -100,6 +102,12 @@ struct Options {
     aq_low_format: String,
     aq_high_format: String,
     dry_run: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TensorScaleEstimator {
+    Exact,
+    Reservoir,
 }
 
 #[derive(Debug, Deserialize)]
@@ -378,6 +386,19 @@ fn parse_positive_f32(flag: &str, value: Option<String>) -> Result<f32, String> 
     Ok(parsed)
 }
 
+fn parse_tensor_scale_estimator(value: Option<String>) -> Result<TensorScaleEstimator, String> {
+    match value
+        .ok_or_else(|| "--tensor-scale-estimator requires a value".to_string())?
+        .as_str()
+    {
+        "exact" => Ok(TensorScaleEstimator::Exact),
+        "reservoir" => Ok(TensorScaleEstimator::Reservoir),
+        other => Err(format!(
+            "--tensor-scale-estimator must be exact or reservoir, got {other}"
+        )),
+    }
+}
+
 fn parse_options() -> Result<Options, String> {
     let mut args = env::args().skip(1);
     let mut options = Options {
@@ -405,6 +426,8 @@ fn parse_options() -> Result<Options, String> {
         merge_copy_buffer_bytes: 8 * 1024 * 1024,
         merge_overwrite: false,
         tensor_scale_override: None,
+        tensor_scale_estimator: TensorScaleEstimator::Exact,
+        tensor_scale_reservoir_size: 65_536,
         chunk_bytes: 64 * 1024 * 1024,
         scale_window: 0,
         aq_policy: "all-g16".to_string(),
@@ -510,6 +533,13 @@ fn parse_options() -> Result<Options, String> {
                 options.tensor_scale_override =
                     Some(parse_positive_f32("--tensor-scale-override", args.next())?)
             }
+            "--tensor-scale-estimator" => {
+                options.tensor_scale_estimator = parse_tensor_scale_estimator(args.next())?
+            }
+            "--tensor-scale-reservoir-size" => {
+                options.tensor_scale_reservoir_size =
+                    parse_usize("--tensor-scale-reservoir-size", args.next())?
+            }
             "--chunk-bytes" => options.chunk_bytes = parse_usize("--chunk-bytes", args.next())?,
             "--scale-window" => {
                 options.scale_window = parse_usize_zero_allowed("--scale-window", args.next())?
@@ -580,6 +610,10 @@ fn print_help() {
     println!("  --merge-copy-buffer-bytes <N> payload copy buffer size for merge");
     println!("  --merge-overwrite             replace existing --merge-output-dir");
     println!("  --tensor-scale-override <F>   skip tensor-scale estimation for prototype output");
+    println!("  --tensor-scale-estimator <ID> exact or reservoir; default exact");
+    println!(
+        "  --tensor-scale-reservoir-size <N> sample cap for reservoir tensor-scale estimation"
+    );
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
     println!(
@@ -1204,12 +1238,73 @@ fn update_aq_group_stats(
     Ok(())
 }
 
+fn next_tensor_scale_sample_u64(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    *state
+}
+
+#[derive(Debug)]
+struct TensorScaleSampleCollector {
+    estimator: TensorScaleEstimator,
+    samples: Vec<f32>,
+    sample_limit: usize,
+    seen: usize,
+    rng_state: u64,
+}
+
+impl TensorScaleSampleCollector {
+    fn new(
+        estimator: TensorScaleEstimator,
+        reservoir_size: usize,
+        estimated_groups: usize,
+    ) -> Self {
+        let capacity = match estimator {
+            TensorScaleEstimator::Exact => estimated_groups,
+            TensorScaleEstimator::Reservoir => reservoir_size.min(estimated_groups),
+        };
+        Self {
+            estimator,
+            samples: Vec::with_capacity(capacity),
+            sample_limit: capacity,
+            seen: 0,
+            rng_state: 0x9e37_79b9_7f4a_7c15,
+        }
+    }
+
+    fn push(&mut self, value: f32) {
+        self.seen += 1;
+        match self.estimator {
+            TensorScaleEstimator::Exact => self.samples.push(value),
+            TensorScaleEstimator::Reservoir => {
+                if self.samples.len() < self.sample_limit {
+                    self.samples.push(value);
+                    return;
+                }
+                if self.sample_limit == 0 {
+                    return;
+                }
+                let index =
+                    (next_tensor_scale_sample_u64(&mut self.rng_state) % self.seen as u64) as usize;
+                if index < self.sample_limit {
+                    self.samples[index] = value;
+                }
+            }
+        }
+    }
+
+    fn lower_median(&mut self) -> Option<f32> {
+        lower_median(&mut self.samples)
+    }
+}
+
 fn collect_group_target_scales(
     dtype: &str,
     bytes: &[u8],
     group_size: usize,
     max_code: f32,
-    target_scales: &mut Vec<f32>,
+    target_scales: &mut TensorScaleSampleCollector,
 ) -> Result<(), String> {
     let element_size = numeric_element_size(dtype)
         .ok_or_else(|| format!("tensor scale estimation is not supported for dtype {dtype}"))?;
@@ -1244,6 +1339,8 @@ fn estimate_tensor_scale(
     group_size: usize,
     scale_values: &[f32],
     codebook: &[f32],
+    estimator: TensorScaleEstimator,
+    reservoir_size: usize,
 ) -> Result<f32, String> {
     if codebook.is_empty() {
         return Err("tensor scale estimation requires a non-empty codebook".to_string());
@@ -1260,7 +1357,8 @@ fn estimate_tensor_scale(
         })?)
         .ok_or_else(|| "tensor scale group byte size overflows".to_string())?;
     let estimated_groups = payload_bytes / group_bytes;
-    let mut target_scales = Vec::with_capacity(estimated_groups);
+    let mut target_scales =
+        TensorScaleSampleCollector::new(estimator, reservoir_size, estimated_groups);
     let max_code = max_codebook_abs(codebook);
     let mut offset = 0usize;
     while offset < payload_bytes {
@@ -1283,7 +1381,7 @@ fn estimate_tensor_scale(
         )?;
         offset += bytes.len();
     }
-    let Some(target_median) = lower_median(&mut target_scales) else {
+    let Some(target_median) = target_scales.lower_median() else {
         return Ok(1.0);
     };
     let mut scale_values_for_median = scale_values.to_vec();
@@ -1710,6 +1808,8 @@ fn write_prototype_tensor(
     chunk_bytes: usize,
     scale_window: usize,
     tensor_scale_override: Option<f32>,
+    tensor_scale_estimator: TensorScaleEstimator,
+    tensor_scale_reservoir_size: usize,
     output_dir: &Path,
 ) -> Result<PrototypeManifest, String> {
     let location = find_tensor_location(model_dir, tensor_name)?;
@@ -1746,6 +1846,8 @@ fn write_prototype_tensor(
             group_size,
             &group_stats.scale_values,
             codebook,
+            tensor_scale_estimator,
+            tensor_scale_reservoir_size,
         )?
     } else {
         1.0
@@ -2422,6 +2524,8 @@ fn inspect_tensor_chunks(
     aq_format: Option<&str>,
     codebook: Option<&[f32]>,
     scale_window: usize,
+    tensor_scale_estimator: TensorScaleEstimator,
+    tensor_scale_reservoir_size: usize,
 ) -> Result<TensorInspectResult, String> {
     let location = find_tensor_location(model_dir, tensor_name)?;
     let payload_bytes = tensor_payload_bytes(&location.header)?;
@@ -2478,6 +2582,8 @@ fn inspect_tensor_chunks(
                 group_stats.group_size,
                 &group_stats.scale_values,
                 codebook_values,
+                tensor_scale_estimator,
+                tensor_scale_reservoir_size,
             )?
         } else {
             1.0
@@ -2742,6 +2848,8 @@ fn run() -> Result<(), String> {
             options.inspect_aq_format.as_deref(),
             selected_codebook.as_deref(),
             options.scale_window,
+            options.tensor_scale_estimator,
+            options.tensor_scale_reservoir_size,
         )?;
         println!("inspect_tensor={}", inspect.name);
         println!("inspect_source_file={}", inspect.source_file.display());
@@ -2901,6 +3009,8 @@ fn run() -> Result<(), String> {
             options.chunk_bytes,
             options.scale_window,
             options.tensor_scale_override,
+            options.tensor_scale_estimator,
+            options.tensor_scale_reservoir_size,
             output_dir,
         )?;
         let tensor = manifest
@@ -3077,13 +3187,15 @@ fn main() -> ExitCode {
 mod tests {
     use super::{
         AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport, Options,
-        PrototypeManifest, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, bytes_to_lower_hex,
-        choose_best_scale_index_for_group, decode_numeric_value, default_threads, effective_bpp,
-        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, max_codebook_abs,
-        merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats, new_numeric_stats,
-        new_quant_dry_run_stats, numeric_element_size, quant_assignment, read_safetensors_metadata,
-        read_tensor_payload_chunk, resolve_aq_policy, select_codebook, ullm_aq_quantize_chunk_v1,
-        update_aq_group_stats, update_numeric_stats, update_quant_dry_run_stats,
+        PrototypeManifest, TensorScaleEstimator, TensorScaleSampleCollector, ULLM_AQ_DTYPE_BF16,
+        ULLM_AQ_DTYPE_F16, bytes_to_lower_hex, choose_best_scale_index_for_group,
+        decode_numeric_value, default_threads, effective_bpp, empty_aq_quant_metrics,
+        estimate_output_bytes, family_for_tensor, max_codebook_abs, merge_prototype_dirs,
+        nearest_codebook_index, new_aq_group_stats, new_numeric_stats, new_quant_dry_run_stats,
+        numeric_element_size, parse_tensor_scale_estimator, quant_assignment,
+        read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy, select_codebook,
+        ullm_aq_quantize_chunk_v1, update_aq_group_stats, update_numeric_stats,
+        update_quant_dry_run_stats,
     };
     use std::fs;
     use std::io::Write;
@@ -3092,6 +3204,38 @@ mod tests {
     #[test]
     fn default_thread_count_is_nonzero() {
         assert!(default_threads() >= 1);
+    }
+
+    #[test]
+    fn tensor_scale_estimator_parser_accepts_named_modes() {
+        assert_eq!(
+            parse_tensor_scale_estimator(Some("exact".to_string())).expect("exact"),
+            TensorScaleEstimator::Exact
+        );
+        assert_eq!(
+            parse_tensor_scale_estimator(Some("reservoir".to_string())).expect("reservoir"),
+            TensorScaleEstimator::Reservoir
+        );
+        assert!(parse_tensor_scale_estimator(Some("median".to_string())).is_err());
+    }
+
+    #[test]
+    fn tensor_scale_sample_collector_bounds_reservoir_memory() {
+        let mut exact = TensorScaleSampleCollector::new(TensorScaleEstimator::Exact, 2, 8);
+        for value in [4.0f32, 1.0, 3.0, 2.0] {
+            exact.push(value);
+        }
+        assert_eq!(exact.samples.len(), 4);
+        assert_eq!(exact.lower_median(), Some(2.0));
+
+        let mut reservoir =
+            TensorScaleSampleCollector::new(TensorScaleEstimator::Reservoir, 3, 100);
+        for value in 0..32 {
+            reservoir.push(value as f32);
+        }
+        assert_eq!(reservoir.seen, 32);
+        assert_eq!(reservoir.samples.len(), 3);
+        assert!(reservoir.lower_median().is_some());
     }
 
     #[test]
@@ -3132,6 +3276,8 @@ mod tests {
             merge_copy_buffer_bytes: 1024,
             merge_overwrite: false,
             tensor_scale_override: None,
+            tensor_scale_estimator: TensorScaleEstimator::Exact,
+            tensor_scale_reservoir_size: 65_536,
             chunk_bytes: 1024,
             scale_window: 0,
             aq_policy: policy.to_string(),
