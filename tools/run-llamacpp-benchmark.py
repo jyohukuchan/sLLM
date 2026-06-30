@@ -126,6 +126,14 @@ def command_string(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
+def as_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def json_rows(text: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line in text.splitlines():
@@ -308,10 +316,15 @@ def failure_rows(
     engine_version: str | None,
     returncode: int,
     stderr: str,
+    status_override: str | None = None,
+    error_type: str | None = None,
+    message_override: str | None = None,
 ) -> list[dict[str, Any]]:
-    message = stderr.strip().splitlines()[-1] if stderr.strip() else f"llama-bench exited with {returncode}"
+    message = message_override or (stderr.strip().splitlines()[-1] if stderr.strip() else f"llama-bench exited with {returncode}")
     lowered = stderr.lower()
-    status = "oom" if "out of memory" in lowered or ("memory" in lowered and "failed" in lowered) else "failed"
+    status = status_override or (
+        "oom" if "out of memory" in lowered or ("memory" in lowered and "failed" in lowered) else "failed"
+    )
     rows: list[dict[str, Any]] = []
     for prompt in args.prompts:
         for gen in args.gens:
@@ -357,7 +370,7 @@ def failure_rows(
                         "metrics": None,
                         "artifacts": build_artifacts(command, stdout_log, stderr_log),
                         "error": {
-                            "type": status,
+                            "type": error_type or status,
                             "message": message,
                         },
                         "notes": ["llama-bench did not produce usable JSONL rows for this command."],
@@ -413,14 +426,39 @@ def run_llama_bench(
 
     env = os.environ.copy()
     env.setdefault("HIP_VISIBLE_DEVICES", "0,1,2")
-    completed = subprocess.run(
-        command,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            timeout=args.timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = as_text(exc.stdout)
+        stderr = as_text(exc.stderr)
+        stdout_log.write_text(stdout, encoding="utf-8")
+        stderr_log.write_text(stderr, encoding="utf-8")
+        return failure_rows(
+            args=args,
+            run_id=run_id,
+            model=model,
+            target=target,
+            command=command,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+            devices=devices,
+            driver=driver,
+            runtime=runtime,
+            engine_version=engine_version,
+            returncode=-1,
+            stderr=stderr,
+            status_override="failed",
+            error_type="timeout",
+            message_override=f"llama-bench exceeded timeout_seconds={args.timeout_seconds}",
+        )
     stdout_log.write_text(completed.stdout, encoding="utf-8")
     stderr_log.write_text(completed.stderr, encoding="utf-8")
     if completed.returncode != 0:
@@ -595,6 +633,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu-layers", type=int, default=999)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--flash-attn", choices=["on", "off", "auto"], default=None)
+    parser.add_argument("--timeout-seconds", type=int, default=None)
     parser.add_argument("--write-unsupported", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -607,7 +646,7 @@ def main() -> int:
     today = dt.datetime.now(dt.timezone.utc).date().isoformat()
     run_id = args.run_id or f"{today}-llamacpp-rocm-baseline"
     out_dir = args.output_root / today / "llama.cpp"
-    logs_dir = out_dir / "logs"
+    logs_dir = out_dir / "logs" / run_id
     logs_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / f"{run_id}.jsonl"
     engine_version = git_value(args.llama_repo, "describe", "--tags", "--always", "--dirty")
