@@ -1,0 +1,310 @@
+{
+  "schema_version": "ullm-aq-policy-full-conversion-summary-v0.1",
+  "model": "Qwen/Qwen3.5-9B",
+  "date": "2026-07-01",
+  "codebook_json": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.json",
+  "scale_window": 4,
+  "chunk_bytes": 1048576,
+  "policies": {
+    "p4p6": {
+      "conversion_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-inproj-full-quantized.json",
+      "merge_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-inproj-full-quantized.json",
+      "selected_tensors": 255,
+      "failed_tensors": 0,
+      "conversion_wall": "17:08.00",
+      "conversion_max_rss_kib": 22604,
+      "relative_mse": {
+        "min": 0.003639662156,
+        "max": 0.006010608917,
+        "mean": 0.005078796240898039
+      },
+      "families": {
+        "attn_k": {
+          "count": 9,
+          "min": 0.003667359312,
+          "max": 0.003927970222,
+          "mean": 0.003758196033888889
+        },
+        "attn_o": {
+          "count": 9,
+          "min": 0.003639662156,
+          "max": 0.003797789239,
+          "mean": 0.0036811346127777777
+        },
+        "attn_q": {
+          "count": 9,
+          "min": 0.005314884734,
+          "max": 0.005368310821,
+          "mean": 0.005336698986666667
+        },
+        "attn_v": {
+          "count": 9,
+          "min": 0.003797044088,
+          "max": 0.003857622082,
+          "mean": 0.0038280354191111113
+        },
+        "linear_attn_a": {
+          "count": 24,
+          "min": 0.005567015778,
+          "max": 0.006010608917,
+          "mean": 0.005746999971624999
+        },
+        "linear_attn_b": {
+          "count": 24,
+          "min": 0.005454824069,
+          "max": 0.005851166943,
+          "mean": 0.005716373485958333
+        },
+        "linear_attn_out": {
+          "count": 24,
+          "min": 0.003732074646,
+          "max": 0.003780259396,
+          "mean": 0.0037530655953333333
+        },
+        "linear_attn_qkv": {
+          "count": 24,
+          "min": 0.005410547566,
+          "max": 0.005453427404,
+          "mean": 0.005431720500333334
+        },
+        "linear_attn_z": {
+          "count": 24,
+          "min": 0.005314063194,
+          "max": 0.005359601981,
+          "mean": 0.005328908524166666
+        },
+        "mlp_down": {
+          "count": 33,
+          "min": 0.005304337195,
+          "max": 0.005461632439,
+          "mean": 0.00533357309569697
+        },
+        "mlp_gate": {
+          "count": 33,
+          "min": 0.005186197377,
+          "max": 0.005285911704,
+          "mean": 0.005223280056424242
+        },
+        "mlp_up": {
+          "count": 33,
+          "min": 0.005245190541,
+          "max": 0.005290551044,
+          "mean": 0.0052675960023939395
+        }
+      },
+      "merge": {
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-inproj-full-quantized-rust-merged.ullm.d",
+        "tensor_count": 255,
+        "passthrough_tensor_count": 0,
+        "codebook_count": 12,
+        "total_file_bytes": 4049329252
+      },
+      "verify": {
+        "verified_quantized_tensors": 255,
+        "exit_status": 0,
+        "wall": "0:47.90",
+        "max_rss_kib": 104296
+      }
+    },
+    "p4p46": {
+      "conversion_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p46-inproj-full-quantized.json",
+      "merge_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p46-inproj-full-quantized.json",
+      "selected_tensors": 255,
+      "failed_tensors": 0,
+      "conversion_wall": "16:47.74",
+      "conversion_max_rss_kib": 22612,
+      "relative_mse": {
+        "min": 0.003606917819,
+        "max": 0.00573987766,
+        "mean": 0.00462919583607451
+      },
+      "families": {
+        "attn_k": {
+          "count": 9,
+          "min": 0.005399506075,
+          "max": 0.00573987766,
+          "mean": 0.005518134209333333
+        },
+        "attn_o": {
+          "count": 9,
+          "min": 0.003639662156,
+          "max": 0.003797789239,
+          "mean": 0.0036811346127777777
+        },
+        "attn_q": {
+          "count": 9,
+          "min": 0.005314884734,
+          "max": 0.005368310821,
+          "mean": 0.005336698986666667
+        },
+        "attn_v": {
+          "count": 9,
+          "min": 0.003797044088,
+          "max": 0.003857622082,
+          "mean": 0.0038280354191111113
+        },
+        "linear_attn_a": {
+          "count": 24,
+          "min": 0.00367470215,
+          "max": 0.004119881334,
+          "mean": 0.0038580499022083333
+        },
+        "linear_attn_b": {
+          "count": 24,
+          "min": 0.003627763172,
+          "max": 0.004004262306,
+          "mean": 0.0038743400967500004
+        },
+        "linear_attn_out": {
+          "count": 24,
+          "min": 0.003732074646,
+          "max": 0.003780259396,
+          "mean": 0.0037530655953333333
+        },
+        "linear_attn_qkv": {
+          "count": 24,
+          "min": 0.005410547566,
+          "max": 0.005453427404,
+          "mean": 0.005431720500333334
+        },
+        "linear_attn_z": {
+          "count": 24,
+          "min": 0.003606917819,
+          "max": 0.003648894271,
+          "mean": 0.00362291086575
+        },
+        "mlp_down": {
+          "count": 33,
+          "min": 0.005304337195,
+          "max": 0.005461632439,
+          "mean": 0.00533357309569697
+        },
+        "mlp_gate": {
+          "count": 33,
+          "min": 0.005186197377,
+          "max": 0.005285911704,
+          "mean": 0.005223280056424242
+        },
+        "mlp_up": {
+          "count": 33,
+          "min": 0.005245190541,
+          "max": 0.005290551044,
+          "mean": 0.0052675960023939395
+        }
+      },
+      "merge": {
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p46-inproj-full-quantized-rust-merged.ullm.d",
+        "tensor_count": 255,
+        "passthrough_tensor_count": 0,
+        "codebook_count": 12,
+        "total_file_bytes": 4072528801
+      },
+      "verify": {
+        "verified_quantized_tensors": 255,
+        "exit_status": 0,
+        "wall": "0:47.51",
+        "max_rss_kib": 103512
+      }
+    },
+    "p4p65": {
+      "conversion_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p65-inproj-full-quantized.json",
+      "merge_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p65-inproj-full-quantized.json",
+      "selected_tensors": 255,
+      "failed_tensors": 0,
+      "conversion_wall": "16:53.97",
+      "conversion_max_rss_kib": 28748,
+      "relative_mse": {
+        "min": 0.003627763172,
+        "max": 0.005461632439,
+        "mean": 0.004560537962537255
+      },
+      "families": {
+        "attn_k": {
+          "count": 9,
+          "min": 0.003667359312,
+          "max": 0.003927970222,
+          "mean": 0.003758196033888889
+        },
+        "attn_o": {
+          "count": 9,
+          "min": 0.003639662156,
+          "max": 0.003797789239,
+          "mean": 0.0036811346127777777
+        },
+        "attn_q": {
+          "count": 9,
+          "min": 0.005314884734,
+          "max": 0.005368310821,
+          "mean": 0.005336698986666667
+        },
+        "attn_v": {
+          "count": 9,
+          "min": 0.003797044088,
+          "max": 0.003857622082,
+          "mean": 0.0038280354191111113
+        },
+        "linear_attn_a": {
+          "count": 24,
+          "min": 0.00367470215,
+          "max": 0.004119881334,
+          "mean": 0.0038580499022083333
+        },
+        "linear_attn_b": {
+          "count": 24,
+          "min": 0.003627763172,
+          "max": 0.004004262306,
+          "mean": 0.0038743400967500004
+        },
+        "linear_attn_out": {
+          "count": 24,
+          "min": 0.003732074646,
+          "max": 0.003780259396,
+          "mean": 0.0037530655953333333
+        },
+        "linear_attn_qkv": {
+          "count": 24,
+          "min": 0.003638771452,
+          "max": 0.003671954228,
+          "mean": 0.0036562097513749997
+        },
+        "linear_attn_z": {
+          "count": 24,
+          "min": 0.005314063194,
+          "max": 0.005359601981,
+          "mean": 0.005328908524166666
+        },
+        "mlp_down": {
+          "count": 33,
+          "min": 0.005304337195,
+          "max": 0.005461632439,
+          "mean": 0.00533357309569697
+        },
+        "mlp_gate": {
+          "count": 33,
+          "min": 0.005186197377,
+          "max": 0.005285911704,
+          "mean": 0.005223280056424242
+        },
+        "mlp_up": {
+          "count": 33,
+          "min": 0.005245190541,
+          "max": 0.005290551044,
+          "mean": 0.0052675960023939395
+        }
+      },
+      "merge": {
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p65-inproj-full-quantized-rust-merged.ullm.d",
+        "tensor_count": 255,
+        "passthrough_tensor_count": 0,
+        "codebook_count": 12,
+        "total_file_bytes": 4100053929
+      },
+      "verify": {
+        "verified_quantized_tensors": 255,
+        "exit_status": 0,
+        "wall": "0:47.51",
+        "max_rss_kib": 104316
+      }
+    }
+  }
+}

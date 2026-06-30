@@ -284,18 +284,27 @@
   - repeat128 loss smoke result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8-repeat128.jsonl`; log `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8-repeat128.log`; 40 rows, 1016 target tokens, elapsed `10:44.75`, max RSS `16363884 KiB`.
   - repeat128 token-weighted loss delta: all-g16 `+0.001027819`, all-g8 `-0.004386369`, p4p6 `-0.011532098`, p4p46 `-0.006359033`, p4p65 `-0.004686363`.
   - interpretation update: repeat128 loss ranks p4p6 best and p4p46 second. Negative deltas on repeated prompts are not quality proof, but the relative ordering keeps p4p6 as the conservative full-conversion baseline while keeping p4p46 as the strongest in-proj follow-up.
+- In-proj-weighted full quantized prototype conversions completed for p4p6, p4p46, and p4p65.
+  - aggregate summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-summary-qwen35-9b-inproj-full-quantized.json`.
+  - p4p6 full conversion: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-inproj-full-quantized.json`; logs under `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-inproj-full-quantized-logs/`; parts under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-inproj-full-quantized.ullm.parts`; 255 selected, 0 failures, mean relative MSE `0.005078796`, range `0.003639662156` to `0.006010608917`, wall `17:08.00`, max per-tensor RSS `22604 KiB`.
+  - p4p46 full conversion: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p46-inproj-full-quantized.json`; logs under `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p46-inproj-full-quantized-logs/`; parts under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p46-inproj-full-quantized.ullm.parts`; 255 selected, 0 failures, mean relative MSE `0.004629196`, range `0.003606917819` to `0.005739877660`, wall `16:47.74`, max per-tensor RSS `22612 KiB`.
+  - p4p65 full conversion: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p65-inproj-full-quantized.json`; logs under `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p65-inproj-full-quantized-logs/`; parts under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p65-inproj-full-quantized.ullm.parts`; 255 selected, 0 failures, mean relative MSE `0.004560538`, range `0.003627763172` to `0.005461632439`, wall `16:53.97`, max per-tensor RSS `28748 KiB`.
+  - Rust quantized-only merge summaries: p4p6 `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-inproj-full-quantized.json`, p4p46 `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p46-inproj-full-quantized.json`, p4p65 `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p65-inproj-full-quantized.json`.
+  - merged quantized payload bytes: p4p6 `4049329252`, p4p46 `4072528801`, p4p65 `4100053929`; each merge has 255 tensors, 0 passthrough tensors, and 12 codebooks.
+  - merged prototype verification succeeded for all three policies with `--verify-prototype-all`; each verified 255 tensors with exit 0. Verify wall/max RSS: p4p6 `0:47.90` / `104296 KiB`; p4p46 `0:47.51` / `103512 KiB`; p4p65 `0:47.51` / `104316 KiB`.
+  - full tensor-MSE ranking is p4p65 best, p4p46 second, p4p6 third. This conflicts with repeated-prompt next-token loss, which keeps p4p6 as conservative baseline. The next policy decision should use a real-text loss/perplexity run.
 
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and the wider self-attn smoke supports p4p46/p4p65 as real policy candidates, but the repeated-prompt loss smoke still favors p4p6 as the conservative baseline.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, and repeated-prompt next-token loss still favors p4p6.
 
 ## Next
 
 - Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
-- Run full-policy prototype conversion for p4p6, p4p46, and p4p65, using the in-proj-weighted codebooks.
 - Run a less artificial perplexity or next-token loss smoke for p4p6, p4p46, and p4p65 on a real text calibration set.
+- Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Replace the current per-tensor temporary conversion driver with a single `ullm-quant` full-conversion command.

@@ -1398,6 +1398,39 @@ to all-g8. Because this is still an artificial repeated-prompt smoke over only
 signal is relative ordering: p4p6 remains the conservative full-conversion
 baseline, while p4p46 remains the best in-proj follow-up candidate.
 
+A full in-proj-weighted prototype conversion was then run for p4p6, p4p46, and
+p4p65:
+
+- aggregate summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-summary-qwen35-9b-inproj-full-quantized.json`
+- codebooks:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.json`
+- scope: all 255 quantized tensors selected by the plan; passthrough tensors
+  were not included in these three new quantized-only merges.
+- conversion settings: `--chunk-bytes 1048576`, `--scale-window 4`, write-only
+  per-tensor prototype conversion followed by Rust-side merge and
+  `--verify-prototype-all`.
+
+| policy | selected / failed | conversion wall | mean relative MSE | min / max relative MSE | merged bytes | verify |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| p4p6 | 255 / 0 | 17:08.00 | 0.005078796 | 0.003639662 / 0.006010609 | 4,049,329,252 | 255 tensors, exit 0 |
+| p4p46_inproj | 255 / 0 | 16:47.74 | 0.004629196 | 0.003606918 / 0.005739878 | 4,072,528,801 | 255 tensors, exit 0 |
+| p4p65_inproj | 255 / 0 | 16:53.97 | 0.004560538 | 0.003627763 / 0.005461632 | 4,100,053,929 | 255 tensors, exit 0 |
+
+The full tensor-level conversion now ranks p4p65 first by mean relative MSE,
+p4p46 second, and p4p6 third. p4p46 improves the mean relative MSE by about
+8.9% versus p4p6 while adding about 23.2 MB to the merged quantized payload.
+p4p65 improves it by about 10.2% while adding about 50.7 MB. This is still a
+weight-reconstruction metric, not a model-quality result.
+
+The family-level pattern explains the policy tradeoff. p4p46 improves
+`linear_attn_a`, `linear_attn_b`, and `linear_attn_z`, but regresses `attn_k`
+because `attn_k` is low-budget in p4p46. p4p65 restores `attn_k` and improves
+`linear_attn_qkv`, but leaves `linear_attn_z` low-budget. This matches the
+earlier smoke-test split: p4p46 is attractive by final-token logit relative MSE,
+p4p65 by KL and full tensor MSE, while p4p6 is still the conservative choice
+from repeated-prompt next-token loss.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -1410,22 +1443,23 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 - Zero-preserving versus free16 codebooks must be evaluated with model-level quality, not only MSE.
 - GGUF linear-attention comparison must apply the Qwen3.5 V-head reorder used by llama.cpp conversion.
 - Activation weighting now covers Qwen3.5 linear-attention in-projection
-  modules, but tensor-level improvements and logit-level improvements do not
-  rank the same. The wider self-attention smoke nevertheless supports treating
-  p4p46 and p4p65 as named follow-up candidates alongside the conservative
-  p4p6 policy. The repeated-prompt next-token loss smoke keeps p4p6 as the
-  conservative baseline for the next full conversion.
+  modules, and p4p6/p4p46/p4p65 all complete full quantized-tensor prototype
+  conversion plus Rust-side merge/verify. Tensor-level full conversion favors
+  p4p65, wider final-token logit relative MSE favors p4p46, and the
+  repeated-prompt next-token loss smoke still favors p4p6. The next policy
+  decision needs a less artificial real-text loss/perplexity run, not another
+  tensor-only metric.
 
 ## Next Actions
 
-1. Run full-policy prototype conversion for p4p6, p4p46, and p4p65 with the
-   in-proj-weighted codebooks, then compare against the existing p4p6 package.
-2. Replace the current per-tensor temporary conversion driver with a single
+1. Run a less artificial perplexity or next-token loss smoke on a real text
+   calibration set for p4p6, p4p46, and p4p65.
+2. Build full-package p4p46/p4p65 prototypes with passthrough tensors only if
+   packaging or loader work needs them; quantized-only merge/verify already
+   succeeded.
+3. Replace the current per-tensor temporary conversion driver with a single
    `ullm-quant` full-conversion command now that Rust-side merge exists.
-3. Replace or approximate the exact tensor-scale pre-pass before scaling from
-   12 tensors to all policy-selected tensors.
-4. Run a less artificial perplexity or next-token loss smoke on a real text
-   calibration set for p4p6, p4p46, and p4p65; repeated prompts are useful but
-   not enough to settle the policy.
+4. Replace or approximate the exact tensor-scale pre-pass before wider
+   multi-tensor conversion and packaging work.
 5. Add SIMD and multithreaded scheduling only after the scalar C++ semantics
    remain stable across wider conversion.
