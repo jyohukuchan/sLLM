@@ -15,7 +15,7 @@
 | Status | Engine | Model | Family | Quant | Target | Workload | Decode tok/s | Consumed GiB | Decode x GiB | Source |
 | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |
 | ok | ATOM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | 11.86 | 24.11 | 285.98 | `2026-06-30-atom-r9700-qwen3-14b-fp8.jsonl` |
-| ok | ATOM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp512/tg128/b1 | 9.15 | 24.17 | 221.14 | `2026-06-30-atom-r9700-qwen3-14b-fp8.jsonl` |
+| ok | ATOM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp512/tg128/b1 | 18.27 | 24.30 | 444.07 | `2026-06-30-atom-r9700-qwen3-14b-fp8.jsonl` |
 | ok | SGLang | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | 19.12 | 16.75 | 320.37 | `2026-06-30-sglang-r9700-qwen3-14b-fp8.jsonl` |
 | ok | SGLang | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp512/tg128/b1 | 24.99 | 16.81 | 420.12 | `2026-06-30-sglang-r9700-qwen3-14b-fp8.jsonl` |
 | ok | vLLM | Qwen3-14B-FP8 | FP8 | FP8 | R9700 | pp16/tg8/b1 | 5.98 | 28.72 | 171.75 | `2026-06-30-vllm-r9700-qwen3-14b-fp8.jsonl` |
@@ -29,7 +29,7 @@ Earlier failed compatibility attempts remain in the raw JSONL files. This table 
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | vLLM | ok | pp512/tg128/tp1/pp1 | 94.66 | 23.67 | 118.33 | 28.72 | 679.79 |
 | SGLang | ok | pp512/tg128/tp1/pp1 | 49.50 | 24.99 | 74.49 | 16.81 | 420.12 |
-| ATOM | ok | pp512/tg128/tp1/pp1 | 36.60 | 9.15 | 45.75 | 24.17 | 221.14 |
+| ATOM | ok | pp512/tg128/tp1/pp1 | 73.09 | 18.27 | 91.37 | 24.30 | 444.07 |
 
 ## Environment Notes
 
@@ -45,11 +45,12 @@ Earlier failed compatibility attempts remain in the raw JSONL files. This table 
   - version `amd-aiter==0.1.17.dev155+g71829a74b`
   - install mode: `AITER_USE_SYSTEM_TRITON=1 BUILD_TARGET=rocm GPU_ARCHS=gfx1201 PREBUILD_KERNELS=0`
   - `PREBUILD_KERNELS=1` was not used because the FlyDSL AOT path started compiling a large `gfx950` set despite `GPU_ARCHS=gfx1201`.
-- ATOM source AITER run used `--enforce-eager`, `--block-size 64`, `--kv_cache_dtype bf16`, `--max-num-seqs 1`, and `--max-num-batched-tokens 640` for the representative row.
+- The first ATOM source AITER representative row used `--enforce-eager`, `--block-size 64`, `--kv_cache_dtype bf16`, `--max-num-seqs 1`, and `--max-num-batched-tokens 640`. A follow-up row with the same pp512/tg128 workload removed `--enforce-eager` and improved the wrapper throughput from `9.15` to `18.27` tok/s.
 - ATOM `benchmark_serving` requires percentile `99` when saving the PyTorch benchmark sidecar; `50,95` alone produced a post-benchmark `KeyError: 'p99_ttft_ms'` even though the request completed.
+- ATOM official recipe comparisons should use TPOT-derived speed, `1000 / mean_tpot_ms`, not the wrapper `output_throughput`. The local Qwen3-8B-FP8 official-like CUDAGraph run reached `55.65` TPOT-derived tok/s, matching the official 52.9-class result. Details are in `atom-qwen3-fp8-cause-analysis.md`.
 
 ## Interpretation
 
 - vLLM is currently the best R9700 FP8 baseline by `decode tok/s x consumed GiB` for the representative single-request row, but it consumes about 28.72 GiB.
 - SGLang reaches the highest representative decode tok/s with much lower consumed VRAM than vLLM, but only after local compatibility patches.
-- ATOM becomes runnable on R9700/gfx1201 after replacing the wheel AITER with source AITER HEAD. In this single-request representative row it is slower than vLLM and SGLang and consumes about 24.17 GiB.
+- ATOM becomes runnable on R9700/gfx1201 after replacing the wheel AITER with source AITER HEAD. Without `--enforce-eager`, the single-request representative row is still slower than vLLM and SGLang, but the gap is smaller than the first eager row suggested.
