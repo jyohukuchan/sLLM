@@ -1,2 +1,5 @@
 build/
 reference-src/
+__pycache__/
+*.pyc
+benchmarks/results/**/logs/

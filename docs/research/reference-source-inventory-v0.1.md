@@ -20,7 +20,7 @@ reference-src/
 
 | Project | Local path | Commit | Size | License state | Use |
 | --- | --- | --- | --- | --- | --- |
-| llama.cpp | `reference-src/llama.cpp` | `86b94708f224` | 191M | MIT license found | GGUF, CPU/GPU layout, quantization comparison |
+| llama.cpp | `reference-src/llama.cpp` | `6c5de1cc8353` | 191M | MIT license found | GGUF, CPU/GPU layout, quantization comparison |
 | vLLM | `reference-src/vllm` | `5b4cb6952310` | 144M | Apache-2.0 license found | serving architecture, scheduler, paged attention, benchmark comparison |
 | SGLang | `reference-src/sglang` | `3add35e26dc0` | 125M | Apache-2.0 license found | high-throughput serving, RadixAttention, prefill/decode disaggregation |
 | ATOM | `reference-src/atom` | `cce1a6e56dcd` | 15M | MIT license found | ROCm/HIP kernel and serving comparison |
