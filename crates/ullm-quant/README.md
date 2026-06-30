@@ -55,6 +55,9 @@ For BF16 and F32 tensors, inspection also reports chunked numeric stats such as
 min, max, mean absolute value, and max absolute value.
 With `--inspect-aq-format`, it also reports group-count and group-absmax stats
 using the aq candidate's group size.
+For scale-format dry runs, it reports direct group-absmax scale index range,
+clamp counts, and mean relative scale error. This is a range check, not the
+final quantizer scale search.
 
 Policy presets:
 

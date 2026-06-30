@@ -91,10 +91,18 @@ struct NumericStats {
 #[derive(Clone, Debug)]
 struct AqGroupStats {
     format: String,
+    scale_format: String,
+    scale_values: Vec<f32>,
     group_size: usize,
     groups: usize,
     sum_absmax: f64,
     max_absmax: f32,
+    zero_absmax_groups: usize,
+    scale_index_min: usize,
+    scale_index_max: usize,
+    scale_clamped_low: usize,
+    scale_clamped_high: usize,
+    sum_scale_relative_error: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -414,6 +422,77 @@ fn aq_group_size(format: &str) -> Result<usize, String> {
     }
 }
 
+fn aq_scale_format(format: &str) -> Result<&'static str, String> {
+    if format.contains("_e8m0_") {
+        Ok("e8m0")
+    } else if format.contains("_e5m2_") {
+        Ok("e5m2")
+    } else if format.contains("_e4m3_") {
+        Ok("e4m3")
+    } else if format.contains("_ue5m3_") {
+        Ok("ue5m3")
+    } else {
+        Err(format!(
+            "cannot infer aq scale format from format: {format}"
+        ))
+    }
+}
+
+fn decode_e8m0() -> Vec<f32> {
+    (0..255).map(|code| 2.0f32.powi(code - 127)).collect()
+}
+
+fn decode_ieee_like_float(exp_bits: u32, mant_bits: u32, bias: i32) -> Vec<f32> {
+    let mut values = Vec::new();
+    let max_exp = (1u32 << exp_bits) - 1;
+    for exp in 0..max_exp {
+        for mant in 0..(1u32 << mant_bits) {
+            if exp == 0 {
+                if mant == 0 {
+                    continue;
+                }
+                values.push((mant as f32 / (1u32 << mant_bits) as f32) * 2.0f32.powi(1 - bias));
+            } else {
+                values.push(
+                    (1.0 + mant as f32 / (1u32 << mant_bits) as f32)
+                        * 2.0f32.powi(exp as i32 - bias),
+                );
+            }
+        }
+    }
+    values.sort_by(|left, right| left.total_cmp(right));
+    values.dedup_by(|left, right| left == right);
+    values
+}
+
+fn scale_values(scale_format: &str) -> Result<Vec<f32>, String> {
+    match scale_format {
+        "e8m0" => Ok(decode_e8m0()),
+        "e5m2" => Ok(decode_ieee_like_float(5, 2, 15)),
+        "e4m3" => Ok(decode_ieee_like_float(4, 3, 7)),
+        "ue5m3" => Ok(decode_ieee_like_float(5, 3, 15)),
+        _ => Err(format!("unknown aq scale format: {scale_format}")),
+    }
+}
+
+fn nearest_scale_index(target: f32, scales: &[f32]) -> (usize, bool, bool) {
+    debug_assert!(!scales.is_empty());
+    if target <= scales[0] {
+        return (0, target < scales[0], false);
+    }
+    let last = scales.len() - 1;
+    if target >= scales[last] {
+        return (last, false, target > scales[last]);
+    }
+    let idx = scales.partition_point(|scale| *scale < target);
+    let prev = idx - 1;
+    if (target - scales[prev]).abs() < (target - scales[idx]).abs() {
+        (prev, false, false)
+    } else {
+        (idx, false, false)
+    }
+}
+
 fn div_ceil(value: usize, divisor: usize) -> usize {
     value.div_ceil(divisor)
 }
@@ -627,14 +706,24 @@ fn update_numeric_stats(dtype: &str, bytes: &[u8], stats: &mut NumericStats) -> 
     Ok(())
 }
 
-fn new_aq_group_stats(format: &str, group_size: usize) -> AqGroupStats {
-    AqGroupStats {
+fn new_aq_group_stats(format: &str, group_size: usize) -> Result<AqGroupStats, String> {
+    let scale_format = aq_scale_format(format)?;
+    let scale_values = scale_values(scale_format)?;
+    Ok(AqGroupStats {
         format: format.to_string(),
+        scale_format: scale_format.to_string(),
+        scale_values,
         group_size,
         groups: 0,
         sum_absmax: 0.0,
         max_absmax: 0.0,
-    }
+        zero_absmax_groups: 0,
+        scale_index_min: usize::MAX,
+        scale_index_max: 0,
+        scale_clamped_low: 0,
+        scale_clamped_high: 0,
+        sum_scale_relative_error: 0.0,
+    })
 }
 
 fn update_aq_group_stats(
@@ -666,6 +755,22 @@ fn update_aq_group_stats(
         stats.groups += 1;
         stats.sum_absmax += f64::from(absmax);
         stats.max_absmax = stats.max_absmax.max(absmax);
+        if absmax == 0.0 {
+            stats.zero_absmax_groups += 1;
+            continue;
+        }
+        let (scale_index, clamped_low, clamped_high) =
+            nearest_scale_index(absmax, &stats.scale_values);
+        stats.scale_index_min = stats.scale_index_min.min(scale_index);
+        stats.scale_index_max = stats.scale_index_max.max(scale_index);
+        if clamped_low {
+            stats.scale_clamped_low += 1;
+        }
+        if clamped_high {
+            stats.scale_clamped_high += 1;
+        }
+        let scale_value = stats.scale_values[scale_index];
+        stats.sum_scale_relative_error += f64::from((scale_value - absmax).abs() / absmax);
     }
     Ok(())
 }
@@ -711,7 +816,7 @@ fn inspect_tensor_chunks(
                 "tensor payload bytes {payload_bytes} are not divisible by group byte size {group_bytes}"
             ));
         }
-        Some(new_aq_group_stats(format, group_size))
+        Some(new_aq_group_stats(format, group_size)?)
     } else {
         None
     };
@@ -962,6 +1067,8 @@ fn run() -> Result<(), String> {
         }
         if let Some(stats) = &inspect.aq_group_stats {
             println!("inspect_aq_format={}", stats.format);
+            println!("inspect_aq_scale_format={}", stats.scale_format);
+            println!("inspect_aq_scale_count={}", stats.scale_values.len());
             println!("inspect_aq_group_size={}", stats.group_size);
             println!("inspect_aq_groups={}", stats.groups);
             if stats.groups > 0 {
@@ -970,6 +1077,18 @@ fn run() -> Result<(), String> {
                     stats.sum_absmax / stats.groups as f64
                 );
                 println!("inspect_aq_group_absmax_max={:.9}", stats.max_absmax);
+                println!("inspect_aq_zero_absmax_groups={}", stats.zero_absmax_groups);
+                if stats.groups > stats.zero_absmax_groups {
+                    println!("inspect_aq_scale_index_min={}", stats.scale_index_min);
+                    println!("inspect_aq_scale_index_max={}", stats.scale_index_max);
+                    println!("inspect_aq_scale_clamped_low={}", stats.scale_clamped_low);
+                    println!("inspect_aq_scale_clamped_high={}", stats.scale_clamped_high);
+                    println!(
+                        "inspect_aq_scale_relative_error_mean={:.9}",
+                        stats.sum_scale_relative_error
+                            / (stats.groups - stats.zero_absmax_groups) as f64
+                    );
+                }
             }
         }
     }
@@ -1112,7 +1231,7 @@ mod tests {
 
     #[test]
     fn aq_group_stats_track_absmax_per_group() {
-        let mut stats = new_aq_group_stats("aq4_e4m3_g2_test", 2);
+        let mut stats = new_aq_group_stats("aq4_e4m3_g2_test", 2).expect("group stats");
         let payload = [
             0x80, 0x3f, // 1.0
             0x00, 0xc0, // -2.0
@@ -1123,5 +1242,9 @@ mod tests {
         assert_eq!(stats.groups, 2);
         assert_eq!(stats.max_absmax, 3.0);
         assert_eq!(stats.sum_absmax, 5.0);
+        assert_eq!(stats.zero_absmax_groups, 0);
+        assert_eq!(stats.scale_format, "e4m3");
+        assert_eq!(stats.scale_values.len(), 119);
+        assert!(stats.scale_index_min <= stats.scale_index_max);
     }
 }
