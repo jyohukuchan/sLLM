@@ -633,6 +633,32 @@ file, and scale-index file, reconstructs values from the original safetensors
 payload, and fails if relative MSE differs from the in-flight manifest metric by
 more than `1e-9`.
 
+For a larger write-only benchmark, `ullm-quant` was run with `--skip-inspect`
+and `--prototype-skip-verify` so that the timing covers tensor-scale estimation
+plus prototype quantize/write, without duplicate inspection or re-read verify.
+The binary output was written under `/tmp` and only the run log was retained in
+the repository.
+
+Run log:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-write-benchmark-qwen35-9b-layer0-mlp-up-g16-scale-window4.txt`
+
+| item | value |
+| --- | ---: |
+| tensor | `model.language_model.layers.0.mlp.up_proj.weight` |
+| elements | 50,331,648 |
+| groups | 3,145,728 |
+| relative MSE | 0.005283509762 |
+| idx4 bytes | 25,165,824 |
+| scale bytes | 3,145,728 |
+| elapsed wall time | 8.76 s |
+| maximum RSS | 21,560 KiB |
+| elements/s | 5,745,622 |
+
+This is still scalar Rust prototype code and reads the source tensor twice
+because tensor scale is estimated before quantization. It is useful as a
+correctness and memory baseline, not as the intended final CPU throughput.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

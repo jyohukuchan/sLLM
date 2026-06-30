@@ -29,11 +29,13 @@ struct Options {
     model_dir: Option<PathBuf>,
     plan_output: Option<PathBuf>,
     inspect_tensor: Option<String>,
+    skip_inspect: bool,
     inspect_aq_format: Option<String>,
     codebook_json: Option<PathBuf>,
     inspect_codebook_family: Option<String>,
     inspect_codebook_candidate: Option<String>,
     prototype_output_dir: Option<PathBuf>,
+    prototype_verify: bool,
     chunk_bytes: usize,
     scale_window: usize,
     aq_policy: String,
@@ -272,11 +274,13 @@ fn parse_options() -> Result<Options, String> {
         model_dir: None,
         plan_output: None,
         inspect_tensor: None,
+        skip_inspect: false,
         inspect_aq_format: None,
         codebook_json: None,
         inspect_codebook_family: None,
         inspect_codebook_candidate: None,
         prototype_output_dir: None,
+        prototype_verify: true,
         chunk_bytes: 64 * 1024 * 1024,
         scale_window: 0,
         aq_policy: "all-g16".to_string(),
@@ -308,6 +312,7 @@ fn parse_options() -> Result<Options, String> {
                         .ok_or_else(|| "--inspect-tensor requires a value".to_string())?,
                 );
             }
+            "--skip-inspect" => options.skip_inspect = true,
             "--inspect-aq-format" => {
                 options.inspect_aq_format = Some(
                     args.next()
@@ -338,6 +343,7 @@ fn parse_options() -> Result<Options, String> {
                         "--prototype-output-dir requires a value".to_string()
                     })?));
             }
+            "--prototype-skip-verify" => options.prototype_verify = false,
             "--chunk-bytes" => options.chunk_bytes = parse_usize("--chunk-bytes", args.next())?,
             "--scale-window" => {
                 options.scale_window = parse_usize_zero_allowed("--scale-window", args.next())?
@@ -388,11 +394,13 @@ fn print_help() {
     println!(
         "  --inspect-tensor <NAME>       read one tensor payload in chunks and print checksum"
     );
+    println!("  --skip-inspect                use --inspect-tensor only as a target selector");
     println!("  --inspect-aq-format <ID>      also compute group absmax stats for an aq format");
     println!("  --codebook-json <PATH>        exported aq family codebook JSON");
     println!("  --inspect-codebook-family <F> inspect one family from --codebook-json");
     println!("  --inspect-codebook-candidate <ID>");
     println!("  --prototype-output-dir <PATH> write one inspected tensor to a .ullm.d prototype");
+    println!("  --prototype-skip-verify       skip prototype re-read/dequant verification");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
     println!("  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, or custom");
@@ -1965,7 +1973,11 @@ fn run() -> Result<(), String> {
             plan.estimated_output_to_input_ratio
         );
     }
-    if let Some(tensor_name) = options.inspect_tensor.as_deref() {
+    if let Some(tensor_name) = options
+        .inspect_tensor
+        .as_deref()
+        .filter(|_| !options.skip_inspect)
+    {
         let model_dir = options
             .model_dir
             .as_deref()
@@ -2155,36 +2167,41 @@ fn run() -> Result<(), String> {
             "prototype_max_abs_error={:.9}",
             tensor.metrics.max_abs_error
         );
-        let verification = verify_prototype_tensor(output_dir, 0, options.chunk_bytes)?;
-        let relative_mse_delta = (verification.relative_mse - tensor.metrics.relative_mse).abs();
-        if relative_mse_delta > 1e-9 {
-            return Err(format!(
-                "prototype verification relative MSE delta {relative_mse_delta:.12} exceeds tolerance"
-            ));
+        if options.prototype_verify {
+            let verification = verify_prototype_tensor(output_dir, 0, options.chunk_bytes)?;
+            let relative_mse_delta =
+                (verification.relative_mse - tensor.metrics.relative_mse).abs();
+            if relative_mse_delta > 1e-9 {
+                return Err(format!(
+                    "prototype verification relative MSE delta {relative_mse_delta:.12} exceeds tolerance"
+                ));
+            }
+            println!("prototype_verify_elements={}", verification.elements);
+            println!("prototype_verify_groups={}", verification.groups);
+            println!("prototype_verify_mse={:.12}", verification.mse);
+            println!(
+                "prototype_verify_relative_mse={:.12}",
+                verification.relative_mse
+            );
+            println!(
+                "prototype_verify_max_abs_error={:.9}",
+                verification.max_abs_error
+            );
+            println!(
+                "prototype_verify_index_file_bytes={}",
+                verification.index_file_bytes
+            );
+            println!(
+                "prototype_verify_scale_file_bytes={}",
+                verification.scale_file_bytes
+            );
+            println!(
+                "prototype_verify_codebook_entries={}",
+                verification.codebook_entries
+            );
+        } else {
+            println!("prototype_verify=skipped");
         }
-        println!("prototype_verify_elements={}", verification.elements);
-        println!("prototype_verify_groups={}", verification.groups);
-        println!("prototype_verify_mse={:.12}", verification.mse);
-        println!(
-            "prototype_verify_relative_mse={:.12}",
-            verification.relative_mse
-        );
-        println!(
-            "prototype_verify_max_abs_error={:.9}",
-            verification.max_abs_error
-        );
-        println!(
-            "prototype_verify_index_file_bytes={}",
-            verification.index_file_bytes
-        );
-        println!(
-            "prototype_verify_scale_file_bytes={}",
-            verification.scale_file_bytes
-        );
-        println!(
-            "prototype_verify_codebook_entries={}",
-            verification.codebook_entries
-        );
     }
     if let (Some(plan), Some(output)) = (&plan, options.plan_output.as_deref()) {
         let text = serde_json::to_string_pretty(plan)
@@ -2249,11 +2266,13 @@ mod tests {
             model_dir: None,
             plan_output: None,
             inspect_tensor: None,
+            skip_inspect: false,
             inspect_aq_format: None,
             codebook_json: None,
             inspect_codebook_family: None,
             inspect_codebook_candidate: None,
             prototype_output_dir: None,
+            prototype_verify: true,
             chunk_bytes: 1024,
             scale_window: 0,
             aq_policy: policy.to_string(),

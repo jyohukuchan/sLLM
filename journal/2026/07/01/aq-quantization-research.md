@@ -188,6 +188,9 @@
   - first real prototype output: `benchmarks/results/2026-07-01/aq/prototype-qwen35-9b-layer3-attn-k-g8-scale-window4.ullm.d/`.
   - prototype tensor `model.language_model.layers.3.self_attn.k_proj.weight`: idx4 bytes `2097152`, scale bytes `524288`, relative MSE `0.003677692937`, verified relative MSE `0.003677692937`.
   - prototype write log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-write-qwen35-9b-layer3-attn-k-g8-scale-window4.txt`; elapsed `1.71 s`, max RSS `8232 KiB`.
+  - added `--skip-inspect` and `--prototype-skip-verify` so write-only prototype benchmarks do not rerun duplicate inspection or re-read verification.
+  - larger scalar Rust write-only benchmark: `model.language_model.layers.0.mlp.up_proj.weight`, `aq4_e4m3_g16_ts_flloyd16`, output written under `/tmp`, log retained at `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-write-benchmark-qwen35-9b-layer0-mlp-up-g16-scale-window4.txt`.
+  - `mlp_up` write-only benchmark: relative MSE `0.005283509762`, idx4 bytes `25165824`, scale bytes `3145728`, elapsed `8.76 s`, max RSS `21560 KiB`, throughput about `5.75M` elements/s.
 
 ## Current Interpretation
 
@@ -197,7 +200,6 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Split inspect/write/verify modes so prototype writes do not run duplicate inspection work.
-- Record larger-tensor throughput and peak RSS, starting with `mlp_up` g16.
 - Move hot quantization loops from scalar Rust prototype code into C++20 kernels.
+- Reduce or fuse the tensor-scale pre-pass, because current prototype reads the source tensor twice.
 - Extend the output path from one tensor to all tensors selected by the p4p6 plan.

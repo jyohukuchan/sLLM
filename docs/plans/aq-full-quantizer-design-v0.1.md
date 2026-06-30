@@ -292,6 +292,19 @@ Rust implementation status:
   - scale bytes: `524288`
   - wall time: `1.71 s`
   - peak RSS: `8232 KiB`
+- `--skip-inspect` and `--prototype-skip-verify` allow write-only benchmark
+  runs without duplicate inspection or re-read verification.
+- Larger scalar Rust prototype benchmark:
+  - tensor: `model.language_model.layers.0.mlp.up_proj.weight`
+  - candidate: `aq4_e4m3_g16_ts_flloyd16`
+  - relative MSE: `0.005283509762`
+  - idx4 bytes: `25165824`
+  - scale bytes: `3145728`
+  - wall time: `8.76 s`
+  - peak RSS: `21560 KiB`
+  - throughput: about `5.75M` elements/s
+  - note: source tensor is read twice because tensor-scale estimation is still
+    a pre-pass.
 
 ## Output Directory Prototype
 
@@ -369,10 +382,11 @@ Performance tests:
 
 ## Immediate Steps
 
-1. Split inspect, write, and verify modes so prototype writes do not rerun the
-   inspection pass unnecessarily.
-2. Record larger-tensor throughput and peak RSS, starting with `mlp_up` g16.
-3. Move hot loops from scalar Rust prototype code into C++20 kernels.
-4. Extend from one tensor to all tensors selected by the p4p6 plan.
-5. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
+1. Move hot loops from scalar Rust prototype code into C++20 kernels:
+   best-scale search, nearest-codebook assignment, index packing, and metric
+   accumulation.
+2. Avoid the tensor-scale pre-pass where possible by either storing group amax
+   summaries or fusing estimation with a bounded histogram.
+3. Extend from one tensor to all tensors selected by the p4p6 plan.
+4. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.
