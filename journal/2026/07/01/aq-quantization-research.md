@@ -230,6 +230,10 @@
   - full quantized conversion selected all 255 p4p6 quantized tensors, including 7 MTP linear tensors, and skipped per-tensor re-read verification; all 255 returned success. Relative MSE ranged from `0.003639662156` (`attn_o`) to `0.005783048676` (`linear_attn_a`). Driver elapsed `17:23.16`, max RSS `22616 KiB`, parts directory size `3.8 GiB`.
   - merged full quantized summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-quantized.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-merged.ullm.d`; tensor count `255`, codebook count `12`, total file bytes `4049329404`.
   - merged full quantized verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-quantized.txt`; all 255 tensors verified; elapsed `47.48 s`, max RSS `103892 KiB`; relative-MSE values matched summary with max delta about `1e-12`.
+  - extended `tools/merge-ullm-prototype-dirs.py` with optional `--include-passthrough`, `--plan-json`, and `--copy-buffer-bytes`. It streams safetensors payloads for passthrough tensors into `passthrough/*.raw` and records them in top-level manifest field `passthrough_tensors`.
+  - full-package prototype summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-package.json`; merge log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-package.log`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-package.ullm.d`.
+  - full-package prototype has 255 quantized tensors, 520 passthrough tensors, 12 codebooks, passthrough payload bytes `5049777120`, total file bytes `9099409599`, directory size `8.5 GiB`. Merge elapsed `8.71 s`, max RSS `36240 KiB`.
+  - existing Rust verifier accepts the passthrough-extended manifest and verifies the 255 quantized tensors while ignoring `passthrough_tensors`: log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-package.txt`; elapsed `48.63 s`, max RSS `103296 KiB`.
 
 ## Current Interpretation
 
@@ -244,4 +248,4 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Move merge behavior into `ullm-quant` itself so multi-tensor output does not require per-tensor temporary directories.
-- Add passthrough tensors and full-model metadata; current full run covers all 255 quantized tensors but not the 520 passthrough tensors.
+- Move full-package merge behavior into `ullm-quant` itself and add explicit passthrough verifier for payload size/hash.

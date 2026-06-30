@@ -1015,6 +1015,61 @@ The 255-tensor prototype was merged and verified:
 | verify maximum RSS | 103,892 KiB |
 | verification relative-MSE max delta vs summary | about 1e-12 |
 
+### Full-Package Directory Smoke
+
+`tools/merge-ullm-prototype-dirs.py` was extended with an optional
+`--include-passthrough` mode. It copies passthrough safetensors payloads in a
+streaming way and adds them to the manifest under a top-level
+`passthrough_tensors` field. Quantized tensors remain under `tensors`, so the
+existing Rust verifier can continue to verify quantized tensors without seeing
+passthrough entries as quantized data.
+
+Passthrough entry fields:
+
+- `name`
+- `source_file`
+- `dtype`
+- `shape`
+- `family`
+- `elements`
+- `payload_file`
+- `payload_encoding`
+- `payload_bytes`
+- `payload_sha256`
+
+Full package prototype:
+
+- merge summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-package.json`
+- merge log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-package.log`
+- output:
+  `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-package.ullm.d`
+
+| item | value |
+| --- | ---: |
+| quantized tensors | 255 |
+| passthrough tensors | 520 |
+| codebooks | 12 |
+| passthrough payload bytes | 5,049,777,120 |
+| total file bytes | 9,099,409,599 |
+| directory size | 8.5 GiB |
+| merge elapsed wall time | 8.71 s |
+| merge maximum RSS | 36,240 KiB |
+
+The existing Rust prototype verifier also accepts the full-package manifest and
+verified the 255 quantized tensors while ignoring the top-level passthrough
+field:
+
+- verify log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-package.txt`
+
+| item | value |
+| --- | ---: |
+| verified quantized tensors | 255 |
+| verify elapsed wall time | 48.63 s |
+| verify maximum RSS | 103,296 KiB |
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

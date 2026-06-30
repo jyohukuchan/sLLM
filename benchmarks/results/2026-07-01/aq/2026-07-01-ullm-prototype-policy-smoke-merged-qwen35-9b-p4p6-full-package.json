@@ -1,0 +1,4183 @@
+{
+  "codebook_count": 12,
+  "files": [
+    {
+      "bytes": 65536,
+      "path": "tensors/000-model_language_model_layers_0_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/000-model_language_model_layers_0_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/linear_attn_a__aq4_e4m3_g16_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/001-model_language_model_layers_0_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/001-model_language_model_layers_0_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/linear_attn_b__aq4_e4m3_g16_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/002-model_language_model_layers_0_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/002-model_language_model_layers_0_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/linear_attn_qkv__aq4_e4m3_g16_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/003-model_language_model_layers_0_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/003-model_language_model_layers_0_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/linear_attn_z__aq4_e4m3_g16_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/004-model_language_model_layers_0_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/004-model_language_model_layers_0_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/linear_attn_out__aq4_e4m3_g8_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/005-model_language_model_layers_0_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/005-model_language_model_layers_0_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/mlp_down__aq4_e4m3_g16_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/006-model_language_model_layers_0_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/006-model_language_model_layers_0_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/mlp_gate__aq4_e4m3_g16_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/007-model_language_model_layers_0_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/007-model_language_model_layers_0_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/mlp_up__aq4_e4m3_g16_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/008-model_language_model_layers_1_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/008-model_language_model_layers_1_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/009-model_language_model_layers_1_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/009-model_language_model_layers_1_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/010-model_language_model_layers_1_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/010-model_language_model_layers_1_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/011-model_language_model_layers_1_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/011-model_language_model_layers_1_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/012-model_language_model_layers_1_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/012-model_language_model_layers_1_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/013-model_language_model_layers_1_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/013-model_language_model_layers_1_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/014-model_language_model_layers_1_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/014-model_language_model_layers_1_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/015-model_language_model_layers_1_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/015-model_language_model_layers_1_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/016-model_language_model_layers_10_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/016-model_language_model_layers_10_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/017-model_language_model_layers_10_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/017-model_language_model_layers_10_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/018-model_language_model_layers_10_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/018-model_language_model_layers_10_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/019-model_language_model_layers_10_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/019-model_language_model_layers_10_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/020-model_language_model_layers_10_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/020-model_language_model_layers_10_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/021-model_language_model_layers_10_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/021-model_language_model_layers_10_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/022-model_language_model_layers_10_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/022-model_language_model_layers_10_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/023-model_language_model_layers_10_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/023-model_language_model_layers_10_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/024-model_language_model_layers_11_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/024-model_language_model_layers_11_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/025-model_language_model_layers_11_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/025-model_language_model_layers_11_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/026-model_language_model_layers_11_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/026-model_language_model_layers_11_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/027-model_language_model_layers_11_self_attn_k_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/027-model_language_model_layers_11_self_attn_k_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/028-model_language_model_layers_11_self_attn_o_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/028-model_language_model_layers_11_self_attn_o_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/attn_o__aq4_e4m3_g8_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/029-model_language_model_layers_11_self_attn_q_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/029-model_language_model_layers_11_self_attn_q_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/attn_q__aq4_e4m3_g16_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/030-model_language_model_layers_11_self_attn_v_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/030-model_language_model_layers_11_self_attn_v_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/attn_v__aq4_e4m3_g8_ts_flloyd16.f32"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/031-model_language_model_layers_12_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/031-model_language_model_layers_12_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/032-model_language_model_layers_12_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/032-model_language_model_layers_12_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/033-model_language_model_layers_12_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/033-model_language_model_layers_12_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/034-model_language_model_layers_12_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/034-model_language_model_layers_12_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/035-model_language_model_layers_12_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/035-model_language_model_layers_12_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/036-model_language_model_layers_12_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/036-model_language_model_layers_12_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/037-model_language_model_layers_12_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/037-model_language_model_layers_12_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/038-model_language_model_layers_12_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/038-model_language_model_layers_12_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/039-model_language_model_layers_13_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/039-model_language_model_layers_13_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/040-model_language_model_layers_13_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/040-model_language_model_layers_13_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/041-model_language_model_layers_13_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/041-model_language_model_layers_13_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/042-model_language_model_layers_13_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/042-model_language_model_layers_13_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/043-model_language_model_layers_13_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/043-model_language_model_layers_13_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/044-model_language_model_layers_13_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/044-model_language_model_layers_13_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/045-model_language_model_layers_13_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/045-model_language_model_layers_13_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/046-model_language_model_layers_13_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/046-model_language_model_layers_13_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/047-model_language_model_layers_14_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/047-model_language_model_layers_14_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/048-model_language_model_layers_14_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/048-model_language_model_layers_14_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/049-model_language_model_layers_14_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/049-model_language_model_layers_14_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/050-model_language_model_layers_14_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/050-model_language_model_layers_14_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/051-model_language_model_layers_14_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/051-model_language_model_layers_14_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/052-model_language_model_layers_14_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/052-model_language_model_layers_14_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/053-model_language_model_layers_14_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/053-model_language_model_layers_14_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/054-model_language_model_layers_14_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/054-model_language_model_layers_14_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/055-model_language_model_layers_15_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/055-model_language_model_layers_15_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/056-model_language_model_layers_15_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/056-model_language_model_layers_15_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/057-model_language_model_layers_15_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/057-model_language_model_layers_15_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/058-model_language_model_layers_15_self_attn_k_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/058-model_language_model_layers_15_self_attn_k_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/059-model_language_model_layers_15_self_attn_o_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/059-model_language_model_layers_15_self_attn_o_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/060-model_language_model_layers_15_self_attn_q_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/060-model_language_model_layers_15_self_attn_q_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/061-model_language_model_layers_15_self_attn_v_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/061-model_language_model_layers_15_self_attn_v_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/062-model_language_model_layers_16_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/062-model_language_model_layers_16_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/063-model_language_model_layers_16_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/063-model_language_model_layers_16_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/064-model_language_model_layers_16_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/064-model_language_model_layers_16_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/065-model_language_model_layers_16_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/065-model_language_model_layers_16_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/066-model_language_model_layers_16_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/066-model_language_model_layers_16_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/067-model_language_model_layers_16_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/067-model_language_model_layers_16_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/068-model_language_model_layers_16_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/068-model_language_model_layers_16_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/069-model_language_model_layers_16_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/069-model_language_model_layers_16_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/070-model_language_model_layers_17_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/070-model_language_model_layers_17_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/071-model_language_model_layers_17_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/071-model_language_model_layers_17_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/072-model_language_model_layers_17_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/072-model_language_model_layers_17_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/073-model_language_model_layers_17_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/073-model_language_model_layers_17_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/074-model_language_model_layers_17_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/074-model_language_model_layers_17_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/075-model_language_model_layers_17_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/075-model_language_model_layers_17_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/076-model_language_model_layers_17_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/076-model_language_model_layers_17_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/077-model_language_model_layers_17_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/077-model_language_model_layers_17_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/078-model_language_model_layers_18_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/078-model_language_model_layers_18_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/079-model_language_model_layers_18_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/079-model_language_model_layers_18_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/080-model_language_model_layers_18_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/080-model_language_model_layers_18_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/081-model_language_model_layers_18_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/081-model_language_model_layers_18_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/082-model_language_model_layers_18_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/082-model_language_model_layers_18_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/083-model_language_model_layers_18_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/083-model_language_model_layers_18_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/084-model_language_model_layers_18_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/084-model_language_model_layers_18_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/085-model_language_model_layers_18_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/085-model_language_model_layers_18_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/086-model_language_model_layers_19_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/086-model_language_model_layers_19_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/087-model_language_model_layers_19_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/087-model_language_model_layers_19_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/088-model_language_model_layers_19_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/088-model_language_model_layers_19_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/089-model_language_model_layers_19_self_attn_k_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/089-model_language_model_layers_19_self_attn_k_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/090-model_language_model_layers_19_self_attn_o_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/090-model_language_model_layers_19_self_attn_o_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/091-model_language_model_layers_19_self_attn_q_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/091-model_language_model_layers_19_self_attn_q_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/092-model_language_model_layers_19_self_attn_v_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/092-model_language_model_layers_19_self_attn_v_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/093-model_language_model_layers_2_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/093-model_language_model_layers_2_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/094-model_language_model_layers_2_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/094-model_language_model_layers_2_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/095-model_language_model_layers_2_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/095-model_language_model_layers_2_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/096-model_language_model_layers_2_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/096-model_language_model_layers_2_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/097-model_language_model_layers_2_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/097-model_language_model_layers_2_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/098-model_language_model_layers_2_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/098-model_language_model_layers_2_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/099-model_language_model_layers_2_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/099-model_language_model_layers_2_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/100-model_language_model_layers_2_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/100-model_language_model_layers_2_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/101-model_language_model_layers_20_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/101-model_language_model_layers_20_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/102-model_language_model_layers_20_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/102-model_language_model_layers_20_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/103-model_language_model_layers_20_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/103-model_language_model_layers_20_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/104-model_language_model_layers_20_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/104-model_language_model_layers_20_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/105-model_language_model_layers_20_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/105-model_language_model_layers_20_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/106-model_language_model_layers_20_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/106-model_language_model_layers_20_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/107-model_language_model_layers_20_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/107-model_language_model_layers_20_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/108-model_language_model_layers_20_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/108-model_language_model_layers_20_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/109-model_language_model_layers_21_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/109-model_language_model_layers_21_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/110-model_language_model_layers_21_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/110-model_language_model_layers_21_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/111-model_language_model_layers_21_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/111-model_language_model_layers_21_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/112-model_language_model_layers_21_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/112-model_language_model_layers_21_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/113-model_language_model_layers_21_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/113-model_language_model_layers_21_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/114-model_language_model_layers_21_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/114-model_language_model_layers_21_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/115-model_language_model_layers_21_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/115-model_language_model_layers_21_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/116-model_language_model_layers_21_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/116-model_language_model_layers_21_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/117-model_language_model_layers_22_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/117-model_language_model_layers_22_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/118-model_language_model_layers_22_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/118-model_language_model_layers_22_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/119-model_language_model_layers_22_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/119-model_language_model_layers_22_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/120-model_language_model_layers_22_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/120-model_language_model_layers_22_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/121-model_language_model_layers_22_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/121-model_language_model_layers_22_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/122-model_language_model_layers_22_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/122-model_language_model_layers_22_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/123-model_language_model_layers_22_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/123-model_language_model_layers_22_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/124-model_language_model_layers_22_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/124-model_language_model_layers_22_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/125-model_language_model_layers_23_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/125-model_language_model_layers_23_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/126-model_language_model_layers_23_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/126-model_language_model_layers_23_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/127-model_language_model_layers_23_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/127-model_language_model_layers_23_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/128-model_language_model_layers_23_self_attn_k_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/128-model_language_model_layers_23_self_attn_k_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/129-model_language_model_layers_23_self_attn_o_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/129-model_language_model_layers_23_self_attn_o_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/130-model_language_model_layers_23_self_attn_q_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/130-model_language_model_layers_23_self_attn_q_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/131-model_language_model_layers_23_self_attn_v_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/131-model_language_model_layers_23_self_attn_v_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/132-model_language_model_layers_24_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/132-model_language_model_layers_24_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/133-model_language_model_layers_24_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/133-model_language_model_layers_24_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/134-model_language_model_layers_24_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/134-model_language_model_layers_24_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/135-model_language_model_layers_24_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/135-model_language_model_layers_24_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/136-model_language_model_layers_24_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/136-model_language_model_layers_24_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/137-model_language_model_layers_24_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/137-model_language_model_layers_24_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/138-model_language_model_layers_24_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/138-model_language_model_layers_24_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/139-model_language_model_layers_24_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/139-model_language_model_layers_24_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/140-model_language_model_layers_25_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/140-model_language_model_layers_25_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/141-model_language_model_layers_25_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/141-model_language_model_layers_25_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/142-model_language_model_layers_25_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/142-model_language_model_layers_25_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/143-model_language_model_layers_25_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/143-model_language_model_layers_25_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/144-model_language_model_layers_25_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/144-model_language_model_layers_25_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/145-model_language_model_layers_25_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/145-model_language_model_layers_25_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/146-model_language_model_layers_25_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/146-model_language_model_layers_25_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/147-model_language_model_layers_25_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/147-model_language_model_layers_25_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/148-model_language_model_layers_26_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/148-model_language_model_layers_26_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/149-model_language_model_layers_26_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/149-model_language_model_layers_26_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/150-model_language_model_layers_26_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/150-model_language_model_layers_26_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/151-model_language_model_layers_26_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/151-model_language_model_layers_26_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/152-model_language_model_layers_26_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/152-model_language_model_layers_26_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/153-model_language_model_layers_26_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/153-model_language_model_layers_26_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/154-model_language_model_layers_26_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/154-model_language_model_layers_26_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/155-model_language_model_layers_26_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/155-model_language_model_layers_26_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/156-model_language_model_layers_27_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/156-model_language_model_layers_27_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/157-model_language_model_layers_27_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/157-model_language_model_layers_27_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/158-model_language_model_layers_27_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/158-model_language_model_layers_27_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/159-model_language_model_layers_27_self_attn_k_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/159-model_language_model_layers_27_self_attn_k_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/160-model_language_model_layers_27_self_attn_o_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/160-model_language_model_layers_27_self_attn_o_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/161-model_language_model_layers_27_self_attn_q_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/161-model_language_model_layers_27_self_attn_q_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/162-model_language_model_layers_27_self_attn_v_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/162-model_language_model_layers_27_self_attn_v_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/163-model_language_model_layers_28_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/163-model_language_model_layers_28_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/164-model_language_model_layers_28_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/164-model_language_model_layers_28_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/165-model_language_model_layers_28_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/165-model_language_model_layers_28_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/166-model_language_model_layers_28_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/166-model_language_model_layers_28_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/167-model_language_model_layers_28_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/167-model_language_model_layers_28_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/168-model_language_model_layers_28_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/168-model_language_model_layers_28_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/169-model_language_model_layers_28_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/169-model_language_model_layers_28_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/170-model_language_model_layers_28_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/170-model_language_model_layers_28_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/171-model_language_model_layers_29_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/171-model_language_model_layers_29_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/172-model_language_model_layers_29_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/172-model_language_model_layers_29_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/173-model_language_model_layers_29_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/173-model_language_model_layers_29_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/174-model_language_model_layers_29_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/174-model_language_model_layers_29_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/175-model_language_model_layers_29_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/175-model_language_model_layers_29_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/176-model_language_model_layers_29_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/176-model_language_model_layers_29_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/177-model_language_model_layers_29_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/177-model_language_model_layers_29_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/178-model_language_model_layers_29_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/178-model_language_model_layers_29_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/179-model_language_model_layers_3_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/179-model_language_model_layers_3_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/180-model_language_model_layers_3_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/180-model_language_model_layers_3_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/181-model_language_model_layers_3_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/181-model_language_model_layers_3_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/182-model_language_model_layers_3_self_attn_k_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/182-model_language_model_layers_3_self_attn_k_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/183-model_language_model_layers_3_self_attn_o_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/183-model_language_model_layers_3_self_attn_o_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/184-model_language_model_layers_3_self_attn_q_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/184-model_language_model_layers_3_self_attn_q_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/185-model_language_model_layers_3_self_attn_v_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/185-model_language_model_layers_3_self_attn_v_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/186-model_language_model_layers_30_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/186-model_language_model_layers_30_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/187-model_language_model_layers_30_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/187-model_language_model_layers_30_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/188-model_language_model_layers_30_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/188-model_language_model_layers_30_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/189-model_language_model_layers_30_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/189-model_language_model_layers_30_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/190-model_language_model_layers_30_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/190-model_language_model_layers_30_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/191-model_language_model_layers_30_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/191-model_language_model_layers_30_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/192-model_language_model_layers_30_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/192-model_language_model_layers_30_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/193-model_language_model_layers_30_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/193-model_language_model_layers_30_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/194-model_language_model_layers_31_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/194-model_language_model_layers_31_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/195-model_language_model_layers_31_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/195-model_language_model_layers_31_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/196-model_language_model_layers_31_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/196-model_language_model_layers_31_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/197-model_language_model_layers_31_self_attn_k_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/197-model_language_model_layers_31_self_attn_k_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/198-model_language_model_layers_31_self_attn_o_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/198-model_language_model_layers_31_self_attn_o_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/199-model_language_model_layers_31_self_attn_q_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/199-model_language_model_layers_31_self_attn_q_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/200-model_language_model_layers_31_self_attn_v_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/200-model_language_model_layers_31_self_attn_v_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/201-model_language_model_layers_4_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/201-model_language_model_layers_4_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/202-model_language_model_layers_4_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/202-model_language_model_layers_4_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/203-model_language_model_layers_4_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/203-model_language_model_layers_4_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/204-model_language_model_layers_4_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/204-model_language_model_layers_4_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/205-model_language_model_layers_4_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/205-model_language_model_layers_4_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/206-model_language_model_layers_4_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/206-model_language_model_layers_4_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/207-model_language_model_layers_4_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/207-model_language_model_layers_4_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/208-model_language_model_layers_4_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/208-model_language_model_layers_4_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/209-model_language_model_layers_5_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/209-model_language_model_layers_5_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/210-model_language_model_layers_5_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/210-model_language_model_layers_5_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/211-model_language_model_layers_5_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/211-model_language_model_layers_5_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/212-model_language_model_layers_5_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/212-model_language_model_layers_5_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/213-model_language_model_layers_5_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/213-model_language_model_layers_5_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/214-model_language_model_layers_5_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/214-model_language_model_layers_5_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/215-model_language_model_layers_5_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/215-model_language_model_layers_5_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/216-model_language_model_layers_5_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/216-model_language_model_layers_5_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/217-model_language_model_layers_6_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/217-model_language_model_layers_6_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/218-model_language_model_layers_6_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/218-model_language_model_layers_6_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/219-model_language_model_layers_6_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/219-model_language_model_layers_6_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/220-model_language_model_layers_6_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/220-model_language_model_layers_6_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/221-model_language_model_layers_6_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/221-model_language_model_layers_6_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/222-model_language_model_layers_6_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/222-model_language_model_layers_6_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/223-model_language_model_layers_6_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/223-model_language_model_layers_6_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/224-model_language_model_layers_6_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/224-model_language_model_layers_6_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/225-model_language_model_layers_7_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/225-model_language_model_layers_7_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/226-model_language_model_layers_7_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/226-model_language_model_layers_7_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/227-model_language_model_layers_7_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/227-model_language_model_layers_7_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/228-model_language_model_layers_7_self_attn_k_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/228-model_language_model_layers_7_self_attn_k_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/229-model_language_model_layers_7_self_attn_o_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/229-model_language_model_layers_7_self_attn_o_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/230-model_language_model_layers_7_self_attn_q_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/230-model_language_model_layers_7_self_attn_q_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/231-model_language_model_layers_7_self_attn_v_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/231-model_language_model_layers_7_self_attn_v_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/232-model_language_model_layers_8_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/232-model_language_model_layers_8_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/233-model_language_model_layers_8_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/233-model_language_model_layers_8_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/234-model_language_model_layers_8_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/234-model_language_model_layers_8_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/235-model_language_model_layers_8_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/235-model_language_model_layers_8_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/236-model_language_model_layers_8_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/236-model_language_model_layers_8_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/237-model_language_model_layers_8_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/237-model_language_model_layers_8_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/238-model_language_model_layers_8_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/238-model_language_model_layers_8_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/239-model_language_model_layers_8_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/239-model_language_model_layers_8_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/240-model_language_model_layers_9_linear_attn_in_proj_a_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/240-model_language_model_layers_9_linear_attn_in_proj_a_weight.scale_u8"
+    },
+    {
+      "bytes": 65536,
+      "path": "tensors/241-model_language_model_layers_9_linear_attn_in_proj_b_weight.idx4"
+    },
+    {
+      "bytes": 8192,
+      "path": "tensors/241-model_language_model_layers_9_linear_attn_in_proj_b_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/242-model_language_model_layers_9_linear_attn_in_proj_qkv_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/242-model_language_model_layers_9_linear_attn_in_proj_qkv_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/243-model_language_model_layers_9_linear_attn_in_proj_z_weight.idx4"
+    },
+    {
+      "bytes": 1048576,
+      "path": "tensors/243-model_language_model_layers_9_linear_attn_in_proj_z_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/244-model_language_model_layers_9_linear_attn_out_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/244-model_language_model_layers_9_linear_attn_out_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/245-model_language_model_layers_9_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/245-model_language_model_layers_9_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/246-model_language_model_layers_9_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/246-model_language_model_layers_9_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/247-model_language_model_layers_9_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/247-model_language_model_layers_9_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/248-mtp_layers_0_mlp_down_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/248-mtp_layers_0_mlp_down_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/249-mtp_layers_0_mlp_gate_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/249-mtp_layers_0_mlp_gate_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 25165824,
+      "path": "tensors/250-mtp_layers_0_mlp_up_proj_weight.idx4"
+    },
+    {
+      "bytes": 3145728,
+      "path": "tensors/250-mtp_layers_0_mlp_up_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/251-mtp_layers_0_self_attn_k_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/251-mtp_layers_0_self_attn_k_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 8388608,
+      "path": "tensors/252-mtp_layers_0_self_attn_o_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/252-mtp_layers_0_self_attn_o_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 16777216,
+      "path": "tensors/253-mtp_layers_0_self_attn_q_proj_weight.idx4"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/253-mtp_layers_0_self_attn_q_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2097152,
+      "path": "tensors/254-mtp_layers_0_self_attn_v_proj_weight.idx4"
+    },
+    {
+      "bytes": 524288,
+      "path": "tensors/254-mtp_layers_0_self_attn_v_proj_weight.scale_u8"
+    },
+    {
+      "bytes": 2034237440,
+      "path": "passthrough/000-lm_head_weight.raw"
+    },
+    {
+      "bytes": 2034237440,
+      "path": "passthrough/001-model_language_model_embed_tokens_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/002-model_language_model_layers_0_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/003-model_language_model_layers_0_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/004-model_language_model_layers_0_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/005-model_language_model_layers_0_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/010-model_language_model_layers_0_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/015-model_language_model_layers_0_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/016-model_language_model_layers_1_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/017-model_language_model_layers_1_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/018-model_language_model_layers_1_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/019-model_language_model_layers_1_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/024-model_language_model_layers_1_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/029-model_language_model_layers_1_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/030-model_language_model_layers_10_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/031-model_language_model_layers_10_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/032-model_language_model_layers_10_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/033-model_language_model_layers_10_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/038-model_language_model_layers_10_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/043-model_language_model_layers_10_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/044-model_language_model_layers_11_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/048-model_language_model_layers_11_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/049-model_language_model_layers_11_self_attn_k_norm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/052-model_language_model_layers_11_self_attn_q_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/055-model_language_model_layers_12_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/056-model_language_model_layers_12_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/057-model_language_model_layers_12_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/058-model_language_model_layers_12_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/063-model_language_model_layers_12_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/068-model_language_model_layers_12_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/069-model_language_model_layers_13_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/070-model_language_model_layers_13_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/071-model_language_model_layers_13_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/072-model_language_model_layers_13_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/077-model_language_model_layers_13_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/082-model_language_model_layers_13_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/083-model_language_model_layers_14_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/084-model_language_model_layers_14_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/085-model_language_model_layers_14_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/086-model_language_model_layers_14_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/091-model_language_model_layers_14_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/096-model_language_model_layers_14_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/097-model_language_model_layers_15_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/101-model_language_model_layers_15_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/102-model_language_model_layers_15_self_attn_k_norm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/105-model_language_model_layers_15_self_attn_q_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/108-model_language_model_layers_16_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/109-model_language_model_layers_16_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/110-model_language_model_layers_16_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/111-model_language_model_layers_16_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/116-model_language_model_layers_16_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/121-model_language_model_layers_16_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/122-model_language_model_layers_17_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/123-model_language_model_layers_17_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/124-model_language_model_layers_17_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/125-model_language_model_layers_17_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/130-model_language_model_layers_17_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/135-model_language_model_layers_17_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/136-model_language_model_layers_18_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/137-model_language_model_layers_18_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/138-model_language_model_layers_18_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/139-model_language_model_layers_18_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/144-model_language_model_layers_18_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/149-model_language_model_layers_18_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/150-model_language_model_layers_19_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/154-model_language_model_layers_19_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/155-model_language_model_layers_19_self_attn_k_norm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/158-model_language_model_layers_19_self_attn_q_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/161-model_language_model_layers_2_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/162-model_language_model_layers_2_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/163-model_language_model_layers_2_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/164-model_language_model_layers_2_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/169-model_language_model_layers_2_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/174-model_language_model_layers_2_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/175-model_language_model_layers_20_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/176-model_language_model_layers_20_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/177-model_language_model_layers_20_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/178-model_language_model_layers_20_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/183-model_language_model_layers_20_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/188-model_language_model_layers_20_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/189-model_language_model_layers_21_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/190-model_language_model_layers_21_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/191-model_language_model_layers_21_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/192-model_language_model_layers_21_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/197-model_language_model_layers_21_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/202-model_language_model_layers_21_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/203-model_language_model_layers_22_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/204-model_language_model_layers_22_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/205-model_language_model_layers_22_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/206-model_language_model_layers_22_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/211-model_language_model_layers_22_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/216-model_language_model_layers_22_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/217-model_language_model_layers_23_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/221-model_language_model_layers_23_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/222-model_language_model_layers_23_self_attn_k_norm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/225-model_language_model_layers_23_self_attn_q_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/228-model_language_model_layers_24_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/229-model_language_model_layers_24_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/230-model_language_model_layers_24_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/231-model_language_model_layers_24_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/236-model_language_model_layers_24_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/241-model_language_model_layers_24_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/242-model_language_model_layers_25_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/243-model_language_model_layers_25_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/244-model_language_model_layers_25_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/245-model_language_model_layers_25_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/250-model_language_model_layers_25_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/255-model_language_model_layers_25_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/256-model_language_model_layers_26_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/257-model_language_model_layers_26_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/258-model_language_model_layers_26_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/259-model_language_model_layers_26_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/264-model_language_model_layers_26_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/269-model_language_model_layers_26_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/270-model_language_model_layers_27_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/274-model_language_model_layers_27_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/275-model_language_model_layers_27_self_attn_k_norm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/278-model_language_model_layers_27_self_attn_q_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/281-model_language_model_layers_28_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/282-model_language_model_layers_28_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/283-model_language_model_layers_28_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/284-model_language_model_layers_28_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/289-model_language_model_layers_28_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/294-model_language_model_layers_28_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/295-model_language_model_layers_29_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/296-model_language_model_layers_29_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/297-model_language_model_layers_29_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/298-model_language_model_layers_29_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/303-model_language_model_layers_29_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/308-model_language_model_layers_29_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/309-model_language_model_layers_3_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/313-model_language_model_layers_3_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/314-model_language_model_layers_3_self_attn_k_norm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/317-model_language_model_layers_3_self_attn_q_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/320-model_language_model_layers_30_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/321-model_language_model_layers_30_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/322-model_language_model_layers_30_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/323-model_language_model_layers_30_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/328-model_language_model_layers_30_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/333-model_language_model_layers_30_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/334-model_language_model_layers_31_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/338-model_language_model_layers_31_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/339-model_language_model_layers_31_self_attn_k_norm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/342-model_language_model_layers_31_self_attn_q_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/345-model_language_model_layers_4_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/346-model_language_model_layers_4_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/347-model_language_model_layers_4_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/348-model_language_model_layers_4_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/353-model_language_model_layers_4_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/358-model_language_model_layers_4_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/359-model_language_model_layers_5_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/360-model_language_model_layers_5_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/361-model_language_model_layers_5_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/362-model_language_model_layers_5_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/367-model_language_model_layers_5_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/372-model_language_model_layers_5_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/373-model_language_model_layers_6_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/374-model_language_model_layers_6_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/375-model_language_model_layers_6_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/376-model_language_model_layers_6_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/381-model_language_model_layers_6_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/386-model_language_model_layers_6_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/387-model_language_model_layers_7_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/391-model_language_model_layers_7_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/392-model_language_model_layers_7_self_attn_k_norm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/395-model_language_model_layers_7_self_attn_q_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/398-model_language_model_layers_8_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/399-model_language_model_layers_8_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/400-model_language_model_layers_8_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/401-model_language_model_layers_8_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/406-model_language_model_layers_8_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/411-model_language_model_layers_8_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/412-model_language_model_layers_9_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 128,
+      "path": "passthrough/413-model_language_model_layers_9_linear_attn_A_log.raw"
+    },
+    {
+      "bytes": 65536,
+      "path": "passthrough/414-model_language_model_layers_9_linear_attn_conv1d_weight.raw"
+    },
+    {
+      "bytes": 64,
+      "path": "passthrough/415-model_language_model_layers_9_linear_attn_dt_bias.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/420-model_language_model_layers_9_linear_attn_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/425-model_language_model_layers_9_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/426-model_language_model_norm_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/427-model_visual_blocks_0_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/428-model_visual_blocks_0_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/429-model_visual_blocks_0_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/430-model_visual_blocks_0_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/431-model_visual_blocks_0_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/432-model_visual_blocks_0_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/433-model_visual_blocks_0_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/434-model_visual_blocks_0_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/435-model_visual_blocks_0_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/436-model_visual_blocks_0_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/437-model_visual_blocks_0_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/438-model_visual_blocks_0_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/439-model_visual_blocks_1_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/440-model_visual_blocks_1_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/441-model_visual_blocks_1_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/442-model_visual_blocks_1_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/443-model_visual_blocks_1_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/444-model_visual_blocks_1_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/445-model_visual_blocks_1_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/446-model_visual_blocks_1_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/447-model_visual_blocks_1_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/448-model_visual_blocks_1_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/449-model_visual_blocks_1_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/450-model_visual_blocks_1_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/451-model_visual_blocks_10_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/452-model_visual_blocks_10_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/453-model_visual_blocks_10_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/454-model_visual_blocks_10_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/455-model_visual_blocks_10_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/456-model_visual_blocks_10_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/457-model_visual_blocks_10_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/458-model_visual_blocks_10_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/459-model_visual_blocks_10_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/460-model_visual_blocks_10_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/461-model_visual_blocks_10_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/462-model_visual_blocks_10_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/463-model_visual_blocks_11_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/464-model_visual_blocks_11_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/465-model_visual_blocks_11_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/466-model_visual_blocks_11_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/467-model_visual_blocks_11_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/468-model_visual_blocks_11_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/469-model_visual_blocks_11_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/470-model_visual_blocks_11_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/471-model_visual_blocks_11_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/472-model_visual_blocks_11_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/473-model_visual_blocks_11_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/474-model_visual_blocks_11_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/475-model_visual_blocks_12_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/476-model_visual_blocks_12_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/477-model_visual_blocks_12_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/478-model_visual_blocks_12_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/479-model_visual_blocks_12_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/480-model_visual_blocks_12_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/481-model_visual_blocks_12_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/482-model_visual_blocks_12_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/483-model_visual_blocks_12_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/484-model_visual_blocks_12_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/485-model_visual_blocks_12_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/486-model_visual_blocks_12_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/487-model_visual_blocks_13_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/488-model_visual_blocks_13_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/489-model_visual_blocks_13_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/490-model_visual_blocks_13_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/491-model_visual_blocks_13_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/492-model_visual_blocks_13_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/493-model_visual_blocks_13_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/494-model_visual_blocks_13_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/495-model_visual_blocks_13_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/496-model_visual_blocks_13_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/497-model_visual_blocks_13_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/498-model_visual_blocks_13_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/499-model_visual_blocks_14_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/500-model_visual_blocks_14_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/501-model_visual_blocks_14_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/502-model_visual_blocks_14_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/503-model_visual_blocks_14_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/504-model_visual_blocks_14_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/505-model_visual_blocks_14_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/506-model_visual_blocks_14_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/507-model_visual_blocks_14_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/508-model_visual_blocks_14_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/509-model_visual_blocks_14_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/510-model_visual_blocks_14_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/511-model_visual_blocks_15_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/512-model_visual_blocks_15_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/513-model_visual_blocks_15_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/514-model_visual_blocks_15_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/515-model_visual_blocks_15_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/516-model_visual_blocks_15_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/517-model_visual_blocks_15_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/518-model_visual_blocks_15_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/519-model_visual_blocks_15_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/520-model_visual_blocks_15_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/521-model_visual_blocks_15_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/522-model_visual_blocks_15_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/523-model_visual_blocks_16_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/524-model_visual_blocks_16_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/525-model_visual_blocks_16_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/526-model_visual_blocks_16_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/527-model_visual_blocks_16_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/528-model_visual_blocks_16_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/529-model_visual_blocks_16_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/530-model_visual_blocks_16_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/531-model_visual_blocks_16_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/532-model_visual_blocks_16_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/533-model_visual_blocks_16_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/534-model_visual_blocks_16_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/535-model_visual_blocks_17_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/536-model_visual_blocks_17_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/537-model_visual_blocks_17_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/538-model_visual_blocks_17_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/539-model_visual_blocks_17_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/540-model_visual_blocks_17_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/541-model_visual_blocks_17_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/542-model_visual_blocks_17_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/543-model_visual_blocks_17_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/544-model_visual_blocks_17_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/545-model_visual_blocks_17_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/546-model_visual_blocks_17_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/547-model_visual_blocks_18_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/548-model_visual_blocks_18_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/549-model_visual_blocks_18_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/550-model_visual_blocks_18_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/551-model_visual_blocks_18_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/552-model_visual_blocks_18_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/553-model_visual_blocks_18_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/554-model_visual_blocks_18_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/555-model_visual_blocks_18_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/556-model_visual_blocks_18_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/557-model_visual_blocks_18_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/558-model_visual_blocks_18_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/559-model_visual_blocks_19_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/560-model_visual_blocks_19_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/561-model_visual_blocks_19_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/562-model_visual_blocks_19_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/563-model_visual_blocks_19_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/564-model_visual_blocks_19_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/565-model_visual_blocks_19_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/566-model_visual_blocks_19_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/567-model_visual_blocks_19_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/568-model_visual_blocks_19_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/569-model_visual_blocks_19_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/570-model_visual_blocks_19_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/571-model_visual_blocks_2_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/572-model_visual_blocks_2_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/573-model_visual_blocks_2_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/574-model_visual_blocks_2_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/575-model_visual_blocks_2_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/576-model_visual_blocks_2_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/577-model_visual_blocks_2_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/578-model_visual_blocks_2_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/579-model_visual_blocks_2_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/580-model_visual_blocks_2_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/581-model_visual_blocks_2_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/582-model_visual_blocks_2_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/583-model_visual_blocks_20_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/584-model_visual_blocks_20_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/585-model_visual_blocks_20_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/586-model_visual_blocks_20_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/587-model_visual_blocks_20_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/588-model_visual_blocks_20_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/589-model_visual_blocks_20_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/590-model_visual_blocks_20_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/591-model_visual_blocks_20_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/592-model_visual_blocks_20_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/593-model_visual_blocks_20_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/594-model_visual_blocks_20_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/595-model_visual_blocks_21_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/596-model_visual_blocks_21_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/597-model_visual_blocks_21_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/598-model_visual_blocks_21_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/599-model_visual_blocks_21_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/600-model_visual_blocks_21_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/601-model_visual_blocks_21_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/602-model_visual_blocks_21_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/603-model_visual_blocks_21_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/604-model_visual_blocks_21_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/605-model_visual_blocks_21_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/606-model_visual_blocks_21_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/607-model_visual_blocks_22_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/608-model_visual_blocks_22_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/609-model_visual_blocks_22_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/610-model_visual_blocks_22_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/611-model_visual_blocks_22_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/612-model_visual_blocks_22_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/613-model_visual_blocks_22_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/614-model_visual_blocks_22_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/615-model_visual_blocks_22_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/616-model_visual_blocks_22_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/617-model_visual_blocks_22_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/618-model_visual_blocks_22_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/619-model_visual_blocks_23_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/620-model_visual_blocks_23_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/621-model_visual_blocks_23_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/622-model_visual_blocks_23_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/623-model_visual_blocks_23_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/624-model_visual_blocks_23_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/625-model_visual_blocks_23_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/626-model_visual_blocks_23_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/627-model_visual_blocks_23_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/628-model_visual_blocks_23_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/629-model_visual_blocks_23_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/630-model_visual_blocks_23_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/631-model_visual_blocks_24_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/632-model_visual_blocks_24_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/633-model_visual_blocks_24_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/634-model_visual_blocks_24_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/635-model_visual_blocks_24_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/636-model_visual_blocks_24_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/637-model_visual_blocks_24_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/638-model_visual_blocks_24_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/639-model_visual_blocks_24_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/640-model_visual_blocks_24_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/641-model_visual_blocks_24_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/642-model_visual_blocks_24_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/643-model_visual_blocks_25_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/644-model_visual_blocks_25_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/645-model_visual_blocks_25_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/646-model_visual_blocks_25_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/647-model_visual_blocks_25_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/648-model_visual_blocks_25_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/649-model_visual_blocks_25_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/650-model_visual_blocks_25_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/651-model_visual_blocks_25_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/652-model_visual_blocks_25_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/653-model_visual_blocks_25_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/654-model_visual_blocks_25_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/655-model_visual_blocks_26_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/656-model_visual_blocks_26_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/657-model_visual_blocks_26_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/658-model_visual_blocks_26_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/659-model_visual_blocks_26_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/660-model_visual_blocks_26_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/661-model_visual_blocks_26_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/662-model_visual_blocks_26_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/663-model_visual_blocks_26_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/664-model_visual_blocks_26_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/665-model_visual_blocks_26_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/666-model_visual_blocks_26_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/667-model_visual_blocks_3_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/668-model_visual_blocks_3_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/669-model_visual_blocks_3_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/670-model_visual_blocks_3_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/671-model_visual_blocks_3_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/672-model_visual_blocks_3_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/673-model_visual_blocks_3_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/674-model_visual_blocks_3_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/675-model_visual_blocks_3_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/676-model_visual_blocks_3_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/677-model_visual_blocks_3_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/678-model_visual_blocks_3_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/679-model_visual_blocks_4_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/680-model_visual_blocks_4_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/681-model_visual_blocks_4_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/682-model_visual_blocks_4_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/683-model_visual_blocks_4_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/684-model_visual_blocks_4_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/685-model_visual_blocks_4_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/686-model_visual_blocks_4_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/687-model_visual_blocks_4_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/688-model_visual_blocks_4_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/689-model_visual_blocks_4_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/690-model_visual_blocks_4_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/691-model_visual_blocks_5_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/692-model_visual_blocks_5_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/693-model_visual_blocks_5_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/694-model_visual_blocks_5_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/695-model_visual_blocks_5_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/696-model_visual_blocks_5_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/697-model_visual_blocks_5_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/698-model_visual_blocks_5_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/699-model_visual_blocks_5_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/700-model_visual_blocks_5_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/701-model_visual_blocks_5_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/702-model_visual_blocks_5_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/703-model_visual_blocks_6_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/704-model_visual_blocks_6_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/705-model_visual_blocks_6_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/706-model_visual_blocks_6_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/707-model_visual_blocks_6_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/708-model_visual_blocks_6_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/709-model_visual_blocks_6_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/710-model_visual_blocks_6_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/711-model_visual_blocks_6_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/712-model_visual_blocks_6_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/713-model_visual_blocks_6_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/714-model_visual_blocks_6_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/715-model_visual_blocks_7_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/716-model_visual_blocks_7_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/717-model_visual_blocks_7_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/718-model_visual_blocks_7_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/719-model_visual_blocks_7_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/720-model_visual_blocks_7_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/721-model_visual_blocks_7_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/722-model_visual_blocks_7_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/723-model_visual_blocks_7_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/724-model_visual_blocks_7_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/725-model_visual_blocks_7_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/726-model_visual_blocks_7_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/727-model_visual_blocks_8_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/728-model_visual_blocks_8_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/729-model_visual_blocks_8_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/730-model_visual_blocks_8_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/731-model_visual_blocks_8_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/732-model_visual_blocks_8_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/733-model_visual_blocks_8_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/734-model_visual_blocks_8_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/735-model_visual_blocks_8_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/736-model_visual_blocks_8_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/737-model_visual_blocks_8_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/738-model_visual_blocks_8_norm2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/739-model_visual_blocks_9_attn_proj_bias.raw"
+    },
+    {
+      "bytes": 2654208,
+      "path": "passthrough/740-model_visual_blocks_9_attn_proj_weight.raw"
+    },
+    {
+      "bytes": 6912,
+      "path": "passthrough/741-model_visual_blocks_9_attn_qkv_bias.raw"
+    },
+    {
+      "bytes": 7962624,
+      "path": "passthrough/742-model_visual_blocks_9_attn_qkv_weight.raw"
+    },
+    {
+      "bytes": 8608,
+      "path": "passthrough/743-model_visual_blocks_9_mlp_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/744-model_visual_blocks_9_mlp_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/745-model_visual_blocks_9_mlp_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 9916416,
+      "path": "passthrough/746-model_visual_blocks_9_mlp_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/747-model_visual_blocks_9_norm1_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/748-model_visual_blocks_9_norm1_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/749-model_visual_blocks_9_norm2_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/750-model_visual_blocks_9_norm2_weight.raw"
+    },
+    {
+      "bytes": 9216,
+      "path": "passthrough/751-model_visual_merger_linear_fc1_bias.raw"
+    },
+    {
+      "bytes": 42467328,
+      "path": "passthrough/752-model_visual_merger_linear_fc1_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/753-model_visual_merger_linear_fc2_bias.raw"
+    },
+    {
+      "bytes": 37748736,
+      "path": "passthrough/754-model_visual_merger_linear_fc2_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/755-model_visual_merger_norm_bias.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/756-model_visual_merger_norm_weight.raw"
+    },
+    {
+      "bytes": 2304,
+      "path": "passthrough/757-model_visual_patch_embed_proj_bias.raw"
+    },
+    {
+      "bytes": 3538944,
+      "path": "passthrough/758-model_visual_patch_embed_proj_weight.raw"
+    },
+    {
+      "bytes": 5308416,
+      "path": "passthrough/759-model_visual_pos_embed_weight.raw"
+    },
+    {
+      "bytes": 67108864,
+      "path": "passthrough/760-mtp_fc_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/761-mtp_layers_0_input_layernorm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/765-mtp_layers_0_post_attention_layernorm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/766-mtp_layers_0_self_attn_k_norm_weight.raw"
+    },
+    {
+      "bytes": 512,
+      "path": "passthrough/769-mtp_layers_0_self_attn_q_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/772-mtp_norm_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/773-mtp_pre_fc_norm_embedding_weight.raw"
+    },
+    {
+      "bytes": 8192,
+      "path": "passthrough/774-mtp_pre_fc_norm_hidden_weight.raw"
+    },
+    {
+      "bytes": 686559,
+      "path": "manifest.json"
+    }
+  ],
+  "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-package.ullm.d",
+  "passthrough_tensor_count": 520,
+  "policy_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized.json",
+  "schema_version": "ullm-prototype-merge-summary-v0.1",
+  "tensor_count": 255,
+  "total_file_bytes": 9099409599
+}

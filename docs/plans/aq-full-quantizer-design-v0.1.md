@@ -458,6 +458,30 @@ Rust implementation status:
     `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-quantized.txt`
   - merged verification wall time: `47.48 s`
   - merged verification peak RSS: `103892 KiB`
+- Full p4p6 package-directory prototype:
+  - `tools/merge-ullm-prototype-dirs.py` now supports optional
+    `--include-passthrough`.
+  - passthrough tensors are copied from source safetensors payloads in a
+    streaming way into `passthrough/*.raw`.
+  - manifest keeps quantized tensors under `tensors` and adds top-level
+    `passthrough_tensors` entries with `payload_file`, `payload_encoding`,
+    `payload_bytes`, and `payload_sha256`.
+  - merge summary:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-package.json`
+  - output:
+    `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-package.ullm.d`
+  - quantized tensor count: `255`
+  - passthrough tensor count: `520`
+  - codebook count: `12`
+  - passthrough payload bytes: `5049777120`
+  - total file bytes: `9099409599`
+  - directory size: `8.5 GiB`
+  - merge wall time: `8.71 s`
+  - merge peak RSS: `36240 KiB`
+  - existing Rust verifier accepts the manifest and verifies the 255 quantized
+    tensors while ignoring `passthrough_tensors`.
+  - full-package verifier log:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-package.txt`
 
 ## Output Directory Prototype
 
@@ -546,7 +570,8 @@ Performance tests:
 4. Move merge behavior into `ullm-quant` itself so multi-tensor output does not
    require per-tensor temporary directories.
 5. Add SIMD kernels after the scalar C++ semantics are locked.
-6. Add passthrough tensor copying and full-model metadata. The current full run
-   covers all 255 quantized tensors, but not the 520 passthrough tensors.
-7. Run a full Qwen3.5-9B package conversion once passthrough handling and
-   in-tool multi-tensor output are implemented.
+6. Move full-package merge behavior into `ullm-quant` itself so multi-tensor
+   output no longer depends on per-tensor temporary directories or the Python
+   merge tool.
+7. Add explicit Rust passthrough verification for payload size and hash.
+8. Run a full Qwen3.5-9B package conversion from a single `ullm-quant` command.
