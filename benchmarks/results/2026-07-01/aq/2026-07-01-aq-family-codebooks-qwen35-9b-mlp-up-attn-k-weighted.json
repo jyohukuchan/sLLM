@@ -1,0 +1,134 @@
+{
+  "activation_stats": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512",
+  "candidate_filter": [
+    "aq4_e4m3_g16_ts_flloyd16",
+    "aq4_e4m3_g8_ts_flloyd16"
+  ],
+  "codebooks": [
+    {
+      "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "entry_count": 16,
+      "family": "attn_k",
+      "max": 0.9757498502731323,
+      "min": -0.9830081462860107,
+      "values_f32": [
+        -0.9830081462860107,
+        -0.7367095351219177,
+        -0.5481892228126526,
+        -0.41664332151412964,
+        -0.2932518720626831,
+        -0.1871950626373291,
+        -0.10131745785474777,
+        -0.04548991844058037,
+        0.027289031073451042,
+        0.10016193240880966,
+        0.1861129254102707,
+        0.27016061544418335,
+        0.3760147988796234,
+        0.531842052936554,
+        0.7364135384559631,
+        0.9757498502731323
+      ]
+    },
+    {
+      "candidate_id": "aq4_e4m3_g8_ts_flloyd16",
+      "entry_count": 16,
+      "family": "attn_k",
+      "max": 0.9938215017318726,
+      "min": -0.993532657623291,
+      "values_f32": [
+        -0.993532657623291,
+        -0.8030307292938232,
+        -0.6258993744850159,
+        -0.47915592789649963,
+        -0.34531036019325256,
+        -0.22211459279060364,
+        -0.12327052652835846,
+        -0.0465601310133934,
+        0.03222140297293663,
+        0.12011200934648514,
+        0.23483790457248688,
+        0.3559311032295227,
+        0.4899405837059021,
+        0.6493902802467346,
+        0.8161959648132324,
+        0.9938215017318726
+      ]
+    },
+    {
+      "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "entry_count": 16,
+      "family": "mlp_up",
+      "max": 0.9684811234474182,
+      "min": -0.9663178324699402,
+      "values_f32": [
+        -0.9663178324699402,
+        -0.7286076545715332,
+        -0.556793212890625,
+        -0.4156821370124817,
+        -0.2972016930580139,
+        -0.1942601054906845,
+        -0.10538522154092789,
+        -0.032799601554870605,
+        0.031088296324014664,
+        0.1121654137969017,
+        0.20176832377910614,
+        0.29800546169281006,
+        0.4135562479496002,
+        0.5551319718360901,
+        0.7349943518638611,
+        0.9684811234474182
+      ]
+    },
+    {
+      "candidate_id": "aq4_e4m3_g8_ts_flloyd16",
+      "entry_count": 16,
+      "family": "mlp_up",
+      "max": 0.9868497848510742,
+      "min": -0.9889335036277771,
+      "values_f32": [
+        -0.9889335036277771,
+        -0.80709308385849,
+        -0.6409400105476379,
+        -0.49322614073753357,
+        -0.3614974617958069,
+        -0.23999442160129547,
+        -0.12956710159778595,
+        -0.03868178278207779,
+        0.038270216435194016,
+        0.14122270047664642,
+        0.24714475870132446,
+        0.35909512639045715,
+        0.47992435097694397,
+        0.6291559338569641,
+        0.7946814894676208,
+        0.9868497848510742
+      ]
+    }
+  ],
+  "family_filter": [
+    "mlp_up",
+    "attn_k"
+  ],
+  "max_elements_per_tensor": 262144,
+  "max_tensors": 64,
+  "max_tensors_per_family": 4,
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "notes": [
+    "rust_dry_run_seed_codebooks"
+  ],
+  "schema_version": "aq-family-codebook-export-v0.1",
+  "seed": 0,
+  "tensor_names": [
+    "model.language_model.layers.14.mlp.up_proj.weight",
+    "model.language_model.layers.15.mlp.up_proj.weight",
+    "model.language_model.layers.26.mlp.up_proj.weight",
+    "model.language_model.layers.0.mlp.up_proj.weight",
+    "model.language_model.layers.11.self_attn.k_proj.weight",
+    "model.language_model.layers.15.self_attn.k_proj.weight",
+    "model.language_model.layers.19.self_attn.k_proj.weight",
+    "model.language_model.layers.23.self_attn.k_proj.weight"
+  ],
+  "timestamp_utc": "2026-06-30T17:28:10.926202+00:00",
+  "weighted_codebook": true
+}

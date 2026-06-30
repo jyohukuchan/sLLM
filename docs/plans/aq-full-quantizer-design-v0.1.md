@@ -254,6 +254,11 @@ Rust implementation status:
 - Real Qwen3.5 inspection outputs:
   - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-inspect-qwen35-9b-layer0-mlp-up.txt`
   - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-inspect-qwen35-9b-layer3-attn-k-g8.txt`
+- Fixed sampled codebook export for Rust dry-runs:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-mlp-up-attn-k-weighted.json`
+  - exported families: `mlp_up`, `attn_k`
+  - exported candidates: `aq4_e4m3_g16_ts_flloyd16`, `aq4_e4m3_g8_ts_flloyd16`
+  - source tool: `tools/export-aq-family-codebooks.py`
 
 ## Output Directory Prototype
 
@@ -334,9 +339,7 @@ Performance tests:
 1. Add a one-tensor quantization dry-run for `aq4_e4m3_g16_ts_flloyd16`:
    decode BF16 chunks, compute group absmax, choose direct E4M3 group scale,
    and emit scale indices without writing a full output file.
-2. Add codebook loading or generation for the same candidate:
-   first use a fixed codebook exported from the Python sampler, then replace it
-   with bounded Rust calibration.
+2. Add codebook loading for the exported JSON artifact.
 3. Assign 4-bit codebook indices for one tensor and compute sampled MSE against
    the source tensor.
 4. Compare the Rust one-tensor result against the Python sampler on the same
