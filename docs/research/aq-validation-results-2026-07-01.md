@@ -399,6 +399,24 @@ This reinforces the need for family-specific policy and model-level checks:
 weighted codebook/scale is helpful for some modules, but not uniformly better
 for every family and metric.
 
+A cumulative smoke then quantized three modules together:
+
+- `model.layers.0.linear_attn.out_proj`
+- `model.layers.0.mlp.up_proj`
+- `model.layers.3.self_attn.v_proj`
+- result:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-cumulative3-r9700-calib32-qwen35-9b-prompts8.jsonl`
+
+| variant | mean logit relative MSE | mean abs error | mean KL(ref, candidate) | top1 matches | mean top10 overlap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| g16 unweighted | 0.002544046 | 0.090560542 | 0.005718965 | 8 / 8 | 9.625 |
+| g16 weighted | 0.000297915 | 0.032316454 | 0.001522995 | 8 / 8 | 9.875 |
+| g8 weighted | 0.000249932 | 0.029874566 | 0.001281331 | 8 / 8 | 9.75 |
+
+For this cumulative three-module smoke, g8 weighted was best by logit relative
+MSE and KL. The result is still far from a full-model replacement, but it
+supports carrying weighted g16/g8 policies into the next stage.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

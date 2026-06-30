@@ -129,6 +129,9 @@
   - `model.layers.0.mlp.up_proj`: g8 weighted was best by mean relative MSE `0.000162605` and KL `0.000821250`.
   - `model.layers.3.self_attn.v_proj`: g8 weighted was best by mean relative MSE `0.000222151`, but g16 unweighted had lower KL `0.001237670` than weighted variants.
   - interpretation: weighted variants are promising, but per-family/per-metric behavior differs.
+  - cumulative3 result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-cumulative3-r9700-calib32-qwen35-9b-prompts8.jsonl`.
+  - cumulative3 mean logit relative MSE: g16 unweighted `0.002544046`, g16 weighted `0.000297915`, g8 weighted `0.000249932`.
+  - cumulative3 mean KL: g16 unweighted `0.005718965`, g16 weighted `0.001522995`, g8 weighted `0.001281331`.
 
 - `ullm-quant` metadata planner:
   - added safetensors header planning without reading tensor payloads.

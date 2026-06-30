@@ -251,6 +251,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--activation-stats", type=Path, required=True)
     parser.add_argument("--module", action="append", required=True)
     parser.add_argument("--variant", choices=sorted(VARIANTS), action="append", required=True)
+    parser.add_argument("--cumulative", action="store_true", help="Quantize all selected modules together per variant.")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--prompt-file", type=Path, default=None)
@@ -285,6 +286,85 @@ def main() -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("a", encoding="utf-8") as output:
+        if args.cumulative:
+            module_entries = []
+            for module_name in args.module:
+                module = get_module(model, module_name)
+                module_entries.append(
+                    {
+                        "name": module_name,
+                        "module": module,
+                        "original": module.weight.detach().clone(),
+                        "activation": activation_for_module(module_name, int(module.in_features), stats),
+                    }
+                )
+            for variant_id in args.variant:
+                variant = VARIANTS[variant_id]
+                try:
+                    for entry in module_entries:
+                        quantized = quantize_weight(
+                            sampler,
+                            entry["original"],
+                            entry["activation"],
+                            variant,
+                            args.max_codebook_elements,
+                            args.scale_window,
+                            args.seed,
+                        ).to(device=entry["original"].device, dtype=entry["original"].dtype)
+                        entry["module"].weight.data.copy_(quantized)
+                    rows = []
+                    for prompt_index, (prompt, reference) in enumerate(zip(prompts, reference_logits, strict=True)):
+                        logits = forward_last_logits(model, tokenizer, prompt, args.sequence_length, device)
+                        metrics = logit_metrics(reference, logits)
+                        rows.append(
+                            {
+                                "schema_version": "aq-module-logit-smoke-v0.1",
+                                "run_id": args.run_id,
+                                "timestamp_utc": utc_now(),
+                                "status": "ok",
+                                "model_dir": str(args.model_dir),
+                                "activation_stats": str(args.activation_stats),
+                                "module_scope": "cumulative",
+                                "modules": [str(entry["name"]) for entry in module_entries],
+                                "variant": variant.__dict__,
+                                "prompt": prompt,
+                                "prompt_index": prompt_index,
+                                "prompt_count": len(prompts),
+                                "prompt_file": str(args.prompt_file) if args.prompt_file else None,
+                                "sequence_length": args.sequence_length,
+                                "metrics": metrics,
+                                "notes": args.note,
+                            }
+                        )
+                except Exception as exc:  # noqa: BLE001 - keep benchmark rows self-describing.
+                    rows = [
+                        {
+                            "schema_version": "aq-module-logit-smoke-v0.1",
+                            "run_id": args.run_id,
+                            "timestamp_utc": utc_now(),
+                            "status": "failed",
+                            "model_dir": str(args.model_dir),
+                            "activation_stats": str(args.activation_stats),
+                            "module_scope": "cumulative",
+                            "modules": [str(entry["name"]) for entry in module_entries],
+                            "variant": variant.__dict__,
+                            "prompt": None,
+                            "prompt_count": len(prompts),
+                            "prompt_file": str(args.prompt_file) if args.prompt_file else None,
+                            "sequence_length": args.sequence_length,
+                            "metrics": {},
+                            "notes": args.note,
+                            "error": {"type": type(exc).__name__, "message": str(exc)},
+                        }
+                    ]
+                finally:
+                    for entry in module_entries:
+                        entry["module"].weight.data.copy_(entry["original"])
+                for row in rows:
+                    output.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
+                    output.write("\n")
+            return 0
+
         for module_name in args.module:
             module = get_module(model, module_name)
             original = module.weight.detach().clone()
