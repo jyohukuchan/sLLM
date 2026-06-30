@@ -575,6 +575,33 @@ p4p46_inproj costs only `23,199,744` estimated bytes more than p4p6, while
 p4p65_inproj costs `50,724,864` more than p4p6. This makes both candidates
 small enough for the next full-policy prototype comparison.
 
+The prototype policy smoke driver now forwards the plan's aq policy to
+`ullm-quant` so per-tensor logs show the actual policy id. It was then used
+with the in-proj-weighted codebooks for representative p4p46 and p4p65
+conversion smokes:
+
+- p4p46 summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p46-inproj-family1.json`
+- p4p46 logs:
+  `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p46-inproj-family1-logs/`
+- p4p46 binary parts:
+  `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p46-inproj-family1.ullm.parts`
+- p4p65 summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p65-inproj-family1.json`
+- p4p65 logs:
+  `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p65-inproj-family1-logs/`
+- p4p65 binary parts:
+  `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p65-inproj-family1.ullm.parts`
+
+Both smokes selected 9 representative tensors across attention, linear
+attention, and MLP families. All selected tensors converted and re-read
+verified successfully.
+
+| policy | selected tensors | failures | relative MSE range | max per-tensor RSS |
+| --- | ---: | ---: | ---: | ---: |
+| p4p46_inproj | 9 | 0 | 0.003626188952 - 0.005467660148 | 31,812 KiB |
+| p4p65_inproj | 9 | 0 | 0.003627763172 - 0.005332449503 | 30,496 KiB |
+
 ### Rust `ullm-quant` Payload Dry-Run
 
 `ullm-quant` can now load the exported family codebook JSON, stream a real

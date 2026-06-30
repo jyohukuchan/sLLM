@@ -177,6 +177,11 @@
   - generated updated size summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-policy-size-summary-qwen35-9b-inproj.json`.
   - size interpretation: p4p46 is `23199744` estimated bytes above p4p6; p4p65 is `50724864` estimated bytes above p4p6. Both are much smaller than p4p9's delta.
   - verification after policy preset change: `cargo fmt -p ullm-quant`, `cargo test -p ullm-quant`, and `cargo build -p ullm-quant --release` pass. Tests now pass 22 unit tests.
+  - fixed `tools/run-ullm-prototype-policy-smoke.py` so it forwards the plan's `--aq-policy`, `--aq-low-format`, and `--aq-high-format` into each per-tensor `ullm-quant` run; previous conversions used the correct explicit `--inspect-aq-format` but logs printed default `aq_policy=all-g16`.
+  - p4p46 family1 prototype smoke: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p46-inproj-family1.json`; logs in `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p46-inproj-family1-logs/`; parts under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p46-inproj-family1.ullm.parts`.
+  - p4p46 family1 result: selected 9 tensors, failed 0, relative MSE range `0.003626188952` to `0.005467660148`, max per-tensor RSS `31812 KiB`, re-read verification delta `0`.
+  - p4p65 family1 prototype smoke: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p65-inproj-family1.json`; logs in `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p65-inproj-family1-logs/`; parts under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p65-inproj-family1.ullm.parts`.
+  - p4p65 family1 result: selected 9 tensors, failed 0, relative MSE range `0.003627763172` to `0.005332449503`, max per-tensor RSS `30496 KiB`, re-read verification delta `0`.
   - added exported codebook loading to `ullm-quant` inspection.
   - added streamed one-tensor quantization dry-run: direct E4M3 group scale plus nearest 4-bit family LUT assignment.
   - dry-run result for `model.language_model.layers.0.mlp.up_proj.weight` with `aq4_e4m3_g16_ts_flloyd16`: relative MSE `0.006231116836`, max abs error `0.006380409`, output path `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-dry-run-qwen35-9b-layer0-mlp-up-g16.txt`.
