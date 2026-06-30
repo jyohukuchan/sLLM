@@ -697,6 +697,40 @@ time only slightly (`7.13 s -> 6.99 s`) but reduced peak RSS substantially
 (`21,516 KiB -> 4,180 KiB`) by avoiding the group-target-scale vector used for
 exact median tensor-scale estimation.
 
+### Multi-Tensor Prototype Policy Smoke
+
+`tools/run-ullm-prototype-policy-smoke.py` was added as a small driver around
+`ullm-quant`. It reads a plan JSON, selects tensors whose family/candidate has
+an exported codebook, runs one prototype output directory per tensor, and stores
+only summary/log files in the repository. Binary prototype directories were
+written under `/tmp`.
+
+Result files:
+
+- summary:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k.json`
+- logs:
+  - `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k-logs/`
+
+Scope:
+
+- plan: p4p6
+- families: `mlp_up`, `attn_k`
+- max tensors: 4
+- per family: 2
+- verification: skipped for speed
+
+| family | tensor | candidate | relative MSE | elapsed | max RSS |
+| --- | --- | --- | ---: | ---: | ---: |
+| `mlp_up` | `model.language_model.layers.0.mlp.up_proj.weight` | `aq4_e4m3_g16_ts_flloyd16` | 0.005283509762 | 0:07.40 | 19,476 KiB |
+| `mlp_up` | `model.language_model.layers.1.mlp.up_proj.weight` | `aq4_e4m3_g16_ts_flloyd16` | 0.005288028063 | 0:07.79 | 21,544 KiB |
+| `attn_k` | `model.language_model.layers.11.self_attn.k_proj.weight` | `aq4_e4m3_g8_ts_flloyd16` | 0.003723889112 | 0:00.73 | 8,232 KiB |
+| `attn_k` | `model.language_model.layers.15.self_attn.k_proj.weight` | `aq4_e4m3_g8_ts_flloyd16` | 0.003702330162 | 0:00.73 | 7,208 KiB |
+
+This is still not a single multi-tensor `.ullm.d` container, but it verifies
+that the p4p6 plan, exported codebooks, and C++ chunk kernel can be driven
+across multiple real tensors without manual command construction.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

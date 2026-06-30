@@ -327,6 +327,19 @@ Rust implementation status:
   tensor scale is already known. On `mlp_up` g16, this reduced wall time from
   `7.13 s` to `6.99 s` and peak RSS from `21516 KiB` to `4180 KiB`, with the
   same relative MSE `0.005283509762`.
+- Multi-tensor driver:
+  - `tools/run-ullm-prototype-policy-smoke.py`
+  - reads a plan JSON and exported codebook JSON,
+  - selects tensors with available family/candidate codebooks,
+  - runs one prototype output directory per tensor,
+  - writes summary/logs while leaving binary prototype directories outside the
+    repository.
+- First p4p6 smoke:
+  - summary:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k.json`
+  - families: `mlp_up`, `attn_k`
+  - tensors: 4
+  - relative MSE range: `0.003702330162` to `0.005288028063`
 
 ## Output Directory Prototype
 
@@ -410,6 +423,8 @@ Performance tests:
    mostly hurts memory rather than wall time on one tensor, but it will matter
    more for multi-tensor scheduling.
 3. Add SIMD kernels after the scalar C++ semantics are locked.
-4. Extend from one tensor to all tensors selected by the p4p6 plan.
-5. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
+4. Convert the multi-tensor driver into a single `.ullm.d` directory writer
+   with one manifest and shared codebook files.
+5. Extend from the `mlp_up/attn_k` smoke to all tensors selected by the p4p6 plan.
+6. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.

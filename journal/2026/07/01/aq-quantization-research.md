@@ -203,6 +203,9 @@
   - interpretation: one-pass override only improved wall time slightly versus C++ pre-pass (`7.13 s -> 6.99 s`), but significantly reduced peak RSS (`21516 KiB -> 4180 KiB`).
   - added F16 decode support to Rust numeric stats and C++ `quantize_chunk_v1`.
   - `cargo test -p ullm-quant` passes 18 tests including F16 numeric decode and F16 C++ quantization/packing smoke.
+  - added `tools/run-ullm-prototype-policy-smoke.py` to drive multiple single-tensor prototype conversions from a plan JSON and exported codebook JSON.
+  - p4p6 smoke summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k.json`; logs in `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k-logs/`; binary prototype dirs written under `/tmp`.
+  - p4p6 smoke converted 4 tensors: layer0/layer1 `mlp_up` g16 and layer11/layer15 `attn_k` g8. Relative MSE range `0.003702330162` to `0.005288028063`; elapsed times about `7.4-7.8 s` for `mlp_up` and `0.73 s` for `attn_k`.
 
 ## Current Interpretation
 
@@ -215,4 +218,5 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
-- Extend the output path from one tensor to all tensors selected by the p4p6 plan.
+- Convert the multi-tensor driver into a single `.ullm.d` directory writer with one manifest and shared codebook files.
+- Extend the smoke from `mlp_up/attn_k` to all tensors selected by the p4p6 plan.
