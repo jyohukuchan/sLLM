@@ -1,0 +1,23 @@
+	Command being timed: "target/release/ullm-quant --convert-plan-json benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p65-inproj.json --codebook-json benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.json --convert-output-root /tmp/ullm-quant-convert-full-qwen35-9b-p4p65-inproj-reservoir65536-jobs4.ullm.parts --convert-summary-output benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-full-qwen35-9b-p4p65-inproj-reservoir65536-jobs4.json --convert-jobs 4 --chunk-bytes 67108864 --scale-window 4 --tensor-scale-estimator reservoir --tensor-scale-reservoir-size 65536 --convert-overwrite --merge-policy-summary benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-full-qwen35-9b-p4p65-inproj-reservoir65536-jobs4.json --merge-output-dir /tmp/ullm-quant-convert-full-qwen35-9b-p4p65-inproj-reservoir65536-jobs4-merged.ullm.d --merge-summary-output benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-full-rust-merged-qwen35-9b-p4p65-inproj-reservoir65536-jobs4.json --merge-overwrite --verify-prototype-dir /tmp/ullm-quant-convert-full-qwen35-9b-p4p65-inproj-reservoir65536-jobs4-merged.ullm.d --verify-prototype-all --dry-run"
+	User time (seconds): 1076.05
+	System time (seconds): 38.58
+	Percent of CPU this job got: 233%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 7:58.36
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 339088
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 10365313
+	Voluntary context switches: 14115
+	Involuntary context switches: 11998
+	Swaps: 0
+	File system inputs: 5938512
+	File system outputs: 16020416
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

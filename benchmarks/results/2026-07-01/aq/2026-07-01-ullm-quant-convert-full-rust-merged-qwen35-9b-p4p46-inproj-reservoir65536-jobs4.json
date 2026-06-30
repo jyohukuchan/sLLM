@@ -1,0 +1,2103 @@
+{
+  "schema_version": "ullm-prototype-merge-summary-v0.1",
+  "policy_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-full-qwen35-9b-p4p46-inproj-reservoir65536-jobs4.json",
+  "output_dir": "/tmp/ullm-quant-convert-full-qwen35-9b-p4p46-inproj-reservoir65536-jobs4-merged.ullm.d",
+  "tensor_count": 255,
+  "passthrough_tensor_count": 0,
+  "codebook_count": 12,
+  "total_file_bytes": 4072528768,
+  "files": [
+    {
+      "path": "tensors/000-model_language_model_layers_0_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/000-model_language_model_layers_0_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "codebooks/linear_attn_a__aq4_e4m3_g8_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/001-model_language_model_layers_0_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/001-model_language_model_layers_0_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "codebooks/linear_attn_b__aq4_e4m3_g8_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/002-model_language_model_layers_0_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/002-model_language_model_layers_0_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "codebooks/linear_attn_qkv__aq4_e4m3_g16_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/003-model_language_model_layers_0_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/003-model_language_model_layers_0_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "codebooks/linear_attn_z__aq4_e4m3_g8_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/004-model_language_model_layers_0_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/004-model_language_model_layers_0_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "codebooks/linear_attn_out__aq4_e4m3_g8_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/005-model_language_model_layers_0_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/005-model_language_model_layers_0_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "codebooks/mlp_down__aq4_e4m3_g16_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/006-model_language_model_layers_0_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/006-model_language_model_layers_0_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "codebooks/mlp_gate__aq4_e4m3_g16_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/007-model_language_model_layers_0_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/007-model_language_model_layers_0_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "codebooks/mlp_up__aq4_e4m3_g16_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/008-model_language_model_layers_1_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/008-model_language_model_layers_1_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/009-model_language_model_layers_1_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/009-model_language_model_layers_1_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/010-model_language_model_layers_1_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/010-model_language_model_layers_1_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/011-model_language_model_layers_1_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/011-model_language_model_layers_1_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/012-model_language_model_layers_1_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/012-model_language_model_layers_1_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/013-model_language_model_layers_1_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/013-model_language_model_layers_1_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/014-model_language_model_layers_1_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/014-model_language_model_layers_1_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/015-model_language_model_layers_1_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/015-model_language_model_layers_1_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/016-model_language_model_layers_10_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/016-model_language_model_layers_10_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/017-model_language_model_layers_10_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/017-model_language_model_layers_10_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/018-model_language_model_layers_10_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/018-model_language_model_layers_10_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/019-model_language_model_layers_10_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/019-model_language_model_layers_10_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/020-model_language_model_layers_10_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/020-model_language_model_layers_10_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/021-model_language_model_layers_10_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/021-model_language_model_layers_10_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/022-model_language_model_layers_10_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/022-model_language_model_layers_10_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/023-model_language_model_layers_10_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/023-model_language_model_layers_10_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/024-model_language_model_layers_11_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/024-model_language_model_layers_11_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/025-model_language_model_layers_11_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/025-model_language_model_layers_11_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/026-model_language_model_layers_11_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/026-model_language_model_layers_11_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/027-model_language_model_layers_11_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/027-model_language_model_layers_11_self_attn_k_proj_weight.scale_u8",
+      "bytes": 262144
+    },
+    {
+      "path": "codebooks/attn_k__aq4_e4m3_g16_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/028-model_language_model_layers_11_self_attn_o_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/028-model_language_model_layers_11_self_attn_o_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "codebooks/attn_o__aq4_e4m3_g8_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/029-model_language_model_layers_11_self_attn_q_proj_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/029-model_language_model_layers_11_self_attn_q_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "codebooks/attn_q__aq4_e4m3_g16_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/030-model_language_model_layers_11_self_attn_v_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/030-model_language_model_layers_11_self_attn_v_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "codebooks/attn_v__aq4_e4m3_g8_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/031-model_language_model_layers_12_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/031-model_language_model_layers_12_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/032-model_language_model_layers_12_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/032-model_language_model_layers_12_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/033-model_language_model_layers_12_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/033-model_language_model_layers_12_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/034-model_language_model_layers_12_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/034-model_language_model_layers_12_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/035-model_language_model_layers_12_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/035-model_language_model_layers_12_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/036-model_language_model_layers_12_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/036-model_language_model_layers_12_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/037-model_language_model_layers_12_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/037-model_language_model_layers_12_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/038-model_language_model_layers_12_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/038-model_language_model_layers_12_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/039-model_language_model_layers_13_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/039-model_language_model_layers_13_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/040-model_language_model_layers_13_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/040-model_language_model_layers_13_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/041-model_language_model_layers_13_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/041-model_language_model_layers_13_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/042-model_language_model_layers_13_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/042-model_language_model_layers_13_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/043-model_language_model_layers_13_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/043-model_language_model_layers_13_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/044-model_language_model_layers_13_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/044-model_language_model_layers_13_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/045-model_language_model_layers_13_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/045-model_language_model_layers_13_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/046-model_language_model_layers_13_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/046-model_language_model_layers_13_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/047-model_language_model_layers_14_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/047-model_language_model_layers_14_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/048-model_language_model_layers_14_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/048-model_language_model_layers_14_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/049-model_language_model_layers_14_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/049-model_language_model_layers_14_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/050-model_language_model_layers_14_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/050-model_language_model_layers_14_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/051-model_language_model_layers_14_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/051-model_language_model_layers_14_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/052-model_language_model_layers_14_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/052-model_language_model_layers_14_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/053-model_language_model_layers_14_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/053-model_language_model_layers_14_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/054-model_language_model_layers_14_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/054-model_language_model_layers_14_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/055-model_language_model_layers_15_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/055-model_language_model_layers_15_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/056-model_language_model_layers_15_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/056-model_language_model_layers_15_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/057-model_language_model_layers_15_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/057-model_language_model_layers_15_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/058-model_language_model_layers_15_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/058-model_language_model_layers_15_self_attn_k_proj_weight.scale_u8",
+      "bytes": 262144
+    },
+    {
+      "path": "tensors/059-model_language_model_layers_15_self_attn_o_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/059-model_language_model_layers_15_self_attn_o_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/060-model_language_model_layers_15_self_attn_q_proj_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/060-model_language_model_layers_15_self_attn_q_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/061-model_language_model_layers_15_self_attn_v_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/061-model_language_model_layers_15_self_attn_v_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "tensors/062-model_language_model_layers_16_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/062-model_language_model_layers_16_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/063-model_language_model_layers_16_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/063-model_language_model_layers_16_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/064-model_language_model_layers_16_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/064-model_language_model_layers_16_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/065-model_language_model_layers_16_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/065-model_language_model_layers_16_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/066-model_language_model_layers_16_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/066-model_language_model_layers_16_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/067-model_language_model_layers_16_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/067-model_language_model_layers_16_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/068-model_language_model_layers_16_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/068-model_language_model_layers_16_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/069-model_language_model_layers_16_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/069-model_language_model_layers_16_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/070-model_language_model_layers_17_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/070-model_language_model_layers_17_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/071-model_language_model_layers_17_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/071-model_language_model_layers_17_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/072-model_language_model_layers_17_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/072-model_language_model_layers_17_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/073-model_language_model_layers_17_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/073-model_language_model_layers_17_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/074-model_language_model_layers_17_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/074-model_language_model_layers_17_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/075-model_language_model_layers_17_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/075-model_language_model_layers_17_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/076-model_language_model_layers_17_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/076-model_language_model_layers_17_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/077-model_language_model_layers_17_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/077-model_language_model_layers_17_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/078-model_language_model_layers_18_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/078-model_language_model_layers_18_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/079-model_language_model_layers_18_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/079-model_language_model_layers_18_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/080-model_language_model_layers_18_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/080-model_language_model_layers_18_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/081-model_language_model_layers_18_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/081-model_language_model_layers_18_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/082-model_language_model_layers_18_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/082-model_language_model_layers_18_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/083-model_language_model_layers_18_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/083-model_language_model_layers_18_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/084-model_language_model_layers_18_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/084-model_language_model_layers_18_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/085-model_language_model_layers_18_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/085-model_language_model_layers_18_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/086-model_language_model_layers_19_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/086-model_language_model_layers_19_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/087-model_language_model_layers_19_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/087-model_language_model_layers_19_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/088-model_language_model_layers_19_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/088-model_language_model_layers_19_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/089-model_language_model_layers_19_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/089-model_language_model_layers_19_self_attn_k_proj_weight.scale_u8",
+      "bytes": 262144
+    },
+    {
+      "path": "tensors/090-model_language_model_layers_19_self_attn_o_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/090-model_language_model_layers_19_self_attn_o_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/091-model_language_model_layers_19_self_attn_q_proj_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/091-model_language_model_layers_19_self_attn_q_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/092-model_language_model_layers_19_self_attn_v_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/092-model_language_model_layers_19_self_attn_v_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "tensors/093-model_language_model_layers_2_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/093-model_language_model_layers_2_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/094-model_language_model_layers_2_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/094-model_language_model_layers_2_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/095-model_language_model_layers_2_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/095-model_language_model_layers_2_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/096-model_language_model_layers_2_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/096-model_language_model_layers_2_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/097-model_language_model_layers_2_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/097-model_language_model_layers_2_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/098-model_language_model_layers_2_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/098-model_language_model_layers_2_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/099-model_language_model_layers_2_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/099-model_language_model_layers_2_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/100-model_language_model_layers_2_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/100-model_language_model_layers_2_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/101-model_language_model_layers_20_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/101-model_language_model_layers_20_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/102-model_language_model_layers_20_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/102-model_language_model_layers_20_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/103-model_language_model_layers_20_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/103-model_language_model_layers_20_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/104-model_language_model_layers_20_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/104-model_language_model_layers_20_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/105-model_language_model_layers_20_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/105-model_language_model_layers_20_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/106-model_language_model_layers_20_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/106-model_language_model_layers_20_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/107-model_language_model_layers_20_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/107-model_language_model_layers_20_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/108-model_language_model_layers_20_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/108-model_language_model_layers_20_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/109-model_language_model_layers_21_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/109-model_language_model_layers_21_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/110-model_language_model_layers_21_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/110-model_language_model_layers_21_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/111-model_language_model_layers_21_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/111-model_language_model_layers_21_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/112-model_language_model_layers_21_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/112-model_language_model_layers_21_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/113-model_language_model_layers_21_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/113-model_language_model_layers_21_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/114-model_language_model_layers_21_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/114-model_language_model_layers_21_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/115-model_language_model_layers_21_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/115-model_language_model_layers_21_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/116-model_language_model_layers_21_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/116-model_language_model_layers_21_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/117-model_language_model_layers_22_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/117-model_language_model_layers_22_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/118-model_language_model_layers_22_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/118-model_language_model_layers_22_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/119-model_language_model_layers_22_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/119-model_language_model_layers_22_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/120-model_language_model_layers_22_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/120-model_language_model_layers_22_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/121-model_language_model_layers_22_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/121-model_language_model_layers_22_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/122-model_language_model_layers_22_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/122-model_language_model_layers_22_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/123-model_language_model_layers_22_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/123-model_language_model_layers_22_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/124-model_language_model_layers_22_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/124-model_language_model_layers_22_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/125-model_language_model_layers_23_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/125-model_language_model_layers_23_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/126-model_language_model_layers_23_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/126-model_language_model_layers_23_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/127-model_language_model_layers_23_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/127-model_language_model_layers_23_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/128-model_language_model_layers_23_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/128-model_language_model_layers_23_self_attn_k_proj_weight.scale_u8",
+      "bytes": 262144
+    },
+    {
+      "path": "tensors/129-model_language_model_layers_23_self_attn_o_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/129-model_language_model_layers_23_self_attn_o_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/130-model_language_model_layers_23_self_attn_q_proj_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/130-model_language_model_layers_23_self_attn_q_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/131-model_language_model_layers_23_self_attn_v_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/131-model_language_model_layers_23_self_attn_v_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "tensors/132-model_language_model_layers_24_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/132-model_language_model_layers_24_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/133-model_language_model_layers_24_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/133-model_language_model_layers_24_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/134-model_language_model_layers_24_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/134-model_language_model_layers_24_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/135-model_language_model_layers_24_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/135-model_language_model_layers_24_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/136-model_language_model_layers_24_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/136-model_language_model_layers_24_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/137-model_language_model_layers_24_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/137-model_language_model_layers_24_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/138-model_language_model_layers_24_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/138-model_language_model_layers_24_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/139-model_language_model_layers_24_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/139-model_language_model_layers_24_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/140-model_language_model_layers_25_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/140-model_language_model_layers_25_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/141-model_language_model_layers_25_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/141-model_language_model_layers_25_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/142-model_language_model_layers_25_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/142-model_language_model_layers_25_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/143-model_language_model_layers_25_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/143-model_language_model_layers_25_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/144-model_language_model_layers_25_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/144-model_language_model_layers_25_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/145-model_language_model_layers_25_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/145-model_language_model_layers_25_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/146-model_language_model_layers_25_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/146-model_language_model_layers_25_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/147-model_language_model_layers_25_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/147-model_language_model_layers_25_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/148-model_language_model_layers_26_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/148-model_language_model_layers_26_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/149-model_language_model_layers_26_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/149-model_language_model_layers_26_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/150-model_language_model_layers_26_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/150-model_language_model_layers_26_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/151-model_language_model_layers_26_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/151-model_language_model_layers_26_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/152-model_language_model_layers_26_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/152-model_language_model_layers_26_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/153-model_language_model_layers_26_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/153-model_language_model_layers_26_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/154-model_language_model_layers_26_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/154-model_language_model_layers_26_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/155-model_language_model_layers_26_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/155-model_language_model_layers_26_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/156-model_language_model_layers_27_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/156-model_language_model_layers_27_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/157-model_language_model_layers_27_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/157-model_language_model_layers_27_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/158-model_language_model_layers_27_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/158-model_language_model_layers_27_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/159-model_language_model_layers_27_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/159-model_language_model_layers_27_self_attn_k_proj_weight.scale_u8",
+      "bytes": 262144
+    },
+    {
+      "path": "tensors/160-model_language_model_layers_27_self_attn_o_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/160-model_language_model_layers_27_self_attn_o_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/161-model_language_model_layers_27_self_attn_q_proj_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/161-model_language_model_layers_27_self_attn_q_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/162-model_language_model_layers_27_self_attn_v_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/162-model_language_model_layers_27_self_attn_v_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "tensors/163-model_language_model_layers_28_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/163-model_language_model_layers_28_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/164-model_language_model_layers_28_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/164-model_language_model_layers_28_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/165-model_language_model_layers_28_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/165-model_language_model_layers_28_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/166-model_language_model_layers_28_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/166-model_language_model_layers_28_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/167-model_language_model_layers_28_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/167-model_language_model_layers_28_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/168-model_language_model_layers_28_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/168-model_language_model_layers_28_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/169-model_language_model_layers_28_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/169-model_language_model_layers_28_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/170-model_language_model_layers_28_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/170-model_language_model_layers_28_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/171-model_language_model_layers_29_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/171-model_language_model_layers_29_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/172-model_language_model_layers_29_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/172-model_language_model_layers_29_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/173-model_language_model_layers_29_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/173-model_language_model_layers_29_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/174-model_language_model_layers_29_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/174-model_language_model_layers_29_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/175-model_language_model_layers_29_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/175-model_language_model_layers_29_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/176-model_language_model_layers_29_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/176-model_language_model_layers_29_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/177-model_language_model_layers_29_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/177-model_language_model_layers_29_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/178-model_language_model_layers_29_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/178-model_language_model_layers_29_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/179-model_language_model_layers_3_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/179-model_language_model_layers_3_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/180-model_language_model_layers_3_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/180-model_language_model_layers_3_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/181-model_language_model_layers_3_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/181-model_language_model_layers_3_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/182-model_language_model_layers_3_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/182-model_language_model_layers_3_self_attn_k_proj_weight.scale_u8",
+      "bytes": 262144
+    },
+    {
+      "path": "tensors/183-model_language_model_layers_3_self_attn_o_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/183-model_language_model_layers_3_self_attn_o_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/184-model_language_model_layers_3_self_attn_q_proj_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/184-model_language_model_layers_3_self_attn_q_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/185-model_language_model_layers_3_self_attn_v_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/185-model_language_model_layers_3_self_attn_v_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "tensors/186-model_language_model_layers_30_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/186-model_language_model_layers_30_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/187-model_language_model_layers_30_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/187-model_language_model_layers_30_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/188-model_language_model_layers_30_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/188-model_language_model_layers_30_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/189-model_language_model_layers_30_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/189-model_language_model_layers_30_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/190-model_language_model_layers_30_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/190-model_language_model_layers_30_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/191-model_language_model_layers_30_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/191-model_language_model_layers_30_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/192-model_language_model_layers_30_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/192-model_language_model_layers_30_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/193-model_language_model_layers_30_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/193-model_language_model_layers_30_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/194-model_language_model_layers_31_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/194-model_language_model_layers_31_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/195-model_language_model_layers_31_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/195-model_language_model_layers_31_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/196-model_language_model_layers_31_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/196-model_language_model_layers_31_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/197-model_language_model_layers_31_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/197-model_language_model_layers_31_self_attn_k_proj_weight.scale_u8",
+      "bytes": 262144
+    },
+    {
+      "path": "tensors/198-model_language_model_layers_31_self_attn_o_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/198-model_language_model_layers_31_self_attn_o_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/199-model_language_model_layers_31_self_attn_q_proj_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/199-model_language_model_layers_31_self_attn_q_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/200-model_language_model_layers_31_self_attn_v_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/200-model_language_model_layers_31_self_attn_v_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "tensors/201-model_language_model_layers_4_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/201-model_language_model_layers_4_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/202-model_language_model_layers_4_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/202-model_language_model_layers_4_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/203-model_language_model_layers_4_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/203-model_language_model_layers_4_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/204-model_language_model_layers_4_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/204-model_language_model_layers_4_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/205-model_language_model_layers_4_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/205-model_language_model_layers_4_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/206-model_language_model_layers_4_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/206-model_language_model_layers_4_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/207-model_language_model_layers_4_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/207-model_language_model_layers_4_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/208-model_language_model_layers_4_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/208-model_language_model_layers_4_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/209-model_language_model_layers_5_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/209-model_language_model_layers_5_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/210-model_language_model_layers_5_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/210-model_language_model_layers_5_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/211-model_language_model_layers_5_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/211-model_language_model_layers_5_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/212-model_language_model_layers_5_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/212-model_language_model_layers_5_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/213-model_language_model_layers_5_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/213-model_language_model_layers_5_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/214-model_language_model_layers_5_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/214-model_language_model_layers_5_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/215-model_language_model_layers_5_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/215-model_language_model_layers_5_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/216-model_language_model_layers_5_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/216-model_language_model_layers_5_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/217-model_language_model_layers_6_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/217-model_language_model_layers_6_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/218-model_language_model_layers_6_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/218-model_language_model_layers_6_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/219-model_language_model_layers_6_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/219-model_language_model_layers_6_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/220-model_language_model_layers_6_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/220-model_language_model_layers_6_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/221-model_language_model_layers_6_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/221-model_language_model_layers_6_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/222-model_language_model_layers_6_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/222-model_language_model_layers_6_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/223-model_language_model_layers_6_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/223-model_language_model_layers_6_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/224-model_language_model_layers_6_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/224-model_language_model_layers_6_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/225-model_language_model_layers_7_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/225-model_language_model_layers_7_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/226-model_language_model_layers_7_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/226-model_language_model_layers_7_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/227-model_language_model_layers_7_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/227-model_language_model_layers_7_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/228-model_language_model_layers_7_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/228-model_language_model_layers_7_self_attn_k_proj_weight.scale_u8",
+      "bytes": 262144
+    },
+    {
+      "path": "tensors/229-model_language_model_layers_7_self_attn_o_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/229-model_language_model_layers_7_self_attn_o_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/230-model_language_model_layers_7_self_attn_q_proj_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/230-model_language_model_layers_7_self_attn_q_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/231-model_language_model_layers_7_self_attn_v_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/231-model_language_model_layers_7_self_attn_v_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "tensors/232-model_language_model_layers_8_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/232-model_language_model_layers_8_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/233-model_language_model_layers_8_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/233-model_language_model_layers_8_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/234-model_language_model_layers_8_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/234-model_language_model_layers_8_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/235-model_language_model_layers_8_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/235-model_language_model_layers_8_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/236-model_language_model_layers_8_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/236-model_language_model_layers_8_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/237-model_language_model_layers_8_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/237-model_language_model_layers_8_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/238-model_language_model_layers_8_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/238-model_language_model_layers_8_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/239-model_language_model_layers_8_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/239-model_language_model_layers_8_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/240-model_language_model_layers_9_linear_attn_in_proj_a_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/240-model_language_model_layers_9_linear_attn_in_proj_a_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/241-model_language_model_layers_9_linear_attn_in_proj_b_weight.idx4",
+      "bytes": 65536
+    },
+    {
+      "path": "tensors/241-model_language_model_layers_9_linear_attn_in_proj_b_weight.scale_u8",
+      "bytes": 16384
+    },
+    {
+      "path": "tensors/242-model_language_model_layers_9_linear_attn_in_proj_qkv_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/242-model_language_model_layers_9_linear_attn_in_proj_qkv_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/243-model_language_model_layers_9_linear_attn_in_proj_z_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/243-model_language_model_layers_9_linear_attn_in_proj_z_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/244-model_language_model_layers_9_linear_attn_out_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/244-model_language_model_layers_9_linear_attn_out_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/245-model_language_model_layers_9_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/245-model_language_model_layers_9_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/246-model_language_model_layers_9_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/246-model_language_model_layers_9_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/247-model_language_model_layers_9_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/247-model_language_model_layers_9_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/248-mtp_layers_0_mlp_down_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/248-mtp_layers_0_mlp_down_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/249-mtp_layers_0_mlp_gate_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/249-mtp_layers_0_mlp_gate_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/250-mtp_layers_0_mlp_up_proj_weight.idx4",
+      "bytes": 25165824
+    },
+    {
+      "path": "tensors/250-mtp_layers_0_mlp_up_proj_weight.scale_u8",
+      "bytes": 3145728
+    },
+    {
+      "path": "tensors/251-mtp_layers_0_self_attn_k_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/251-mtp_layers_0_self_attn_k_proj_weight.scale_u8",
+      "bytes": 262144
+    },
+    {
+      "path": "tensors/252-mtp_layers_0_self_attn_o_proj_weight.idx4",
+      "bytes": 8388608
+    },
+    {
+      "path": "tensors/252-mtp_layers_0_self_attn_o_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/253-mtp_layers_0_self_attn_q_proj_weight.idx4",
+      "bytes": 16777216
+    },
+    {
+      "path": "tensors/253-mtp_layers_0_self_attn_q_proj_weight.scale_u8",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/254-mtp_layers_0_self_attn_v_proj_weight.idx4",
+      "bytes": 2097152
+    },
+    {
+      "path": "tensors/254-mtp_layers_0_self_attn_v_proj_weight.scale_u8",
+      "bytes": 524288
+    },
+    {
+      "path": "manifest.json",
+      "bytes": 383104
+    }
+  ]
+}
