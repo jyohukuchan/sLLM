@@ -115,6 +115,10 @@ def run_one(args: argparse.Namespace, plan: dict, tensor: dict, index: int) -> d
         str(args.chunk_bytes),
         "--scale-window",
         str(args.scale_window),
+        "--tensor-scale-estimator",
+        args.tensor_scale_estimator,
+        "--tensor-scale-reservoir-size",
+        str(args.tensor_scale_reservoir_size),
         "--prototype-output-dir",
         str(output_dir),
         "--dry-run",
@@ -130,6 +134,15 @@ def run_one(args: argparse.Namespace, plan: dict, tensor: dict, index: int) -> d
             check=False,
         )
     parsed = parse_log(log_path)
+    manifest_path = output_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        tensors = manifest.get("tensors", [])
+        if tensors:
+            tensor_manifest = tensors[0]
+            parsed["prototype_tensor_scale"] = tensor_manifest.get("tensor_scale")
+            parsed["prototype_groups"] = tensor_manifest.get("groups")
+            parsed["prototype_elements"] = tensor_manifest.get("elements")
     return {
         "tensor": name,
         "family": family,
@@ -155,6 +168,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--per-family", type=int, default=2)
     parser.add_argument("--chunk-bytes", type=int, default=1_048_576)
     parser.add_argument("--scale-window", type=int, default=4)
+    parser.add_argument("--tensor-scale-estimator", choices=["exact", "reservoir"], default="exact")
+    parser.add_argument("--tensor-scale-reservoir-size", type=int, default=65_536)
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -191,6 +206,8 @@ def main() -> None:
         "max_tensors": args.max_tensors,
         "per_family": args.per_family,
         "scale_window": args.scale_window,
+        "tensor_scale_estimator": args.tensor_scale_estimator,
+        "tensor_scale_reservoir_size": args.tensor_scale_reservoir_size,
         "verify": args.verify,
         "selected_count": len(selected),
         "results": rows,

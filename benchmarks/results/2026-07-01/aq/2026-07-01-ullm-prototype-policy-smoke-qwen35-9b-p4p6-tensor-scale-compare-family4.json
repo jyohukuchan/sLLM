@@ -1,0 +1,142 @@
+{
+  "chunk_bytes": 67108864,
+  "codebook_json": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.json",
+  "comparisons": [
+    {
+      "candidate": "aq4_e4m3_g8_ts_flloyd16",
+      "deltas": {
+        "max_rss_kib": -556,
+        "relative_mse": 0.0,
+        "relative_tensor_scale": 0.0,
+        "tensor_scale": 0.0,
+        "verify_relative_mse": 0.0
+      },
+      "exact": {
+        "elapsed": "0:02.95",
+        "log_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4-logs/000-model_language_model_layers_0_linear_attn_out_proj_weight.log",
+        "max_rss_kib": 45476,
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4.ullm.parts/000-model_language_model_layers_0_linear_attn_out_proj_weight.ullm.d",
+        "relative_mse": 0.00376530259,
+        "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4.json",
+        "tensor_scale": 0.01664368,
+        "verify_relative_mse": 0.00376530259
+      },
+      "family": "linear_attn_out",
+      "reservoir65536": {
+        "elapsed": "0:03.07",
+        "log_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4-logs/000-model_language_model_layers_0_linear_attn_out_proj_weight.log",
+        "max_rss_kib": 44920,
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.ullm.parts/000-model_language_model_layers_0_linear_attn_out_proj_weight.ullm.d",
+        "relative_mse": 0.00376530259,
+        "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.json",
+        "tensor_scale": 0.01664368,
+        "verify_relative_mse": 0.00376530259
+      },
+      "tensor": "model.language_model.layers.0.linear_attn.out_proj.weight"
+    },
+    {
+      "candidate": "aq4_e4m3_g16_ts_flloyd16",
+      "deltas": {
+        "max_rss_kib": -560,
+        "relative_mse": 0.0,
+        "relative_tensor_scale": 0.0,
+        "tensor_scale": 0.0,
+        "verify_relative_mse": 0.0
+      },
+      "exact": {
+        "elapsed": "0:08.48",
+        "log_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4-logs/001-model_language_model_layers_0_mlp_down_proj_weight.log",
+        "max_rss_kib": 99804,
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4.ullm.parts/001-model_language_model_layers_0_mlp_down_proj_weight.ullm.d",
+        "relative_mse": 0.00531850479,
+        "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4.json",
+        "tensor_scale": 0.01531633,
+        "verify_relative_mse": 0.00531850479
+      },
+      "family": "mlp_down",
+      "reservoir65536": {
+        "elapsed": "0:08.17",
+        "log_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4-logs/001-model_language_model_layers_0_mlp_down_proj_weight.log",
+        "max_rss_kib": 99244,
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.ullm.parts/001-model_language_model_layers_0_mlp_down_proj_weight.ullm.d",
+        "relative_mse": 0.00531850479,
+        "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.json",
+        "tensor_scale": 0.01531633,
+        "verify_relative_mse": 0.00531850479
+      },
+      "tensor": "model.language_model.layers.0.mlp.down_proj.weight"
+    },
+    {
+      "candidate": "aq4_e4m3_g16_ts_flloyd16",
+      "deltas": {
+        "max_rss_kib": -680,
+        "relative_mse": 0.0,
+        "relative_tensor_scale": 0.0,
+        "tensor_scale": 0.0,
+        "verify_relative_mse": 0.0
+      },
+      "exact": {
+        "elapsed": "0:07.42",
+        "log_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4-logs/002-model_language_model_layers_0_mlp_gate_proj_weight.log",
+        "max_rss_kib": 100956,
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4.ullm.parts/002-model_language_model_layers_0_mlp_gate_proj_weight.ullm.d",
+        "relative_mse": 0.005198360634,
+        "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4.json",
+        "tensor_scale": 0.015569289,
+        "verify_relative_mse": 0.005198360634
+      },
+      "family": "mlp_gate",
+      "reservoir65536": {
+        "elapsed": "0:07.94",
+        "log_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4-logs/002-model_language_model_layers_0_mlp_gate_proj_weight.log",
+        "max_rss_kib": 100276,
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.ullm.parts/002-model_language_model_layers_0_mlp_gate_proj_weight.ullm.d",
+        "relative_mse": 0.005198360634,
+        "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.json",
+        "tensor_scale": 0.015569289,
+        "verify_relative_mse": 0.005198360634
+      },
+      "tensor": "model.language_model.layers.0.mlp.gate_proj.weight"
+    },
+    {
+      "candidate": "aq4_e4m3_g16_ts_flloyd16",
+      "deltas": {
+        "max_rss_kib": 864,
+        "relative_mse": 6.21219999998382e-08,
+        "relative_tensor_scale": -0.005681850855998593,
+        "tensor_scale": -8.398299999999928e-05,
+        "verify_relative_mse": 6.21219999998382e-08
+      },
+      "exact": {
+        "elapsed": "0:07.92",
+        "log_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4-logs/003-model_language_model_layers_0_mlp_up_proj_weight.log",
+        "max_rss_kib": 100852,
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4.ullm.parts/003-model_language_model_layers_0_mlp_up_proj_weight.ullm.d",
+        "relative_mse": 0.005245190541,
+        "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4.json",
+        "tensor_scale": 0.014780923,
+        "verify_relative_mse": 0.005245190541
+      },
+      "family": "mlp_up",
+      "reservoir65536": {
+        "elapsed": "0:07.64",
+        "log_path": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4-logs/003-model_language_model_layers_0_mlp_up_proj_weight.log",
+        "max_rss_kib": 101716,
+        "output_dir": "/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.ullm.parts/003-model_language_model_layers_0_mlp_up_proj_weight.ullm.d",
+        "relative_mse": 0.005245252663,
+        "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.json",
+        "tensor_scale": 0.01469694,
+        "verify_relative_mse": 0.005245252663
+      },
+      "tensor": "model.language_model.layers.0.mlp.up_proj.weight"
+    }
+  ],
+  "exact_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-exact-family4.json",
+  "interpretation": "In this four-tensor p4p6 prototype conversion smoke, reservoir65536 matched exact for linear_attn_out, mlp_down, and mlp_gate. It shifted layer0 mlp_up tensor_scale by about -0.57% and relative MSE by about 6.2e-8 absolute, matching the inspect-level finding. Verification succeeded for all tensors in both runs.",
+  "model": "Qwen/Qwen3.5-9B",
+  "plan_json": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json",
+  "reservoir_summary": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-tensor-scale-reservoir65536-family4.json",
+  "scale_window": 4,
+  "schema_version": "ullm-prototype-tensor-scale-estimator-compare-v0.1",
+  "selected_count": 4
+}
