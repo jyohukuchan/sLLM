@@ -103,6 +103,15 @@
   - Unsloth Dynamic Q4_K_XL mixed weighted relative MSE: `0.002471176`.
   - direction remained stable versus the 4-prompt smoke.
 
+- Weighted codebook and family policy:
+  - added activation-weighted Lloyd support through `--weighted-codebook`.
+  - aq g16 weighted scale + codebook weighted relative MSE: `0.004038034`.
+  - aq g8 weighted scale + codebook weighted relative MSE: `0.002821072`.
+  - combined param-weighted result: aq all-g16 `0.003798456` at 4.5 bpp; aq all-g8 `0.002582475` at 5.0 bpp.
+  - sampled UD Q4_K_XL mixed combined result: `0.002364278` at parameter-weighted bpp `5.206019`.
+  - simple family policy with g8 on `attn_k,attn_o,attn_v,linear_attn_out` gave combined weighted relative MSE `0.003053866` at bpp `4.592593`.
+  - next evidence should be model-level logit/perplexity, not only tensor metrics.
+
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
@@ -111,6 +120,5 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Test activation-weighted Lloyd / clipped scale variants and then expand calibration with longer contexts.
+- Add explicit family-policy artifacts and run a small model-level logit/perplexity check.
 - Extend `ullm-quant` from skeleton to safetensors metadata planning.
-- Add a small model-level check after tensor-level candidate narrowing.

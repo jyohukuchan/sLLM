@@ -230,14 +230,30 @@ def sample_groups_with_columns(
 
 
 def normalized_values(groups: torch.Tensor) -> torch.Tensor:
+    values, _ = normalized_values_and_weights(groups, None)
+    return values
+
+
+def normalized_values_and_weights(
+    groups: torch.Tensor,
+    group_weights: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     amax = groups.abs().amax(dim=1)
     mask = amax > 0
     if not bool(mask.any()):
-        return torch.zeros(1, dtype=torch.float32)
-    return (groups[mask] / amax[mask, None]).flatten()
+        values = torch.zeros(1, dtype=torch.float32)
+        weights = torch.ones(1, dtype=torch.float32) if group_weights is not None else None
+        return values, weights
+    values = (groups[mask] / amax[mask, None]).flatten()
+    weights = group_weights[mask].to(torch.float32).flatten() if group_weights is not None else None
+    return values, weights
 
 
-def codebook_from_normalized_values(norm: torch.Tensor, mode: str) -> torch.Tensor:
+def codebook_from_normalized_values(
+    norm: torch.Tensor,
+    mode: str,
+    weights: torch.Tensor | None = None,
+) -> torch.Tensor:
     if mode in {"zero_free15", "zero_lloyd15"}:
         nonzero = norm[norm.abs() > 0]
         if nonzero.numel() == 0:
@@ -247,7 +263,7 @@ def codebook_from_normalized_values(norm: torch.Tensor, mode: str) -> torch.Tens
             values = torch.quantile(nonzero, q)
         codebook = torch.cat([torch.zeros(1), values]).sort().values
         if mode == "zero_lloyd15":
-            codebook = lloyd_refine_codebook(norm, codebook, fixed_zero=True)
+            codebook = lloyd_refine_codebook(norm, codebook, fixed_zero=True, weights=weights)
     elif mode == "symmetric7":
         abs_values = norm.abs()
         abs_values = abs_values[abs_values > 0]
@@ -262,23 +278,30 @@ def codebook_from_normalized_values(norm: torch.Tensor, mode: str) -> torch.Tens
         q = torch.linspace(0.02, 0.98, 16)
         codebook = torch.quantile(norm, q).sort().values
         if mode == "free_lloyd16":
-            codebook = lloyd_refine_codebook(norm, codebook, fixed_zero=False)
+            codebook = lloyd_refine_codebook(norm, codebook, fixed_zero=False, weights=weights)
     else:
         raise ValueError(f"unknown codebook mode: {mode}")
     return codebook.to(torch.float32)
 
 
-def codebook_from_groups(groups: torch.Tensor, mode: str) -> torch.Tensor:
-    return codebook_from_normalized_values(normalized_values(groups), mode)
+def codebook_from_groups(
+    groups: torch.Tensor,
+    mode: str,
+    group_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    values, weights = normalized_values_and_weights(groups, group_weights)
+    return codebook_from_normalized_values(values, mode, weights)
 
 
 def lloyd_refine_codebook(
     values: torch.Tensor,
     initial: torch.Tensor,
     fixed_zero: bool,
+    weights: torch.Tensor | None = None,
     iterations: int = 8,
 ) -> torch.Tensor:
     codebook = initial.to(torch.float32).clone()
+    weights = weights.to(torch.float32).clamp_min(0) if weights is not None else None
     zero_index = None
     if fixed_zero:
         zero_index = int(codebook.abs().argmin())
@@ -292,7 +315,13 @@ def lloyd_refine_codebook(
                 continue
             mask = nearest == idx
             if bool(mask.any()):
-                updated[idx] = values[mask].mean()
+                if weights is None:
+                    updated[idx] = values[mask].mean()
+                else:
+                    selected_weights = weights[mask]
+                    denom = selected_weights.sum()
+                    if float(denom) > 0:
+                        updated[idx] = (values[mask] * selected_weights).sum() / denom
         codebook = updated.sort().values
         if fixed_zero:
             zero_index = int(codebook.abs().argmin())
@@ -304,29 +333,49 @@ def build_family_codebooks(
     args: argparse.Namespace,
     tensors: list[tuple[str, Path]],
     candidates: list[Candidate],
+    activation_stats: dict[str, torch.Tensor],
 ) -> dict[tuple[str, str], torch.Tensor]:
     result: dict[tuple[str, str], torch.Tensor] = {}
     for candidate_index, candidate in enumerate(candidates):
         generator = torch.Generator(device="cpu")
         generator.manual_seed(args.seed + 100_000 + candidate_index)
         family_values: dict[str, list[torch.Tensor]] = defaultdict(list)
+        family_weights: dict[str, list[torch.Tensor]] = defaultdict(list)
         for tensor_name, path in tensors:
             family = family_for_tensor(tensor_name)
             with safe_open(path, framework="pt", device="cpu") as handle:
                 tensor = handle.get_tensor(tensor_name)
             if tensor.ndim < 2 or not tensor.is_floating_point():
                 continue
-            groups = sample_groups(
+            tensor_shape = tuple(int(dim) for dim in tensor.shape)
+            groups, columns = sample_groups_with_columns(
                 tensor,
                 candidate.group_size,
                 args.max_elements_per_tensor,
                 generator,
             )
-            family_values[family].append(normalized_values(groups))
+            group_weights = None
+            if args.weighted_codebook:
+                if columns is None:
+                    raise ValueError(f"cannot apply activation stats to non-2D tensor {tensor_name}")
+                activation_second_moment = activation_stats_for_tensor(tensor_name, tensor_shape, activation_stats)
+                group_weights = activation_second_moment.index_select(0, columns.flatten()).view_as(groups)
+            values, weights = normalized_values_and_weights(groups, group_weights)
+            family_values[family].append(values)
+            if weights is not None:
+                family_weights[family].append(weights)
             del tensor, groups
         for family, chunks in family_values.items():
             values = torch.cat(chunks) if len(chunks) > 1 else chunks[0]
-            result[(family, candidate.candidate_id)] = codebook_from_normalized_values(values, candidate.codebook_mode)
+            weights = None
+            if args.weighted_codebook:
+                weight_chunks = family_weights[family]
+                weights = torch.cat(weight_chunks) if len(weight_chunks) > 1 else weight_chunks[0]
+            result[(family, candidate.candidate_id)] = codebook_from_normalized_values(
+                values,
+                candidate.codebook_mode,
+                weights,
+            )
     return result
 
 
@@ -363,9 +412,14 @@ def evaluate_candidate(
     codebook_override: torch.Tensor | None = None,
     group_weights: torch.Tensor | None = None,
     weighted_scale_search: bool = False,
+    weighted_codebook: bool = False,
 ) -> dict[str, float | int | str | None]:
     scales = scale_values(candidate.scale_format)
-    codebook = codebook_override if codebook_override is not None else codebook_from_groups(groups, candidate.codebook_mode)
+    if codebook_override is not None:
+        codebook = codebook_override
+    else:
+        codebook_weights = group_weights if weighted_codebook else None
+        codebook = codebook_from_groups(groups, candidate.codebook_mode, codebook_weights)
     tensor_scale = choose_tensor_scale(groups, candidate, scales, codebook)
     scaled_groups = groups / tensor_scale
     max_code = codebook.abs().max().clamp_min(1e-12)
@@ -489,8 +543,15 @@ def row_for_result(
                 "objective": "activation_weighted_mse" if args.weighted_scale_search else "mse",
                 "weighted_metrics": bool(args.activation_stats),
                 "weighted_scale_search": args.weighted_scale_search,
+                "weighted_codebook": args.weighted_codebook,
                 "scale_search": f"nearest_plus_minus_{args.scale_window}",
-                "codebook_update": "lloyd" if "lloyd" in candidate.codebook_mode else "quantile_init_only",
+                "codebook_update": (
+                    "weighted_lloyd"
+                    if args.weighted_codebook and "lloyd" in candidate.codebook_mode
+                    else "lloyd"
+                    if "lloyd" in candidate.codebook_mode
+                    else "quantile_init_only"
+                ),
             },
         },
         "inputs": {
@@ -541,6 +602,11 @@ def parse_args() -> argparse.Namespace:
         "--weighted-scale-search",
         action="store_true",
         help="Use activation weights, when provided, to choose the best group scale.",
+    )
+    parser.add_argument(
+        "--weighted-codebook",
+        action="store_true",
+        help="Use activation weights, when provided, during Lloyd codebook refinement.",
     )
     parser.add_argument("--note", action="append", default=[])
     return parser.parse_args()
@@ -606,6 +672,8 @@ def main() -> int:
         raise SystemExit("--max-tensors-per-family must be >= 1")
     if args.weighted_scale_search and args.activation_stats is None:
         raise SystemExit("--weighted-scale-search requires --activation-stats")
+    if args.weighted_codebook and args.activation_stats is None:
+        raise SystemExit("--weighted-codebook requires --activation-stats")
     torch.set_num_threads(args.torch_threads)
     torch.set_num_interop_threads(args.torch_interop_threads)
     args.model_dir = args.model_dir.expanduser().resolve()
@@ -631,7 +699,7 @@ def main() -> int:
 
     family_codebooks: dict[tuple[str, str], torch.Tensor] = {}
     if args.codebook_granularity == "per_family_sample":
-        family_codebooks = build_family_codebooks(args, tensors, candidates)
+        family_codebooks = build_family_codebooks(args, tensors, candidates, activation_stats)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     generator = torch.Generator(device="cpu")
@@ -676,6 +744,7 @@ def main() -> int:
                         codebook_override,
                         group_weights=group_weights,
                         weighted_scale_search=args.weighted_scale_search,
+                        weighted_codebook=args.weighted_codebook,
                     )
                     row = row_for_result(
                         args,

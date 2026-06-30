@@ -190,3 +190,15 @@ direction:
 
 The next aq-specific tests should target activation-weighted codebook fitting
 and family-specific precision policy, especially for `linear_attn_out`.
+
+Weighted codebook fitting was then tested with the same calib32 stats:
+
+- aq g16 weighted scale + codebook: `0.004038034`
+- aq g8 weighted scale + codebook: `0.002821072`
+- aq all-g8 combined weighted relative MSE: `0.002582475` at parameter-weighted
+  bpp `5.000000`
+- Unsloth Dynamic Q4_K_XL mixed combined weighted relative MSE: `0.002364278`
+  at parameter-weighted bpp `5.206019`
+
+The next step should be a model-level logit or perplexity check for the weighted
+scale + weighted codebook candidates, plus an explicit family-policy artifact.

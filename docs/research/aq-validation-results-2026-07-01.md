@@ -292,6 +292,49 @@ The direction remained stable after expanding calibration:
 - Unsloth Dynamic remains ahead because it uses mixed precision and protects
   sensitive families such as `linear_attn_out`.
 
+### Weighted Codebook And Family Policy
+
+Result file:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-scale-codebook-r9700-calib32-qwen35-9b-family4.jsonl`
+
+The next variant used both activation-weighted scale search and
+activation-weighted Lloyd refinement for the family-level codebook.
+
+| candidate | mean bpp | mean relative MSE | mean weighted relative MSE | `linear_attn_out` weighted relative MSE |
+| --- | ---: | ---: | ---: | ---: |
+| aq g16, weighted scale only | 4.5000 | 0.005900905 | 0.004622421 | 0.009085352 |
+| aq g16, weighted scale + codebook | 4.5000 | 0.006031252 | 0.004038034 | 0.005163994 |
+| aq g8, weighted scale only | 5.0000 | 0.004163366 | 0.003439578 | 0.007488695 |
+| aq g8, weighted scale + codebook | 5.0000 | 0.004204903 | 0.002821072 | 0.003941077 |
+
+Weighted Lloyd worsened ordinary tensor MSE slightly, but improved the
+activation-weighted metric again. This is consistent with the goal of aq:
+minimize the error that matters to layer outputs, not only raw tensor MSE.
+
+Using the same rows, a simple family-policy simulation was computed by choosing
+g16 or g8 per family. The following combined weighted relative MSE values use
+sample-level weighted SSE/denominator reconstruction and parameter-weighted bpp.
+
+| policy | parameter-weighted bpp | combined weighted relative MSE |
+| --- | ---: | ---: |
+| aq all g16, weighted scale + codebook | 4.500000 | 0.003798456 |
+| aq g8 for `attn_k,attn_o,attn_v,linear_attn_out` | 4.592593 | 0.003053866 |
+| aq g8 for `attn_k,attn_o,attn_q,attn_v,linear_attn_out` | 4.666667 | 0.002900270 |
+| aq g8 except `mlp_down` | 4.888889 | 0.002673004 |
+| aq all g8, weighted scale + codebook | 5.000000 | 0.002582475 |
+| ModelOpt NVFP4 | 4.500001 | 0.008990352 |
+| Unsloth Dynamic Q4_K_XL mixed | 5.206019 | 0.002364278 |
+
+This does not prove model quality, but it changes the next aq direction:
+
+- weighted codebook fitting should stay in the search loop,
+- a uniform bpp policy is probably leaving accuracy on the table,
+- family-specific g16/g8 allocation may approach UD-like weighted error with
+  lower bpp than the sampled UD mix,
+- model-level logit/perplexity checks are now needed before further tensor-only
+  optimization.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -308,6 +351,6 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 
 1. Add activation-stat collection for selected Qwen3.5-9B linear modules.
 2. Expand calibration with longer contexts or an external text set after the current 32-prompt smoke.
-3. Try activation-weighted Lloyd, clipped-scale variants, and family-specific bpp policy before changing the runtime format.
-4. Run a small logit-difference or perplexity check for the top candidates after weighted tensor narrowing.
+3. Add explicit family-policy search artifacts instead of only ad-hoc table analysis.
+4. Run a small logit-difference or perplexity check for the top weighted candidates.
 5. Extend `ullm-quant` from skeleton to safetensors metadata planning and then chunked CPU quantization.
