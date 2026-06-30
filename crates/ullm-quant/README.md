@@ -2,7 +2,9 @@
 
 `ullm-quant` is the prototype full-model aq converter.
 
-The first skeleton only verifies the Rust CLI, C++20 kernel build, and C ABI boundary. Full safetensors input, calibration, and packed aq output will be added after the CPU kernel path is stable.
+The first skeleton verifies the Rust CLI, C++20 kernel build, and C ABI boundary.
+It also reads safetensors metadata and writes a planning JSON without loading
+tensor payloads.
 
 Initial target candidate:
 
@@ -16,3 +18,15 @@ Threading rules:
 - `--io-threads` controls read/write helpers.
 - Numeric kernels must not silently create another large thread pool.
 
+Planning example:
+
+```text
+cargo run -p ullm-quant -- \
+  --model-dir /path/to/model \
+  --plan-output /tmp/ullm-plan.json \
+  --dry-run
+```
+
+The current default planner marks known text linear families as `quantize` and
+leaves embeddings, lm head, vision tensors, convolution tensors, MTP tensors,
+and unknown families as `passthrough`.

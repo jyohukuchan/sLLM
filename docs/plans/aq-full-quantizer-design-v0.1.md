@@ -76,6 +76,20 @@ Read only metadata first:
 3. Reject unsupported tensors early or mark pass-through.
 4. Estimate output size and peak working memory.
 
+Initial implementation status:
+
+- `crates/ullm-quant` can read safetensors headers without loading tensor payloads.
+- Plan output path:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b.json`
+- Qwen3.5-9B plan result:
+  - total tensors: `775`
+  - default quantize tensors: `255`
+  - passthrough tensors: `520`
+  - total tensor bytes: `19306216416`
+- The default planner currently quantizes known text linear families only and
+  passes through embeddings, lm head, vision tensors, convolution tensors, MTP
+  tensors, and unknown families.
+
 ### Phase 1: Calibration
 
 Goal: build candidate codebooks and optional family/tensor scales.

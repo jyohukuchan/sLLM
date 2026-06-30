@@ -126,6 +126,12 @@
   - 8-prompt mean KL: g16 unweighted `0.005510745`, g16 weighted `0.000705097`, g8 weighted `0.000899909`.
   - note: g16 weighted ranked slightly better than g8 weighted on the logit smoke despite g8's better tensor weighted MSE.
 
+- `ullm-quant` metadata planner:
+  - added safetensors header planning without reading tensor payloads.
+  - generated `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b.json`.
+  - Qwen3.5-9B plan: total tensors `775`, default quantize tensors `255`, passthrough tensors `520`, total tensor bytes `19306216416`.
+  - default quantize target is known text linear families only; embeddings, lm head, vision, conv, MTP, and unknown tensors pass through for now.
+
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
@@ -135,4 +141,4 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 ## Next
 
 - Expand module-level logit smoke to more prompts/modules, then plan full-model replacement.
-- Extend `ullm-quant` from skeleton to safetensors metadata planning.
+- Extend `ullm-quant` from metadata planning to chunked tensor reads and calibration samples.
