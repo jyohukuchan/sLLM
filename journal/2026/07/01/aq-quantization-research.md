@@ -273,18 +273,24 @@
   - wider scope: layer0/layer12 `linear_attn.in_proj_a/b/qkv/z`, `linear_attn.out_proj`, `mlp.up_proj`; layer3/layer7 `self_attn.q/k/v/o_proj`, `mlp.up_proj`; 22 modules; total original selected weight bytes `907018240`; elapsed `11:11.54`; max RSS `16367660 KiB`.
   - wider mean logit relative MSE / KL: all-g16 `0.000579478` / `0.001758983`; all-g8 `0.000452192` / `0.002217304`; p4p6 `0.000392221` / `0.001303061`; p4p46_inproj `0.000384154` / `0.001293804`; p4p65_inproj `0.000412484` / `0.001134097`; p4p70_inproj `0.000387565` / `0.001182557`; p4p80_inproj `0.000426451` / `0.001241760`.
   - interpretation update: with dense self-attn included, mixed policies beat all-g16/all-g8 on both relative MSE and KL. `p4p46_inproj` is best by relative MSE, `p4p65_inproj` is best by KL, and `p4p70_inproj` is close by relative MSE with full top10 overlap. Keep p4p6 as conservative baseline, but p4p46/p4p65 should become named follow-up candidates.
+  - added `tools/run-aq-module-loss-smoke.py` for cumulative next-token cross-entropy smoke. It reuses the existing logit-smoke quantization/policy implementation and adds optional `--repeat-to-length`.
+  - short-prompt loss smoke result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8.jsonl`; log `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8.log`; 40 rows, only 111 target tokens, elapsed `9:11.85`, max RSS `16370264 KiB`.
+  - short-prompt token-weighted loss delta: all-g16 `+0.001532838`, all-g8 `-0.004225286`, p4p6 `-0.000037107`, p4p46 `-0.011064199`, p4p65 `+0.003953395`. This run is too small for policy selection.
+  - repeat128 loss smoke result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8-repeat128.jsonl`; log `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8-repeat128.log`; 40 rows, 1016 target tokens, elapsed `10:44.75`, max RSS `16363884 KiB`.
+  - repeat128 token-weighted loss delta: all-g16 `+0.001027819`, all-g8 `-0.004386369`, p4p6 `-0.011532098`, p4p46 `-0.006359033`, p4p65 `-0.004686363`.
+  - interpretation update: repeat128 loss ranks p4p6 best and p4p46 second. Negative deltas on repeated prompts are not quality proof, but the relative ordering keeps p4p6 as the conservative full-conversion baseline while keeping p4p46 as the strongest in-proj follow-up.
 
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and the wider self-attn smoke now supports p4p46/p4p65 as real policy candidates, but tensor-level weighted MSE and logit-level ranking still do not fully agree.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and the wider self-attn smoke supports p4p46/p4p65 as real policy candidates, but the repeated-prompt loss smoke still favors p4p6 as the conservative baseline.
 
 ## Next
 
 - Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
-- Add named plan support for `p4p46_inproj` and `p4p65_inproj`, or run equivalent custom full-policy conversions.
-- Run a small perplexity or next-token loss smoke for p4p6, p4p46, and p4p65.
+- Run full-policy prototype conversion for p4p6, p4p46, and p4p65, using the in-proj-weighted codebooks.
+- Run a less artificial perplexity or next-token loss smoke for p4p6, p4p46, and p4p65 on a real text calibration set.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Replace the current per-tensor temporary conversion driver with a single `ullm-quant` full-conversion command.

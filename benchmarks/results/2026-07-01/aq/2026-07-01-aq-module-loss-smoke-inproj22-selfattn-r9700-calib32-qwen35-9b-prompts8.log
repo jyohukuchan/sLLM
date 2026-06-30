@@ -1,0 +1,25 @@
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/427 [00:00<?, ?it/s]Loading weights: 100%|██████████| 427/427 [00:00<00:00, 8293.25it/s]
+	Command being timed: "build/envs/vllm-rocm-nightly/bin/python tools/run-aq-module-loss-smoke.py --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --activation-stats benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj --selection-json benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj22-selfattn.json --prompt-file benchmarks/calibration/qwen35-aq-smoke-prompts-v0.1.txt --max-prompts 8 --sequence-length 128 --device cuda:0 --dtype bfloat16 --torch-threads 64 --variant g16_weighted --variant g8_weighted --policy p4p6=attn_k,attn_o,attn_v,linear_attn_out --policy p4p46_inproj=attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_z --policy p4p65_inproj=attn_k,attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_qkv --run-id aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8 --output benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8.jsonl --note wider_inproj_selfattn_policy_loss_probe"
+	User time (seconds): 21670.11
+	System time (seconds): 6009.15
+	Percent of CPU this job got: 5015%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 9:11.85
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 16370264
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 20
+	Minor (reclaiming a frame) page faults: 580121233
+	Voluntary context switches: 1903827
+	Involuntary context switches: 630064
+	Swaps: 0
+	File system inputs: 13672
+	File system outputs: 407208
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

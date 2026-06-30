@@ -1331,6 +1331,46 @@ KL, and p4p70 is close to p4p46 while preserving full top10 overlap. The
 current conservative p4p6 policy still performs well, but p4p46 is now a real
 candidate rather than only a tensor-MSE artifact.
 
+A next-token loss smoke was then added to avoid relying only on final-token
+logit differences:
+
+- tool:
+  `tools/run-aq-module-loss-smoke.py`
+- short-prompt result:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8.jsonl`
+- short-prompt log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8.log`
+- repeated-prompt result:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8-repeat128.jsonl`
+- repeated-prompt log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-inproj22-selfattn-r9700-calib32-qwen35-9b-prompts8-repeat128.log`
+
+The short-prompt run covered only 111 next-token targets, so it is too small
+for policy selection. It did show p4p46 with the lowest token-weighted loss
+delta, but the token count is the limiting factor.
+
+The repeated-prompt run used `--repeat-to-length --sequence-length 128`,
+covering 1,016 next-token targets:
+
+- rows: 40
+- scope: same 22 modules as the wider logit smoke
+- elapsed wall time: 10:44.75
+- maximum RSS: 16,363,884 KiB
+
+| variant / policy | token-weighted ref loss | token-weighted candidate loss | token-weighted loss delta | relative delta |
+| --- | ---: | ---: | ---: | ---: |
+| all g16 weighted | 0.566713959 | 0.567741778 | +0.001027819 | +0.001813646 |
+| all g8 weighted | 0.566713959 | 0.562327590 | -0.004386369 | -0.007740005 |
+| p4p6 | 0.566713959 | 0.555181861 | -0.011532098 | -0.020349063 |
+| p4p46_inproj | 0.566713959 | 0.560354926 | -0.006359033 | -0.011220887 |
+| p4p65_inproj | 0.566713959 | 0.562027596 | -0.004686363 | -0.008269362 |
+
+The repeated-prompt loss smoke ranks p4p6 best, p4p46 second, and p4p65 close
+to all-g8. Because this is still an artificial repeated-prompt smoke over only
+22 modules, the negative deltas should not be read as quality gains. The useful
+signal is relative ordering: p4p6 remains the conservative full-conversion
+baseline, while p4p46 remains the best in-proj follow-up candidate.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -1346,17 +1386,19 @@ However, a dedicated quantization-tool optimization track is necessary before fu
   modules, but tensor-level improvements and logit-level improvements do not
   rank the same. The wider self-attention smoke nevertheless supports treating
   p4p46 and p4p65 as named follow-up candidates alongside the conservative
-  p4p6 policy.
+  p4p6 policy. The repeated-prompt next-token loss smoke keeps p4p6 as the
+  conservative baseline for the next full conversion.
 
 ## Next Actions
 
-1. Add named plan support for p4p46 and p4p65, or run an equivalent custom
-   full-policy conversion, then compare against the existing p4p6 package.
+1. Run full-policy prototype conversion for p4p6, p4p46, and p4p65 with the
+   in-proj-weighted codebooks, then compare against the existing p4p6 package.
 2. Replace the current per-tensor temporary conversion driver with a single
    `ullm-quant` full-conversion command now that Rust-side merge exists.
 3. Replace or approximate the exact tensor-scale pre-pass before scaling from
    12 tensors to all policy-selected tensors.
-4. Run a small perplexity or next-token loss smoke for p4p6, p4p46, and p4p65;
-   logit relative MSE alone is not enough to settle the policy.
+4. Run a less artificial perplexity or next-token loss smoke on a real text
+   calibration set for p4p6, p4p46, and p4p65; repeated prompts are useful but
+   not enough to settle the policy.
 5. Add SIMD and multithreaded scheduling only after the scalar C++ semantics
    remain stable across wider conversion.
