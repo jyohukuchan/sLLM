@@ -28,7 +28,7 @@ Even when licenses are permissive, unconscious code copying is a practical risk.
 - `vllm`: Apache-2.0 license in the checked source tree.
 - `sglang`: Apache-2.0 license in the checked source tree.
 - `tensorrt-llm`: Apache-2.0 license in the checked source tree, with bundled third-party license notices.
-- `atom`: no LICENSE/COPYING/NOTICE file found in the checked shallow source tree; treat as license-unknown.
+- `atom` (`ROCm/ATOM`): MIT license in the checked source tree.
 
 ## Consequences
 

@@ -24,5 +24,5 @@ clone_or_update() {
 clone_or_update llama.cpp https://github.com/ggml-org/llama.cpp.git
 clone_or_update vllm https://github.com/vllm-project/vllm.git
 clone_or_update sglang https://github.com/sgl-project/sglang.git
-clone_or_update atom https://github.com/efeslab/Atom.git
+clone_or_update atom https://github.com/ROCm/ATOM.git
 clone_or_update tensorrt-llm https://github.com/NVIDIA/TensorRT-LLM.git

@@ -117,8 +117,8 @@ uLLM-project/
 
 1. `docs/specs/ullm-container-v0.1.md` を作る。
 2. `schemas/ullm-manifest-v0.1.schema.json` を作る。
-3. 最終配布では single-file `.ullm` を目指す。
-4. ただし初期実装では、debug と差分確認を優先して directory container の `model.ullm/` を採用する。
+3. 初期実装では、debug と差分確認を優先して directory container の `model.ullm/` を採用する。
+4. single-file `.ullm` にするかどうか、単一ファイル化する場合の内部構造は後で決める。
 5. directory container の標準構成を定義する。
 
 ```text
@@ -155,7 +155,7 @@ model.ullm/
 8. `aq` 用に codebook/LUT 参照を表現する。
 9. `sq` 用に hardware-native layout と scale metadata を表現する。
 10. 未対応機能を拒否するための capability field を定義する。
-11. directory container から single-file `.ullm` へ pack する将来仕様の placeholder を定義する。
+11. single-file 化は未決定事項として記録し、v0.1 仕様の決定範囲から外す。
 
 成果物:
 
@@ -168,7 +168,7 @@ model.ullm/
 - 空の `.ullm` directory container を validate できる。
 - `aq` と `sq` の manifest example を validate できる。
 - manifest schema が unknown field と missing required field を検出できる。
-- single-file 化時にも manifest と tensor table の論理構造を変えずに済む見通しがある。
+- single-file 化を決めなくても、directory container と manifest schema の検証が進められる。
 
 ### M2: Format tooling v0.1
 
@@ -716,7 +716,7 @@ python -m ullm_eval.compare_hf_logits \
 - C++/HIP runtime binary
 - Rust API/scheduler binary
 - sample `.ullm/` directory container
-- 将来の single-file `.ullm`
+- single-file `.ullm` は未決定事項として扱う
 
 4. Linux x86_64 + ROCm/HIP を最初の binary target にする。
 5. Docker/Podman image を配布するか決める。
@@ -733,7 +733,8 @@ python -m ullm_eval.compare_hf_logits \
 完了条件:
 
 - V620/R9700 で動く最小 runtime を第三者が再現できる手順がある。
-- `.ullm/` directory container と将来 single-file `.ullm` の配布方針が明確である。
+- `.ullm/` directory container の配布方針が明確である。
+- single-file `.ullm` を後で検討するための未決定事項が記録されている。
 - license/notice の確認手順が release checklist に入っている。
 
 ### M18: Announcement gate v0.1
@@ -816,8 +817,8 @@ python -m ullm_eval.compare_hf_logits \
 後から添削すべき点は次の通り。
 
 - 初期 runtime を C++20 中心にする判断が妥当か。
-- `.ullm` を最初から single-file にするか、directory container から始めるか。
-- single-file `.ullm` の pack 方式を tar-like container にするか、custom binary container にするか。
+- single-file `.ullm` を本当に必要とするか。
+- single-file `.ullm` を作る場合、pack 方式を tar-like container にするか、custom binary container にするか。
 - Qwen3-14B と Qwen3-30B-A3B のどちらを先に correctness target にするか。
 - Qwen3.5 と Gemma4 のどちらを先に advanced target にするか。
 - `aq4_lut16_g64` を最初の variant にするか。
