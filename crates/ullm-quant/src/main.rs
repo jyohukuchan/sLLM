@@ -79,6 +79,7 @@ struct Options {
     inspect_codebook_candidate: Option<String>,
     prototype_output_dir: Option<PathBuf>,
     prototype_verify: bool,
+    tensor_scale_override: Option<f32>,
     chunk_bytes: usize,
     scale_window: usize,
     aq_policy: String,
@@ -308,6 +309,17 @@ fn parse_usize_zero_allowed(flag: &str, value: Option<String>) -> Result<usize, 
         .map_err(|_| format!("{flag} must be a non-negative integer"))
 }
 
+fn parse_positive_f32(flag: &str, value: Option<String>) -> Result<f32, String> {
+    let raw = value.ok_or_else(|| format!("{flag} requires a value"))?;
+    let parsed = raw
+        .parse::<f32>()
+        .map_err(|_| format!("{flag} must be a positive finite float"))?;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return Err(format!("{flag} must be a positive finite float"));
+    }
+    Ok(parsed)
+}
+
 fn parse_options() -> Result<Options, String> {
     let mut args = env::args().skip(1);
     let mut options = Options {
@@ -324,6 +336,7 @@ fn parse_options() -> Result<Options, String> {
         inspect_codebook_candidate: None,
         prototype_output_dir: None,
         prototype_verify: true,
+        tensor_scale_override: None,
         chunk_bytes: 64 * 1024 * 1024,
         scale_window: 0,
         aq_policy: "all-g16".to_string(),
@@ -387,6 +400,10 @@ fn parse_options() -> Result<Options, String> {
                     })?));
             }
             "--prototype-skip-verify" => options.prototype_verify = false,
+            "--tensor-scale-override" => {
+                options.tensor_scale_override =
+                    Some(parse_positive_f32("--tensor-scale-override", args.next())?)
+            }
             "--chunk-bytes" => options.chunk_bytes = parse_usize("--chunk-bytes", args.next())?,
             "--scale-window" => {
                 options.scale_window = parse_usize_zero_allowed("--scale-window", args.next())?
@@ -444,6 +461,7 @@ fn print_help() {
     println!("  --inspect-codebook-candidate <ID>");
     println!("  --prototype-output-dir <PATH> write one inspected tensor to a .ullm.d prototype");
     println!("  --prototype-skip-verify       skip prototype re-read/dequant verification");
+    println!("  --tensor-scale-override <F>   skip tensor-scale estimation for prototype output");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
     println!("  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, or custom");
@@ -1509,6 +1527,7 @@ fn write_prototype_tensor(
     codebook: &[f32],
     chunk_bytes: usize,
     scale_window: usize,
+    tensor_scale_override: Option<f32>,
     output_dir: &Path,
 ) -> Result<PrototypeManifest, String> {
     let location = find_tensor_location(model_dir, tensor_name)?;
@@ -1535,7 +1554,9 @@ fn write_prototype_tensor(
     }
 
     let group_stats = new_aq_group_stats(aq_format, group_size)?;
-    let tensor_scale = if aq_uses_tensor_scale(aq_format) {
+    let tensor_scale = if let Some(value) = tensor_scale_override {
+        value
+    } else if aq_uses_tensor_scale(aq_format) {
         estimate_tensor_scale(
             &location,
             payload_bytes,
@@ -2283,6 +2304,7 @@ fn run() -> Result<(), String> {
             codebook,
             options.chunk_bytes,
             options.scale_window,
+            options.tensor_scale_override,
             output_dir,
         )?;
         let tensor = manifest
@@ -2299,6 +2321,14 @@ fn run() -> Result<(), String> {
         println!("prototype_scale_file={}", tensor.scale_file);
         println!("prototype_codebook_file={}", tensor.codebook_file);
         println!("prototype_relative_mse={:.12}", tensor.metrics.relative_mse);
+        println!(
+            "prototype_tensor_scale_source={}",
+            if options.tensor_scale_override.is_some() {
+                "override"
+            } else {
+                "estimated"
+            }
+        );
         println!(
             "prototype_max_abs_error={:.9}",
             tensor.metrics.max_abs_error
@@ -2410,6 +2440,7 @@ mod tests {
             inspect_codebook_candidate: None,
             prototype_output_dir: None,
             prototype_verify: true,
+            tensor_scale_override: None,
             chunk_bytes: 1024,
             scale_window: 0,
             aq_policy: policy.to_string(),

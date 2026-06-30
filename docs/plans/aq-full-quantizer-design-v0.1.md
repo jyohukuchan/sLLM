@@ -323,6 +323,10 @@ Rust implementation status:
     about `1.23x` faster before SIMD/multithreading.
   - `attn_k` g8 write + re-read verification succeeded with relative MSE
     `0.003677692937`.
+- `--tensor-scale-override` can skip exact tensor-scale estimation when the
+  tensor scale is already known. On `mlp_up` g16, this reduced wall time from
+  `7.13 s` to `6.99 s` and peak RSS from `21516 KiB` to `4180 KiB`, with the
+  same relative MSE `0.005283509762`.
 
 ## Output Directory Prototype
 
@@ -403,8 +407,9 @@ Performance tests:
 1. Add F16 support to `quantize_chunk_v1` after BF16 semantics are stable.
 2. Add larger golden tests that compare C++ chunk output against Python or Rust
    scalar output across multiple random seeds.
-3. Avoid the tensor-scale pre-pass where possible by either storing group amax
-   summaries or fusing estimation with a bounded histogram.
+3. Avoid the exact tensor-scale pre-pass where possible. The current pre-pass
+   mostly hurts memory rather than wall time on one tensor, but it will matter
+   more for multi-tensor scheduling.
 4. Add SIMD kernels after the scalar C++ semantics are locked.
 5. Extend from one tensor to all tensors selected by the p4p6 plan.
 6. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor

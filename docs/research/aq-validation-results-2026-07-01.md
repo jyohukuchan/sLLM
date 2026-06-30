@@ -683,12 +683,19 @@ Run logs:
 | --- | --- | ---: | ---: | ---: | ---: |
 | scalar Rust write-only | `mlp_up` g16 | 0.005283509762 | 8.76 s | 21,560 KiB | 5,745,622 |
 | C++ BF16 write-only | `mlp_up` g16 | 0.005283509762 | 7.13 s | 21,516 KiB | 7,059,137 |
+| C++ BF16 one-pass with tensor-scale override | `mlp_up` g16 | 0.005283509762 | 6.99 s | 4,180 KiB | 7,200,522 |
 | C++ BF16 write + verify | `attn_k` g8 | 0.003677692937 | 0.74 s | 8,220 KiB | n/a |
 
 The first C++ kernel is only a scalar baseline, but it preserved metrics and
 improved the large-tensor write path by about `1.23x`. The next optimization
 target is not only SIMD: the prototype still reads the tensor twice because
 tensor-scale estimation is a pre-pass.
+
+`--tensor-scale-override` was added to isolate one-pass quantize/write speed
+when a correct tensor scale is already known. For `mlp_up`, this reduced wall
+time only slightly (`7.13 s -> 6.99 s`) but reduced peak RSS substantially
+(`21,516 KiB -> 4,180 KiB`) by avoiding the group-target-scale vector used for
+exact median tensor-scale estimation.
 
 ## Interpretation
 
