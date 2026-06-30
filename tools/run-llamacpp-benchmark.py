@@ -12,6 +12,8 @@ import shlex
 import socket
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -71,8 +73,129 @@ def run_text(command: list[str], cwd: Path | None = None) -> str | None:
     return completed.stdout.strip()
 
 
+def parse_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def git_value(repo: Path, *args: str) -> str | None:
     return run_text(["git", "-C", str(repo), *args])
+
+
+def read_rocm_vram() -> dict[str, dict[str, Any]]:
+    output = run_text(["rocm-smi", "--showmeminfo", "vram", "--json"])
+    if not output:
+        return {}
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError:
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for key, value in data.items():
+        if not key.startswith("card") or not isinstance(value, dict):
+            continue
+        used = parse_int(value.get("VRAM Total Used Memory (B)"))
+        total = parse_int(value.get("VRAM Total Memory (B)"))
+        result[key] = {
+            "used_bytes": used,
+            "total_bytes": total,
+            "series": value.get("Card Series"),
+            "gfx": value.get("GFX Version"),
+        }
+    return result
+
+
+def total_used_bytes(sample: dict[str, dict[str, Any]]) -> int | None:
+    values = [info.get("used_bytes") for info in sample.values()]
+    numeric = [value for value in values if isinstance(value, int)]
+    if not numeric:
+        return None
+    return sum(numeric)
+
+
+def used_by_card(sample: dict[str, dict[str, Any]]) -> dict[str, int]:
+    return {
+        card: value
+        for card, info in sample.items()
+        if isinstance((value := info.get("used_bytes")), int)
+    }
+
+
+class RocmMemoryMonitor:
+    def __init__(self, log_path: Path, interval_seconds: float) -> None:
+        self.log_path = log_path
+        self.interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.baseline: dict[str, dict[str, Any]] = {}
+        self.peak_by_card: dict[str, int] = {}
+        self.peak_total_bytes: int | None = None
+        self.sample_count = 0
+
+    def _write_sample(self, stage: str, sample: dict[str, dict[str, Any]]) -> None:
+        self.sample_count += 1
+        total = total_used_bytes(sample)
+        if total is not None:
+            self.peak_total_bytes = max(total, self.peak_total_bytes or total)
+        for card, used in used_by_card(sample).items():
+            self.peak_by_card[card] = max(used, self.peak_by_card.get(card, used))
+        row = {
+            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "stage": stage,
+            "total_used_bytes": total,
+            "cards": sample,
+        }
+        with self.log_path.open("a", encoding="utf-8") as output:
+            output.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
+            output.write("\n")
+
+    def start(self) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.log_path.exists():
+            self.log_path.unlink()
+        self.baseline = read_rocm_vram()
+        self._write_sample("baseline", self.baseline)
+        self._thread = threading.Thread(target=self._run, name="rocm-memory-monitor", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self._write_sample("sample", read_rocm_vram())
+
+    def stop(self) -> dict[str, Any]:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.interval_seconds * 2))
+        self._write_sample("final", read_rocm_vram())
+        return self.summary()
+
+    def summary(self) -> dict[str, Any]:
+        baseline_by_card = used_by_card(self.baseline)
+        baseline_total = total_used_bytes(self.baseline)
+        consumed_by_card = {
+            card: max(0, peak - baseline_by_card.get(card, 0))
+            for card, peak in self.peak_by_card.items()
+        }
+        consumed_total = None
+        if baseline_total is not None and self.peak_total_bytes is not None:
+            consumed_total = max(0, self.peak_total_bytes - baseline_total)
+        return {
+            "backend": "rocm-smi",
+            "sample_interval_seconds": self.interval_seconds,
+            "sample_count": self.sample_count,
+            "baseline_total_bytes": baseline_total,
+            "peak_total_bytes": self.peak_total_bytes,
+            "consumed_total_bytes": consumed_total,
+            "baseline_by_card_bytes": baseline_by_card,
+            "peak_by_card_bytes": self.peak_by_card,
+            "consumed_by_card_bytes": consumed_by_card,
+            "log": str(self.log_path),
+        }
 
 
 def parse_devices(llama_bench: Path) -> dict[str, dict[str, Any]]:
@@ -208,11 +331,12 @@ def build_parallelism(target: dict[str, str]) -> dict[str, int]:
     }
 
 
-def build_artifacts(command: list[str], stdout_log: Path, stderr_log: Path) -> dict[str, str]:
+def build_artifacts(command: list[str], stdout_log: Path, stderr_log: Path, memory_log: Path | None = None) -> dict[str, str | None]:
     return {
         "command": command_string(command),
         "stdout_log": str(stdout_log),
         "stderr_log": str(stderr_log),
+        "memory_log": str(memory_log) if memory_log else None,
     }
 
 
@@ -223,6 +347,19 @@ def total_tokens_per_second(prompt: int, gen: int, pp_ts: float, tg_ts: float) -
     if seconds <= 0:
         return None
     return (prompt + gen) / seconds
+
+
+def gib(value: int | None) -> float | None:
+    if value is None:
+        return None
+    return value / 1024**3
+
+
+def decode_memory_product(decode_tokens_per_second: float, consumed_bytes: int | None) -> float | None:
+    consumed_gib = gib(consumed_bytes)
+    if consumed_gib is None:
+        return None
+    return decode_tokens_per_second * consumed_gib
 
 
 def result_row(
@@ -238,6 +375,8 @@ def result_row(
     command: list[str],
     stdout_log: Path,
     stderr_log: Path,
+    memory_log: Path,
+    memory: dict[str, Any] | None,
     devices: dict[str, dict[str, Any]],
     driver: str | None,
     runtime: str | None,
@@ -292,14 +431,22 @@ def result_row(
             "total_tokens_per_second": total_tokens_per_second(prompt, gen, pp_ts, tg_ts),
             "latency_p50_ms": None,
             "latency_p95_ms": None,
-            "vram_peak_bytes": None,
+            "vram_baseline_bytes": memory.get("baseline_total_bytes") if memory else None,
+            "vram_peak_bytes": memory.get("peak_total_bytes") if memory else None,
+            "vram_consumed_bytes": memory.get("consumed_total_bytes") if memory else None,
+            "decode_tokens_per_second_times_vram_consumed_gib": decode_memory_product(
+                tg_ts,
+                memory.get("consumed_total_bytes") if memory else None,
+            ),
             "power_watts_avg": None,
         },
-        "artifacts": build_artifacts(command, stdout_log, stderr_log),
+        "memory": memory,
+        "artifacts": build_artifacts(command, stdout_log, stderr_log, memory_log),
         "error": None,
         "notes": [
             "llama-bench reports separate prompt-processing and token-generation rows; total token/s is computed from those two averages.",
             "context_length records prompt_tokens + generated_tokens because this llama-bench mode does not expose an independent n_ctx sweep.",
+            "VRAM consumed bytes are process-window peak total used bytes minus pre-command total used bytes from rocm-smi.",
             f"llama.cpp split_mode={split_mode}; this is not the same as vLLM/SGLang pipeline parallelism.",
         ],
     }
@@ -314,6 +461,8 @@ def failure_rows(
     command: list[str],
     stdout_log: Path,
     stderr_log: Path,
+    memory_log: Path,
+    memory: dict[str, Any] | None,
     devices: dict[str, dict[str, Any]],
     driver: str | None,
     runtime: str | None,
@@ -372,7 +521,8 @@ def failure_rows(
                             "kv_cache_dtype": f"{args.cache_type_k}/{args.cache_type_v}",
                         },
                         "metrics": None,
-                        "artifacts": build_artifacts(command, stdout_log, stderr_log),
+                        "memory": memory,
+                        "artifacts": build_artifacts(command, stdout_log, stderr_log, memory_log),
                         "error": {
                             "type": error_type or status,
                             "message": message,
@@ -398,6 +548,7 @@ def run_llama_bench(
     log_base = case_id("raw", model["name"], model["quantization"], target["label"], target["split_mode"])
     stdout_log = logs_dir / f"{log_base}.stdout.jsonl"
     stderr_log = logs_dir / f"{log_base}.stderr.log"
+    memory_log = logs_dir / f"{log_base}.memory.jsonl"
     command = [
         str(args.llama_bench),
         "-m",
@@ -430,6 +581,9 @@ def run_llama_bench(
 
     env = os.environ.copy()
     env.setdefault("HIP_VISIBLE_DEVICES", "0,1,2")
+    monitor = None if args.no_memory_monitor else RocmMemoryMonitor(memory_log, args.memory_sample_interval)
+    if monitor is not None:
+        monitor.start()
     try:
         completed = subprocess.run(
             command,
@@ -441,6 +595,7 @@ def run_llama_bench(
             timeout=args.timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
+        memory = monitor.stop() if monitor is not None else None
         stdout = as_text(exc.stdout)
         stderr = as_text(exc.stderr)
         stdout_log.write_text(stdout, encoding="utf-8")
@@ -453,6 +608,8 @@ def run_llama_bench(
             command=command,
             stdout_log=stdout_log,
             stderr_log=stderr_log,
+            memory_log=memory_log,
+            memory=memory,
             devices=devices,
             driver=driver,
             runtime=runtime,
@@ -463,6 +620,7 @@ def run_llama_bench(
             error_type="timeout",
             message_override=f"llama-bench exceeded timeout_seconds={args.timeout_seconds}",
         )
+    memory = monitor.stop() if monitor is not None else None
     stdout_log.write_text(completed.stdout, encoding="utf-8")
     stderr_log.write_text(completed.stderr, encoding="utf-8")
     if completed.returncode != 0:
@@ -474,6 +632,8 @@ def run_llama_bench(
             command=command,
             stdout_log=stdout_log,
             stderr_log=stderr_log,
+            memory_log=memory_log,
+            memory=memory,
             devices=devices,
             driver=driver,
             runtime=runtime,
@@ -492,6 +652,8 @@ def run_llama_bench(
             command=command,
             stdout_log=stdout_log,
             stderr_log=stderr_log,
+            memory_log=memory_log,
+            memory=memory,
             devices=devices,
             driver=driver,
             runtime=runtime,
@@ -533,6 +695,8 @@ def run_llama_bench(
                         command=command,
                         stdout_log=stdout_log,
                         stderr_log=stderr_log,
+                        memory_log=memory_log,
+                        memory=memory,
                         devices=devices,
                         driver=driver,
                         runtime=runtime,
@@ -549,6 +713,8 @@ def run_llama_bench(
         command=command,
         stdout_log=stdout_log,
         stderr_log=stderr_log,
+        memory_log=memory_log,
+        memory=memory,
         devices=devices,
         driver=driver,
         runtime=runtime,
@@ -605,7 +771,8 @@ def unsupported_rows(
                     "kv_cache_dtype": "f16/f16",
                 },
                 "metrics": None,
-                "artifacts": {"command": None, "stdout_log": None, "stderr_log": None},
+                "memory": None,
+                "artifacts": {"command": None, "stdout_log": None, "stderr_log": None, "memory_log": None},
                 "error": {"type": "unsupported_hardware", "message": message},
                 "notes": ["Unsupported rows are recorded before MI300X/NVIDIA test environments are available."],
             }
@@ -638,6 +805,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--flash-attn", choices=["on", "off", "auto"], default=None)
     parser.add_argument("--timeout-seconds", type=int, default=None)
+    parser.add_argument("--memory-sample-interval", type=float, default=1.0)
+    parser.add_argument("--no-memory-monitor", action="store_true")
     parser.add_argument("--write-unsupported", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

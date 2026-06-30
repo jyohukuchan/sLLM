@@ -65,13 +65,29 @@ Each line is one benchmark case. A case may be successful, failed, unsupported, 
     "total_tokens_per_second": 0.0,
     "latency_p50_ms": null,
     "latency_p95_ms": null,
+    "vram_baseline_bytes": null,
     "vram_peak_bytes": null,
+    "vram_consumed_bytes": null,
+    "decode_tokens_per_second_times_vram_consumed_gib": null,
     "power_watts_avg": null
+  },
+  "memory": {
+    "backend": "rocm-smi",
+    "sample_interval_seconds": 1.0,
+    "sample_count": 0,
+    "baseline_total_bytes": null,
+    "peak_total_bytes": null,
+    "consumed_total_bytes": null,
+    "baseline_by_card_bytes": {},
+    "peak_by_card_bytes": {},
+    "consumed_by_card_bytes": {},
+    "log": null
   },
   "artifacts": {
     "command": "llama-bench ...",
     "stdout_log": null,
-    "stderr_log": null
+    "stderr_log": null,
+    "memory_log": null
   },
   "error": null,
   "notes": []
@@ -128,6 +144,8 @@ Example:
 - GPU model
 - backend/runtime
 - KV cache dtype
+- quantization family: `K-Quant`, `I-Quant`, `UD`, `FP8`, or another explicit family
+- VRAM baseline, peak, and consumed memory
 
 ## Metrics
 
@@ -136,7 +154,29 @@ At minimum:
 - prefill tokens/s
 - decode tokens/s
 - total tokens/s
-- peak VRAM if available
+- VRAM baseline before the command
+- peak VRAM during the command
+- consumed VRAM, defined as peak total used bytes minus baseline total used bytes
+- `decode_tokens_per_second_times_vram_consumed_gib`
 - unsupported/OOM reason if metrics are unavailable
 
 Latency and power metrics are optional in v0.1.
+
+## Memory Semantics
+
+Memory must be recorded for throughput runs. On ROCm, use `rocm-smi --showmeminfo vram --json` or an equivalent runtime API. The preferred values are:
+
+- `vram_baseline_bytes`: total used VRAM immediately before the engine command starts.
+- `vram_peak_bytes`: maximum total used VRAM observed while the command runs.
+- `vram_consumed_bytes`: `vram_peak_bytes - vram_baseline_bytes`, clamped at zero.
+- `memory.*_by_card_bytes`: raw per-card values as reported by the monitoring backend.
+
+The aggregate total is the comparison key. Per-card names may not match runtime device names exactly on every ROCm system, so they are diagnostic metadata unless a backend provides stable runtime-device mapping.
+
+Tables derived from this schema should include:
+
+- decode tokens/s
+- consumed VRAM in GiB
+- `decode tokens/s * consumed VRAM GiB`
+
+The product is only a reference column. It is not a quality score by itself.

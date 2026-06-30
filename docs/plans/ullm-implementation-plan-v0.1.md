@@ -33,7 +33,7 @@
 - Qwen3.5 または Gemma4 は、Unsloth Dynamic 系との比較と MTP/新技術検証のために早期 target へ昇格させる。
 - JAX/TPU は backend/plugin 構想に含めるが、初期実装 target にはしない。
 - `aq` と `sq` の詳細な量子化仕様は、事前に決めない。最初に決めるのは実験 ID、payload metadata、測定条件、結果 schema、採用判定基準である。
-- Qwen3 実装の前に、既存推論エンジンの token/s を測定する phase を挟む。
+- Qwen3 実装の前に、既存推論エンジンの token/s とメモリ消費量を測定する phase を挟む。
 
 ## Repository Layout
 
@@ -178,7 +178,7 @@ model.ullm/
 
 目的:
 
-- Qwen3 実装前に、既存推論エンジンの token/s と制約を条件別に測定する。
+- Qwen3 実装前に、既存推論エンジンの token/s、メモリ消費量、制約を条件別に測定する。
 - uLLM の目標を、推測ではなく実測 baseline から決める。
 
 手順:
@@ -209,14 +209,17 @@ model.ullm/
 - decode tokens/s
 - total tokens/s
 - latency p50/p95
-- VRAM peak
+- VRAM baseline / peak / consumed
+- decode tokens/s x consumed VRAM GiB
 - power if available
 - unsupported/OOM reason
 
 6. V620/R9700 では llama.cpp を主な実測対象にする。
-7. vLLM、SGLang、ROCm/ATOM、TensorRT-LLM は V620 で無理に動かさず、MI300X/NVIDIA 環境用の測定 harness を先に作る。
-8. TP/PP を指定できない engine では、その条件を `unsupported` として記録する。
-9. 結果から uLLM の最初の target condition を決める。
+7. vLLM、SGLang、ROCm/ATOM は V620 で無理に動かさず、R9700 + Qwen3-14B-FP8 の代表条件で先に測定可否を確認する。
+8. TensorRT-LLM は AMD GPU では無理に動かさず、NVIDIA 環境用の測定 harness を先に作る。
+9. I-Quant、K-Quant、UD(Unsloth Dynamic) は同じ表で混ぜず、別々の比較グループとして測る。
+10. TP/PP を指定できない engine では、その条件を `unsupported` として記録する。
+11. 結果から uLLM の最初の target condition を決める。
 
 成果物:
 
@@ -868,18 +871,21 @@ python -m ullm_eval.compare_hf_logits \
 2. `docs/plans/existing-engine-benchmark-plan-v0.1.md` を書く。
 3. `benchmarks/results/README.md` を作る。
 4. llama.cpp benchmark wrapper を作る。
-5. V620/R9700 で context length、batch、prompt/generated token 数を振って llama.cpp token/s を測る。
-6. vLLM、SGLang、ROCm/ATOM、TensorRT-LLM は V620 で無理に動かさず、unsupported reason を記録できるようにする。
-7. `.ullm` directory container の `tensors/`、`codebooks/`、`scales/` を「実験 payload 用の論理ストレージ」として文書化する。
-8. `schemas/ullm-manifest-v0.1.schema.json` を作る。
-9. `python/ullm_format/` の manifest validation を作る。
-10. dummy `.ullm` directory container の round-trip test を作る。
-11. 量子化実験 protocol と result schema を作る。
-12. Qwen3-14B と Qwen3-30B-A3B の import 調査に進む。
-13. HIP C++ backend の build skeleton を作る。
-14. V620/R9700 向け GEMM microbenchmark を作る。
-15. prefill/decode 速度予測の v0.1 仕様を書く。
-16. 配布計画と release checklist を作る。
+5. V620/R9700 で context length、batch、prompt/generated token 数を振って llama.cpp token/s とメモリ消費量を測る。
+6. summary table に decode token/s、consumed VRAM GiB、decode token/s x consumed VRAM GiB を入れる。
+7. I-Quant、K-Quant、UD(Unsloth Dynamic) を別々の比較グループで測る。
+8. R9700 + Qwen3-14B-FP8 で vLLM、SGLang、ROCm/ATOM の代表条件を測る。
+9. vLLM、SGLang、ROCm/ATOM、TensorRT-LLM は V620 で無理に動かさず、unsupported reason を記録できるようにする。
+10. `.ullm` directory container の `tensors/`、`codebooks/`、`scales/` を「実験 payload 用の論理ストレージ」として文書化する。
+11. `schemas/ullm-manifest-v0.1.schema.json` を作る。
+12. `python/ullm_format/` の manifest validation を作る。
+13. dummy `.ullm` directory container の round-trip test を作る。
+14. 量子化実験 protocol と result schema を作る。
+15. Qwen3-14B と Qwen3-30B-A3B の import 調査に進む。
+16. HIP C++ backend の build skeleton を作る。
+17. V620/R9700 向け GEMM microbenchmark を作る。
+18. prefill/decode 速度予測の v0.1 仕様を書く。
+19. 配布計画と release checklist を作る。
 
 ## Review Points
 
@@ -902,6 +908,6 @@ python -m ullm_eval.compare_hf_logits \
 
 ## Current Integrated Plan
 
-現時点では、まず既存推論エンジンの benchmark schema と測定 harness を作り、llama.cpp on V620/R9700 の token/s baseline を取る。次に `.ullm` directory container と quantization experiment payload の受け皿を作る。その後、HIP C++ backend を V620/R9700 で進め、MI300X で FP8 系 `sq` candidate のサーバー級 throughput を確認し、その後 AVX-512 backend を追加する。
+現時点では、まず既存推論エンジンの benchmark schema と測定 harness を作り、llama.cpp on V620/R9700 の token/s とメモリ消費量 baseline を取る。R9700 + Qwen3-14B-FP8 では vLLM、SGLang、ROCm/ATOM の代表条件も測定対象にする。次に `.ullm` directory container と quantization experiment payload の受け皿を作る。その後、HIP C++ backend を V620/R9700 で進め、MI300X で FP8 系 `sq` candidate のサーバー級 throughput を確認し、その後 AVX-512 backend を追加する。
 
-最初の成功条件は、既存推論エンジンの token/s を context length、batch、prompt/generated tokens、TP、PP、GPU 数などの条件つきで保存できる状態である。量子化方式は、その baseline と評価基盤ができた後に candidate として試し、結果を見てから stable spec へ昇格させる。その後、Qwen3-14B、Qwen3-30B-A3B、Qwen3.5、Gemma4 へ進む。
+最初の成功条件は、既存推論エンジンの token/s とメモリ消費量を context length、batch、prompt/generated tokens、TP、PP、GPU 数などの条件つきで保存できる状態である。量子化方式は、その baseline と評価基盤ができた後に candidate として試し、結果を見てから stable spec へ昇格させる。その後、Qwen3-14B、Qwen3-30B-A3B、Qwen3.5、Gemma4 へ進む。
