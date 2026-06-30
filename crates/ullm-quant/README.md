@@ -41,6 +41,16 @@ It also records an index+scale payload-size estimate for quantized tensors.
 The next conversion step should use the existing safetensors chunk reader so
 payload processing stays bounded by the working-memory budget.
 
+Chunk inspection example:
+
+```text
+cargo run -p ullm-quant -- \
+  --model-dir /path/to/model \
+  --inspect-tensor model.language_model.layers.0.mlp.up_proj.weight \
+  --chunk-bytes 1048576 \
+  --dry-run
+```
+
 Policy presets:
 
 - `all-g16`: all quantizable tensors use the low-budget format.

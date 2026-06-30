@@ -157,6 +157,8 @@
   - p4p6 estimated output bytes: low `3655729152`, high `393216000`, passthrough `5049777120`, total `9098722272`; input tensor bytes `19306216416`, estimated output/input ratio `0.471285`.
   - added safetensors payload chunk reader in Rust so future conversion can read tensor bytes by offset/length instead of loading whole tensors.
   - `cargo test -p ullm-quant` passes 5 tests, including a handcrafted safetensors chunk-read test.
+  - real-model chunk inspection output: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-inspect-qwen35-9b-layer0-mlp-up.txt`.
+  - inspected `model.language_model.layers.0.mlp.up_proj.weight`: BF16 `[12288, 4096]`, payload `100663296` bytes, chunk size `1048576`, chunks `96`, FNV-1a64 `16e6f2e89dfb833b`.
 
 ## Current Interpretation
 

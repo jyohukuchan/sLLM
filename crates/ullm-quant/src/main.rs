@@ -28,6 +28,8 @@ struct Options {
     max_working_memory_mib: usize,
     model_dir: Option<PathBuf>,
     plan_output: Option<PathBuf>,
+    inspect_tensor: Option<String>,
+    chunk_bytes: usize,
     aq_policy: String,
     aq_high_families: Vec<String>,
     aq_low_format: String,
@@ -40,7 +42,7 @@ struct SafetensorsIndex {
     weight_map: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct TensorHeader {
     dtype: String,
     shape: Vec<usize>,
@@ -51,6 +53,25 @@ struct TensorHeader {
 struct SafetensorsMetadata {
     data_start: u64,
     tensors: BTreeMap<String, TensorHeader>,
+}
+
+#[derive(Debug)]
+struct TensorLocation {
+    source_file: PathBuf,
+    data_start: u64,
+    header: TensorHeader,
+}
+
+#[derive(Debug)]
+struct TensorInspectResult {
+    name: String,
+    source_file: PathBuf,
+    dtype: String,
+    shape: Vec<usize>,
+    payload_bytes: usize,
+    chunk_bytes: usize,
+    chunks: usize,
+    fnv1a64: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +139,8 @@ fn parse_options() -> Result<Options, String> {
         max_working_memory_mib: 4096,
         model_dir: None,
         plan_output: None,
+        inspect_tensor: None,
+        chunk_bytes: 64 * 1024 * 1024,
         aq_policy: "all-g16".to_string(),
         aq_high_families: Vec::new(),
         aq_low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
@@ -141,6 +164,13 @@ fn parse_options() -> Result<Options, String> {
                         "--plan-output requires a value".to_string()
                     })?));
             }
+            "--inspect-tensor" => {
+                options.inspect_tensor = Some(
+                    args.next()
+                        .ok_or_else(|| "--inspect-tensor requires a value".to_string())?,
+                );
+            }
+            "--chunk-bytes" => options.chunk_bytes = parse_usize("--chunk-bytes", args.next())?,
             "--aq-policy" => {
                 options.aq_policy = args
                     .next()
@@ -184,6 +214,10 @@ fn print_help() {
     println!("Options:");
     println!("  --model-dir <PATH>            HF safetensors model directory");
     println!("  --plan-output <PATH>          write metadata plan JSON");
+    println!(
+        "  --inspect-tensor <NAME>       read one tensor payload in chunks and print checksum"
+    );
+    println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, or custom");
     println!("  --aq-high-family <FAMILY>     high-format family for custom policy; repeatable");
     println!("  --aq-low-format <ID>          low-budget aq candidate id");
@@ -479,6 +513,69 @@ fn read_tensor_payload_chunk(
     Ok(bytes)
 }
 
+fn find_tensor_location(model_dir: &Path, tensor_name: &str) -> Result<TensorLocation, String> {
+    for path in safetensor_files(model_dir)? {
+        let metadata = read_safetensors_metadata(&path)?;
+        if let Some(header) = metadata.tensors.get(tensor_name) {
+            return Ok(TensorLocation {
+                source_file: path,
+                data_start: metadata.data_start,
+                header: header.clone(),
+            });
+        }
+    }
+    Err(format!(
+        "tensor {tensor_name} not found in {}",
+        model_dir.display()
+    ))
+}
+
+fn fnv1a64_update(mut hash: u64, bytes: &[u8]) -> u64 {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn inspect_tensor_chunks(
+    model_dir: &Path,
+    tensor_name: &str,
+    chunk_bytes: usize,
+) -> Result<TensorInspectResult, String> {
+    let location = find_tensor_location(model_dir, tensor_name)?;
+    let payload_bytes = tensor_payload_bytes(&location.header)?;
+    let mut offset = 0usize;
+    let mut chunks = 0usize;
+    let mut hash = 0xcbf2_9ce4_8422_2325;
+    while offset < payload_bytes {
+        let bytes = read_tensor_payload_chunk(
+            &location.source_file,
+            location.data_start,
+            &location.header,
+            offset,
+            chunk_bytes,
+        )?;
+        if bytes.is_empty() {
+            break;
+        }
+        hash = fnv1a64_update(hash, &bytes);
+        offset += bytes.len();
+        chunks += 1;
+    }
+    Ok(TensorInspectResult {
+        name: tensor_name.to_string(),
+        source_file: location.source_file,
+        dtype: location.header.dtype,
+        shape: location.header.shape,
+        payload_bytes,
+        chunk_bytes,
+        chunks,
+        fnv1a64: hash,
+    })
+}
+
 fn safetensor_files(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let index_path = model_dir.join("model.safetensors.index.json");
     if index_path.exists() {
@@ -653,6 +750,21 @@ fn run() -> Result<(), String> {
             plan.estimated_output_to_input_ratio
         );
     }
+    if let Some(tensor_name) = options.inspect_tensor.as_deref() {
+        let model_dir = options
+            .model_dir
+            .as_deref()
+            .ok_or_else(|| "--inspect-tensor requires --model-dir".to_string())?;
+        let inspect = inspect_tensor_chunks(model_dir, tensor_name, options.chunk_bytes)?;
+        println!("inspect_tensor={}", inspect.name);
+        println!("inspect_source_file={}", inspect.source_file.display());
+        println!("inspect_dtype={}", inspect.dtype);
+        println!("inspect_shape={:?}", inspect.shape);
+        println!("inspect_payload_bytes={}", inspect.payload_bytes);
+        println!("inspect_chunk_bytes={}", inspect.chunk_bytes);
+        println!("inspect_chunks={}", inspect.chunks);
+        println!("inspect_fnv1a64={:016x}", inspect.fnv1a64);
+    }
     if let (Some(plan), Some(output)) = (&plan, options.plan_output.as_deref()) {
         let text = serde_json::to_string_pretty(plan)
             .map_err(|err| format!("failed to serialize plan: {err}"))?;
@@ -712,6 +824,8 @@ mod tests {
             max_working_memory_mib: 1024,
             model_dir: None,
             plan_output: None,
+            inspect_tensor: None,
+            chunk_bytes: 1024,
             aq_policy: policy.to_string(),
             aq_high_families: Vec::new(),
             aq_low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
