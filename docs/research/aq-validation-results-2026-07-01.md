@@ -382,6 +382,23 @@ On this small logit smoke, g16 weighted was slightly better than g8 weighted
 despite g8 being better in tensor weighted MSE. Candidate ranking therefore
 needs model-level checks, not only tensor metrics.
 
+Two additional modules were checked with the same 8 prompts:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-extra-modules-r9700-calib32-qwen35-9b-prompts8.jsonl`
+
+| module | variant | mean logit relative MSE | mean KL(ref, candidate) | top1 matches | mean top10 overlap |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `model.layers.0.mlp.up_proj` | g16 unweighted | 0.000218958 | 0.001802187 | 8 / 8 | 9.875 |
+| `model.layers.0.mlp.up_proj` | g16 weighted | 0.000168724 | 0.001214926 | 8 / 8 | 9.75 |
+| `model.layers.0.mlp.up_proj` | g8 weighted | 0.000162605 | 0.000821250 | 8 / 8 | 9.875 |
+| `model.layers.3.self_attn.v_proj` | g16 unweighted | 0.000262743 | 0.001237670 | 8 / 8 | 9.875 |
+| `model.layers.3.self_attn.v_proj` | g16 weighted | 0.000293307 | 0.001418085 | 8 / 8 | 9.75 |
+| `model.layers.3.self_attn.v_proj` | g8 weighted | 0.000222151 | 0.001376848 | 8 / 8 | 9.75 |
+
+This reinforces the need for family-specific policy and model-level checks:
+weighted codebook/scale is helpful for some modules, but not uniformly better
+for every family and metric.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
