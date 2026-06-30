@@ -340,6 +340,16 @@ Rust implementation status:
   - families: `mlp_up`, `attn_k`
   - tensors: 4
   - relative MSE range: `0.003702330162` to `0.005288028063`
+- Prototype merge tool:
+  - `tools/merge-ullm-prototype-dirs.py`
+  - merges per-tensor prototype directories into one `.ullm.d` directory,
+  - de-duplicates shared codebook files,
+  - writes a single manifest with multiple tensor entries.
+- First merged prototype summary:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-mlp-up-attn-k.json`
+  - tensor count: `4`
+  - shared codebook count: `2`
+  - total file bytes: `61872608`
 
 ## Output Directory Prototype
 
@@ -423,8 +433,8 @@ Performance tests:
    mostly hurts memory rather than wall time on one tensor, but it will matter
    more for multi-tensor scheduling.
 3. Add SIMD kernels after the scalar C++ semantics are locked.
-4. Convert the multi-tensor driver into a single `.ullm.d` directory writer
-   with one manifest and shared codebook files.
+4. Move merge behavior into `ullm-quant` itself so multi-tensor output does not
+   require per-tensor temporary directories.
 5. Extend from the `mlp_up/attn_k` smoke to all tensors selected by the p4p6 plan.
 6. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.

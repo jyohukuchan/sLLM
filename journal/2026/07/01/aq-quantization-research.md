@@ -206,6 +206,8 @@
   - added `tools/run-ullm-prototype-policy-smoke.py` to drive multiple single-tensor prototype conversions from a plan JSON and exported codebook JSON.
   - p4p6 smoke summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k.json`; logs in `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k-logs/`; binary prototype dirs written under `/tmp`.
   - p4p6 smoke converted 4 tensors: layer0/layer1 `mlp_up` g16 and layer11/layer15 `attn_k` g8. Relative MSE range `0.003702330162` to `0.005288028063`; elapsed times about `7.4-7.8 s` for `mlp_up` and `0.73 s` for `attn_k`.
+  - added `tools/merge-ullm-prototype-dirs.py` to merge per-tensor prototype dirs into one shared `.ullm.d` directory.
+  - merged p4p6 smoke summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-mlp-up-attn-k.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k-merged.ullm.d`; tensor count `4`, shared codebooks `2`, total file bytes `61872608`.
 
 ## Current Interpretation
 
@@ -218,5 +220,5 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
-- Convert the multi-tensor driver into a single `.ullm.d` directory writer with one manifest and shared codebook files.
+- Move merge behavior into `ullm-quant` itself so multi-tensor output does not require per-tensor temporary directories.
 - Extend the smoke from `mlp_up/attn_k` to all tensors selected by the p4p6 plan.

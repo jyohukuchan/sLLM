@@ -731,6 +731,29 @@ This is still not a single multi-tensor `.ullm.d` container, but it verifies
 that the p4p6 plan, exported codebooks, and C++ chunk kernel can be driven
 across multiple real tensors without manual command construction.
 
+`tools/merge-ullm-prototype-dirs.py` was then added to merge per-tensor
+prototype directories into one directory with a shared manifest and de-duplicated
+codebook files.
+
+Merge summary:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-mlp-up-attn-k.json`
+
+Merged output was written under `/tmp`:
+
+- `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-mlp-up-attn-k-merged.ullm.d`
+
+| item | value |
+| --- | ---: |
+| tensor count | 4 |
+| shared codebook count | 2 |
+| manifest bytes | 6,496 |
+| total file bytes | 61,872,608 |
+
+This is the first single-directory multi-tensor prototype. It still lacks
+passthrough tensors and full-model metadata, but it establishes the merge shape:
+one manifest, one `tensors/` directory, and shared `codebooks/`.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
