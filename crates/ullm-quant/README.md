@@ -76,6 +76,32 @@ cargo run -p ullm-quant -- \
   --dry-run
 ```
 
+Multi-tensor prototype conversion example:
+
+```text
+cargo run -p ullm-quant --release -- \
+  --convert-plan-json /path/to/ullm-plan.json \
+  --codebook-json /path/to/codebooks.json \
+  --convert-output-root /tmp/model.ullm.parts \
+  --convert-summary-output /tmp/model-convert-summary.json \
+  --convert-family mlp_up \
+  --convert-family attn_k \
+  --convert-max-tensors 4 \
+  --convert-per-family 2 \
+  --scale-window 4 \
+  --tensor-scale-estimator reservoir \
+  --tensor-scale-reservoir-size 65536 \
+  --convert-verify \
+  --convert-overwrite \
+  --dry-run
+```
+
+This writes one prototype `.ullm.d` directory per selected quantized tensor.
+Selection is driven by the plan's `action`, `family`, and `quant_format`; tensors
+without matching exported codebooks are skipped. Use `--convert-family`,
+`--convert-max-tensors`, and `--convert-per-family` for bounded smokes before
+full conversion.
+
 Policy presets:
 
 - `all-g16`: all quantizable tensors use the low-budget format.

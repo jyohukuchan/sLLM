@@ -85,6 +85,14 @@ struct Options {
     verify_prototype_dir: Option<PathBuf>,
     verify_prototype_all: bool,
     verify_passthrough: bool,
+    convert_plan_json: Option<PathBuf>,
+    convert_output_root: Option<PathBuf>,
+    convert_summary_output: Option<PathBuf>,
+    convert_families: Vec<String>,
+    convert_max_tensors: usize,
+    convert_per_family: usize,
+    convert_verify: bool,
+    convert_overwrite: bool,
     merge_policy_summary: Option<PathBuf>,
     merge_plan_json: Option<PathBuf>,
     merge_output_dir: Option<PathBuf>,
@@ -339,6 +347,48 @@ struct PrototypeMergeSummary {
     files: Vec<CopiedFileSummary>,
 }
 
+#[derive(Debug, Serialize)]
+struct PrototypeConvertSummary {
+    schema_version: String,
+    plan_json: String,
+    codebook_json: String,
+    aq_policy: AqPolicyPlan,
+    output_root: String,
+    tensor_scale_estimator: String,
+    tensor_scale_reservoir_size: usize,
+    scale_window: usize,
+    chunk_bytes: usize,
+    families: Vec<String>,
+    max_tensors: usize,
+    per_family: usize,
+    verify: bool,
+    selected_count: usize,
+    results: Vec<PrototypeConvertResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct PrototypeConvertResult {
+    tensor: String,
+    family: String,
+    candidate: String,
+    status: String,
+    output_dir: String,
+    error: Option<String>,
+    manifest: Option<PrototypeTensorManifest>,
+    verification: Option<PrototypeConvertVerifySummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct PrototypeConvertVerifySummary {
+    elements: usize,
+    groups: usize,
+    relative_mse: f64,
+    max_abs_error: f32,
+    index_file_bytes: usize,
+    scale_file_bytes: usize,
+    codebook_entries: usize,
+}
+
 #[derive(Debug)]
 struct PrototypeVerifyResult {
     elements: usize,
@@ -418,6 +468,14 @@ fn parse_options() -> Result<Options, String> {
         verify_prototype_dir: None,
         verify_prototype_all: false,
         verify_passthrough: false,
+        convert_plan_json: None,
+        convert_output_root: None,
+        convert_summary_output: None,
+        convert_families: Vec::new(),
+        convert_max_tensors: usize::MAX,
+        convert_per_family: usize::MAX,
+        convert_verify: false,
+        convert_overwrite: false,
         merge_policy_summary: None,
         merge_plan_json: None,
         merge_output_dir: None,
@@ -499,6 +557,38 @@ fn parse_options() -> Result<Options, String> {
             }
             "--verify-prototype-all" => options.verify_prototype_all = true,
             "--verify-passthrough" => options.verify_passthrough = true,
+            "--convert-plan-json" => {
+                options.convert_plan_json =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--convert-plan-json requires a value".to_string()
+                    })?));
+            }
+            "--convert-output-root" => {
+                options.convert_output_root =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--convert-output-root requires a value".to_string()
+                    })?));
+            }
+            "--convert-summary-output" => {
+                options.convert_summary_output =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--convert-summary-output requires a value".to_string()
+                    })?));
+            }
+            "--convert-family" => {
+                options.convert_families.push(
+                    args.next()
+                        .ok_or_else(|| "--convert-family requires a value".to_string())?,
+                );
+            }
+            "--convert-max-tensors" => {
+                options.convert_max_tensors = parse_usize("--convert-max-tensors", args.next())?;
+            }
+            "--convert-per-family" => {
+                options.convert_per_family = parse_usize("--convert-per-family", args.next())?;
+            }
+            "--convert-verify" => options.convert_verify = true,
+            "--convert-overwrite" => options.convert_overwrite = true,
             "--merge-policy-summary" => {
                 options.merge_policy_summary =
                     Some(PathBuf::from(args.next().ok_or_else(|| {
@@ -602,6 +692,14 @@ fn print_help() {
     println!(
         "  --verify-passthrough          verify passthrough payloads in --verify-prototype-dir"
     );
+    println!("  --convert-plan-json <PATH>    convert quantized tensors from a plan JSON");
+    println!("  --convert-output-root <PATH>  output root for per-tensor prototype dirs");
+    println!("  --convert-summary-output <PATH>");
+    println!("  --convert-family <FAMILY>     restrict conversion to family; repeatable");
+    println!("  --convert-max-tensors <N>     maximum tensors for --convert-plan-json");
+    println!("  --convert-per-family <N>      maximum tensors per family for conversion");
+    println!("  --convert-verify              verify each converted prototype tensor");
+    println!("  --convert-overwrite           replace existing per-tensor prototype dirs");
     println!("  --merge-policy-summary <PATH> merge per-tensor prototype summary JSON");
     println!("  --merge-plan-json <PATH>      model plan JSON for passthrough merge");
     println!("  --merge-output-dir <PATH>     merged prototype .ullm.d output directory");
@@ -1567,6 +1665,13 @@ fn sanitize_file_stem(name: &str) -> String {
     }
 }
 
+fn tensor_scale_estimator_name(estimator: TensorScaleEstimator) -> &'static str {
+    match estimator {
+        TensorScaleEstimator::Exact => "exact",
+        TensorScaleEstimator::Reservoir => "reservoir",
+    }
+}
+
 fn relative_path_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -1966,6 +2071,197 @@ fn write_prototype_tensor(
     fs::write(&manifest_path, manifest_text + "\n")
         .map_err(|err| format!("failed to write {}: {err}", manifest_path.display()))?;
     Ok(manifest)
+}
+
+fn codebook_exists(export: &CodebookExport, family: &str, candidate_id: &str) -> bool {
+    export
+        .codebooks
+        .iter()
+        .any(|entry| entry.family == family && entry.candidate_id == candidate_id)
+}
+
+fn select_convert_tensors<'a>(
+    plan: &'a ModelPlan,
+    export: &CodebookExport,
+    families: &BTreeSet<String>,
+    max_tensors: usize,
+    per_family: usize,
+) -> Vec<&'a TensorPlan> {
+    let mut selected = Vec::new();
+    let mut family_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for tensor in &plan.tensors {
+        if tensor.action != "quantize" {
+            continue;
+        }
+        if !families.is_empty() && !families.contains(&tensor.family) {
+            continue;
+        }
+        let Some(candidate) = tensor.quant_format.as_deref() else {
+            continue;
+        };
+        if !codebook_exists(export, &tensor.family, candidate) {
+            continue;
+        }
+        let count = family_counts.get(&tensor.family).copied().unwrap_or(0);
+        if count >= per_family {
+            continue;
+        }
+        selected.push(tensor);
+        family_counts.insert(tensor.family.clone(), count + 1);
+        if selected.len() >= max_tensors {
+            break;
+        }
+    }
+    selected
+}
+
+fn convert_verification_summary(result: PrototypeVerifyResult) -> PrototypeConvertVerifySummary {
+    PrototypeConvertVerifySummary {
+        elements: result.elements,
+        groups: result.groups,
+        relative_mse: result.relative_mse,
+        max_abs_error: result.max_abs_error,
+        index_file_bytes: result.index_file_bytes,
+        scale_file_bytes: result.scale_file_bytes,
+        codebook_entries: result.codebook_entries,
+    }
+}
+
+fn run_prototype_convert(options: &Options) -> Result<PrototypeConvertSummary, String> {
+    let plan_json = options
+        .convert_plan_json
+        .as_deref()
+        .ok_or_else(|| "--convert-plan-json is required".to_string())?;
+    let codebook_json = options
+        .codebook_json
+        .as_deref()
+        .ok_or_else(|| "--codebook-json is required for --convert-plan-json".to_string())?;
+    let output_root = options
+        .convert_output_root
+        .as_deref()
+        .ok_or_else(|| "--convert-output-root is required".to_string())?;
+    let summary_output = options
+        .convert_summary_output
+        .as_deref()
+        .ok_or_else(|| "--convert-summary-output is required".to_string())?;
+
+    let plan: ModelPlan = read_json_file(plan_json)?;
+    let export = load_codebook_export(codebook_json)?;
+    let families = options
+        .convert_families
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let selected = select_convert_tensors(
+        &plan,
+        &export,
+        &families,
+        options.convert_max_tensors,
+        options.convert_per_family,
+    );
+    fs::create_dir_all(output_root)
+        .map_err(|err| format!("failed to create {}: {err}", output_root.display()))?;
+
+    let mut results = Vec::with_capacity(selected.len());
+    for (index, tensor) in selected.iter().enumerate() {
+        let candidate = tensor
+            .quant_format
+            .as_deref()
+            .ok_or_else(|| format!("selected tensor {} has no quant format", tensor.name))?;
+        let output_dir = output_root.join(format!(
+            "{index:03}-{}.ullm.d",
+            sanitize_file_stem(&tensor.name)
+        ));
+        let result = (|| -> Result<PrototypeConvertResult, String> {
+            if output_dir.exists() {
+                if !options.convert_overwrite {
+                    return Err(format!("{} already exists", output_dir.display()));
+                }
+                fs::remove_dir_all(&output_dir)
+                    .map_err(|err| format!("failed to remove {}: {err}", output_dir.display()))?;
+            }
+            let codebook = select_codebook(&export, &tensor.family, candidate)?;
+            let manifest = write_prototype_tensor(
+                Path::new(&plan.model_dir),
+                &tensor.name,
+                candidate,
+                &tensor.family,
+                candidate,
+                codebook,
+                options.chunk_bytes,
+                options.scale_window,
+                options.tensor_scale_override,
+                options.tensor_scale_estimator,
+                options.tensor_scale_reservoir_size,
+                &output_dir,
+            )?;
+            let verification = if options.convert_verify {
+                Some(convert_verification_summary(verify_prototype_tensor(
+                    &output_dir,
+                    0,
+                    options.chunk_bytes,
+                )?))
+            } else {
+                None
+            };
+            let tensor_manifest = manifest
+                .tensors
+                .into_iter()
+                .next()
+                .ok_or_else(|| "prototype manifest has no tensors".to_string())?;
+            Ok(PrototypeConvertResult {
+                tensor: tensor.name.clone(),
+                family: tensor.family.clone(),
+                candidate: candidate.to_string(),
+                status: "ok".to_string(),
+                output_dir: output_dir.display().to_string(),
+                error: None,
+                manifest: Some(tensor_manifest),
+                verification,
+            })
+        })();
+        match result {
+            Ok(row) => results.push(row),
+            Err(error) => results.push(PrototypeConvertResult {
+                tensor: tensor.name.clone(),
+                family: tensor.family.clone(),
+                candidate: candidate.to_string(),
+                status: "failed".to_string(),
+                output_dir: output_dir.display().to_string(),
+                error: Some(error),
+                manifest: None,
+                verification: None,
+            }),
+        }
+    }
+
+    let summary = PrototypeConvertSummary {
+        schema_version: "ullm-prototype-convert-summary-v0.1".to_string(),
+        plan_json: plan_json.display().to_string(),
+        codebook_json: codebook_json.display().to_string(),
+        aq_policy: plan.aq_policy.clone(),
+        output_root: output_root.display().to_string(),
+        tensor_scale_estimator: tensor_scale_estimator_name(options.tensor_scale_estimator)
+            .to_string(),
+        tensor_scale_reservoir_size: options.tensor_scale_reservoir_size,
+        scale_window: options.scale_window,
+        chunk_bytes: options.chunk_bytes,
+        families: options.convert_families.clone(),
+        max_tensors: options.convert_max_tensors,
+        per_family: options.convert_per_family,
+        verify: options.convert_verify,
+        selected_count: selected.len(),
+        results,
+    };
+    if let Some(parent) = summary_output.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&summary)
+        .map_err(|err| format!("failed to serialize convert summary: {err}"))?;
+    fs::write(summary_output, text + "\n")
+        .map_err(|err| format!("failed to write {}: {err}", summary_output.display()))?;
+    Ok(summary)
 }
 
 fn verify_prototype_tensor(
@@ -2937,10 +3233,7 @@ fn run() -> Result<(), String> {
             );
         }
     }
-    if options.codebook_json.is_some()
-        || options.inspect_codebook_family.is_some()
-        || options.inspect_codebook_candidate.is_some()
-    {
+    if options.inspect_codebook_family.is_some() || options.inspect_codebook_candidate.is_some() {
         let path = options
             .codebook_json
             .as_deref()
@@ -2973,6 +3266,25 @@ fn run() -> Result<(), String> {
             .collect::<Vec<_>>()
             .join(",");
         println!("inspect_codebook_values={values}");
+    }
+    if options.convert_plan_json.is_some()
+        || options.convert_output_root.is_some()
+        || options.convert_summary_output.is_some()
+    {
+        let summary = run_prototype_convert(&options)?;
+        println!("convert_plan_json={}", summary.plan_json);
+        println!("convert_aq_policy={}", summary.aq_policy.policy_id);
+        println!("convert_output_root={}", summary.output_root);
+        if let Some(path) = options.convert_summary_output.as_deref() {
+            println!("convert_summary_output={}", path.display());
+        }
+        println!("convert_selected_count={}", summary.selected_count);
+        let failure_count = summary
+            .results
+            .iter()
+            .filter(|row| row.status != "ok")
+            .count();
+        println!("convert_failure_count={failure_count}");
     }
     if let Some(output_dir) = options.prototype_output_dir.as_deref() {
         let model_dir = options
@@ -3186,17 +3498,18 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport, Options,
-        PrototypeManifest, TensorScaleEstimator, TensorScaleSampleCollector, ULLM_AQ_DTYPE_BF16,
-        ULLM_AQ_DTYPE_F16, bytes_to_lower_hex, choose_best_scale_index_for_group,
-        decode_numeric_value, default_threads, effective_bpp, empty_aq_quant_metrics,
-        estimate_output_bytes, family_for_tensor, max_codebook_abs, merge_prototype_dirs,
-        nearest_codebook_index, new_aq_group_stats, new_numeric_stats, new_quant_dry_run_stats,
-        numeric_element_size, parse_tensor_scale_estimator, quant_assignment,
-        read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy, select_codebook,
-        ullm_aq_quantize_chunk_v1, update_aq_group_stats, update_numeric_stats,
-        update_quant_dry_run_stats,
+        AqPolicyPlan, AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport,
+        ModelPlan, Options, PrototypeManifest, TensorPlan, TensorScaleEstimator,
+        TensorScaleSampleCollector, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, bytes_to_lower_hex,
+        choose_best_scale_index_for_group, decode_numeric_value, default_threads, effective_bpp,
+        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, max_codebook_abs,
+        merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats, new_numeric_stats,
+        new_quant_dry_run_stats, numeric_element_size, parse_tensor_scale_estimator,
+        quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
+        select_codebook, select_convert_tensors, ullm_aq_quantize_chunk_v1, update_aq_group_stats,
+        update_numeric_stats, update_quant_dry_run_stats,
     };
+    use std::collections::BTreeSet;
     use std::fs;
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3268,6 +3581,14 @@ mod tests {
             verify_prototype_dir: None,
             verify_prototype_all: false,
             verify_passthrough: false,
+            convert_plan_json: None,
+            convert_output_root: None,
+            convert_summary_output: None,
+            convert_families: Vec::new(),
+            convert_max_tensors: usize::MAX,
+            convert_per_family: usize::MAX,
+            convert_verify: false,
+            convert_overwrite: false,
             merge_policy_summary: None,
             merge_plan_json: None,
             merge_output_dir: None,
@@ -3322,6 +3643,100 @@ mod tests {
         assert_eq!(role.as_deref(), Some("low"));
         let alias_policy = resolve_aq_policy(&test_options("p4p65")).expect("p4p65 alias");
         assert_eq!(policy.high_families, alias_policy.high_families);
+    }
+
+    #[test]
+    fn convert_tensor_selection_filters_by_action_family_codebook_and_limits() {
+        fn tensor_plan(
+            name: &str,
+            family: &str,
+            action: &str,
+            quant_format: Option<&str>,
+        ) -> TensorPlan {
+            TensorPlan {
+                name: name.to_string(),
+                source_file: "model.safetensors".to_string(),
+                dtype: "BF16".to_string(),
+                shape: vec![4, 4],
+                family: family.to_string(),
+                n_elements: 16,
+                n_bytes: 32,
+                supported_input: action == "quantize",
+                action: action.to_string(),
+                quant_format: quant_format.map(str::to_string),
+                quant_role: quant_format.map(|_| "low".to_string()),
+                estimated_output_bytes: 9,
+                estimated_effective_bpp: 4.5,
+            }
+        }
+
+        let plan = ModelPlan {
+            schema_version: "ullm-quant-plan-v0.3".to_string(),
+            model_dir: "/tmp/model".to_string(),
+            aq_policy: AqPolicyPlan {
+                policy_id: "test".to_string(),
+                low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
+                high_format: "aq4_e4m3_g8_ts_flloyd16".to_string(),
+                high_families: vec!["attn_k".to_string()],
+            },
+            tensor_count: 5,
+            supported_tensor_count: 4,
+            passthrough_tensor_count: 1,
+            total_tensor_bytes: 160,
+            total_estimated_output_bytes: 80,
+            estimated_output_to_input_ratio: 0.5,
+            tensors: vec![
+                tensor_plan(
+                    "layer0.mlp_up",
+                    "mlp_up",
+                    "quantize",
+                    Some("aq4_e4m3_g16_ts_flloyd16"),
+                ),
+                tensor_plan(
+                    "layer1.mlp_up",
+                    "mlp_up",
+                    "quantize",
+                    Some("aq4_e4m3_g16_ts_flloyd16"),
+                ),
+                tensor_plan(
+                    "layer2.attn_k",
+                    "attn_k",
+                    "quantize",
+                    Some("aq4_e4m3_g8_ts_flloyd16"),
+                ),
+                tensor_plan(
+                    "layer3.attn_q",
+                    "attn_q",
+                    "quantize",
+                    Some("aq4_e4m3_g8_ts_flloyd16"),
+                ),
+                tensor_plan("embed", "other", "passthrough", None),
+            ],
+        };
+        let export = CodebookExport {
+            codebooks: vec![
+                CodebookEntry {
+                    family: "mlp_up".to_string(),
+                    candidate_id: "aq4_e4m3_g16_ts_flloyd16".to_string(),
+                    values_f32: vec![0.0; 16],
+                },
+                CodebookEntry {
+                    family: "attn_k".to_string(),
+                    candidate_id: "aq4_e4m3_g8_ts_flloyd16".to_string(),
+                    values_f32: vec![0.0; 16],
+                },
+            ],
+        };
+        let families = ["mlp_up".to_string(), "attn_k".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        let selected = select_convert_tensors(&plan, &export, &families, 3, 1);
+        let names = selected
+            .iter()
+            .map(|tensor| tensor.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["layer0.mlp_up", "layer2.attn_k"]);
     }
 
     #[test]
