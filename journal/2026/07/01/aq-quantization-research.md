@@ -79,7 +79,11 @@
   - extended `tools/run-aq-tensor-sample.py` with `--activation-stats`, `weighted_mse`, and `weighted_relative_mse`.
   - `python3 -m py_compile tools/run-aq-tensor-sample.py tools/run-aq-weighted-sample.py tools/collect-activation-stats.py` passed.
   - one-tensor smoke with unit activation weights on `model.language_model.layers.14.mlp.down_proj.weight` passed; weighted relative MSE was `0.005159932654350996`.
-  - default Python has `torch 2.12.0+cpu` and no CUDA/ROCm-visible device, so full activation collection should use an R9700-capable environment or stay as a small CPU smoke.
+  - default Python has `torch 2.12.0+cpu` and no CUDA/ROCm-visible device.
+  - real CPU activation-stat smoke succeeded for `language_model.layers.0.mlp.down_proj`, with 1 prompt and 15 tokens.
+  - result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-smoke-qwen35-9b.jsonl`
+  - weighted smoke metrics for `aq4_e4m3_g16_ts_flloyd16`: unweighted relative MSE `0.0051582370266549235`, weighted relative MSE `0.004603734239935875`.
+  - full activation collection should use an R9700-capable environment; small CPU smoke runs are feasible.
 
 ## Current Interpretation
 

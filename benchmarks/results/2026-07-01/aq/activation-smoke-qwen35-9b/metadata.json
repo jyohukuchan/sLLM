@@ -1,0 +1,26 @@
+{
+  "device": "cpu",
+  "dtype": "bfloat16",
+  "max_samples": 1,
+  "model_class": "auto_model",
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "module_count": 1,
+  "module_pattern": "mlp.down_proj$",
+  "modules": {
+    "language_model.layers.0.mlp.down_proj": {
+      "activation_count": 15,
+      "input_features": 12288
+    }
+  },
+  "notes": [
+    "cpu_smoke_single_module"
+  ],
+  "prompt_file": null,
+  "repeat_to_length": false,
+  "run_id": "qwen35-9b-activation-smoke",
+  "samples_seen": 1,
+  "schema_version": "aq-activation-stats-v0.1",
+  "sequence_length": 32,
+  "timestamp_utc": "2026-06-30T15:58:27.358279+00:00",
+  "tokens_seen": 15
+}

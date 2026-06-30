@@ -177,6 +177,37 @@ The wider 8-tensor/family check remained close:
 
 This makes per-family LUTs a plausible first storage target. The remaining risk is layer-depth and activation sensitivity, not obvious tensor-distribution instability.
 
+### Activation-Weighted Smoke
+
+Result files:
+
+- `benchmarks/results/2026-07-01/aq/activation-smoke-qwen35-9b/`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-smoke-qwen35-9b.jsonl`
+
+One CPU smoke run collected activation statistics for:
+
+```text
+language_model.layers.0.mlp.down_proj
+```
+
+The weighted evaluator then ran `aq4_e4m3_g16_ts_flloyd16` on:
+
+```text
+model.language_model.layers.0.mlp.down_proj.weight
+```
+
+| metric | value |
+| --- | ---: |
+| samples | 1 |
+| tokens | 15 |
+| sampled elements | 16384 |
+| unweighted relative MSE | 0.005158237 |
+| weighted relative MSE | 0.004603734 |
+
+This is only a tool smoke, not a quality conclusion. It verifies that
+Transformers module names can be mapped to checkpoint tensor names and that the
+weighted metric path works with real activation reductions.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

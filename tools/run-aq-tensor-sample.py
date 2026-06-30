@@ -561,11 +561,14 @@ def activation_stats_for_tensor(
     if not stats:
         return None
     key_stem = tensor_name.removesuffix(".weight")
+    module_stem = key_stem.removeprefix("model.")
     candidates = (
         tensor_name,
         key_stem,
+        module_stem,
         f"{tensor_name}.input_second_moment",
         f"{key_stem}.input_second_moment",
+        f"{module_stem}.input_second_moment",
     )
     for key in candidates:
         values = stats.get(key)

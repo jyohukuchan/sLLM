@@ -137,7 +137,8 @@ candidate" to "format candidate".
 
 ## Current Verification
 
-The weighted path was smoke-tested on one Qwen3.5-9B tensor:
+The weighted path was first smoke-tested on one Qwen3.5-9B tensor with unit
+activation weights:
 
 ```text
 model.language_model.layers.14.mlp.down_proj.weight
@@ -147,6 +148,23 @@ With unit activation weights and candidate `aq4_e4m3_g16_ts_flloyd16`,
 `weighted_relative_mse` was `0.005159932654350996`, matching the unweighted
 relative MSE as expected for all-one weights.
 
-The default Python environment currently has CPU-only PyTorch, so full
-activation collection should be run later in an R9700-capable environment or as
-a deliberately small CPU smoke.
+A real CPU activation-stat smoke also succeeded:
+
+- stats output:
+  - `benchmarks/results/2026-07-01/aq/activation-smoke-qwen35-9b/`
+- weighted result:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-smoke-qwen35-9b.jsonl`
+- module:
+  - `language_model.layers.0.mlp.down_proj`
+- samples/tokens:
+  - 1 prompt, 15 tokens
+- candidate:
+  - `aq4_e4m3_g16_ts_flloyd16`
+- unweighted relative MSE:
+  - `0.0051582370266549235`
+- weighted relative MSE:
+  - `0.004603734239935875`
+
+The default Python environment currently has CPU-only PyTorch. Small CPU
+activation smoke runs work, but full activation collection should use an
+R9700-capable environment.

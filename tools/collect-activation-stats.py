@@ -92,10 +92,7 @@ def load_transformers_model(args: argparse.Namespace):
     model_cls = AutoModel if args.model_class == "auto_model" else AutoModelForCausalLM
     dtype = dtype_from_arg(args.dtype)
     kwargs = {"trust_remote_code": args.trust_remote_code}
-    if dtype == "auto":
-        kwargs["torch_dtype"] = "auto"
-    else:
-        kwargs["torch_dtype"] = dtype
+    kwargs["dtype"] = dtype
 
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_dir,
@@ -109,9 +106,9 @@ def load_transformers_model(args: argparse.Namespace):
             **kwargs,
         )
     except TypeError as exc:
-        if "torch_dtype" not in str(exc):
+        if "dtype" not in str(exc):
             raise
-        kwargs["dtype"] = kwargs.pop("torch_dtype")
+        kwargs["torch_dtype"] = kwargs.pop("dtype")
         model = model_cls.from_pretrained(
             args.model_dir,
             local_files_only=True,
