@@ -110,6 +110,7 @@
   - combined param-weighted result: aq all-g16 `0.003798456` at 4.5 bpp; aq all-g8 `0.002582475` at 5.0 bpp.
   - sampled UD Q4_K_XL mixed combined result: `0.002364278` at parameter-weighted bpp `5.206019`.
   - simple family policy with g8 on `attn_k,attn_o,attn_v,linear_attn_out` gave combined weighted relative MSE `0.003053866` at bpp `4.592593`.
+  - policy artifact: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-policy-r9700-calib32-qwen35-9b.json`.
   - next evidence should be model-level logit/perplexity, not only tensor metrics.
 
 ## Current Interpretation
@@ -120,5 +121,5 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Add explicit family-policy artifacts and run a small model-level logit/perplexity check.
+- Use the family-policy artifact to select candidates for a small model-level logit/perplexity check.
 - Extend `ullm-quant` from skeleton to safetensors metadata planning.

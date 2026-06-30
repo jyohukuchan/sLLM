@@ -297,6 +297,8 @@ The direction remained stable after expanding calibration:
 Result file:
 
 - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-scale-codebook-r9700-calib32-qwen35-9b-family4.jsonl`
+- policy summary:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-policy-r9700-calib32-qwen35-9b.json`
 
 The next variant used both activation-weighted scale search and
 activation-weighted Lloyd refinement for the family-level codebook.
@@ -351,6 +353,6 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 
 1. Add activation-stat collection for selected Qwen3.5-9B linear modules.
 2. Expand calibration with longer contexts or an external text set after the current 32-prompt smoke.
-3. Add explicit family-policy search artifacts instead of only ad-hoc table analysis.
+3. Use the family-policy summary to choose candidates for model-level checks.
 4. Run a small logit-difference or perplexity check for the top weighted candidates.
 5. Extend `ullm-quant` from skeleton to safetensors metadata planning and then chunked CPU quantization.
