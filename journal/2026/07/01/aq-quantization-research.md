@@ -53,6 +53,13 @@
   - Chunked tensor processing to avoid whole-model RAM use.
   - First implementation target: `aq4_e4m3_g16_ts_flloyd16`, plus `g8` as a 5.0 bpp accuracy point.
 
+- `ullm-quant` skeleton:
+  - added a Rust workspace with `crates/ullm-quant`.
+  - added a C++20 CPU kernel stub behind a C ABI.
+  - smoke kernel packs 4-bit nibbles and is called from Rust.
+  - `cargo test -p ullm-quant` passed.
+  - `cargo run -p ullm-quant -- --dry-run --threads 64 --io-threads 2 --max-working-memory-mib 4096` printed `pack_smoke=ok [16, 33, 15, 120]`.
+
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
@@ -63,5 +70,5 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 - Add family-level LUT aggregation to the sampler.
 - Expand family-level LUT testing to more tensors per family.
-- Create the first `ullm-quant` skeleton from the CPU full-quantizer design.
+- Extend `ullm-quant` from skeleton to safetensors metadata planning.
 - Add a small model-level check after tensor-level candidate narrowing.
