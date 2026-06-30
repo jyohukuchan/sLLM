@@ -400,9 +400,9 @@ Performance tests:
 
 ## Immediate Steps
 
-1. Add C++/Rust golden tests for all-zero groups, NaN groups,
-   and scale/codebook argument validation.
-2. Add F16 support to `quantize_chunk_v1` after BF16 semantics are stable.
+1. Add F16 support to `quantize_chunk_v1` after BF16 semantics are stable.
+2. Add larger golden tests that compare C++ chunk output against Python or Rust
+   scalar output across multiple random seeds.
 3. Avoid the tensor-scale pre-pass where possible by either storing group amax
    summaries or fusing estimation with a bounded histogram.
 4. Add SIMD kernels after the scalar C++ semantics are locked.

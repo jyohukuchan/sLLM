@@ -2648,6 +2648,161 @@ mod tests {
     }
 
     #[test]
+    fn cxx_v1_kernel_handles_all_zero_bf16_group() {
+        let payload = [0u8; 8];
+        let scales = [1.0f32];
+        let codebook = [
+            0.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ];
+        let mut packed = [0xffu8; 2];
+        let mut scale_indices = [0xffu8; 1];
+        let mut metrics = empty_aq_quant_metrics();
+        let request = AqQuantizeChunkRequestV1 {
+            struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+            dtype: ULLM_AQ_DTYPE_BF16,
+            reserved0: 0,
+            input: payload.as_ptr(),
+            input_bytes: payload.len(),
+            group_size: 4,
+            scale_values: scales.as_ptr(),
+            scale_count: scales.len(),
+            codebook: codebook.as_ptr(),
+            codebook_count: codebook.len(),
+            tensor_scale: 1.0,
+            reserved1: 0,
+            scale_window: 0,
+            packed_indices: packed.as_mut_ptr(),
+            packed_indices_bytes: packed.len(),
+            scale_indices: scale_indices.as_mut_ptr(),
+            scale_indices_bytes: scale_indices.len(),
+        };
+        let status = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(packed, [0x00, 0x00]);
+        assert_eq!(scale_indices, [0]);
+        assert_eq!(metrics.elements, 4);
+        assert_eq!(metrics.groups, 1);
+        assert_eq!(metrics.sse, 0.0);
+        assert_eq!(metrics.ref_sse, 0.0);
+        assert_eq!(metrics.index_counts[0], 4);
+    }
+
+    #[test]
+    fn cxx_v1_kernel_writes_nan_as_zero_index_and_excludes_metrics() {
+        let payload = [
+            0xc0, 0x7f, // NaN
+            0x80, 0x3f, // 1.0
+            0xc0, 0x7f, // NaN
+            0x80, 0xbf, // -1.0
+        ];
+        let scales = [1.0f32];
+        let codebook = [
+            -1.0f32, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ];
+        let mut packed = [0u8; 2];
+        let mut scale_indices = [0u8; 1];
+        let mut metrics = empty_aq_quant_metrics();
+        let request = AqQuantizeChunkRequestV1 {
+            struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+            dtype: ULLM_AQ_DTYPE_BF16,
+            reserved0: 0,
+            input: payload.as_ptr(),
+            input_bytes: payload.len(),
+            group_size: 4,
+            scale_values: scales.as_ptr(),
+            scale_count: scales.len(),
+            codebook: codebook.as_ptr(),
+            codebook_count: codebook.len(),
+            tensor_scale: 1.0,
+            reserved1: 0,
+            scale_window: 0,
+            packed_indices: packed.as_mut_ptr(),
+            packed_indices_bytes: packed.len(),
+            scale_indices: scale_indices.as_mut_ptr(),
+            scale_indices_bytes: scale_indices.len(),
+        };
+        let status = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(packed, [0x20, 0x00]);
+        assert_eq!(scale_indices, [0]);
+        assert_eq!(metrics.elements, 2);
+        assert_eq!(metrics.groups, 1);
+        assert_eq!(metrics.index_counts[0], 1);
+        assert_eq!(metrics.index_counts[2], 1);
+    }
+
+    #[test]
+    fn cxx_v1_kernel_rejects_invalid_scale_codebook_and_layout() {
+        let payload = [0u8; 8];
+        let scales = [1.0f32];
+        let codebook = [0.0f32; 16];
+        let mut packed = [0u8; 2];
+        let mut scale_indices = [0u8; 1];
+        let mut metrics = empty_aq_quant_metrics();
+        let mut request = AqQuantizeChunkRequestV1 {
+            struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+            dtype: ULLM_AQ_DTYPE_BF16,
+            reserved0: 0,
+            input: payload.as_ptr(),
+            input_bytes: payload.len(),
+            group_size: 4,
+            scale_values: scales.as_ptr(),
+            scale_count: 0,
+            codebook: codebook.as_ptr(),
+            codebook_count: codebook.len(),
+            tensor_scale: 1.0,
+            reserved1: 0,
+            scale_window: 0,
+            packed_indices: packed.as_mut_ptr(),
+            packed_indices_bytes: packed.len(),
+            scale_indices: scale_indices.as_mut_ptr(),
+            scale_indices_bytes: scale_indices.len(),
+        };
+        let scale_count_zero = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(scale_count_zero, -2);
+
+        request.scale_count = scales.len();
+        request.codebook_count = 15;
+        let bad_codebook_count = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(bad_codebook_count, -2);
+
+        request.codebook_count = codebook.len();
+        request.input_bytes = 6;
+        let bad_layout = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(bad_layout, -3);
+    }
+
+    #[test]
     fn exported_codebook_selection_requires_16_entries() {
         let export = CodebookExport {
             codebooks: vec![CodebookEntry {
