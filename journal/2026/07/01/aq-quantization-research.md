@@ -182,6 +182,12 @@
   - added `tools/verify-aq-one-tensor.py` as a chunked Python reference for one full tensor with exported family codebooks.
   - Python reference matched Rust for `attn_k` index counts exactly; `mlp_up` relative MSE matched within about `1.3e-10`, with only tiny count differences from tensor-scale rounding/ties.
   - `cargo test -p ullm-quant` passes 10 tests; `python3 -m py_compile tools/verify-aq-one-tensor.py` passes.
+  - added `--prototype-output-dir` to `ullm-quant` for one inspected tensor.
+  - prototype output writes `manifest.json`, packed idx4 indices, u8 scale indices, and f32-le codebook values.
+  - added re-read/dequant verification for prototype output; it fails if verified relative MSE differs from manifest relative MSE by more than `1e-9`.
+  - first real prototype output: `benchmarks/results/2026-07-01/aq/prototype-qwen35-9b-layer3-attn-k-g8-scale-window4.ullm.d/`.
+  - prototype tensor `model.language_model.layers.3.self_attn.k_proj.weight`: idx4 bytes `2097152`, scale bytes `524288`, relative MSE `0.003677692937`, verified relative MSE `0.003677692937`.
+  - prototype write log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-write-qwen35-9b-layer3-attn-k-g8-scale-window4.txt`; elapsed `1.71 s`, max RSS `8232 KiB`.
 
 ## Current Interpretation
 
@@ -191,6 +197,7 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Add prototype `.ullm.d/` packed index and scale output for one tensor, then re-read/dequant verification.
-- Record one-tensor quantization throughput and peak RSS.
+- Split inspect/write/verify modes so prototype writes do not run duplicate inspection work.
+- Record larger-tensor throughput and peak RSS, starting with `mlp_up` g16.
+- Move hot quantization loops from scalar Rust prototype code into C++20 kernels.
 - Extend the output path from one tensor to all tensors selected by the p4p6 plan.

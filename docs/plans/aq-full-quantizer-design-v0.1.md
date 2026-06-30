@@ -277,7 +277,21 @@ Rust implementation status:
   - `tools/verify-aq-one-tensor.py`
   - validates the Rust chunk path against a chunked PyTorch implementation
     using the same exported family codebook and scale-window setting.
-- Remaining dry-run gap: it still does not write packed index/scale files.
+- Prototype one-tensor output exists via `--prototype-output-dir`:
+  - writes `manifest.json`, `idx4` packed indices, `scale_u8` scale indices,
+    and an F32 little-endian codebook file,
+  - re-reads the prototype files and dequantizes against the source safetensors
+    payload,
+  - fails if re-read relative MSE differs from the in-flight metric by more
+    than `1e-9`.
+- First real prototype output:
+  - `benchmarks/results/2026-07-01/aq/prototype-qwen35-9b-layer3-attn-k-g8-scale-window4.ullm.d/`
+  - tensor: `model.language_model.layers.3.self_attn.k_proj.weight`
+  - relative MSE and re-read relative MSE: `0.003677692937`
+  - idx4 bytes: `2097152`
+  - scale bytes: `524288`
+  - wall time: `1.71 s`
+  - peak RSS: `8232 KiB`
 
 ## Output Directory Prototype
 
@@ -355,10 +369,10 @@ Performance tests:
 
 ## Immediate Steps
 
-1. Add packed index and scale output files under a prototype `.ullm.d/`
-   directory for one tensor.
-2. Add a re-read/dequant verification path for the prototype output files.
-3. Record quantization throughput and peak RSS for the one-tensor output path.
+1. Split inspect, write, and verify modes so prototype writes do not rerun the
+   inspection pass unnecessarily.
+2. Record larger-tensor throughput and peak RSS, starting with `mlp_up` g16.
+3. Move hot loops from scalar Rust prototype code into C++20 kernels.
 4. Extend from one tensor to all tensors selected by the p4p6 plan.
 5. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.

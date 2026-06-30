@@ -1,0 +1,63 @@
+{
+  "schema_version": "ullm-prototype-manifest-v0.1",
+  "source_model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "tensors": [
+    {
+      "name": "model.language_model.layers.3.self_attn.k_proj.weight",
+      "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00004-of-00004.safetensors",
+      "dtype": "BF16",
+      "shape": [
+        1024,
+        4096
+      ],
+      "family": "attn_k",
+      "candidate_id": "aq4_e4m3_g8_ts_flloyd16",
+      "scale_format": "e4m3",
+      "group_size": 8,
+      "tensor_scale": 0.01826061,
+      "scale_window": 4,
+      "elements": 4194304,
+      "groups": 524288,
+      "index_file": "tensors/model_language_model_layers_3_self_attn_k_proj_weight.idx4",
+      "index_encoding": "idx4_low_nibble_first",
+      "scale_file": "tensors/model_language_model_layers_3_self_attn_k_proj_weight.scale_u8",
+      "scale_encoding": "u8_scale_table_index",
+      "codebook_file": "codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32",
+      "metrics": {
+        "mse": 9.77282043093506e-7,
+        "relative_mse": 0.0036776929372097375,
+        "max_abs_error": 0.012858063,
+        "scale_index_min": 27,
+        "scale_index_max": 86,
+        "scale_window_improved_groups": 259635,
+        "index_counts": [
+          232829,
+          224263,
+          224635,
+          264571,
+          306760,
+          308237,
+          267118,
+          246598,
+          263170,
+          307083,
+          328124,
+          299014,
+          268653,
+          221170,
+          212081,
+          219998
+        ]
+      }
+    }
+  ],
+  "codebooks": [
+    {
+      "family": "attn_k",
+      "candidate_id": "aq4_e4m3_g8_ts_flloyd16",
+      "file": "codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32",
+      "encoding": "f32_le",
+      "entries": 16
+    }
+  ]
+}

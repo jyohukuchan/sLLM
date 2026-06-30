@@ -592,6 +592,47 @@ For `mlp_up`, relative MSE matched within roughly `1.3e-10`; a few index counts
 and improved-group counts differ by 1-3 due to tensor-scale rounding and exact
 tie behavior. This is acceptable for validating the Rust chunk path.
 
+### Prototype `.ullm.d` Tensor Output
+
+`ullm-quant` can now write a temporary directory-form prototype for one
+inspected tensor. This is not the final `.ullm` container, but it is enough to
+test packed index bytes, scale indices, codebook storage, manifest metadata, and
+re-read/dequant verification.
+
+Prototype output:
+
+- directory:
+  - `benchmarks/results/2026-07-01/aq/prototype-qwen35-9b-layer3-attn-k-g8-scale-window4.ullm.d/`
+- run log:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-write-qwen35-9b-layer3-attn-k-g8-scale-window4.txt`
+
+Files:
+
+| file | bytes | note |
+| --- | ---: | --- |
+| `manifest.json` | 1,844 | one tensor manifest |
+| `codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32` | 64 | 16 little-endian F32 entries |
+| `tensors/model_language_model_layers_3_self_attn_k_proj_weight.idx4` | 2,097,152 | two 4-bit indices per byte |
+| `tensors/model_language_model_layers_3_self_attn_k_proj_weight.scale_u8` | 524,288 | one scale-table index per group |
+
+Verification:
+
+| item | value |
+| --- | ---: |
+| tensor | `model.language_model.layers.3.self_attn.k_proj.weight` |
+| elements | 4,194,304 |
+| groups | 524,288 |
+| relative MSE | 0.003677692937 |
+| max abs error | 0.012858063 |
+| re-read/dequant relative MSE | 0.003677692937 |
+| elapsed wall time | 1.71 s |
+| maximum RSS | 8,232 KiB |
+
+The re-read/dequant path reads `manifest.json`, binary codebook, packed idx4
+file, and scale-index file, reconstructs values from the original safetensors
+payload, and fails if relative MSE differs from the in-flight manifest metric by
+more than `1e-9`.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

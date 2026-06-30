@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -33,6 +33,7 @@ struct Options {
     codebook_json: Option<PathBuf>,
     inspect_codebook_family: Option<String>,
     inspect_codebook_candidate: Option<String>,
+    prototype_output_dir: Option<PathBuf>,
     chunk_bytes: usize,
     scale_window: usize,
     aq_policy: String,
@@ -176,6 +177,68 @@ struct ModelPlan {
     tensors: Vec<TensorPlan>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PrototypeManifest {
+    schema_version: String,
+    source_model_dir: String,
+    tensors: Vec<PrototypeTensorManifest>,
+    codebooks: Vec<PrototypeCodebookManifest>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PrototypeTensorManifest {
+    name: String,
+    source_file: String,
+    dtype: String,
+    shape: Vec<usize>,
+    family: String,
+    candidate_id: String,
+    scale_format: String,
+    group_size: usize,
+    tensor_scale: f32,
+    scale_window: usize,
+    elements: usize,
+    groups: usize,
+    index_file: String,
+    index_encoding: String,
+    scale_file: String,
+    scale_encoding: String,
+    codebook_file: String,
+    metrics: PrototypeTensorMetrics,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PrototypeTensorMetrics {
+    mse: f64,
+    relative_mse: f64,
+    max_abs_error: f32,
+    scale_index_min: usize,
+    scale_index_max: usize,
+    scale_window_improved_groups: usize,
+    index_counts: Vec<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PrototypeCodebookManifest {
+    family: String,
+    candidate_id: String,
+    file: String,
+    encoding: String,
+    entries: usize,
+}
+
+#[derive(Debug)]
+struct PrototypeVerifyResult {
+    elements: usize,
+    groups: usize,
+    mse: f64,
+    relative_mse: f64,
+    max_abs_error: f32,
+    index_file_bytes: usize,
+    scale_file_bytes: usize,
+    codebook_entries: usize,
+}
+
 fn default_threads() -> usize {
     std::thread::available_parallelism()
         .map(NonZeroUsize::get)
@@ -213,6 +276,7 @@ fn parse_options() -> Result<Options, String> {
         codebook_json: None,
         inspect_codebook_family: None,
         inspect_codebook_candidate: None,
+        prototype_output_dir: None,
         chunk_bytes: 64 * 1024 * 1024,
         scale_window: 0,
         aq_policy: "all-g16".to_string(),
@@ -268,6 +332,12 @@ fn parse_options() -> Result<Options, String> {
                         "--inspect-codebook-candidate requires a value".to_string()
                     })?);
             }
+            "--prototype-output-dir" => {
+                options.prototype_output_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--prototype-output-dir requires a value".to_string()
+                    })?));
+            }
             "--chunk-bytes" => options.chunk_bytes = parse_usize("--chunk-bytes", args.next())?,
             "--scale-window" => {
                 options.scale_window = parse_usize_zero_allowed("--scale-window", args.next())?
@@ -322,6 +392,7 @@ fn print_help() {
     println!("  --codebook-json <PATH>        exported aq family codebook JSON");
     println!("  --inspect-codebook-family <F> inspect one family from --codebook-json");
     println!("  --inspect-codebook-candidate <ID>");
+    println!("  --prototype-output-dir <PATH> write one inspected tensor to a .ullm.d prototype");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
     println!("  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, or custom");
@@ -1004,6 +1075,53 @@ fn nearest_codebook_index(value: f32, codebook: &[f32]) -> usize {
     best_index
 }
 
+fn choose_best_scale_index_for_group(
+    dtype: &str,
+    group: &[u8],
+    element_size: usize,
+    scale_values: &[f32],
+    codebook: &[f32],
+    tensor_scale: f32,
+    scale_window: usize,
+    max_code: f32,
+) -> Result<(usize, usize), String> {
+    let mut absmax = 0.0f32;
+    for item in group.chunks_exact(element_size) {
+        let value = decode_numeric_value(dtype, item)?;
+        if !value.is_nan() {
+            absmax = absmax.max(value.abs());
+        }
+    }
+    let scale_target = absmax / tensor_scale / max_code;
+    let (center_scale_index, _, _) = nearest_scale_index(scale_target, scale_values);
+    let scale_start = center_scale_index.saturating_sub(scale_window);
+    let scale_end = center_scale_index
+        .saturating_add(scale_window)
+        .min(scale_values.len() - 1);
+    let mut best_scale_index = center_scale_index;
+    let mut best_group_sse = f64::INFINITY;
+    for scale_index in scale_start..=scale_end {
+        let combined_scale = scale_values[scale_index] * tensor_scale;
+        let mut group_sse = 0.0f64;
+        for item in group.chunks_exact(element_size) {
+            let value = decode_numeric_value(dtype, item)?;
+            if value.is_nan() {
+                continue;
+            }
+            let normalized = value / combined_scale;
+            let codebook_index = nearest_codebook_index(normalized, codebook);
+            let recon = codebook[codebook_index] * combined_scale;
+            let error = value - recon;
+            group_sse += f64::from(error * error);
+        }
+        if group_sse < best_group_sse {
+            best_group_sse = group_sse;
+            best_scale_index = scale_index;
+        }
+    }
+    Ok((center_scale_index, best_scale_index))
+}
+
 fn new_quant_dry_run_stats(
     codebook_len: usize,
     tensor_scale: f32,
@@ -1056,40 +1174,16 @@ fn update_quant_dry_run_stats(
     }
     let max_code = max_codebook_abs(codebook);
     for group in bytes.chunks_exact(group_bytes) {
-        let mut absmax = 0.0f32;
-        for item in group.chunks_exact(element_size) {
-            let value = decode_numeric_value(dtype, item)?;
-            if !value.is_nan() {
-                absmax = absmax.max(value.abs());
-            }
-        }
-        let scale_target = absmax / tensor_scale / max_code;
-        let (center_scale_index, _, _) = nearest_scale_index(scale_target, scale_values);
-        let scale_start = center_scale_index.saturating_sub(scale_window);
-        let scale_end = center_scale_index
-            .saturating_add(scale_window)
-            .min(scale_values.len() - 1);
-        let mut best_scale_index = center_scale_index;
-        let mut best_group_sse = f64::INFINITY;
-        for scale_index in scale_start..=scale_end {
-            let combined_scale = scale_values[scale_index] * tensor_scale;
-            let mut group_sse = 0.0f64;
-            for item in group.chunks_exact(element_size) {
-                let value = decode_numeric_value(dtype, item)?;
-                if value.is_nan() {
-                    continue;
-                }
-                let normalized = value / combined_scale;
-                let codebook_index = nearest_codebook_index(normalized, codebook);
-                let recon = codebook[codebook_index] * combined_scale;
-                let error = value - recon;
-                group_sse += f64::from(error * error);
-            }
-            if group_sse < best_group_sse {
-                best_group_sse = group_sse;
-                best_scale_index = scale_index;
-            }
-        }
+        let (center_scale_index, best_scale_index) = choose_best_scale_index_for_group(
+            dtype,
+            group,
+            element_size,
+            scale_values,
+            codebook,
+            tensor_scale,
+            scale_window,
+            max_code,
+        )?;
         if best_scale_index != center_scale_index {
             stats.scale_window_improved_groups += 1;
         }
@@ -1114,6 +1208,450 @@ fn update_quant_dry_run_stats(
         stats.groups += 1;
     }
     Ok(())
+}
+
+fn sanitize_file_stem(name: &str) -> String {
+    let mut output = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch);
+        } else {
+            output.push('_');
+        }
+    }
+    if output.is_empty() {
+        "tensor".to_string()
+    } else {
+        output
+    }
+}
+
+fn relative_path_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn write_f32_le_file(path: &Path, values: &[f32]) -> Result<(), String> {
+    let file = fs::File::create(path)
+        .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    for value in values {
+        writer
+            .write_all(&value.to_le_bytes())
+            .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    }
+    writer
+        .flush()
+        .map_err(|err| format!("failed to flush {}: {err}", path.display()))
+}
+
+fn read_f32_le_file(path: &Path) -> Result<Vec<f32>, String> {
+    let bytes =
+        fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    if bytes.len() % 4 != 0 {
+        return Err(format!(
+            "{} has {} bytes, not divisible by 4",
+            path.display(),
+            bytes.len()
+        ));
+    }
+    let mut values = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        values.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(values)
+}
+
+fn quantize_chunk_to_writers<WIndex: Write, WScale: Write>(
+    dtype: &str,
+    bytes: &[u8],
+    group_size: usize,
+    scale_values: &[f32],
+    codebook: &[f32],
+    tensor_scale: f32,
+    scale_window: usize,
+    stats: &mut QuantDryRunStats,
+    index_writer: &mut WIndex,
+    scale_writer: &mut WScale,
+) -> Result<(), String> {
+    if scale_values.len() > u8::MAX as usize + 1 {
+        return Err("prototype scale index writer only supports up to 256 scales".to_string());
+    }
+    let element_size = numeric_element_size(dtype)
+        .ok_or_else(|| format!("prototype quantization is not supported for dtype {dtype}"))?;
+    let group_bytes = group_size
+        .checked_mul(element_size)
+        .ok_or_else(|| "prototype group byte size overflows".to_string())?;
+    if bytes.len() % group_bytes != 0 {
+        return Err(format!(
+            "{dtype} prototype chunk has {} bytes, not divisible by group byte size {group_bytes}",
+            bytes.len()
+        ));
+    }
+
+    let groups = bytes.len() / group_bytes;
+    let mut packed_indices = Vec::with_capacity(bytes.len() / (2 * element_size));
+    let mut scale_indices = Vec::with_capacity(groups);
+    let max_code = max_codebook_abs(codebook);
+
+    for group in bytes.chunks_exact(group_bytes) {
+        let (center_scale_index, best_scale_index) = choose_best_scale_index_for_group(
+            dtype,
+            group,
+            element_size,
+            scale_values,
+            codebook,
+            tensor_scale,
+            scale_window,
+            max_code,
+        )?;
+        if best_scale_index != center_scale_index {
+            stats.scale_window_improved_groups += 1;
+        }
+        stats.scale_index_min = stats.scale_index_min.min(best_scale_index);
+        stats.scale_index_max = stats.scale_index_max.max(best_scale_index);
+        scale_indices.push(best_scale_index as u8);
+
+        let combined_scale = scale_values[best_scale_index] * tensor_scale;
+        let mut pending_low: Option<u8> = None;
+        for item in group.chunks_exact(element_size) {
+            let value = decode_numeric_value(dtype, item)?;
+            if value.is_nan() {
+                let nibble = 0u8;
+                if let Some(low) = pending_low.take() {
+                    packed_indices.push(low | (nibble << 4));
+                } else {
+                    pending_low = Some(nibble);
+                }
+                continue;
+            }
+            let normalized = value / combined_scale;
+            let codebook_index = nearest_codebook_index(normalized, codebook);
+            let recon = codebook[codebook_index] * combined_scale;
+            let error = value - recon;
+            stats.elements += 1;
+            stats.sse += f64::from(error * error);
+            stats.ref_sse += f64::from(value * value);
+            stats.max_abs_error = stats.max_abs_error.max(error.abs());
+            stats.index_counts[codebook_index] += 1;
+
+            let nibble = codebook_index as u8 & 0x0f;
+            if let Some(low) = pending_low.take() {
+                packed_indices.push(low | (nibble << 4));
+            } else {
+                pending_low = Some(nibble);
+            }
+        }
+        if let Some(low) = pending_low {
+            packed_indices.push(low);
+        }
+        stats.groups += 1;
+    }
+
+    index_writer
+        .write_all(&packed_indices)
+        .map_err(|err| format!("failed to write prototype index bytes: {err}"))?;
+    scale_writer
+        .write_all(&scale_indices)
+        .map_err(|err| format!("failed to write prototype scale bytes: {err}"))?;
+    Ok(())
+}
+
+fn write_prototype_tensor(
+    model_dir: &Path,
+    tensor_name: &str,
+    aq_format: &str,
+    family: &str,
+    candidate_id: &str,
+    codebook: &[f32],
+    chunk_bytes: usize,
+    scale_window: usize,
+    output_dir: &Path,
+) -> Result<PrototypeManifest, String> {
+    let location = find_tensor_location(model_dir, tensor_name)?;
+    let payload_bytes = tensor_payload_bytes(&location.header)?;
+    let element_size = numeric_element_size(&location.header.dtype).ok_or_else(|| {
+        format!(
+            "prototype output is not supported for dtype {}",
+            location.header.dtype
+        )
+    })?;
+    let group_size = aq_group_size(aq_format)?;
+    let group_bytes = group_size
+        .checked_mul(element_size)
+        .ok_or_else(|| "prototype group byte size overflows".to_string())?;
+    if chunk_bytes % group_bytes != 0 {
+        return Err(format!(
+            "--chunk-bytes must be divisible by {group_bytes} for prototype output"
+        ));
+    }
+    if payload_bytes % group_bytes != 0 {
+        return Err(format!(
+            "tensor payload bytes {payload_bytes} are not divisible by group byte size {group_bytes}"
+        ));
+    }
+
+    let group_stats = new_aq_group_stats(aq_format, group_size)?;
+    let tensor_scale = if aq_uses_tensor_scale(aq_format) {
+        estimate_tensor_scale(
+            &location,
+            payload_bytes,
+            chunk_bytes,
+            group_size,
+            &group_stats.scale_values,
+            codebook,
+        )?
+    } else {
+        1.0
+    };
+
+    let tensor_stem = sanitize_file_stem(tensor_name);
+    let codebook_stem = sanitize_file_stem(&format!("{family}__{candidate_id}"));
+    let tensors_dir = output_dir.join("tensors");
+    let codebooks_dir = output_dir.join("codebooks");
+    fs::create_dir_all(&tensors_dir)
+        .map_err(|err| format!("failed to create {}: {err}", tensors_dir.display()))?;
+    fs::create_dir_all(&codebooks_dir)
+        .map_err(|err| format!("failed to create {}: {err}", codebooks_dir.display()))?;
+
+    let index_rel = PathBuf::from("tensors").join(format!("{tensor_stem}.idx4"));
+    let scale_rel = PathBuf::from("tensors").join(format!("{tensor_stem}.scale_u8"));
+    let codebook_rel = PathBuf::from("codebooks").join(format!("{codebook_stem}.f32"));
+    let index_path = output_dir.join(&index_rel);
+    let scale_path = output_dir.join(&scale_rel);
+    let codebook_path = output_dir.join(&codebook_rel);
+    write_f32_le_file(&codebook_path, codebook)?;
+
+    let index_file = fs::File::create(&index_path)
+        .map_err(|err| format!("failed to create {}: {err}", index_path.display()))?;
+    let scale_file = fs::File::create(&scale_path)
+        .map_err(|err| format!("failed to create {}: {err}", scale_path.display()))?;
+    let mut index_writer = BufWriter::new(index_file);
+    let mut scale_writer = BufWriter::new(scale_file);
+    let mut stats = new_quant_dry_run_stats(codebook.len(), tensor_scale, scale_window);
+
+    let mut offset = 0usize;
+    while offset < payload_bytes {
+        let bytes = read_tensor_payload_chunk(
+            &location.source_file,
+            location.data_start,
+            &location.header,
+            offset,
+            chunk_bytes,
+        )?;
+        if bytes.is_empty() {
+            break;
+        }
+        quantize_chunk_to_writers(
+            &location.header.dtype,
+            &bytes,
+            group_size,
+            &group_stats.scale_values,
+            codebook,
+            tensor_scale,
+            scale_window,
+            &mut stats,
+            &mut index_writer,
+            &mut scale_writer,
+        )?;
+        offset += bytes.len();
+    }
+    index_writer
+        .flush()
+        .map_err(|err| format!("failed to flush {}: {err}", index_path.display()))?;
+    scale_writer
+        .flush()
+        .map_err(|err| format!("failed to flush {}: {err}", scale_path.display()))?;
+
+    let elements = payload_bytes / element_size;
+    let manifest = PrototypeManifest {
+        schema_version: "ullm-prototype-manifest-v0.1".to_string(),
+        source_model_dir: model_dir.display().to_string(),
+        tensors: vec![PrototypeTensorManifest {
+            name: tensor_name.to_string(),
+            source_file: location.source_file.display().to_string(),
+            dtype: location.header.dtype,
+            shape: location.header.shape,
+            family: family.to_string(),
+            candidate_id: candidate_id.to_string(),
+            scale_format: group_stats.scale_format,
+            group_size,
+            tensor_scale,
+            scale_window,
+            elements,
+            groups: stats.groups,
+            index_file: relative_path_string(&index_rel),
+            index_encoding: "idx4_low_nibble_first".to_string(),
+            scale_file: relative_path_string(&scale_rel),
+            scale_encoding: "u8_scale_table_index".to_string(),
+            codebook_file: relative_path_string(&codebook_rel),
+            metrics: PrototypeTensorMetrics {
+                mse: if stats.elements > 0 {
+                    stats.sse / stats.elements as f64
+                } else {
+                    0.0
+                },
+                relative_mse: if stats.ref_sse > 0.0 {
+                    stats.sse / stats.ref_sse
+                } else {
+                    0.0
+                },
+                max_abs_error: stats.max_abs_error,
+                scale_index_min: stats.scale_index_min,
+                scale_index_max: stats.scale_index_max,
+                scale_window_improved_groups: stats.scale_window_improved_groups,
+                index_counts: stats.index_counts,
+            },
+        }],
+        codebooks: vec![PrototypeCodebookManifest {
+            family: family.to_string(),
+            candidate_id: candidate_id.to_string(),
+            file: relative_path_string(&codebook_rel),
+            encoding: "f32_le".to_string(),
+            entries: codebook.len(),
+        }],
+    };
+    let manifest_path = output_dir.join("manifest.json");
+    let manifest_text = serde_json::to_string_pretty(&manifest)
+        .map_err(|err| format!("failed to serialize prototype manifest: {err}"))?;
+    fs::write(&manifest_path, manifest_text + "\n")
+        .map_err(|err| format!("failed to write {}: {err}", manifest_path.display()))?;
+    Ok(manifest)
+}
+
+fn verify_prototype_tensor(
+    output_dir: &Path,
+    tensor_index: usize,
+    chunk_bytes: usize,
+) -> Result<PrototypeVerifyResult, String> {
+    let manifest_path = output_dir.join("manifest.json");
+    let manifest_text = fs::read_to_string(&manifest_path)
+        .map_err(|err| format!("failed to read {}: {err}", manifest_path.display()))?;
+    let manifest: PrototypeManifest = serde_json::from_str(&manifest_text)
+        .map_err(|err| format!("failed to parse {}: {err}", manifest_path.display()))?;
+    let tensor = manifest
+        .tensors
+        .get(tensor_index)
+        .ok_or_else(|| format!("prototype tensor index {tensor_index} is out of range"))?;
+    let source_file = PathBuf::from(&tensor.source_file);
+    let metadata = read_safetensors_metadata(&source_file)?;
+    let header = metadata.tensors.get(&tensor.name).ok_or_else(|| {
+        format!(
+            "tensor {} not found in {}",
+            tensor.name,
+            source_file.display()
+        )
+    })?;
+    let payload_bytes = tensor_payload_bytes(header)?;
+    let element_size = numeric_element_size(&header.dtype).ok_or_else(|| {
+        format!(
+            "prototype verify is not supported for dtype {}",
+            header.dtype
+        )
+    })?;
+    let group_bytes = tensor
+        .group_size
+        .checked_mul(element_size)
+        .ok_or_else(|| "prototype verify group byte size overflows".to_string())?;
+    if chunk_bytes % group_bytes != 0 {
+        return Err(format!(
+            "--chunk-bytes must be divisible by {group_bytes} for prototype verify"
+        ));
+    }
+
+    let index_path = output_dir.join(&tensor.index_file);
+    let scale_path = output_dir.join(&tensor.scale_file);
+    let codebook_path = output_dir.join(&tensor.codebook_file);
+    let index_bytes = fs::read(&index_path)
+        .map_err(|err| format!("failed to read {}: {err}", index_path.display()))?;
+    let scale_indices = fs::read(&scale_path)
+        .map_err(|err| format!("failed to read {}: {err}", scale_path.display()))?;
+    let codebook = read_f32_le_file(&codebook_path)?;
+    let scale_values = scale_values(&tensor.scale_format)?;
+
+    let expected_elements = payload_bytes / element_size;
+    let expected_groups = expected_elements / tensor.group_size;
+    let expected_index_bytes = expected_elements.div_ceil(2);
+    if index_bytes.len() != expected_index_bytes {
+        return Err(format!(
+            "{} has {} bytes, expected {expected_index_bytes}",
+            index_path.display(),
+            index_bytes.len()
+        ));
+    }
+    if scale_indices.len() != expected_groups {
+        return Err(format!(
+            "{} has {} bytes, expected {expected_groups}",
+            scale_path.display(),
+            scale_indices.len()
+        ));
+    }
+
+    let mut offset = 0usize;
+    let mut element_cursor = 0usize;
+    let mut group_cursor = 0usize;
+    let mut elements = 0usize;
+    let mut sse = 0.0f64;
+    let mut ref_sse = 0.0f64;
+    let mut max_abs_error = 0.0f32;
+    while offset < payload_bytes {
+        let bytes = read_tensor_payload_chunk(
+            &source_file,
+            metadata.data_start,
+            header,
+            offset,
+            chunk_bytes,
+        )?;
+        if bytes.is_empty() {
+            break;
+        }
+        for group in bytes.chunks_exact(group_bytes) {
+            let scale_index = usize::from(scale_indices[group_cursor]);
+            let scale = *scale_values.get(scale_index).ok_or_else(|| {
+                format!("scale index {scale_index} at group {group_cursor} is out of range")
+            })?;
+            let combined_scale = scale * tensor.tensor_scale;
+            for item in group.chunks_exact(element_size) {
+                let packed = index_bytes[element_cursor / 2];
+                let codebook_index = if element_cursor % 2 == 0 {
+                    packed & 0x0f
+                } else {
+                    (packed >> 4) & 0x0f
+                } as usize;
+                let code = *codebook.get(codebook_index).ok_or_else(|| {
+                    format!(
+                        "codebook index {codebook_index} at element {element_cursor} is out of range"
+                    )
+                })?;
+                let value = decode_numeric_value(&header.dtype, item)?;
+                element_cursor += 1;
+                if value.is_nan() {
+                    continue;
+                }
+                let recon = code * combined_scale;
+                let error = value - recon;
+                elements += 1;
+                sse += f64::from(error * error);
+                ref_sse += f64::from(value * value);
+                max_abs_error = max_abs_error.max(error.abs());
+            }
+            group_cursor += 1;
+        }
+        offset += bytes.len();
+    }
+    Ok(PrototypeVerifyResult {
+        elements,
+        groups: group_cursor,
+        mse: if elements > 0 {
+            sse / elements as f64
+        } else {
+            0.0
+        },
+        relative_mse: if ref_sse > 0.0 { sse / ref_sse } else { 0.0 },
+        max_abs_error,
+        index_file_bytes: index_bytes.len(),
+        scale_file_bytes: scale_indices.len(),
+        codebook_entries: codebook.len(),
+    })
 }
 
 fn inspect_tensor_chunks(
@@ -1563,6 +2101,91 @@ fn run() -> Result<(), String> {
             .join(",");
         println!("inspect_codebook_values={values}");
     }
+    if let Some(output_dir) = options.prototype_output_dir.as_deref() {
+        let model_dir = options
+            .model_dir
+            .as_deref()
+            .ok_or_else(|| "--prototype-output-dir requires --model-dir".to_string())?;
+        let tensor_name = options
+            .inspect_tensor
+            .as_deref()
+            .ok_or_else(|| "--prototype-output-dir requires --inspect-tensor".to_string())?;
+        let aq_format = options
+            .inspect_aq_format
+            .as_deref()
+            .ok_or_else(|| "--prototype-output-dir requires --inspect-aq-format".to_string())?;
+        let family = options.inspect_codebook_family.as_deref().ok_or_else(|| {
+            "--prototype-output-dir requires --inspect-codebook-family".to_string()
+        })?;
+        let candidate_id = options
+            .inspect_codebook_candidate
+            .as_deref()
+            .ok_or_else(|| {
+                "--prototype-output-dir requires --inspect-codebook-candidate".to_string()
+            })?;
+        let codebook = selected_codebook
+            .as_deref()
+            .ok_or_else(|| "--prototype-output-dir requires a selected codebook".to_string())?;
+        let manifest = write_prototype_tensor(
+            model_dir,
+            tensor_name,
+            aq_format,
+            family,
+            candidate_id,
+            codebook,
+            options.chunk_bytes,
+            options.scale_window,
+            output_dir,
+        )?;
+        let tensor = manifest
+            .tensors
+            .first()
+            .ok_or_else(|| "prototype manifest has no tensors".to_string())?;
+        println!("prototype_output_dir={}", output_dir.display());
+        println!(
+            "prototype_manifest={}",
+            output_dir.join("manifest.json").display()
+        );
+        println!("prototype_tensor={}", tensor.name);
+        println!("prototype_index_file={}", tensor.index_file);
+        println!("prototype_scale_file={}", tensor.scale_file);
+        println!("prototype_codebook_file={}", tensor.codebook_file);
+        println!("prototype_relative_mse={:.12}", tensor.metrics.relative_mse);
+        println!(
+            "prototype_max_abs_error={:.9}",
+            tensor.metrics.max_abs_error
+        );
+        let verification = verify_prototype_tensor(output_dir, 0, options.chunk_bytes)?;
+        let relative_mse_delta = (verification.relative_mse - tensor.metrics.relative_mse).abs();
+        if relative_mse_delta > 1e-9 {
+            return Err(format!(
+                "prototype verification relative MSE delta {relative_mse_delta:.12} exceeds tolerance"
+            ));
+        }
+        println!("prototype_verify_elements={}", verification.elements);
+        println!("prototype_verify_groups={}", verification.groups);
+        println!("prototype_verify_mse={:.12}", verification.mse);
+        println!(
+            "prototype_verify_relative_mse={:.12}",
+            verification.relative_mse
+        );
+        println!(
+            "prototype_verify_max_abs_error={:.9}",
+            verification.max_abs_error
+        );
+        println!(
+            "prototype_verify_index_file_bytes={}",
+            verification.index_file_bytes
+        );
+        println!(
+            "prototype_verify_scale_file_bytes={}",
+            verification.scale_file_bytes
+        );
+        println!(
+            "prototype_verify_codebook_entries={}",
+            verification.codebook_entries
+        );
+    }
     if let (Some(plan), Some(output)) = (&plan, options.plan_output.as_deref()) {
         let text = serde_json::to_string_pretty(plan)
             .map_err(|err| format!("failed to serialize plan: {err}"))?;
@@ -1630,6 +2253,7 @@ mod tests {
             codebook_json: None,
             inspect_codebook_family: None,
             inspect_codebook_candidate: None,
+            prototype_output_dir: None,
             chunk_bytes: 1024,
             scale_window: 0,
             aq_policy: policy.to_string(),
