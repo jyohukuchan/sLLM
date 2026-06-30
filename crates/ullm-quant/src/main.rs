@@ -2834,6 +2834,88 @@ mod tests {
     }
 
     #[test]
+    fn cxx_v1_kernel_matches_rust_scalar_metrics_on_bf16_chunk() {
+        fn append_bf16(bytes: &mut Vec<u8>, value: f32) {
+            let raw = (value.to_bits() >> 16) as u16;
+            bytes.extend_from_slice(&raw.to_le_bytes());
+        }
+
+        let values = [-1.0f32, -0.6, 0.2, 1.5, 0.0, 0.1, -0.2, 0.4];
+        let mut payload = Vec::new();
+        for value in values {
+            append_bf16(&mut payload, value);
+        }
+        let scales = [0.5f32, 1.0, 2.0];
+        let codebook = [
+            -1.0f32, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            1.0,
+        ];
+        let mut rust_stats = new_quant_dry_run_stats(codebook.len(), 1.0, 1);
+        update_quant_dry_run_stats(
+            "BF16",
+            &payload,
+            4,
+            &scales,
+            &codebook,
+            1.0,
+            1,
+            &mut rust_stats,
+        )
+        .expect("rust scalar dry run");
+
+        let mut packed = vec![0u8; payload.len() / 4];
+        let mut scale_indices = vec![0u8; payload.len() / (2 * 4)];
+        let mut cxx_metrics = empty_aq_quant_metrics();
+        let request = AqQuantizeChunkRequestV1 {
+            struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+            dtype: ULLM_AQ_DTYPE_BF16,
+            reserved0: 0,
+            input: payload.as_ptr(),
+            input_bytes: payload.len(),
+            group_size: 4,
+            scale_values: scales.as_ptr(),
+            scale_count: scales.len(),
+            codebook: codebook.as_ptr(),
+            codebook_count: codebook.len(),
+            tensor_scale: 1.0,
+            reserved1: 0,
+            scale_window: 1,
+            packed_indices: packed.as_mut_ptr(),
+            packed_indices_bytes: packed.len(),
+            scale_indices: scale_indices.as_mut_ptr(),
+            scale_indices_bytes: scale_indices.len(),
+        };
+        let status = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut cxx_metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(rust_stats.elements, cxx_metrics.elements as usize);
+        assert_eq!(rust_stats.groups, cxx_metrics.groups as usize);
+        assert!((rust_stats.sse - cxx_metrics.sse).abs() < 1e-12);
+        assert!((rust_stats.ref_sse - cxx_metrics.ref_sse).abs() < 1e-12);
+        assert_eq!(rust_stats.max_abs_error, cxx_metrics.max_abs_error);
+        assert_eq!(
+            rust_stats.scale_index_min,
+            cxx_metrics.scale_index_min as usize
+        );
+        assert_eq!(
+            rust_stats.scale_index_max,
+            cxx_metrics.scale_index_max as usize
+        );
+        assert_eq!(
+            rust_stats.scale_window_improved_groups,
+            cxx_metrics.scale_window_improved_groups as usize
+        );
+        for (left, right) in rust_stats.index_counts.iter().zip(cxx_metrics.index_counts) {
+            assert_eq!(*left, right as usize);
+        }
+    }
+
+    #[test]
     fn exported_codebook_selection_requires_16_entries() {
         let export = CodebookExport {
             codebooks: vec![CodebookEntry {
