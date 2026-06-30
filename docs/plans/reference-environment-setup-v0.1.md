@@ -18,7 +18,8 @@ uLLM の初期開発では、実装対象と比較対象を分ける。手元の
 - Python: 3.12.3
 - CMake: 3.28.3
 - g++: 13.3.0
-- Rust: not found in current PATH at the time of this check
+- Rust: 1.96.0
+- Cargo: 1.96.0
 
 ## Reference Sources
 
@@ -127,3 +128,4 @@ Start uLLM's own HIP C++ environment after Step 3:
 - `llama-cli` and `llama-bench` built successfully under `build/reference/llama.cpp-hip`.
 - `llama-bench --help` detected three ROCm devices: two V620 GPUs and one gfx1201 GPU.
 - OpenSSL was not found during llama.cpp configure, so HTTPS support in the bundled HTTP library is disabled for this build.
+- A later fast-compile setup installed `libssl-dev`; the Ninja/ccache configure found OpenSSL successfully.
