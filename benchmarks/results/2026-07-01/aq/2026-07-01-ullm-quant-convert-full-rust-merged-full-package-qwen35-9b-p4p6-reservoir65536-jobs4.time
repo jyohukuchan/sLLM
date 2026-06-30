@@ -1,0 +1,23 @@
+	Command being timed: "target/release/ullm-quant --merge-policy-summary benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-full-qwen35-9b-p4p6-reservoir65536-jobs4.json --merge-plan-json benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json --merge-output-dir /tmp/ullm-quant-convert-full-qwen35-9b-p4p6-reservoir65536-jobs4-full-package.ullm.d --merge-summary-output benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-full-rust-merged-full-package-qwen35-9b-p4p6-reservoir65536-jobs4.json --merge-include-passthrough --merge-copy-buffer-bytes 67108864 --merge-overwrite --verify-prototype-dir /tmp/ullm-quant-convert-full-qwen35-9b-p4p6-reservoir65536-jobs4-full-package.ullm.d --verify-prototype-all --verify-passthrough --chunk-bytes 67108864 --dry-run"
+	User time (seconds): 42.76
+	System time (seconds): 21.08
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:04.26
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 103344
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 4005217
+	Voluntary context switches: 5293
+	Involuntary context switches: 1009
+	Swaps: 0
+	File system inputs: 2352472
+	File system outputs: 17774144
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
