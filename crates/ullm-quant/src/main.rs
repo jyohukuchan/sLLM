@@ -315,7 +315,7 @@ struct PrototypeTensorMetrics {
     index_counts: Vec<usize>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct PrototypeCodebookManifest {
     family: String,
     candidate_id: String,
@@ -390,6 +390,7 @@ struct PrototypeDirectPackageSummary {
     families: Vec<String>,
     max_tensors: usize,
     per_family: usize,
+    jobs: usize,
     include_passthrough: bool,
     verify: bool,
     selected_count: usize,
@@ -1981,7 +1982,7 @@ fn quantize_chunk_to_writers<WIndex: Write, WScale: Write>(
     Ok(())
 }
 
-fn write_prototype_tensor(
+fn write_prototype_tensor_artifacts(
     model_dir: &Path,
     tensor_name: &str,
     aq_format: &str,
@@ -1994,7 +1995,9 @@ fn write_prototype_tensor(
     tensor_scale_estimator: TensorScaleEstimator,
     tensor_scale_reservoir_size: usize,
     output_dir: &Path,
-) -> Result<PrototypeManifest, String> {
+    tensor_stem: &str,
+    write_codebook: bool,
+) -> Result<(PrototypeTensorManifest, PrototypeCodebookManifest), String> {
     let location = find_tensor_location(model_dir, tensor_name)?;
     let payload_bytes = tensor_payload_bytes(&location.header)?;
     let element_size = numeric_element_size(&location.header.dtype).ok_or_else(|| {
@@ -2036,7 +2039,6 @@ fn write_prototype_tensor(
         1.0
     };
 
-    let tensor_stem = sanitize_file_stem(tensor_name);
     let codebook_stem = sanitize_file_stem(&format!("{family}__{candidate_id}"));
     let tensors_dir = output_dir.join("tensors");
     let codebooks_dir = output_dir.join("codebooks");
@@ -2051,7 +2053,9 @@ fn write_prototype_tensor(
     let index_path = output_dir.join(&index_rel);
     let scale_path = output_dir.join(&scale_rel);
     let codebook_path = output_dir.join(&codebook_rel);
-    write_f32_le_file(&codebook_path, codebook)?;
+    if write_codebook {
+        write_f32_le_file(&codebook_path, codebook)?;
+    }
 
     let index_file = fs::File::create(&index_path)
         .map_err(|err| format!("failed to create {}: {err}", index_path.display()))?;
@@ -2095,59 +2099,92 @@ fn write_prototype_tensor(
         .map_err(|err| format!("failed to flush {}: {err}", scale_path.display()))?;
 
     let elements = payload_bytes / element_size;
+    let tensor_manifest = PrototypeTensorManifest {
+        name: tensor_name.to_string(),
+        source_file: location.source_file.display().to_string(),
+        dtype: location.header.dtype,
+        shape: location.header.shape,
+        family: family.to_string(),
+        candidate_id: candidate_id.to_string(),
+        scale_format: group_stats.scale_format,
+        group_size,
+        tensor_scale,
+        scale_window,
+        elements,
+        groups: stats.groups,
+        index_file: relative_path_string(&index_rel),
+        index_encoding: "idx4_low_nibble_first".to_string(),
+        scale_file: relative_path_string(&scale_rel),
+        scale_encoding: "u8_scale_table_index".to_string(),
+        codebook_file: relative_path_string(&codebook_rel),
+        metrics: PrototypeTensorMetrics {
+            mse: if stats.elements > 0 {
+                stats.sse / stats.elements as f64
+            } else {
+                0.0
+            },
+            relative_mse: if stats.ref_sse > 0.0 {
+                stats.sse / stats.ref_sse
+            } else {
+                0.0
+            },
+            max_abs_error: stats.max_abs_error,
+            scale_index_min: stats.scale_index_min,
+            scale_index_max: stats.scale_index_max,
+            scale_window_improved_groups: stats.scale_window_improved_groups,
+            index_counts: stats.index_counts,
+        },
+    };
+    let codebook_manifest = PrototypeCodebookManifest {
+        family: family.to_string(),
+        candidate_id: candidate_id.to_string(),
+        file: relative_path_string(&codebook_rel),
+        encoding: "f32_le".to_string(),
+        entries: codebook.len(),
+    };
+    Ok((tensor_manifest, codebook_manifest))
+}
+
+fn write_prototype_tensor(
+    model_dir: &Path,
+    tensor_name: &str,
+    aq_format: &str,
+    family: &str,
+    candidate_id: &str,
+    codebook: &[f32],
+    chunk_bytes: usize,
+    scale_window: usize,
+    tensor_scale_override: Option<f32>,
+    tensor_scale_estimator: TensorScaleEstimator,
+    tensor_scale_reservoir_size: usize,
+    output_dir: &Path,
+) -> Result<PrototypeManifest, String> {
+    let tensor_stem = sanitize_file_stem(tensor_name);
+    let (tensor_manifest, codebook_manifest) = write_prototype_tensor_artifacts(
+        model_dir,
+        tensor_name,
+        aq_format,
+        family,
+        candidate_id,
+        codebook,
+        chunk_bytes,
+        scale_window,
+        tensor_scale_override,
+        tensor_scale_estimator,
+        tensor_scale_reservoir_size,
+        output_dir,
+        &tensor_stem,
+        true,
+    )?;
     let manifest = PrototypeManifest {
         schema_version: "ullm-prototype-manifest-v0.1".to_string(),
         source_model_dir: model_dir.display().to_string(),
-        tensors: vec![PrototypeTensorManifest {
-            name: tensor_name.to_string(),
-            source_file: location.source_file.display().to_string(),
-            dtype: location.header.dtype,
-            shape: location.header.shape,
-            family: family.to_string(),
-            candidate_id: candidate_id.to_string(),
-            scale_format: group_stats.scale_format,
-            group_size,
-            tensor_scale,
-            scale_window,
-            elements,
-            groups: stats.groups,
-            index_file: relative_path_string(&index_rel),
-            index_encoding: "idx4_low_nibble_first".to_string(),
-            scale_file: relative_path_string(&scale_rel),
-            scale_encoding: "u8_scale_table_index".to_string(),
-            codebook_file: relative_path_string(&codebook_rel),
-            metrics: PrototypeTensorMetrics {
-                mse: if stats.elements > 0 {
-                    stats.sse / stats.elements as f64
-                } else {
-                    0.0
-                },
-                relative_mse: if stats.ref_sse > 0.0 {
-                    stats.sse / stats.ref_sse
-                } else {
-                    0.0
-                },
-                max_abs_error: stats.max_abs_error,
-                scale_index_min: stats.scale_index_min,
-                scale_index_max: stats.scale_index_max,
-                scale_window_improved_groups: stats.scale_window_improved_groups,
-                index_counts: stats.index_counts,
-            },
-        }],
-        codebooks: vec![PrototypeCodebookManifest {
-            family: family.to_string(),
-            candidate_id: candidate_id.to_string(),
-            file: relative_path_string(&codebook_rel),
-            encoding: "f32_le".to_string(),
-            entries: codebook.len(),
-        }],
+        tensors: vec![tensor_manifest],
+        codebooks: vec![codebook_manifest],
         passthrough_tensors: Vec::new(),
     };
     let manifest_path = output_dir.join("manifest.json");
-    let manifest_text = serde_json::to_string_pretty(&manifest)
-        .map_err(|err| format!("failed to serialize prototype manifest: {err}"))?;
-    fs::write(&manifest_path, manifest_text + "\n")
-        .map_err(|err| format!("failed to write {}: {err}", manifest_path.display()))?;
+    write_json_pretty_file(&manifest_path, &manifest)?;
     Ok(manifest)
 }
 
@@ -2222,6 +2259,57 @@ fn failed_convert_result(
         manifest: None,
         verification: None,
     }
+}
+
+fn run_one_direct_package_convert(
+    plan: &ModelPlan,
+    export: &CodebookExport,
+    options: &Options,
+    output_dir: &Path,
+    index: usize,
+    tensor: &TensorPlan,
+) -> PrototypeConvertResult {
+    let candidate = tensor.quant_format.as_deref().unwrap_or("<missing>");
+    let result = (|| -> Result<PrototypeConvertResult, String> {
+        if tensor.quant_format.is_none() {
+            return Err(format!(
+                "selected tensor {} has no quant format",
+                tensor.name
+            ));
+        }
+        let codebook = select_codebook(export, &tensor.family, candidate)?;
+        let tensor_stem = format!("{index:03}-{}", sanitize_file_stem(&tensor.name));
+        let (tensor_manifest, _) = write_prototype_tensor_artifacts(
+            Path::new(&plan.model_dir),
+            &tensor.name,
+            candidate,
+            &tensor.family,
+            candidate,
+            codebook,
+            options.chunk_bytes,
+            options.scale_window,
+            options.tensor_scale_override,
+            options.tensor_scale_estimator,
+            options.tensor_scale_reservoir_size,
+            output_dir,
+            &tensor_stem,
+            false,
+        )?;
+        Ok(PrototypeConvertResult {
+            tensor: tensor.name.clone(),
+            family: tensor.family.clone(),
+            candidate: candidate.to_string(),
+            status: "ok".to_string(),
+            returncode: 0,
+            output_dir: output_dir.display().to_string(),
+            error: None,
+            manifest: Some(tensor_manifest),
+            verification: None,
+        })
+    })();
+    result.unwrap_or_else(|error| {
+        failed_convert_result(tensor, candidate.to_string(), output_dir, error)
+    })
 }
 
 fn run_one_prototype_convert(
@@ -2433,11 +2521,6 @@ fn run_prototype_convert(options: &Options) -> Result<PrototypeConvertSummary, S
 fn run_direct_prototype_package(
     options: &Options,
 ) -> Result<PrototypeDirectPackageSummary, String> {
-    if options.convert_jobs != 1 {
-        return Err(
-            "--convert-package-output-dir currently supports only --convert-jobs 1".to_string(),
-        );
-    }
     if options.convert_output_root.is_some() || options.convert_summary_output.is_some() {
         return Err(
             "--convert-package-output-dir cannot be combined with --convert-output-root or --convert-summary-output"
@@ -2476,84 +2559,127 @@ fn run_direct_prototype_package(
     );
     prepare_merge_output_dir(output_dir, options.convert_overwrite)?;
 
-    let mut tensors = Vec::new();
-    let mut codebooks = Vec::new();
-    let mut codebook_files: BTreeSet<(String, String)> = BTreeSet::new();
     let mut copied_files = Vec::new();
-    let mut results = Vec::with_capacity(selected.len());
-    let mut success_result_indices = Vec::new();
-
+    let mut codebook_manifests: BTreeMap<(String, String), PrototypeCodebookManifest> =
+        BTreeMap::new();
     for tensor in &selected {
         let candidate = tensor.quant_format.as_deref().unwrap_or("<missing>");
-        let row = (|| -> Result<PrototypeConvertResult, String> {
+        let codebook_key = (tensor.family.clone(), candidate.to_string());
+        if !codebook_manifests.contains_key(&codebook_key) {
             let codebook = select_codebook(&export, &tensor.family, candidate)?;
-            let manifest = write_prototype_tensor(
-                Path::new(&plan.model_dir),
-                &tensor.name,
-                candidate,
-                &tensor.family,
-                candidate,
-                codebook,
-                options.chunk_bytes,
-                options.scale_window,
-                options.tensor_scale_override,
-                options.tensor_scale_estimator,
-                options.tensor_scale_reservoir_size,
-                output_dir,
-            )?;
-            let tensor_manifest = manifest
-                .tensors
-                .into_iter()
-                .next()
-                .ok_or_else(|| "prototype manifest has no tensors".to_string())?;
-            let codebook_manifest = manifest
-                .codebooks
-                .into_iter()
-                .next()
-                .ok_or_else(|| "prototype manifest has no codebooks".to_string())?;
-            let index_bytes = file_len_usize(&output_dir.join(&tensor_manifest.index_file))?;
-            let scale_bytes = file_len_usize(&output_dir.join(&tensor_manifest.scale_file))?;
+            let codebook_rel = PathBuf::from("codebooks").join(format!(
+                "{}.f32",
+                sanitize_file_stem(&format!("{}__{}", tensor.family, candidate))
+            ));
+            write_f32_le_file(&output_dir.join(&codebook_rel), codebook)?;
+            let codebook_file = relative_path_string(&codebook_rel);
             copied_files.push(CopiedFileSummary {
-                path: tensor_manifest.index_file.clone(),
-                bytes: index_bytes,
+                path: codebook_file.clone(),
+                bytes: file_len_usize(&output_dir.join(&codebook_rel))?,
             });
-            copied_files.push(CopiedFileSummary {
-                path: tensor_manifest.scale_file.clone(),
-                bytes: scale_bytes,
-            });
-            let codebook_key = (
-                codebook_manifest.family.clone(),
-                codebook_manifest.candidate_id.clone(),
+            codebook_manifests.insert(
+                codebook_key,
+                PrototypeCodebookManifest {
+                    family: tensor.family.clone(),
+                    candidate_id: candidate.to_string(),
+                    file: codebook_file,
+                    encoding: "f32_le".to_string(),
+                    entries: codebook.len(),
+                },
             );
-            if codebook_files.insert(codebook_key) {
-                let codebook_bytes = file_len_usize(&output_dir.join(&codebook_manifest.file))?;
-                copied_files.push(CopiedFileSummary {
-                    path: codebook_manifest.file.clone(),
-                    bytes: codebook_bytes,
-                });
-                codebooks.push(codebook_manifest);
-            }
-            tensors.push(tensor_manifest.clone());
-            Ok(PrototypeConvertResult {
-                tensor: tensor.name.clone(),
-                family: tensor.family.clone(),
-                candidate: candidate.to_string(),
-                status: "ok".to_string(),
-                returncode: 0,
-                output_dir: output_dir.display().to_string(),
-                error: None,
-                manifest: Some(tensor_manifest),
-                verification: None,
-            })
-        })()
-        .unwrap_or_else(|error| {
-            failed_convert_result(tensor, candidate.to_string(), output_dir, error)
-        });
-        if row.status == "ok" {
-            success_result_indices.push(results.len());
         }
-        results.push(row);
     }
+
+    let jobs = options.convert_jobs.max(1);
+    let mut indexed_results = Vec::with_capacity(selected.len());
+    if jobs == 1 {
+        for (index, tensor) in selected.iter().enumerate() {
+            indexed_results.push((
+                index,
+                run_one_direct_package_convert(&plan, &export, options, output_dir, index, tensor),
+            ));
+        }
+    } else {
+        for batch_start in (0..selected.len()).step_by(jobs) {
+            let batch_end = batch_start.saturating_add(jobs).min(selected.len());
+            thread::scope(|scope| {
+                let plan_ref = &plan;
+                let export_ref = &export;
+                let options_ref = options;
+                let output_dir_ref = output_dir;
+                let mut handles = Vec::with_capacity(batch_end - batch_start);
+                for index in batch_start..batch_end {
+                    let tensor = selected[index];
+                    handles.push((
+                        index,
+                        tensor,
+                        scope.spawn(move || {
+                            run_one_direct_package_convert(
+                                plan_ref,
+                                export_ref,
+                                options_ref,
+                                output_dir_ref,
+                                index,
+                                tensor,
+                            )
+                        }),
+                    ));
+                }
+                for (index, tensor, handle) in handles {
+                    match handle.join() {
+                        Ok(row) => indexed_results.push((index, row)),
+                        Err(_) => {
+                            let candidate = tensor
+                                .quant_format
+                                .clone()
+                                .unwrap_or_else(|| "<missing>".to_string());
+                            indexed_results.push((
+                                index,
+                                failed_convert_result(
+                                    tensor,
+                                    candidate,
+                                    output_dir,
+                                    "direct package conversion worker panicked".to_string(),
+                                ),
+                            ));
+                        }
+                    }
+                }
+            });
+        }
+    }
+    indexed_results.sort_by_key(|(index, _)| *index);
+    let mut results = indexed_results
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
+
+    let mut tensors = Vec::new();
+    let mut success_result_indices = Vec::new();
+    for (result_index, result) in results.iter().enumerate() {
+        if result.status != "ok" {
+            continue;
+        }
+        let tensor_manifest = result
+            .manifest
+            .as_ref()
+            .ok_or_else(|| format!("successful result {result_index} has no manifest"))?;
+        let index_bytes = file_len_usize(&output_dir.join(&tensor_manifest.index_file))?;
+        let scale_bytes = file_len_usize(&output_dir.join(&tensor_manifest.scale_file))?;
+        copied_files.push(CopiedFileSummary {
+            path: tensor_manifest.index_file.clone(),
+            bytes: index_bytes,
+        });
+        copied_files.push(CopiedFileSummary {
+            path: tensor_manifest.scale_file.clone(),
+            bytes: scale_bytes,
+        });
+        tensors.push(tensor_manifest.clone());
+        success_result_indices.push(result_index);
+    }
+    let codebooks = codebook_manifests
+        .into_values()
+        .collect::<Vec<PrototypeCodebookManifest>>();
 
     let passthrough_tensors = if options.convert_include_passthrough {
         merge_passthrough_tensors(
@@ -2625,6 +2751,7 @@ fn run_direct_prototype_package(
         families: options.convert_families.clone(),
         max_tensors: options.convert_max_tensors,
         per_family: options.convert_per_family,
+        jobs,
         include_passthrough: options.convert_include_passthrough,
         verify: options.convert_verify,
         selected_count: selected.len(),
@@ -3661,6 +3788,7 @@ fn run() -> Result<(), String> {
             println!("convert_package_summary_output={}", path.display());
         }
         println!("convert_package_selected_count={}", summary.selected_count);
+        println!("convert_package_jobs={}", summary.jobs);
         println!("convert_package_tensor_count={}", summary.tensor_count);
         println!(
             "convert_package_passthrough_tensor_count={}",
@@ -4428,7 +4556,7 @@ mod tests {
         let safetensors_path = model_dir.join("model.safetensors");
         fs::create_dir_all(&model_dir).expect("model dir");
 
-        let header = br#"{"quant":{"dtype":"BF16","shape":[16],"data_offsets":[0,32]},"keep":{"dtype":"U8","shape":[4],"data_offsets":[32,36]}}"#;
+        let header = br#"{"quant":{"dtype":"BF16","shape":[16],"data_offsets":[0,32]},"quant2":{"dtype":"BF16","shape":[16],"data_offsets":[32,64]},"keep":{"dtype":"U8","shape":[4],"data_offsets":[64,68]}}"#;
         let mut safetensors = fs::File::create(&safetensors_path).expect("safetensors");
         safetensors
             .write_all(&(header.len() as u64).to_le_bytes())
@@ -4436,6 +4564,9 @@ mod tests {
         safetensors.write_all(header).expect("header");
         for _ in 0..16 {
             safetensors.write_all(&[0x80, 0x3f]).expect("bf16 1.0");
+        }
+        for _ in 0..16 {
+            safetensors.write_all(&[0x00, 0x40]).expect("bf16 2.0");
         }
         safetensors.write_all(&[9, 8, 7, 6]).expect("passthrough");
         drop(safetensors);
@@ -4445,6 +4576,7 @@ mod tests {
                 "metadata": {},
                 "weight_map": {
                     "quant": "model.safetensors",
+                    "quant2": "model.safetensors",
                     "keep": "model.safetensors"
                 }
             }))
@@ -4461,14 +4593,28 @@ mod tests {
                 "high_format": "aq4_e4m3_g8_ts_flloyd16",
                 "high_families": []
             },
-            "tensor_count": 2,
-            "supported_tensor_count": 1,
+            "tensor_count": 3,
+            "supported_tensor_count": 2,
             "passthrough_tensor_count": 1,
-            "total_tensor_bytes": 36,
-            "total_estimated_output_bytes": 45,
+            "total_tensor_bytes": 68,
+            "total_estimated_output_bytes": 77,
             "estimated_output_to_input_ratio": 1.25,
             "tensors": [{
                 "name": "quant",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "BF16",
+                "shape": [16],
+                "family": "mlp_up",
+                "n_elements": 16,
+                "n_bytes": 32,
+                "supported_input": true,
+                "action": "quantize",
+                "quant_format": "aq4_e4m3_g16_ts_flloyd16",
+                "quant_role": "low",
+                "estimated_output_bytes": 9,
+                "estimated_effective_bpp": 4.5
+            }, {
+                "name": "quant2",
                 "source_file": safetensors_path.display().to_string(),
                 "dtype": "BF16",
                 "shape": [16],
@@ -4522,19 +4668,24 @@ mod tests {
         options.convert_package_summary_output = Some(summary_path);
         options.convert_include_passthrough = true;
         options.convert_verify = true;
+        options.convert_jobs = 2;
         options.chunk_bytes = 32;
 
         let summary = run_direct_prototype_package(&options).expect("direct package");
-        assert_eq!(summary.selected_count, 1);
-        assert_eq!(summary.tensor_count, 1);
+        assert_eq!(summary.selected_count, 2);
+        assert_eq!(summary.jobs, 2);
+        assert_eq!(summary.tensor_count, 2);
         assert_eq!(summary.passthrough_tensor_count, 1);
         assert_eq!(summary.codebook_count, 1);
         assert_eq!(summary.results[0].status, "ok");
+        assert_eq!(summary.results[1].status, "ok");
         assert!(summary.results[0].verification.is_some());
+        assert!(summary.results[1].verification.is_some());
         assert!(output_dir.join("manifest.json").exists());
-        assert!(output_dir.join("tensors").join("quant.idx4").exists());
+        assert!(output_dir.join("tensors").join("000-quant.idx4").exists());
+        assert!(output_dir.join("tensors").join("001-quant2.idx4").exists());
         assert_eq!(
-            fs::read(output_dir.join("passthrough").join("001-keep.raw")).expect("passthrough"),
+            fs::read(output_dir.join("passthrough").join("002-keep.raw")).expect("passthrough"),
             vec![9, 8, 7, 6]
         );
         let passthrough =

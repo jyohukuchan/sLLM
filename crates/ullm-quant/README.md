@@ -132,8 +132,9 @@ cargo run -p ullm-quant --release -- \
 This writes selected quantized tensors directly into a single `.ullm.d`
 prototype package and can optionally stream passthrough safetensors payloads
 into the same manifest. It avoids the per-tensor directory plus merge copy step.
-For now this direct path intentionally accepts only `--convert-jobs 1`; parallel
-direct package writing needs separate scheduling and memory/I/O validation.
+`--convert-jobs` enables tensor-level parallel conversion. Codebook files are
+written once before workers start, while each worker writes unique tensor
+index/scale files into the final package.
 
 Policy presets:
 
