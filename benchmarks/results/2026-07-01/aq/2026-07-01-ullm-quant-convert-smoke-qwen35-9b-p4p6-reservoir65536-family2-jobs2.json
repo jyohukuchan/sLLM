@@ -1,0 +1,292 @@
+{
+  "schema_version": "ullm-prototype-convert-summary-v0.1",
+  "plan_json": "benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json",
+  "codebook_json": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.json",
+  "aq_policy": {
+    "policy_id": "p4p6",
+    "low_format": "aq4_e4m3_g16_ts_flloyd16",
+    "high_format": "aq4_e4m3_g8_ts_flloyd16",
+    "high_families": [
+      "attn_k",
+      "attn_o",
+      "attn_v",
+      "linear_attn_out"
+    ]
+  },
+  "output_root": "/tmp/ullm-quant-convert-smoke-p4p6-reservoir65536-jobs2.ullm.parts",
+  "tensor_scale_estimator": "reservoir",
+  "tensor_scale_reservoir_size": 65536,
+  "scale_window": 4,
+  "chunk_bytes": 67108864,
+  "families": [
+    "mlp_up",
+    "attn_k"
+  ],
+  "max_tensors": 4,
+  "per_family": 2,
+  "jobs": 2,
+  "verify": true,
+  "selected_count": 4,
+  "results": [
+    {
+      "tensor": "model.language_model.layers.0.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "candidate": "aq4_e4m3_g16_ts_flloyd16",
+      "status": "ok",
+      "output_dir": "/tmp/ullm-quant-convert-smoke-p4p6-reservoir65536-jobs2.ullm.parts/000-model_language_model_layers_0_mlp_up_proj_weight.ullm.d",
+      "error": null,
+      "manifest": {
+        "name": "model.language_model.layers.0.mlp.up_proj.weight",
+        "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00002-of-00004.safetensors",
+        "dtype": "BF16",
+        "shape": [
+          12288,
+          4096
+        ],
+        "family": "mlp_up",
+        "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+        "scale_format": "e4m3",
+        "group_size": 16,
+        "tensor_scale": 0.01469694,
+        "scale_window": 4,
+        "elements": 50331648,
+        "groups": 3145728,
+        "index_file": "tensors/model_language_model_layers_0_mlp_up_proj_weight.idx4",
+        "index_encoding": "idx4_low_nibble_first",
+        "scale_file": "tensors/model_language_model_layers_0_mlp_up_proj_weight.scale_u8",
+        "scale_encoding": "u8_scale_table_index",
+        "codebook_file": "codebooks/mlp_up__aq4_e4m3_g16_ts_flloyd16.f32",
+        "metrics": {
+          "mse": 5.833155026423764e-7,
+          "relative_mse": 0.005245252663275264,
+          "max_abs_error": 0.0056050904,
+          "scale_index_min": 43,
+          "scale_index_max": 80,
+          "scale_window_improved_groups": 1602367,
+          "index_counts": [
+            2008622,
+            2407683,
+            3008343,
+            3483872,
+            3807598,
+            3932470,
+            3566375,
+            3138092,
+            3221399,
+            3571047,
+            3695728,
+            3607585,
+            3376423,
+            2986160,
+            2467054,
+            2053197
+          ]
+        }
+      },
+      "verification": {
+        "elements": 50331648,
+        "groups": 3145728,
+        "relative_mse": 0.0052452526632657355,
+        "max_abs_error": 0.0056050904,
+        "index_file_bytes": 25165824,
+        "scale_file_bytes": 3145728,
+        "codebook_entries": 16
+      }
+    },
+    {
+      "tensor": "model.language_model.layers.1.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "candidate": "aq4_e4m3_g16_ts_flloyd16",
+      "status": "ok",
+      "output_dir": "/tmp/ullm-quant-convert-smoke-p4p6-reservoir65536-jobs2.ullm.parts/001-model_language_model_layers_1_mlp_up_proj_weight.ullm.d",
+      "error": null,
+      "manifest": {
+        "name": "model.language_model.layers.1.mlp.up_proj.weight",
+        "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00002-of-00004.safetensors",
+        "dtype": "BF16",
+        "shape": [
+          12288,
+          4096
+        ],
+        "family": "mlp_up",
+        "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+        "scale_format": "e4m3",
+        "group_size": 16,
+        "tensor_scale": 0.015116852,
+        "scale_window": 4,
+        "elements": 50331648,
+        "groups": 3145728,
+        "index_file": "tensors/model_language_model_layers_1_mlp_up_proj_weight.idx4",
+        "index_encoding": "idx4_low_nibble_first",
+        "scale_file": "tensors/model_language_model_layers_1_mlp_up_proj_weight.scale_u8",
+        "scale_encoding": "u8_scale_table_index",
+        "codebook_file": "codebooks/mlp_up__aq4_e4m3_g16_ts_flloyd16.f32",
+        "metrics": {
+          "mse": 6.155803916509765e-7,
+          "relative_mse": 0.00525048844221483,
+          "max_abs_error": 0.00775242,
+          "scale_index_min": 39,
+          "scale_index_max": 86,
+          "scale_window_improved_groups": 1601049,
+          "index_counts": [
+            2008517,
+            2401065,
+            2998221,
+            3473412,
+            3797976,
+            3954545,
+            3569557,
+            3151273,
+            3240332,
+            3583985,
+            3694328,
+            3602454,
+            3370128,
+            2980316,
+            2456248,
+            2049291
+          ]
+        }
+      },
+      "verification": {
+        "elements": 50331648,
+        "groups": 3145728,
+        "relative_mse": 0.005250488442201175,
+        "max_abs_error": 0.00775242,
+        "index_file_bytes": 25165824,
+        "scale_file_bytes": 3145728,
+        "codebook_entries": 16
+      }
+    },
+    {
+      "tensor": "model.language_model.layers.11.self_attn.k_proj.weight",
+      "family": "attn_k",
+      "candidate": "aq4_e4m3_g8_ts_flloyd16",
+      "status": "ok",
+      "output_dir": "/tmp/ullm-quant-convert-smoke-p4p6-reservoir65536-jobs2.ullm.parts/002-model_language_model_layers_11_self_attn_k_proj_weight.ullm.d",
+      "error": null,
+      "manifest": {
+        "name": "model.language_model.layers.11.self_attn.k_proj.weight",
+        "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00004-of-00004.safetensors",
+        "dtype": "BF16",
+        "shape": [
+          1024,
+          4096
+        ],
+        "family": "attn_k",
+        "candidate_id": "aq4_e4m3_g8_ts_flloyd16",
+        "scale_format": "e4m3",
+        "group_size": 8,
+        "tensor_scale": 0.017083505,
+        "scale_window": 4,
+        "elements": 4194304,
+        "groups": 524288,
+        "index_file": "tensors/model_language_model_layers_11_self_attn_k_proj_weight.idx4",
+        "index_encoding": "idx4_low_nibble_first",
+        "scale_file": "tensors/model_language_model_layers_11_self_attn_k_proj_weight.scale_u8",
+        "scale_encoding": "u8_scale_table_index",
+        "codebook_file": "codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32",
+        "metrics": {
+          "mse": 8.757408208581428e-7,
+          "relative_mse": 0.003724312489630634,
+          "max_abs_error": 0.011626986,
+          "scale_index_min": 25,
+          "scale_index_max": 87,
+          "scale_window_improved_groups": 252272,
+          "index_counts": [
+            221178,
+            210039,
+            213827,
+            267647,
+            299988,
+            293505,
+            287717,
+            297415,
+            295939,
+            308607,
+            315631,
+            279516,
+            236208,
+            203274,
+            220168,
+            243645
+          ]
+        }
+      },
+      "verification": {
+        "elements": 4194304,
+        "groups": 524288,
+        "relative_mse": 0.003724312489630634,
+        "max_abs_error": 0.011626986,
+        "index_file_bytes": 2097152,
+        "scale_file_bytes": 524288,
+        "codebook_entries": 16
+      }
+    },
+    {
+      "tensor": "model.language_model.layers.15.self_attn.k_proj.weight",
+      "family": "attn_k",
+      "candidate": "aq4_e4m3_g8_ts_flloyd16",
+      "status": "ok",
+      "output_dir": "/tmp/ullm-quant-convert-smoke-p4p6-reservoir65536-jobs2.ullm.parts/003-model_language_model_layers_15_self_attn_k_proj_weight.ullm.d",
+      "error": null,
+      "manifest": {
+        "name": "model.language_model.layers.15.self_attn.k_proj.weight",
+        "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00004-of-00004.safetensors",
+        "dtype": "BF16",
+        "shape": [
+          1024,
+          4096
+        ],
+        "family": "attn_k",
+        "candidate_id": "aq4_e4m3_g8_ts_flloyd16",
+        "scale_format": "e4m3",
+        "group_size": 8,
+        "tensor_scale": 0.016344314,
+        "scale_window": 4,
+        "elements": 4194304,
+        "groups": 524288,
+        "index_file": "tensors/model_language_model_layers_15_self_attn_k_proj_weight.idx4",
+        "index_encoding": "idx4_low_nibble_first",
+        "scale_file": "tensors/model_language_model_layers_15_self_attn_k_proj_weight.scale_u8",
+        "scale_encoding": "u8_scale_table_index",
+        "codebook_file": "codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32",
+        "metrics": {
+          "mse": 8.267397695474885e-7,
+          "relative_mse": 0.0036972209708366318,
+          "max_abs_error": 0.01304525,
+          "scale_index_min": 32,
+          "scale_index_max": 88,
+          "scale_window_improved_groups": 253146,
+          "index_counts": [
+            221954,
+            211844,
+            218873,
+            270951,
+            300980,
+            290612,
+            282695,
+            291554,
+            290695,
+            303967,
+            314265,
+            281739,
+            238861,
+            206327,
+            224067,
+            244920
+          ]
+        }
+      },
+      "verification": {
+        "elements": 4194304,
+        "groups": 524288,
+        "relative_mse": 0.0036972209708366318,
+        "max_abs_error": 0.01304525,
+        "index_file_bytes": 2097152,
+        "scale_file_bytes": 524288,
+        "codebook_entries": 16
+      }
+    }
+  ]
+}

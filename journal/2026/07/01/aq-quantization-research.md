@@ -347,9 +347,10 @@
   - larger family2 comparison: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2-tensor-scale-compare.json`.
   - family2 result: 24 tensors, exact and reservoir65536 both had 0 failures and verification succeeded. Reservoir65536 relative-MSE delta range was `-7.05e-7` to `+8.75e-7`, mean `+3.69e-8`. Tensor-scale relative deltas ranged from about `-0.995%` to `+0.781%`. This is small enough for prototype conversion, but exact should remain the default until model-level quality is checked.
 - Rust multi-tensor conversion command:
-  - added `ullm-quant --convert-plan-json`, `--convert-output-root`, `--convert-summary-output`, `--convert-family`, `--convert-max-tensors`, `--convert-per-family`, `--convert-verify`, and `--convert-overwrite`.
+  - added `ullm-quant --convert-plan-json`, `--convert-output-root`, `--convert-summary-output`, `--convert-family`, `--convert-max-tensors`, `--convert-per-family`, `--convert-jobs`, `--convert-verify`, and `--convert-overwrite`.
   - the command reads a plan JSON and codebook JSON, selects quantized tensors with matching `(family, quant_format)` codebooks, writes one prototype `.ullm.d` directory per selected tensor, and can verify each written tensor immediately.
-  - summary schema: `ullm-prototype-convert-summary-v0.1`; it records the plan aq policy, tensor-scale estimator, chunk size, scale window, selected tensors, per-tensor manifests, and verification summaries.
+  - `--convert-jobs` enables tensor-level parallel conversion. Default is `1`; `0` is rejected so memory use remains predictable unless a run explicitly opts in.
+  - summary schema: `ullm-prototype-convert-summary-v0.1`; it records the plan aq policy, tensor-scale estimator, chunk size, scale window, job count, selected tensors, per-tensor manifests, and verification summaries.
   - README now documents a bounded multi-tensor conversion example.
   - added unit coverage for conversion selection by action, family filter, codebook availability, `--convert-max-tensors`, and `--convert-per-family`.
   - verification: `cargo fmt -p ullm-quant --check`, `cargo test -p ullm-quant`, and `cargo build -p ullm-quant --release` passed. Unit tests now pass `26` tests.
@@ -360,12 +361,18 @@
     - selected 4 tensors: layer0/layer1 `mlp_up` g16 and layer11/layer15 `attn_k` g8.
     - result: selected `4`, failures `0`, aq policy `p4p6`, elapsed `0:16.48`, max RSS `100364 KiB`.
     - relative MSE values: `0.005245252663`, `0.005250488442`, `0.003724312490`, and `0.003697220971`; verification matched within floating-point noise.
+  - p4p6 reservoir65536 jobs=2 smoke:
+    - summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-smoke-qwen35-9b-p4p6-reservoir65536-family2-jobs2.json`.
+    - time log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-convert-smoke-qwen35-9b-p4p6-reservoir65536-family2-jobs2.time`.
+    - output root: `/tmp/ullm-quant-convert-smoke-p4p6-reservoir65536-jobs2.ullm.parts`.
+    - result: selected `4`, failures `0`, aq policy `p4p6`, jobs `2`, elapsed `0:08.80`, max RSS `168256 KiB`, CPU `194%`.
+    - relative MSE values exactly matched the jobs=1 run in the same selected order.
 
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, but repeated-prompt and both 22-module/44-module project-text next-token loss smokes keep p4p6 as the safer policy. The 44-module run ranks p4p46 second among mixed policies, so p4p46 remains the main follow-up candidate. The Rust multi-tensor conversion path now replaces the Python per-tensor driver for bounded conversion smokes, but it is still sequential and still writes per-tensor directories rather than a directly merged full package.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, but repeated-prompt and both 22-module/44-module project-text next-token loss smokes keep p4p6 as the safer policy. The 44-module run ranks p4p46 second among mixed policies, so p4p46 remains the main follow-up candidate. The Rust multi-tensor conversion path now replaces the Python per-tensor driver for bounded conversion smokes and supports explicit tensor-level parallel jobs, but it still writes per-tensor directories rather than a directly merged full package.
 
 ## Next
 
@@ -374,7 +381,7 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65, preferably after the full-model loader path is available.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.
 - Extend the Rust conversion command toward direct full-package output, including quantized tensors, passthrough tensors, and merge/verify in one path.
-- Add controlled CPU parallelism to conversion; current multi-tensor conversion is still sequential, so full-model conversion speed is limited despite low memory use.
+- Tune controlled CPU parallelism for full conversion. `--convert-jobs 2` is validated on a 4-tensor smoke, but larger jobs need memory and I/O measurements before using them as defaults.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Decide whether manifest JSON needs canonical float/text formatting or whether semantic JSON plus payload hashes are sufficient for the prototype.

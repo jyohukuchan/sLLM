@@ -88,6 +88,7 @@ cargo run -p ullm-quant --release -- \
   --convert-family attn_k \
   --convert-max-tensors 4 \
   --convert-per-family 2 \
+  --convert-jobs 2 \
   --scale-window 4 \
   --tensor-scale-estimator reservoir \
   --tensor-scale-reservoir-size 65536 \
@@ -100,7 +101,9 @@ This writes one prototype `.ullm.d` directory per selected quantized tensor.
 Selection is driven by the plan's `action`, `family`, and `quant_format`; tensors
 without matching exported codebooks are skipped. Use `--convert-family`,
 `--convert-max-tensors`, and `--convert-per-family` for bounded smokes before
-full conversion.
+full conversion. `--convert-jobs` enables tensor-level parallelism, but the
+default is `1` so conversion memory stays predictable unless a run explicitly
+opts in.
 
 Policy presets:
 

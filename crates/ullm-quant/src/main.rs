@@ -5,6 +5,7 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::thread;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -91,6 +92,7 @@ struct Options {
     convert_families: Vec<String>,
     convert_max_tensors: usize,
     convert_per_family: usize,
+    convert_jobs: usize,
     convert_verify: bool,
     convert_overwrite: bool,
     merge_policy_summary: Option<PathBuf>,
@@ -361,6 +363,7 @@ struct PrototypeConvertSummary {
     families: Vec<String>,
     max_tensors: usize,
     per_family: usize,
+    jobs: usize,
     verify: bool,
     selected_count: usize,
     results: Vec<PrototypeConvertResult>,
@@ -474,6 +477,7 @@ fn parse_options() -> Result<Options, String> {
         convert_families: Vec::new(),
         convert_max_tensors: usize::MAX,
         convert_per_family: usize::MAX,
+        convert_jobs: 1,
         convert_verify: false,
         convert_overwrite: false,
         merge_policy_summary: None,
@@ -587,6 +591,13 @@ fn parse_options() -> Result<Options, String> {
             "--convert-per-family" => {
                 options.convert_per_family = parse_usize("--convert-per-family", args.next())?;
             }
+            "--convert-jobs" => {
+                let jobs = parse_usize("--convert-jobs", args.next())?;
+                if jobs == 0 {
+                    return Err("--convert-jobs must be greater than zero".to_string());
+                }
+                options.convert_jobs = jobs;
+            }
             "--convert-verify" => options.convert_verify = true,
             "--convert-overwrite" => options.convert_overwrite = true,
             "--merge-policy-summary" => {
@@ -698,6 +709,7 @@ fn print_help() {
     println!("  --convert-family <FAMILY>     restrict conversion to family; repeatable");
     println!("  --convert-max-tensors <N>     maximum tensors for --convert-plan-json");
     println!("  --convert-per-family <N>      maximum tensors per family for conversion");
+    println!("  --convert-jobs <N>            parallel tensor conversion jobs; default 1");
     println!("  --convert-verify              verify each converted prototype tensor");
     println!("  --convert-overwrite           replace existing per-tensor prototype dirs");
     println!("  --merge-policy-summary <PATH> merge per-tensor prototype summary JSON");
@@ -2127,6 +2139,96 @@ fn convert_verification_summary(result: PrototypeVerifyResult) -> PrototypeConve
     }
 }
 
+fn failed_convert_result(
+    tensor: &TensorPlan,
+    candidate: String,
+    output_dir: &Path,
+    error: String,
+) -> PrototypeConvertResult {
+    PrototypeConvertResult {
+        tensor: tensor.name.clone(),
+        family: tensor.family.clone(),
+        candidate,
+        status: "failed".to_string(),
+        output_dir: output_dir.display().to_string(),
+        error: Some(error),
+        manifest: None,
+        verification: None,
+    }
+}
+
+fn run_one_prototype_convert(
+    plan: &ModelPlan,
+    export: &CodebookExport,
+    options: &Options,
+    output_root: &Path,
+    index: usize,
+    tensor: &TensorPlan,
+) -> PrototypeConvertResult {
+    let candidate = tensor.quant_format.as_deref().unwrap_or("<missing>");
+    let output_dir = output_root.join(format!(
+        "{index:03}-{}.ullm.d",
+        sanitize_file_stem(&tensor.name)
+    ));
+    let result = (|| -> Result<PrototypeConvertResult, String> {
+        if tensor.quant_format.is_none() {
+            return Err(format!(
+                "selected tensor {} has no quant format",
+                tensor.name
+            ));
+        }
+        if output_dir.exists() {
+            if !options.convert_overwrite {
+                return Err(format!("{} already exists", output_dir.display()));
+            }
+            fs::remove_dir_all(&output_dir)
+                .map_err(|err| format!("failed to remove {}: {err}", output_dir.display()))?;
+        }
+        let codebook = select_codebook(export, &tensor.family, candidate)?;
+        let manifest = write_prototype_tensor(
+            Path::new(&plan.model_dir),
+            &tensor.name,
+            candidate,
+            &tensor.family,
+            candidate,
+            codebook,
+            options.chunk_bytes,
+            options.scale_window,
+            options.tensor_scale_override,
+            options.tensor_scale_estimator,
+            options.tensor_scale_reservoir_size,
+            &output_dir,
+        )?;
+        let verification = if options.convert_verify {
+            Some(convert_verification_summary(verify_prototype_tensor(
+                &output_dir,
+                0,
+                options.chunk_bytes,
+            )?))
+        } else {
+            None
+        };
+        let tensor_manifest = manifest
+            .tensors
+            .into_iter()
+            .next()
+            .ok_or_else(|| "prototype manifest has no tensors".to_string())?;
+        Ok(PrototypeConvertResult {
+            tensor: tensor.name.clone(),
+            family: tensor.family.clone(),
+            candidate: candidate.to_string(),
+            status: "ok".to_string(),
+            output_dir: output_dir.display().to_string(),
+            error: None,
+            manifest: Some(tensor_manifest),
+            verification,
+        })
+    })();
+    result.unwrap_or_else(|error| {
+        failed_convert_result(tensor, candidate.to_string(), &output_dir, error)
+    })
+}
+
 fn run_prototype_convert(options: &Options) -> Result<PrototypeConvertSummary, String> {
     let plan_json = options
         .convert_plan_json
@@ -2162,78 +2264,73 @@ fn run_prototype_convert(options: &Options) -> Result<PrototypeConvertSummary, S
     fs::create_dir_all(output_root)
         .map_err(|err| format!("failed to create {}: {err}", output_root.display()))?;
 
-    let mut results = Vec::with_capacity(selected.len());
-    for (index, tensor) in selected.iter().enumerate() {
-        let candidate = tensor
-            .quant_format
-            .as_deref()
-            .ok_or_else(|| format!("selected tensor {} has no quant format", tensor.name))?;
-        let output_dir = output_root.join(format!(
-            "{index:03}-{}.ullm.d",
-            sanitize_file_stem(&tensor.name)
-        ));
-        let result = (|| -> Result<PrototypeConvertResult, String> {
-            if output_dir.exists() {
-                if !options.convert_overwrite {
-                    return Err(format!("{} already exists", output_dir.display()));
+    let jobs = options.convert_jobs.max(1);
+    let mut indexed_results = Vec::with_capacity(selected.len());
+    if jobs == 1 {
+        for (index, tensor) in selected.iter().enumerate() {
+            indexed_results.push((
+                index,
+                run_one_prototype_convert(&plan, &export, options, output_root, index, tensor),
+            ));
+        }
+    } else {
+        for batch_start in (0..selected.len()).step_by(jobs) {
+            let batch_end = batch_start.saturating_add(jobs).min(selected.len());
+            thread::scope(|scope| {
+                let plan_ref = &plan;
+                let export_ref = &export;
+                let options_ref = options;
+                let output_root_ref = output_root;
+                let mut handles = Vec::with_capacity(batch_end - batch_start);
+                for index in batch_start..batch_end {
+                    let tensor = selected[index];
+                    handles.push((
+                        index,
+                        tensor,
+                        scope.spawn(move || {
+                            run_one_prototype_convert(
+                                plan_ref,
+                                export_ref,
+                                options_ref,
+                                output_root_ref,
+                                index,
+                                tensor,
+                            )
+                        }),
+                    ));
                 }
-                fs::remove_dir_all(&output_dir)
-                    .map_err(|err| format!("failed to remove {}: {err}", output_dir.display()))?;
-            }
-            let codebook = select_codebook(&export, &tensor.family, candidate)?;
-            let manifest = write_prototype_tensor(
-                Path::new(&plan.model_dir),
-                &tensor.name,
-                candidate,
-                &tensor.family,
-                candidate,
-                codebook,
-                options.chunk_bytes,
-                options.scale_window,
-                options.tensor_scale_override,
-                options.tensor_scale_estimator,
-                options.tensor_scale_reservoir_size,
-                &output_dir,
-            )?;
-            let verification = if options.convert_verify {
-                Some(convert_verification_summary(verify_prototype_tensor(
-                    &output_dir,
-                    0,
-                    options.chunk_bytes,
-                )?))
-            } else {
-                None
-            };
-            let tensor_manifest = manifest
-                .tensors
-                .into_iter()
-                .next()
-                .ok_or_else(|| "prototype manifest has no tensors".to_string())?;
-            Ok(PrototypeConvertResult {
-                tensor: tensor.name.clone(),
-                family: tensor.family.clone(),
-                candidate: candidate.to_string(),
-                status: "ok".to_string(),
-                output_dir: output_dir.display().to_string(),
-                error: None,
-                manifest: Some(tensor_manifest),
-                verification,
-            })
-        })();
-        match result {
-            Ok(row) => results.push(row),
-            Err(error) => results.push(PrototypeConvertResult {
-                tensor: tensor.name.clone(),
-                family: tensor.family.clone(),
-                candidate: candidate.to_string(),
-                status: "failed".to_string(),
-                output_dir: output_dir.display().to_string(),
-                error: Some(error),
-                manifest: None,
-                verification: None,
-            }),
+                for (index, tensor, handle) in handles {
+                    match handle.join() {
+                        Ok(row) => indexed_results.push((index, row)),
+                        Err(_) => {
+                            let candidate = tensor
+                                .quant_format
+                                .clone()
+                                .unwrap_or_else(|| "<missing>".to_string());
+                            let output_dir = output_root.join(format!(
+                                "{index:03}-{}.ullm.d",
+                                sanitize_file_stem(&tensor.name)
+                            ));
+                            indexed_results.push((
+                                index,
+                                failed_convert_result(
+                                    tensor,
+                                    candidate,
+                                    &output_dir,
+                                    "conversion worker panicked".to_string(),
+                                ),
+                            ));
+                        }
+                    }
+                }
+            });
         }
     }
+    indexed_results.sort_by_key(|(index, _)| *index);
+    let results = indexed_results
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
 
     let summary = PrototypeConvertSummary {
         schema_version: "ullm-prototype-convert-summary-v0.1".to_string(),
@@ -2249,6 +2346,7 @@ fn run_prototype_convert(options: &Options) -> Result<PrototypeConvertSummary, S
         families: options.convert_families.clone(),
         max_tensors: options.convert_max_tensors,
         per_family: options.convert_per_family,
+        jobs,
         verify: options.convert_verify,
         selected_count: selected.len(),
         results,
@@ -3279,6 +3377,7 @@ fn run() -> Result<(), String> {
             println!("convert_summary_output={}", path.display());
         }
         println!("convert_selected_count={}", summary.selected_count);
+        println!("convert_jobs={}", summary.jobs);
         let failure_count = summary
             .results
             .iter()
@@ -3587,6 +3686,7 @@ mod tests {
             convert_families: Vec::new(),
             convert_max_tensors: usize::MAX,
             convert_per_family: usize::MAX,
+            convert_jobs: 1,
             convert_verify: false,
             convert_overwrite: false,
             merge_policy_summary: None,
