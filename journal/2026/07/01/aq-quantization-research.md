@@ -139,6 +139,12 @@
   - policy5 mixed policy result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-policy5-r9700-calib32-qwen35-9b-prompts8.jsonl`.
   - policy5 mean logit relative MSE: all-g16 `0.000286738`, all-g8 `0.000284312`, p4p6 `0.000225818`, p4p9 `0.000284312`.
   - interpretation: p4p6 improved policy5 logit relative MSE by keeping `mlp_up` at g16 while using g8 for `attn_k,attn_o,attn_v,linear_attn_out`; KL still did not improve, so this is an ordering signal, not a quality conclusion.
+  - added `tools/select-aq-logit-smoke-modules.py` to generate reproducible module sets from activation stats.
+  - policy10 selection: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-policy10.json`.
+  - policy10 result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-policy10-r9700-calib32-qwen35-9b-prompts8.jsonl`.
+  - policy10 mean logit relative MSE: all-g16 `0.000398490`, all-g8 `0.000426076`, p4p6 `0.000369140`, p4p9 `0.000426076`.
+  - policy10 mean KL: all-g16 `0.001178040`, all-g8 `0.001987679`, p4p6 `0.001034530`, p4p9 `0.001987679`.
+  - interpretation: p4p6 beat all-g16 and all-g8 on both logit relative MSE and KL for this 10-module smoke; `mlp_up` should remain a lower-priority g8 family until broader model-level evidence says otherwise.
 
 - `ullm-quant` metadata planner:
   - added safetensors header planning without reading tensor payloads.

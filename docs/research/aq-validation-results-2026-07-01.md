@@ -433,6 +433,11 @@ Two mixed-policy smokes were run with the same 8 prompts:
 - policy5 result:
   - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-policy5-r9700-calib32-qwen35-9b-prompts8.jsonl`
 
+`tools/select-aq-logit-smoke-modules.py` was added to select reproducible
+module sets from activation stats. It reads `activation_second_moments` keys,
+uses the existing aq family classifier, and can emit text, JSON, or shell
+`--module` arguments.
+
 Layer0 scope:
 
 - `model.layers.0.linear_attn.out_proj`
@@ -467,6 +472,37 @@ The policy5 result is a useful early signal for mixed precision: keeping
 logit relative MSE against both all-g16 and all-g8 in this small smoke. KL did
 not improve, so the result should be treated as a candidate-ordering signal,
 not a quality conclusion.
+
+A broader policy10 smoke then selected 10 modules across layers 0, 3, and 7:
+
+- selection:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-policy10.json`
+- result:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-policy10-r9700-calib32-qwen35-9b-prompts8.jsonl`
+
+Policy10 scope:
+
+- `model.layers.0.linear_attn.out_proj`
+- `model.layers.0.mlp.up_proj`
+- `model.layers.3.mlp.up_proj`
+- `model.layers.3.self_attn.k_proj`
+- `model.layers.3.self_attn.o_proj`
+- `model.layers.3.self_attn.v_proj`
+- `model.layers.7.mlp.up_proj`
+- `model.layers.7.self_attn.k_proj`
+- `model.layers.7.self_attn.o_proj`
+- `model.layers.7.self_attn.v_proj`
+
+| variant / policy | mean logit relative MSE | mean abs error | mean KL(ref, candidate) | top1 matches | mean top10 overlap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all g16 weighted | 0.000398490 | 0.038127334 | 0.001178040 | 8 / 8 | 9.875 |
+| all g8 weighted | 0.000426076 | 0.037648361 | 0.001987679 | 8 / 8 | 9.75 |
+| p4p6: attention-sensitive families g8; `mlp_up` g16 | 0.000369140 | 0.036939442 | 0.001034530 | 8 / 8 | 9.875 |
+| p4p9: same as all g8 for this scope | 0.000426076 | 0.037648361 | 0.001987679 | 8 / 8 | 9.75 |
+
+For policy10, p4p6 improved both logit relative MSE and KL over all-g16 and
+all-g8. This supports treating `mlp_up` as a family that may not benefit from
+spending g8 budget as early as attention-sensitive families.
 
 ## Interpretation
 

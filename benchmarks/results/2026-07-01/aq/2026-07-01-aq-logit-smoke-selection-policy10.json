@@ -1,0 +1,64 @@
+{
+  "modules": [
+    {
+      "activation_elements": 4096,
+      "family": "linear_attn_out",
+      "layer": 0,
+      "module": "model.layers.0.linear_attn.out_proj"
+    },
+    {
+      "activation_elements": 4096,
+      "family": "mlp_up",
+      "layer": 0,
+      "module": "model.layers.0.mlp.up_proj"
+    },
+    {
+      "activation_elements": 4096,
+      "family": "mlp_up",
+      "layer": 3,
+      "module": "model.layers.3.mlp.up_proj"
+    },
+    {
+      "activation_elements": 4096,
+      "family": "attn_k",
+      "layer": 3,
+      "module": "model.layers.3.self_attn.k_proj"
+    },
+    {
+      "activation_elements": 4096,
+      "family": "attn_o",
+      "layer": 3,
+      "module": "model.layers.3.self_attn.o_proj"
+    },
+    {
+      "activation_elements": 4096,
+      "family": "attn_v",
+      "layer": 3,
+      "module": "model.layers.3.self_attn.v_proj"
+    },
+    {
+      "activation_elements": 4096,
+      "family": "mlp_up",
+      "layer": 7,
+      "module": "model.layers.7.mlp.up_proj"
+    },
+    {
+      "activation_elements": 4096,
+      "family": "attn_k",
+      "layer": 7,
+      "module": "model.layers.7.self_attn.k_proj"
+    },
+    {
+      "activation_elements": 4096,
+      "family": "attn_o",
+      "layer": 7,
+      "module": "model.layers.7.self_attn.o_proj"
+    },
+    {
+      "activation_elements": 4096,
+      "family": "attn_v",
+      "layer": 7,
+      "module": "model.layers.7.self_attn.v_proj"
+    }
+  ]
+}
