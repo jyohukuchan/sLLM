@@ -46,6 +46,8 @@
   - result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-lut-qwen35-9b-balanced.jsonl`
   - g16 / 4.50 bpp free Lloyd16: `0.005241`
   - sample-local g16 result was `0.005244`; no meaningful penalty was observed with 3 tensors per family.
+  - wide result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-lut-qwen35-9b-wide.jsonl`
+  - with up to 8 tensors per family, g16 / 4.50 bpp free Lloyd16 was `0.005268`, still close to the sample-local value.
 
 - CPU full quantizer design:
   - Rust orchestration plus C++20 numeric kernels.
@@ -69,6 +71,6 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 ## Next
 
 - Add family-level LUT aggregation to the sampler.
-- Expand family-level LUT testing to more tensors per family.
+- Start activation/logit-level checks for the current top aq candidates.
 - Extend `ullm-quant` from skeleton to safetensors metadata planning.
 - Add a small model-level check after tensor-level candidate narrowing.

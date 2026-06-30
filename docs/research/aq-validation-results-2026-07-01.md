@@ -146,6 +146,7 @@ At the same nominal 4.5 bpp, the current aq g16 free-Lloyd candidate slightly be
 Result file:
 
 - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-lut-qwen35-9b-balanced.jsonl`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-lut-qwen35-9b-wide.jsonl`
 
 The current top codebook mode was tested with one shared LUT per family instead of one sample-local LUT per tensor.
 
@@ -156,6 +157,16 @@ The current top codebook mode was tested with one shared LUT per family instead 
 | `aq4_e4m3_g8_ts_flloyd16` | 5.00 | 0.003573 | 0.003573 |
 
 With 3 tensors per family, the free-Lloyd codebook is stable enough that family-level sharing did not meaningfully hurt tensor reconstruction. This needs a larger tensor set before becoming a format decision, but it reduces the concern that sample-local codebooks are hiding a large penalty.
+
+The wider 8-tensor/family check remained close:
+
+| candidate | effective bpp | family-LUT relative MSE, 8 tensors/family |
+| --- | ---: | ---: |
+| `aq4_e4m3_g32_ts_flloyd16` | 4.25 | 0.006922 |
+| `aq4_e4m3_g16_ts_flloyd16` | 4.50 | 0.005268 |
+| `aq4_e4m3_g8_ts_flloyd16` | 5.00 | 0.003588 |
+
+This makes per-family LUTs a plausible first storage target. The remaining risk is layer-depth and activation sensitivity, not obvious tensor-distribution instability.
 
 ## Interpretation
 
