@@ -60,6 +60,8 @@ struct TensorPlan {
     action: String,
     quant_format: Option<String>,
     quant_role: Option<String>,
+    estimated_output_bytes: usize,
+    estimated_effective_bpp: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -79,6 +81,8 @@ struct ModelPlan {
     supported_tensor_count: usize,
     passthrough_tensor_count: usize,
     total_tensor_bytes: usize,
+    total_estimated_output_bytes: usize,
+    estimated_output_to_input_ratio: f64,
     tensors: Vec<TensorPlan>,
 }
 
@@ -329,6 +333,44 @@ fn quant_assignment(
     }
 }
 
+fn aq_group_size(format: &str) -> Result<usize, String> {
+    if format.contains("_g8_") {
+        Ok(8)
+    } else if format.contains("_g16_") {
+        Ok(16)
+    } else {
+        Err(format!("cannot infer aq group size from format: {format}"))
+    }
+}
+
+fn div_ceil(value: usize, divisor: usize) -> usize {
+    value.div_ceil(divisor)
+}
+
+fn estimate_output_bytes(
+    n_elements: usize,
+    n_bytes: usize,
+    quant_format: Option<&str>,
+) -> Result<usize, String> {
+    match quant_format {
+        Some(format) => {
+            let group_size = aq_group_size(format)?;
+            let index_bytes = div_ceil(n_elements, 2);
+            let scale_bytes = div_ceil(n_elements, group_size);
+            Ok(index_bytes + scale_bytes)
+        }
+        None => Ok(n_bytes),
+    }
+}
+
+fn effective_bpp(n_elements: usize, bytes: usize) -> f64 {
+    if n_elements == 0 {
+        0.0
+    } else {
+        (bytes as f64 * 8.0) / n_elements as f64
+    }
+}
+
 fn tensor_elements(shape: &[usize]) -> Result<usize, String> {
     shape.iter().try_fold(1usize, |acc, dim| {
         acc.checked_mul(*dim)
@@ -435,6 +477,9 @@ fn build_model_plan(model_dir: &Path, aq_policy: &AqPolicyPlan) -> Result<ModelP
             let family = family_for_tensor(&name).to_string();
             let supported_input = is_supported_input(&header.dtype, &header.shape, &family);
             let (quant_format, quant_role) = quant_assignment(supported_input, &family, aq_policy);
+            let estimated_output_bytes =
+                estimate_output_bytes(n_elements, n_bytes, quant_format.as_deref())?;
+            let estimated_effective_bpp = effective_bpp(n_elements, estimated_output_bytes);
             tensors.push(TensorPlan {
                 family,
                 action: if supported_input {
@@ -444,6 +489,8 @@ fn build_model_plan(model_dir: &Path, aq_policy: &AqPolicyPlan) -> Result<ModelP
                 },
                 quant_format,
                 quant_role,
+                estimated_output_bytes,
+                estimated_effective_bpp,
                 name,
                 source_file: path.display().to_string(),
                 dtype: header.dtype,
@@ -460,14 +507,25 @@ fn build_model_plan(model_dir: &Path, aq_policy: &AqPolicyPlan) -> Result<ModelP
         .filter(|tensor| tensor.supported_input)
         .count();
     let total_tensor_bytes = tensors.iter().map(|tensor| tensor.n_bytes).sum();
+    let total_estimated_output_bytes = tensors
+        .iter()
+        .map(|tensor| tensor.estimated_output_bytes)
+        .sum();
+    let estimated_output_to_input_ratio = if total_tensor_bytes == 0 {
+        0.0
+    } else {
+        total_estimated_output_bytes as f64 / total_tensor_bytes as f64
+    };
     Ok(ModelPlan {
-        schema_version: "ullm-quant-plan-v0.2".to_string(),
+        schema_version: "ullm-quant-plan-v0.3".to_string(),
         model_dir: model_dir.display().to_string(),
         aq_policy: aq_policy.clone(),
         tensor_count: tensors.len(),
         supported_tensor_count,
         passthrough_tensor_count: tensors.len() - supported_tensor_count,
         total_tensor_bytes,
+        total_estimated_output_bytes,
+        estimated_output_to_input_ratio,
         tensors,
     })
 }
@@ -535,6 +593,14 @@ fn run() -> Result<(), String> {
             plan.passthrough_tensor_count
         );
         println!("plan_total_tensor_bytes={}", plan.total_tensor_bytes);
+        println!(
+            "plan_total_estimated_output_bytes={}",
+            plan.total_estimated_output_bytes
+        );
+        println!(
+            "plan_estimated_output_to_input_ratio={:.6}",
+            plan.estimated_output_to_input_ratio
+        );
     }
     if let (Some(plan), Some(output)) = (&plan, options.plan_output.as_deref()) {
         let text = serde_json::to_string_pretty(plan)
@@ -563,7 +629,10 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Options, default_threads, family_for_tensor, quant_assignment, resolve_aq_policy};
+    use super::{
+        Options, default_threads, effective_bpp, estimate_output_bytes, family_for_tensor,
+        quant_assignment, resolve_aq_policy,
+    };
 
     #[test]
     fn default_thread_count_is_nonzero() {
@@ -607,5 +676,17 @@ mod tests {
         let (format, role) = quant_assignment(true, "mlp_up", &policy);
         assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
         assert_eq!(role.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn aq_output_byte_estimate_matches_group_size() {
+        let g16_bytes =
+            estimate_output_bytes(32, 64, Some("aq4_e4m3_g16_ts_flloyd16")).expect("g16");
+        assert_eq!(g16_bytes, 18);
+        assert_eq!(effective_bpp(32, g16_bytes), 4.5);
+
+        let g8_bytes = estimate_output_bytes(32, 64, Some("aq4_e4m3_g8_ts_flloyd16")).expect("g8");
+        assert_eq!(g8_bytes, 20);
+        assert_eq!(effective_bpp(32, g8_bytes), 5.0);
     }
 }

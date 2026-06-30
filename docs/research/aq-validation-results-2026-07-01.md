@@ -510,18 +510,21 @@ spending g8 budget as early as attention-sensitive families.
   - `--aq-policy all-g16|all-g8|p4p6|p4p9|custom`
   - `--aq-high-family FAMILY` for custom policies
   - `--aq-low-format` / `--aq-high-format`
-- plan schema version: `ullm-quant-plan-v0.2`
+- plan schema version: `ullm-quant-plan-v0.3`
 - p4p6 plan:
   - `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p6.json`
 
-| plan item | count |
-| --- | ---: |
-| quantize low / `aq4_e4m3_g16_ts_flloyd16` | 204 |
-| quantize high / `aq4_e4m3_g8_ts_flloyd16` | 51 |
-| passthrough | 520 |
+| plan item | count | input bytes | estimated output bytes |
+| --- | ---: | ---: | ---: |
+| quantize low / `aq4_e4m3_g16_ts_flloyd16` | 204 | 12,998,148,096 | 3,655,729,152 |
+| quantize high / `aq4_e4m3_g8_ts_flloyd16` | 51 | 1,258,291,200 | 393,216,000 |
+| passthrough | 520 | 5,049,777,120 | 5,049,777,120 |
+| total | 775 | 19,306,216,416 | 9,098,722,272 |
 
 This does not quantize payloads yet, but it makes the candidate p4p6 policy
-explicit in the full-model conversion plan.
+explicit in the full-model conversion plan. The estimated output size excludes
+container metadata and shared codebook overhead, so it is a payload estimate,
+not a final `.ullm` file size.
 
 ## Interpretation
 

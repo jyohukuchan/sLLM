@@ -37,6 +37,7 @@ cargo run -p ullm-quant -- \
 The current default planner marks known text linear families as `quantize` and
 leaves embeddings, lm head, vision tensors, convolution tensors, MTP tensors,
 and unknown families as `passthrough`.
+It also records an index+scale payload-size estimate for quantized tensors.
 
 Policy presets:
 
