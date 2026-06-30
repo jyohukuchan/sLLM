@@ -856,6 +856,56 @@ Merged verification also passed:
 | elapsed wall time | 2.16 s |
 | maximum RSS | 101,196 KiB |
 
+The same full-family smoke was then widened to two tensors per family:
+
+- summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2.json`
+- driver log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2-driver.log`
+- per-tensor logs:
+  `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-family2-logs/`
+
+All 24 selected tensors returned success and passed per-tensor verification.
+
+| family | tensors | relative MSE min | relative MSE max | max RSS |
+| --- | ---: | ---: | ---: | ---: |
+| `attn_k` | 2 | 0.003696580544 | 0.003724312490 | 8,276 KiB |
+| `attn_o` | 2 | 0.003639662156 | 0.003642895769 | 16,424 KiB |
+| `attn_q` | 2 | 0.005336517833 | 0.005339968314 | 22,252 KiB |
+| `attn_v` | 2 | 0.003816023096 | 0.003817673166 | 8,252 KiB |
+| `linear_attn_a` | 2 | 0.005253958207 | 0.005313893821 | 3,112 KiB |
+| `linear_attn_b` | 2 | 0.005458763018 | 0.005540913549 | 3,156 KiB |
+| `linear_attn_out` | 2 | 0.003732074646 | 0.003765302590 | 16,424 KiB |
+| `linear_attn_qkv` | 2 | 0.005195938521 | 0.005203145169 | 21,612 KiB |
+| `linear_attn_z` | 2 | 0.005192328385 | 0.005203894074 | 12,760 KiB |
+| `mlp_down` | 2 | 0.005318504789 | 0.005344374105 | 29,564 KiB |
+| `mlp_gate` | 2 | 0.005196248710 | 0.005198360634 | 30,852 KiB |
+| `mlp_up` | 2 | 0.005245190541 | 0.005250488442 | 30,492 KiB |
+
+Family2 driver resource use:
+
+| item | value |
+| --- | ---: |
+| selected tensors | 24 |
+| successful tensors | 24 |
+| elapsed wall time | 1:27.16 |
+| maximum RSS | 30,852 KiB |
+
+The 24-tensor prototype was also merged and verified:
+
+- merge summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-family2.json`
+- verify log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-family2.txt`
+
+| item | value |
+| --- | ---: |
+| tensor count | 24 |
+| codebook count | 12 |
+| total file bytes | 317,004,099 |
+| verify elapsed wall time | 4.09 s |
+| verify maximum RSS | 101,216 KiB |
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

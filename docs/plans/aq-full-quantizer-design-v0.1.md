@@ -390,6 +390,26 @@ Rust implementation status:
     `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-all-families.txt`
   - merged verification wall time: `2.16 s`
   - merged verification peak RSS: `101196 KiB`
+- Family2 p4p6 prototype smoke:
+  - summary:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2.json`
+  - tensors: 24, two per quantized family
+  - all per-tensor writes and verifications succeeded.
+  - relative MSE range: `0.003639662156` to `0.005540913549`
+  - driver wall time: `1:27.16`
+  - largest per-tensor RSS: `30852 KiB`
+- Family2 merged prototype:
+  - merge summary:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-family2.json`
+  - output:
+    `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2-merged.ullm.d`
+  - tensor count: `24`
+  - codebook count: `12`
+  - total file bytes: `317004099`
+  - verify log:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-family2.txt`
+  - merged verification wall time: `4.09 s`
+  - merged verification peak RSS: `101216 KiB`
 
 ## Output Directory Prototype
 
@@ -478,7 +498,7 @@ Performance tests:
 4. Move merge behavior into `ullm-quant` itself so multi-tensor output does not
    require per-tensor temporary directories.
 5. Add SIMD kernels after the scalar C++ semantics are locked.
-6. Extend from one tensor per p4p6 family to more tensors per family, then all
+6. Extend from two tensors per p4p6 family to four tensors per family, then all
    255 quantized tensors selected by the p4p6 plan.
 7. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.

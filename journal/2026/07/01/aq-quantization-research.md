@@ -218,6 +218,10 @@
   - all-family smoke converted and verified 12/12 tensors. Relative MSE ranged from `0.003642895769` (`attn_o` g8) to `0.005458763018` (`linear_attn_b` g16); largest per-tensor RSS was `31148 KiB`; driver elapsed `42.75 s`.
   - merged all-family smoke summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-all-families.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-all-families-merged.ullm.d`; tensor count `12`, codebook count `12`, total file bytes `158503771`.
   - merged all-family verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-all-families.txt`; all 12 tensors verified; elapsed `2.16 s`, max RSS `101196 KiB`.
+  - widened the p4p6 prototype smoke to two tensors per quantized family. Summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2.json`; driver log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2-driver.log`; logs in `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-family2-logs/`.
+  - family2 smoke converted and verified 24/24 tensors. Relative MSE ranged from `0.003639662156` (`attn_o` g8) to `0.005540913549` (`linear_attn_b` g16); largest per-tensor RSS was `30852 KiB`; driver elapsed `1:27.16`.
+  - merged family2 summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-family2.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-family2-merged.ullm.d`; tensor count `24`, codebook count `12`, total file bytes `317004099`.
+  - merged family2 verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-family2.txt`; all 24 tensors verified; elapsed `4.09 s`, max RSS `101216 KiB`.
 
 ## Current Interpretation
 
@@ -232,4 +236,4 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Move merge behavior into `ullm-quant` itself so multi-tensor output does not require per-tensor temporary directories.
-- Extend from one tensor per p4p6 family to more tensors per family, then all 255 quantized tensors selected by the p4p6 plan.
+- Extend from two tensors per p4p6 family to four tensors per family, then all 255 quantized tensors selected by the p4p6 plan.
