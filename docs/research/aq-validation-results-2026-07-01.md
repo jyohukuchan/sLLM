@@ -1431,6 +1431,38 @@ earlier smoke-test split: p4p46 is attractive by final-token logit relative MSE,
 p4p65 by KL and full tensor MSE, while p4p6 is still the conservative choice
 from repeated-prompt next-token loss.
 
+A less artificial next-token loss smoke was then run on 32 non-repeated
+project-text chunks generated from local `docs/plans`, `docs/specs`, and
+`docs/research` files:
+
+- prompt file:
+  `benchmarks/calibration/qwen35-aq-project-text-v0.1.txt`
+- result:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-projecttext32-inproj22-selfattn-r9700-qwen35-9b-s256.jsonl`
+- summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-summary-projecttext32-inproj22-selfattn-r9700-qwen35-9b-s256.json`
+- scope: same 22 modules as the wider in-proj + self-attention smoke
+- prompts: 32
+- sequence length: 256
+- target tokens per variant: 7,136
+- repeat-to-length: false
+- elapsed wall time: 9:48.82
+- maximum RSS: 16,367,072 KiB
+
+| variant / policy | token-weighted ref loss | token-weighted candidate loss | token-weighted loss delta | relative delta |
+| --- | ---: | ---: | ---: | ---: |
+| all g16 weighted | 3.293687835 | 3.292588867 | -0.001098968 | -0.000333659 |
+| all g8 weighted | 3.293687835 | 3.296603732 | +0.002915896 | +0.000885298 |
+| p4p6 | 3.293687835 | 3.293516874 | -0.000170961 | -0.000051906 |
+| p4p46_inproj | 3.293687835 | 3.294538483 | +0.000850648 | +0.000258266 |
+| p4p65_inproj | 3.293687835 | 3.294100903 | +0.000413068 | +0.000125412 |
+
+This real-text smoke no longer favors p4p46 or p4p65. It ranks all-g16 first,
+p4p6 second, p4p65 third, p4p46 fourth, and all-g8 last. The deltas are tiny,
+and the negative deltas should still not be read as true quality improvements,
+but the relative ordering strengthens the case that p4p6 is the safer policy
+until a larger evaluation says otherwise.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -1445,15 +1477,15 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 - Activation weighting now covers Qwen3.5 linear-attention in-projection
   modules, and p4p6/p4p46/p4p65 all complete full quantized-tensor prototype
   conversion plus Rust-side merge/verify. Tensor-level full conversion favors
-  p4p65, wider final-token logit relative MSE favors p4p46, and the
-  repeated-prompt next-token loss smoke still favors p4p6. The next policy
-  decision needs a less artificial real-text loss/perplexity run, not another
-  tensor-only metric.
+  p4p65, wider final-token logit relative MSE favors p4p46, but both
+  repeated-prompt and project-text next-token loss smokes keep p4p6 as the
+  safer policy. The next policy decision should use a wider real-text
+  evaluation or full-model loader path, not another tensor-only metric.
 
 ## Next Actions
 
-1. Run a less artificial perplexity or next-token loss smoke on a real text
-   calibration set for p4p6, p4p46, and p4p65.
+1. Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65,
+   preferably after the full-model loader path is available.
 2. Build full-package p4p46/p4p65 prototypes with passthrough tensors only if
    packaging or loader work needs them; quantized-only merge/verify already
    succeeded.

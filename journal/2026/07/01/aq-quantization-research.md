@@ -293,17 +293,24 @@
   - merged quantized payload bytes: p4p6 `4049329252`, p4p46 `4072528801`, p4p65 `4100053929`; each merge has 255 tensors, 0 passthrough tensors, and 12 codebooks.
   - merged prototype verification succeeded for all three policies with `--verify-prototype-all`; each verified 255 tensors with exit 0. Verify wall/max RSS: p4p6 `0:47.90` / `104296 KiB`; p4p46 `0:47.51` / `103512 KiB`; p4p65 `0:47.51` / `104316 KiB`.
   - full tensor-MSE ranking is p4p65 best, p4p46 second, p4p6 third. This conflicts with repeated-prompt next-token loss, which keeps p4p6 as conservative baseline. The next policy decision should use a real-text loss/perplexity run.
+- Project-text next-token loss smoke:
+  - generated non-repeated local-docs corpus: `benchmarks/calibration/qwen35-aq-project-text-v0.1.txt`; 32 chunks, 224 tokens each by tokenizer check, 7136 next-token targets.
+  - result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-projecttext32-inproj22-selfattn-r9700-qwen35-9b-s256.jsonl`.
+  - summary: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-summary-projecttext32-inproj22-selfattn-r9700-qwen35-9b-s256.json`.
+  - scope: same 22 modules as the wider in-proj + self-attn smoke; sequence length `256`; repeat-to-length `false`; elapsed `9:48.82`; max RSS `16367072 KiB`; rows `160`, all ok.
+  - token-weighted loss deltas: all-g16 `-0.001098968`, all-g8 `+0.002915896`, p4p6 `-0.000170961`, p4p46 `+0.000850648`, p4p65 `+0.000413068`.
+  - interpretation update: project-text loss ranks all-g16 first, p4p6 second, p4p65 third, p4p46 fourth, all-g8 last. Deltas are small and negative deltas are not proof of improvement, but this reinforces p4p6 as the safer policy for now.
 
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, and repeated-prompt next-token loss still favors p4p6.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, but both repeated-prompt and project-text next-token loss keep p4p6 as the safer policy.
 
 ## Next
 
 - Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
-- Run a less artificial perplexity or next-token loss smoke for p4p6, p4p46, and p4p65 on a real text calibration set.
+- Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65, preferably after the full-model loader path is available.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
