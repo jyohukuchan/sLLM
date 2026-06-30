@@ -121,6 +121,10 @@
   - g16 weighted scale + codebook logit relative MSE: `0.000198949`.
   - g8 weighted scale + codebook logit relative MSE: `0.000101244`.
   - all three preserved top1 and top10 on the single prompt.
+  - 8-prompt follow-up result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-linear-attn-out-r9700-calib32-qwen35-9b-prompts8.jsonl`.
+  - 8-prompt mean logit relative MSE: g16 unweighted `0.002274514`, g16 weighted `0.000214926`, g8 weighted `0.000253724`.
+  - 8-prompt mean KL: g16 unweighted `0.005510745`, g16 weighted `0.000705097`, g8 weighted `0.000899909`.
+  - note: g16 weighted ranked slightly better than g8 weighted on the logit smoke despite g8's better tensor weighted MSE.
 
 ## Current Interpretation
 

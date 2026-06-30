@@ -59,6 +59,18 @@ def load_activation_stats(path: Path) -> dict[str, torch.Tensor]:
     return stats
 
 
+def load_prompts(path: Path | None, fallback: str, max_prompts: int | None) -> list[str]:
+    if path is None:
+        prompts = [fallback]
+    else:
+        prompts = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if max_prompts is not None:
+        prompts = prompts[:max_prompts]
+    if not prompts:
+        raise SystemExit("no prompts to evaluate")
+    return prompts
+
+
 def dtype_from_arg(name: str) -> torch.dtype | str:
     if name == "auto":
         return "auto"
@@ -241,6 +253,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variant", choices=sorted(VARIANTS), action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument("--prompt-file", type=Path, default=None)
+    parser.add_argument("--max-prompts", type=int, default=None)
     parser.add_argument("--sequence-length", type=int, default=64)
     parser.add_argument("--max-codebook-elements", type=int, default=262144)
     parser.add_argument("--scale-window", type=int, default=4)
@@ -258,11 +272,16 @@ def main() -> int:
     torch.set_num_threads(args.torch_threads)
     args.model_dir = args.model_dir.expanduser().resolve()
     args.activation_stats = args.activation_stats.expanduser().resolve()
+    args.prompt_file = args.prompt_file.expanduser().resolve() if args.prompt_file else None
     sampler = load_sampler_module()
     stats = load_activation_stats(args.activation_stats)
     tokenizer, model = load_model_and_tokenizer(args)
     device = next(model.parameters()).device
-    reference_logits = forward_last_logits(model, tokenizer, args.prompt, args.sequence_length, device)
+    prompts = load_prompts(args.prompt_file, args.prompt, args.max_prompts)
+    reference_logits = [
+        forward_last_logits(model, tokenizer, prompt, args.sequence_length, device)
+        for prompt in prompts
+    ]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("a", encoding="utf-8") as output:
@@ -283,42 +302,54 @@ def main() -> int:
                         args.seed,
                     ).to(device=original.device, dtype=original.dtype)
                     module.weight.data.copy_(quantized)
-                    logits = forward_last_logits(model, tokenizer, args.prompt, args.sequence_length, device)
-                    metrics = logit_metrics(reference_logits, logits)
-                    row = {
-                        "schema_version": "aq-module-logit-smoke-v0.1",
-                        "run_id": args.run_id,
-                        "timestamp_utc": utc_now(),
-                        "status": "ok",
-                        "model_dir": str(args.model_dir),
-                        "activation_stats": str(args.activation_stats),
-                        "module": module_name,
-                        "variant": variant.__dict__,
-                        "prompt": args.prompt,
-                        "sequence_length": args.sequence_length,
-                        "metrics": metrics,
-                        "notes": args.note,
-                    }
+                    rows = []
+                    for prompt_index, (prompt, reference) in enumerate(zip(prompts, reference_logits, strict=True)):
+                        logits = forward_last_logits(model, tokenizer, prompt, args.sequence_length, device)
+                        metrics = logit_metrics(reference, logits)
+                        rows.append(
+                            {
+                                "schema_version": "aq-module-logit-smoke-v0.1",
+                                "run_id": args.run_id,
+                                "timestamp_utc": utc_now(),
+                                "status": "ok",
+                                "model_dir": str(args.model_dir),
+                                "activation_stats": str(args.activation_stats),
+                                "module": module_name,
+                                "variant": variant.__dict__,
+                                "prompt": prompt,
+                                "prompt_index": prompt_index,
+                                "prompt_count": len(prompts),
+                                "prompt_file": str(args.prompt_file) if args.prompt_file else None,
+                                "sequence_length": args.sequence_length,
+                                "metrics": metrics,
+                                "notes": args.note,
+                            }
+                        )
                 except Exception as exc:  # noqa: BLE001 - keep benchmark rows self-describing.
-                    row = {
-                        "schema_version": "aq-module-logit-smoke-v0.1",
-                        "run_id": args.run_id,
-                        "timestamp_utc": utc_now(),
-                        "status": "failed",
-                        "model_dir": str(args.model_dir),
-                        "activation_stats": str(args.activation_stats),
-                        "module": module_name,
-                        "variant": variant.__dict__,
-                        "prompt": args.prompt,
-                        "sequence_length": args.sequence_length,
-                        "metrics": {},
-                        "notes": args.note,
-                        "error": {"type": type(exc).__name__, "message": str(exc)},
-                    }
+                    rows = [
+                        {
+                            "schema_version": "aq-module-logit-smoke-v0.1",
+                            "run_id": args.run_id,
+                            "timestamp_utc": utc_now(),
+                            "status": "failed",
+                            "model_dir": str(args.model_dir),
+                            "activation_stats": str(args.activation_stats),
+                            "module": module_name,
+                            "variant": variant.__dict__,
+                            "prompt": None,
+                            "prompt_count": len(prompts),
+                            "prompt_file": str(args.prompt_file) if args.prompt_file else None,
+                            "sequence_length": args.sequence_length,
+                            "metrics": {},
+                            "notes": args.note,
+                            "error": {"type": type(exc).__name__, "message": str(exc)},
+                        }
+                    ]
                 finally:
                     module.weight.data.copy_(original)
-                output.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
-                output.write("\n")
+                for row in rows:
+                    output.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
+                    output.write("\n")
     return 0
 
 

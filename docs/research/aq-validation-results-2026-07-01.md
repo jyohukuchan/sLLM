@@ -346,6 +346,8 @@ Tool:
 Result file:
 
 - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-linear-attn-out-r9700-calib32-qwen35-9b.jsonl`
+- 8-prompt follow-up:
+  - `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-linear-attn-out-r9700-calib32-qwen35-9b-prompts8.jsonl`
 
 Scope:
 
@@ -367,6 +369,18 @@ activation-weighted variants also reduce logit error for the most suspicious
 single module from the tensor analysis. The KL result is not strictly monotonic
 with logit MSE in this one-prompt smoke, so the next check should use more
 prompts and eventually full-model replacement.
+
+The 8-prompt follow-up preserved the direction:
+
+| variant | mean logit relative MSE | mean abs error | mean KL(ref, candidate) | top1 matches | mean top10 overlap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| g16 unweighted scale/codebook | 0.002274514 | 0.084321837 | 0.005510745 | 8 / 8 | 9.75 |
+| g16 weighted scale + codebook | 0.000214926 | 0.027823837 | 0.000705097 | 8 / 8 | 9.875 |
+| g8 weighted scale + codebook | 0.000253724 | 0.030042848 | 0.000899909 | 8 / 8 | 10.0 |
+
+On this small logit smoke, g16 weighted was slightly better than g8 weighted
+despite g8 being better in tensor weighted MSE. Candidate ranking therefore
+needs model-level checks, not only tensor metrics.
 
 ## Interpretation
 

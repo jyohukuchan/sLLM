@@ -213,3 +213,13 @@ logit relative MSE versus the unweighted g16 variant:
 
 All three variants preserved top1 and top10 for the single prompt. This should
 be expanded before treating it as a model-quality result.
+
+The 8-prompt follow-up still favored weighted variants, but ranked g16 weighted
+slightly ahead of g8 weighted by logit relative MSE and KL:
+
+- g16 unweighted: mean logit relative MSE `0.002274514`
+- g16 weighted scale + codebook: `0.000214926`
+- g8 weighted scale + codebook: `0.000253724`
+
+This reinforces that tensor metrics should be used to narrow candidates, not to
+declare final quality.
