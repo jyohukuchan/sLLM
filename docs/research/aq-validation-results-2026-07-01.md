@@ -957,6 +957,62 @@ The 48-tensor prototype was also merged and verified:
 | verify elapsed wall time | 8.12 s |
 | verify maximum RSS | 101,252 KiB |
 
+Finally, all 255 p4p6 quantized tensors were converted. This run still excludes
+passthrough tensors, so it is a quantized-weight payload prototype, not a full
+model package. Per-tensor re-read verification was skipped during conversion to
+avoid duplicate verification work; the merged output was verified afterwards.
+
+- summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized.json`
+- driver log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-driver.log`
+- per-tensor logs:
+  `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-logs/`
+
+All 255 selected tensors returned success.
+
+| family | tensors | relative MSE min | relative MSE max | relative MSE mean | max RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `attn_k` | 9 | 0.003667359312 | 0.003927970222 | 0.003758196034 | 8,272 KiB |
+| `attn_o` | 9 | 0.003639662156 | 0.003797789239 | 0.003681134613 | 16,460 KiB |
+| `attn_q` | 9 | 0.005314884734 | 0.005368310821 | 0.005336698987 | 16,424 KiB |
+| `attn_v` | 9 | 0.003797044088 | 0.003857622082 | 0.003828035419 | 8,276 KiB |
+| `linear_attn_a` | 24 | 0.005253958207 | 0.005783048676 | 0.005468881683 | 3,156 KiB |
+| `linear_attn_b` | 24 | 0.005458763018 | 0.005775173912 | 0.005661891291 | 3,152 KiB |
+| `linear_attn_out` | 24 | 0.003732074646 | 0.003780259396 | 0.003753065595 | 16,464 KiB |
+| `linear_attn_qkv` | 24 | 0.005195938521 | 0.005256533937 | 0.005227698373 | 16,468 KiB |
+| `linear_attn_z` | 24 | 0.005183823424 | 0.005237578805 | 0.005201258029 | 12,372 KiB |
+| `mlp_down` | 33 | 0.005304337195 | 0.005461632439 | 0.005333573096 | 22,608 KiB |
+| `mlp_gate` | 33 | 0.005186197377 | 0.005285911704 | 0.005223280056 | 22,616 KiB |
+| `mlp_up` | 33 | 0.005245190541 | 0.005290551044 | 0.005267596002 | 22,612 KiB |
+
+Full quantized-only driver resource use:
+
+| item | value |
+| --- | ---: |
+| selected tensors | 255 |
+| successful tensors | 255 |
+| per-tensor re-read verification | skipped |
+| elapsed wall time | 17:23.16 |
+| maximum RSS | 22,616 KiB |
+| parts directory size | 3.8 GiB |
+
+The 255-tensor prototype was merged and verified:
+
+- merge summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-quantized.json`
+- verify log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-quantized.txt`
+
+| item | value |
+| --- | ---: |
+| tensor count | 255 |
+| codebook count | 12 |
+| total file bytes | 4,049,329,404 |
+| verify elapsed wall time | 47.48 s |
+| verify maximum RSS | 103,892 KiB |
+| verification relative-MSE max delta vs summary | about 1e-12 |
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

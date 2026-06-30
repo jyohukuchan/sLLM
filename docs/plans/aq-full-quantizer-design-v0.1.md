@@ -430,6 +430,30 @@ Rust implementation status:
     `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-family4.txt`
   - merged verification wall time: `8.12 s`
   - merged verification peak RSS: `101252 KiB`
+- Full p4p6 quantized-tensor prototype:
+  - summary:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized.json`
+  - tensors: 255, all quantized tensors selected by the p4p6 plan
+  - passthrough tensors: not included yet
+  - per-tensor re-read verification was skipped during conversion; merged
+    verification was run afterwards.
+  - all per-tensor writes returned success.
+  - relative MSE range: `0.003639662156` to `0.005783048676`
+  - driver wall time: `17:23.16`
+  - driver peak RSS: `22616 KiB`
+  - parts directory size: `3.8 GiB`
+- Full p4p6 merged quantized-tensor prototype:
+  - merge summary:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-quantized.json`
+  - output:
+    `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-merged.ullm.d`
+  - tensor count: `255`
+  - codebook count: `12`
+  - total file bytes: `4049329404`
+  - verify log:
+    `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-quantized.txt`
+  - merged verification wall time: `47.48 s`
+  - merged verification peak RSS: `103892 KiB`
 
 ## Output Directory Prototype
 
@@ -518,7 +542,7 @@ Performance tests:
 4. Move merge behavior into `ullm-quant` itself so multi-tensor output does not
    require per-tensor temporary directories.
 5. Add SIMD kernels after the scalar C++ semantics are locked.
-6. Extend from four tensors per p4p6 family to all 255 quantized tensors
-   selected by the p4p6 plan.
-7. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
-   reconstruction metrics are acceptable.
+6. Add passthrough tensor copying and full-model metadata. The current full run
+   covers all 255 quantized tensors, but not the 520 passthrough tensors.
+7. Run a full Qwen3.5-9B package conversion once passthrough handling and
+   in-tool multi-tensor output are implemented.

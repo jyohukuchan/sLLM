@@ -226,6 +226,10 @@
   - family4 smoke converted and verified 48/48 tensors. Relative MSE ranged from `0.003639662156` (`attn_o` g8) to `0.005741676939` (`linear_attn_b` g16); largest per-tensor RSS was `32076 KiB`; driver elapsed `2:45.31`.
   - merged family4 summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-family4.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-family4-merged.ullm.d`; tensor count `48`, codebook count `12`, total file bytes `634004817`.
   - merged family4 verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-family4.txt`; all 48 tensors verified; elapsed `8.12 s`, max RSS `101252 KiB`.
+  - ran the full p4p6 quantized-tensor prototype conversion. Summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized.json`; driver log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-driver.log`; logs in `benchmarks/results/2026-07-01/aq/prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-logs/`.
+  - full quantized conversion selected all 255 p4p6 quantized tensors and skipped per-tensor re-read verification; all 255 returned success. Relative MSE ranged from `0.003639662156` (`attn_o`) to `0.005783048676` (`linear_attn_a`). Driver elapsed `17:23.16`, max RSS `22616 KiB`, parts directory size `3.8 GiB`.
+  - merged full quantized summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-qwen35-9b-p4p6-full-quantized.json`; output under `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-merged.ullm.d`; tensor count `255`, codebook count `12`, total file bytes `4049329404`.
+  - merged full quantized verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-qwen35-9b-p4p6-full-quantized.txt`; all 255 tensors verified; elapsed `47.48 s`, max RSS `103892 KiB`; relative-MSE values matched summary with max delta about `1e-12`.
 
 ## Current Interpretation
 
@@ -240,4 +244,4 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Move merge behavior into `ullm-quant` itself so multi-tensor output does not require per-tensor temporary directories.
-- Extend from four tensors per p4p6 family to all 255 quantized tensors selected by the p4p6 plan.
+- Add passthrough tensors and full-model metadata; current full run covers all 255 quantized tensors but not the 520 passthrough tensors.
