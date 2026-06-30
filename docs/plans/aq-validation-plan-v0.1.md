@@ -15,6 +15,7 @@
 - scale は arbitrary 8bit LUT にしない。実行時に毎回 arbitrary LUT lookup が必要になる形は、初期候補から外す。
 - まずは BF16 weight との差が小さいことを目標にする。activation-aware weighting や perplexity は次段階で加える。
 - 初期検証は Python/PyTorch で tensor-level simulation を行い、上位候補だけ HIP C++ kernel へ進める。
+- 量子化探索は CPU multi-threading の影響が大きい。実験ツールは thread 数を明示し、結果 row に記録する。最初は Torch intra-op thread pool を使う vectorized 実装を優先し、プロセス並列はメモリ使用量と oversubscription を見てから追加する。
 
 ## External Reference Points
 
@@ -227,6 +228,8 @@ Runtime-level:
 10. Only after this, decide whether a HIP dequant prototype is worth writing for the candidate.
 
 The first helper, `tools/run-aq-tensor-sample.py`, is a tensor-sample smoke tool. It initializes codebooks per tensor sample and records `codebook.granularity=per_tensor_sample`. Family-level codebook aggregation is a follow-up step, not part of the first smoke path.
+
+The helper exposes `--torch-threads` and `--torch-interop-threads`. On WRX80, the default is capped at 64 intra-op threads to use physical cores without immediately oversubscribing SMT threads.
 
 ## Initial Stop Conditions
 

@@ -18,6 +18,7 @@
 - Initial codebook modes are `zero_free15` and `symmetric7`; `free16` is kept for upper-bound sampling.
 - The first objective is BF16 weight reconstruction error. Activation-aware weighting and perplexity come after tensor-level narrowing.
 - The current helper initializes codebooks per tensor sample. Family-level codebook aggregation is still a follow-up task.
+- The helper now records CPU thread settings. Default `--torch-threads` is capped at 64 on WRX80-class hosts to avoid naive Python loops and reduce oversubscription risk.
 
 ## Next
 

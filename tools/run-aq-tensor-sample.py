@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -345,6 +346,8 @@ def row_for_result(
         "inputs": {
             "tensor_pattern": args.tensor_pattern,
             "family_filter": args.family,
+            "torch_threads": args.torch_threads,
+            "torch_interop_threads": args.torch_interop_threads,
         },
         "metrics": metrics,
         "artifacts": {},
@@ -354,6 +357,7 @@ def row_for_result(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    default_threads = max(1, min(os.cpu_count() or 1, 64))
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--model-name", default=None)
     parser.add_argument("--reference-dtype", default="bf16")
@@ -365,6 +369,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-elements-per-tensor", type=int, default=262144)
     parser.add_argument("--scale-window", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--torch-threads", type=int, default=default_threads)
+    parser.add_argument("--torch-interop-threads", type=int, default=1)
     parser.add_argument("--candidate", action="append", help="Candidate ID to run; default is round1.")
     parser.add_argument("--note", action="append", default=[])
     return parser.parse_args()
@@ -372,6 +378,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.torch_threads < 1:
+        raise SystemExit("--torch-threads must be >= 1")
+    if args.torch_interop_threads < 1:
+        raise SystemExit("--torch-interop-threads must be >= 1")
+    torch.set_num_threads(args.torch_threads)
+    torch.set_num_interop_threads(args.torch_interop_threads)
     args.model_dir = args.model_dir.expanduser().resolve()
     args.model_name = args.model_name or args.model_dir.name
     tensor_pattern = re.compile(args.tensor_pattern)
