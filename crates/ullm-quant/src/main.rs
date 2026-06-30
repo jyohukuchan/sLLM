@@ -29,6 +29,7 @@ struct Options {
     model_dir: Option<PathBuf>,
     plan_output: Option<PathBuf>,
     inspect_tensor: Option<String>,
+    inspect_aq_format: Option<String>,
     chunk_bytes: usize,
     aq_policy: String,
     aq_high_families: Vec<String>,
@@ -73,6 +74,7 @@ struct TensorInspectResult {
     chunks: usize,
     fnv1a64: u64,
     numeric_stats: Option<NumericStats>,
+    aq_group_stats: Option<AqGroupStats>,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +86,15 @@ struct NumericStats {
     max: f32,
     sum_abs: f64,
     max_abs: f32,
+}
+
+#[derive(Clone, Debug)]
+struct AqGroupStats {
+    format: String,
+    group_size: usize,
+    groups: usize,
+    sum_absmax: f64,
+    max_absmax: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +163,7 @@ fn parse_options() -> Result<Options, String> {
         model_dir: None,
         plan_output: None,
         inspect_tensor: None,
+        inspect_aq_format: None,
         chunk_bytes: 64 * 1024 * 1024,
         aq_policy: "all-g16".to_string(),
         aq_high_families: Vec::new(),
@@ -180,6 +192,12 @@ fn parse_options() -> Result<Options, String> {
                 options.inspect_tensor = Some(
                     args.next()
                         .ok_or_else(|| "--inspect-tensor requires a value".to_string())?,
+                );
+            }
+            "--inspect-aq-format" => {
+                options.inspect_aq_format = Some(
+                    args.next()
+                        .ok_or_else(|| "--inspect-aq-format requires a value".to_string())?,
                 );
             }
             "--chunk-bytes" => options.chunk_bytes = parse_usize("--chunk-bytes", args.next())?,
@@ -229,6 +247,7 @@ fn print_help() {
     println!(
         "  --inspect-tensor <NAME>       read one tensor payload in chunks and print checksum"
     );
+    println!("  --inspect-aq-format <ID>      also compute group absmax stats for an aq format");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, or custom");
     println!("  --aq-high-family <FAMILY>     high-format family for custom policy; repeatable");
@@ -608,10 +627,54 @@ fn update_numeric_stats(dtype: &str, bytes: &[u8], stats: &mut NumericStats) -> 
     Ok(())
 }
 
+fn new_aq_group_stats(format: &str, group_size: usize) -> AqGroupStats {
+    AqGroupStats {
+        format: format.to_string(),
+        group_size,
+        groups: 0,
+        sum_absmax: 0.0,
+        max_absmax: 0.0,
+    }
+}
+
+fn update_aq_group_stats(
+    dtype: &str,
+    bytes: &[u8],
+    stats: &mut AqGroupStats,
+) -> Result<(), String> {
+    let element_size = numeric_element_size(dtype)
+        .ok_or_else(|| format!("aq group stats are not supported for dtype {dtype}"))?;
+    let group_bytes = stats
+        .group_size
+        .checked_mul(element_size)
+        .ok_or_else(|| "aq group byte size overflows".to_string())?;
+    if bytes.len() % group_bytes != 0 {
+        return Err(format!(
+            "{dtype} aq group chunk has {} bytes, not divisible by group byte size {group_bytes}",
+            bytes.len()
+        ));
+    }
+    for group in bytes.chunks_exact(group_bytes) {
+        let mut absmax = 0.0f32;
+        for item in group.chunks_exact(element_size) {
+            let value = decode_numeric_value(dtype, item)?;
+            if value.is_nan() {
+                continue;
+            }
+            absmax = absmax.max(value.abs());
+        }
+        stats.groups += 1;
+        stats.sum_absmax += f64::from(absmax);
+        stats.max_absmax = stats.max_absmax.max(absmax);
+    }
+    Ok(())
+}
+
 fn inspect_tensor_chunks(
     model_dir: &Path,
     tensor_name: &str,
     chunk_bytes: usize,
+    aq_format: Option<&str>,
 ) -> Result<TensorInspectResult, String> {
     let location = find_tensor_location(model_dir, tensor_name)?;
     let payload_bytes = tensor_payload_bytes(&location.header)?;
@@ -624,6 +687,31 @@ fn inspect_tensor_chunks(
             ));
         }
         Some(new_numeric_stats())
+    } else {
+        None
+    };
+    let mut aq_group_stats = if let Some(format) = aq_format {
+        let element_size = numeric_element_size(&location.header.dtype).ok_or_else(|| {
+            format!(
+                "aq group stats are not supported for dtype {}",
+                location.header.dtype
+            )
+        })?;
+        let group_size = aq_group_size(format)?;
+        let group_bytes = group_size
+            .checked_mul(element_size)
+            .ok_or_else(|| "aq group byte size overflows".to_string())?;
+        if chunk_bytes % group_bytes != 0 {
+            return Err(format!(
+                "--chunk-bytes must be divisible by {group_bytes} for {format} group stats"
+            ));
+        }
+        if payload_bytes % group_bytes != 0 {
+            return Err(format!(
+                "tensor payload bytes {payload_bytes} are not divisible by group byte size {group_bytes}"
+            ));
+        }
+        Some(new_aq_group_stats(format, group_size))
     } else {
         None
     };
@@ -645,6 +733,9 @@ fn inspect_tensor_chunks(
         if let Some(stats) = numeric_stats.as_mut() {
             update_numeric_stats(&location.header.dtype, &bytes, stats)?;
         }
+        if let Some(stats) = aq_group_stats.as_mut() {
+            update_aq_group_stats(&location.header.dtype, &bytes, stats)?;
+        }
         offset += bytes.len();
         chunks += 1;
     }
@@ -658,6 +749,7 @@ fn inspect_tensor_chunks(
         chunks,
         fnv1a64: hash,
         numeric_stats,
+        aq_group_stats,
     })
 }
 
@@ -840,7 +932,12 @@ fn run() -> Result<(), String> {
             .model_dir
             .as_deref()
             .ok_or_else(|| "--inspect-tensor requires --model-dir".to_string())?;
-        let inspect = inspect_tensor_chunks(model_dir, tensor_name, options.chunk_bytes)?;
+        let inspect = inspect_tensor_chunks(
+            model_dir,
+            tensor_name,
+            options.chunk_bytes,
+            options.inspect_aq_format.as_deref(),
+        )?;
         println!("inspect_tensor={}", inspect.name);
         println!("inspect_source_file={}", inspect.source_file.display());
         println!("inspect_dtype={}", inspect.dtype);
@@ -861,6 +958,18 @@ fn run() -> Result<(), String> {
                     stats.sum_abs / stats.finite_elements as f64
                 );
                 println!("inspect_numeric_max_abs={:.9}", stats.max_abs);
+            }
+        }
+        if let Some(stats) = &inspect.aq_group_stats {
+            println!("inspect_aq_format={}", stats.format);
+            println!("inspect_aq_group_size={}", stats.group_size);
+            println!("inspect_aq_groups={}", stats.groups);
+            if stats.groups > 0 {
+                println!(
+                    "inspect_aq_group_absmax_mean={:.9}",
+                    stats.sum_absmax / stats.groups as f64
+                );
+                println!("inspect_aq_group_absmax_max={:.9}", stats.max_absmax);
             }
         }
     }
@@ -893,8 +1002,8 @@ fn main() -> ExitCode {
 mod tests {
     use super::{
         Options, default_threads, effective_bpp, estimate_output_bytes, family_for_tensor,
-        new_numeric_stats, quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk,
-        resolve_aq_policy, update_numeric_stats,
+        new_aq_group_stats, new_numeric_stats, quant_assignment, read_safetensors_metadata,
+        read_tensor_payload_chunk, resolve_aq_policy, update_aq_group_stats, update_numeric_stats,
     };
     use std::fs;
     use std::io::Write;
@@ -925,6 +1034,7 @@ mod tests {
             model_dir: None,
             plan_output: None,
             inspect_tensor: None,
+            inspect_aq_format: None,
             chunk_bytes: 1024,
             aq_policy: policy.to_string(),
             aq_high_families: Vec::new(),
@@ -998,5 +1108,20 @@ mod tests {
         assert_eq!(stats.max, 3.0);
         assert_eq!(stats.max_abs, 3.0);
         assert_eq!(stats.sum_abs, 6.0);
+    }
+
+    #[test]
+    fn aq_group_stats_track_absmax_per_group() {
+        let mut stats = new_aq_group_stats("aq4_e4m3_g2_test", 2);
+        let payload = [
+            0x80, 0x3f, // 1.0
+            0x00, 0xc0, // -2.0
+            0x40, 0x40, // 3.0
+            0x00, 0x3f, // 0.5
+        ];
+        update_aq_group_stats("BF16", &payload, &mut stats).expect("group stats");
+        assert_eq!(stats.groups, 2);
+        assert_eq!(stats.max_absmax, 3.0);
+        assert_eq!(stats.sum_absmax, 5.0);
     }
 }

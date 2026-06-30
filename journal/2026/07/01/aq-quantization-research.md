@@ -160,6 +160,7 @@
   - real-model chunk inspection output: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-inspect-qwen35-9b-layer0-mlp-up.txt`.
   - inspected `model.language_model.layers.0.mlp.up_proj.weight`: BF16 `[12288, 4096]`, payload `100663296` bytes, chunk size `1048576`, chunks `96`, FNV-1a64 `16e6f2e89dfb833b`.
   - chunked numeric stats for the same tensor: elements `50331648`, min `-0.104980469`, max `0.131835938`, mean_abs `0.008388692`, max_abs `0.131835938`, NaN count `0`.
+  - chunked aq group stats for `aq4_e4m3_g16_ts_flloyd16`: group_size `16`, groups `3145728`, group_absmax_mean `0.021983589`, group_absmax_max `0.131835938`.
   - generated policy size summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-policy-size-summary-qwen35-9b.json`.
   - estimated output bytes: all-g16 `9059400672`, p4p6 `9098722272`, p4p9 `9325214688`, all-g8 `9504914400`.
   - size interpretation: p4p6 is only `39321600` bytes above all-g16, while p4p9 is `265814016` bytes above all-g16.

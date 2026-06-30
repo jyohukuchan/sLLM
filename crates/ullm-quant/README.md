@@ -53,6 +53,8 @@ cargo run -p ullm-quant -- \
 
 For BF16 and F32 tensors, inspection also reports chunked numeric stats such as
 min, max, mean absolute value, and max absolute value.
+With `--inspect-aq-format`, it also reports group-count and group-absmax stats
+using the aq candidate's group size.
 
 Policy presets:
 
