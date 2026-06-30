@@ -6,13 +6,15 @@
 
 この版では、最短で価値を確認するために次の順序を採用する。
 
-1. `.ullm` コンテナ仕様を仮固定する。
-2. Qwen3-14B と Qwen3-30B-A3B を最初の correctness target にする。
-3. CPU/Python reference 実装で `aq` の保存、読み込み、dequant、評価を成立させる。
-4. C++20 runtime と HIP C++ backend を作り、V620/R9700 で同じ `.ullm` を実行できるようにする。
-5. MI300X で FP8 `sq` のサーバー級 benchmark を取る。
-6. AVX-512 CPU backend を追加する。
-7. その段階で発表・宣伝できる demo、benchmark、配布物を整える。
+1. 既存推論エンジンの benchmark 条件と結果 schema を固定する。
+2. llama.cpp を V620/R9700 で測り、MI300X 以降で vLLM、SGLang、ROCm/ATOM、TensorRT-LLM も測れる形にする。
+3. `.ullm` directory container と manifest schema を仮固定する。
+4. Qwen3-14B と Qwen3-30B-A3B を最初の correctness target にする。
+5. `aq` と `sq` は仕様を先に固定せず、実験 protocol と採用判定基準を作る。
+6. C++20 runtime と HIP C++ backend を作り、V620/R9700 で同じ `.ullm` を実行できるようにする。
+7. MI300X で FP8 系 `sq` 候補のサーバー級 benchmark を取る。
+8. AVX-512 CPU backend を追加する。
+9. その段階で発表・宣伝できる demo、benchmark、配布物を整える。
 
 ## Assumptions
 
@@ -30,6 +32,8 @@
 - CPU AVX-512 backend は MI300X 後に優先度を上げる。
 - Qwen3.5 または Gemma4 は、Unsloth Dynamic 系との比較と MTP/新技術検証のために早期 target へ昇格させる。
 - JAX/TPU は backend/plugin 構想に含めるが、初期実装 target にはしない。
+- `aq` と `sq` の詳細な量子化仕様は、事前に決めない。最初に決めるのは実験 ID、payload metadata、測定条件、結果 schema、採用判定基準である。
+- Qwen3 実装の前に、既存推論エンジンの token/s を測定する phase を挟む。
 
 ## Repository Layout
 
@@ -76,7 +80,7 @@ uLLM-project/
   journal/
 ```
 
-最初にすべてを作る必要はない。Phase 1 では `docs/specs/`、`schemas/`、`python/`、`tests/format/` だけでよい。`reference-src/` は Git 管理外に置き、参照コードを uLLM の実装へ直接コピーしない。
+最初にすべてを作る必要はない。Phase 1 では `docs/specs/`、`docs/plans/`、`benchmarks/`、`tools/`、`schemas/`、`python/`、`tests/format/` だけでよい。`reference-src/` は Git 管理外に置き、参照コードを uLLM の実装へ直接コピーしない。
 
 ## Target Milestones
 
@@ -111,7 +115,7 @@ uLLM-project/
 目的:
 
 - `.ullm` の最小仕様を決める。
-- `aq` と `sq` の違いを manifest で表現できるようにする。
+- `aq` と `sq` の詳細を固定せず、実験 payload を manifest で参照できるようにする。
 
 手順:
 
@@ -152,8 +156,8 @@ model.ullm/
 - `provenance`
 
 7. alignment、endianness、checksum、tensor chunk の扱いを決める。
-8. `aq` 用に codebook/LUT 参照を表現する。
-9. `sq` 用に hardware-native layout と scale metadata を表現する。
+8. `tensors/`、`codebooks/`、`scales/` は固定仕様ではなく、manifest が解釈方法を指定する論理ストレージとして扱う。
+9. `aq` 用の codebook/LUT や `sq` 用の scale metadata は、必要な実験でだけ使う。
 10. 未対応機能を拒否するための capability field を定義する。
 11. single-file 化は未決定事項として記録し、v0.1 仕様の決定範囲から外す。
 
@@ -166,9 +170,67 @@ model.ullm/
 完了条件:
 
 - 空の `.ullm` directory container を validate できる。
-- `aq` と `sq` の manifest example を validate できる。
+- FP baseline と quantization experiment payload の manifest example を validate できる。
 - manifest schema が unknown field と missing required field を検出できる。
 - single-file 化を決めなくても、directory container と manifest schema の検証が進められる。
+
+### M2.5: Existing inference engine benchmark baseline
+
+目的:
+
+- Qwen3 実装前に、既存推論エンジンの token/s と制約を条件別に測定する。
+- uLLM の目標を、推測ではなく実測 baseline から決める。
+
+手順:
+
+1. `docs/specs/inference-benchmark-result-v0.1.md` を作る。
+2. `docs/plans/existing-engine-benchmark-plan-v0.1.md` を作る。
+3. 結果保存先を `benchmarks/results/` にする。
+4. JSONL result schema を定義する。
+5. 共通測定条件を定義する。
+
+- engine
+- engine commit
+- model
+- quantization
+- context length
+- prompt tokens
+- generated tokens
+- batch size
+- concurrent requests
+- tensor parallelism
+- pipeline parallelism
+- GPU count
+- GPU model
+- backend
+- driver/runtime version
+- KV cache dtype
+- prefill tokens/s
+- decode tokens/s
+- total tokens/s
+- latency p50/p95
+- VRAM peak
+- power if available
+- unsupported/OOM reason
+
+6. V620/R9700 では llama.cpp を主な実測対象にする。
+7. vLLM、SGLang、ROCm/ATOM、TensorRT-LLM は V620 で無理に動かさず、MI300X/NVIDIA 環境用の測定 harness を先に作る。
+8. TP/PP を指定できない engine では、その条件を `unsupported` として記録する。
+9. 結果から uLLM の最初の target condition を決める。
+
+成果物:
+
+- `docs/specs/inference-benchmark-result-v0.1.md`
+- `docs/plans/existing-engine-benchmark-plan-v0.1.md`
+- `benchmarks/results/README.md`
+- llama.cpp benchmark wrapper
+- engine capability matrix
+
+完了条件:
+
+- llama.cpp で少なくとも context length と batch size を振った token/s を記録できる。
+- TP/PP など未対応条件を失敗ではなく structured result として保存できる。
+- Qwen3 実装前に、uLLM が狙う throughput baseline が表になっている。
 
 ### M2: Format tooling v0.1
 
@@ -273,26 +335,28 @@ python -m ullm_eval.compare_hf_logits \
 - failure 時に layer 単位で差分を追える debug 出力がある。
 - Qwen3-30B-A3B の expert routing 差分を追える。
 
-### M5: `aq` reference quantizer v0.1
+### M5: Quantization experiment framework v0.1
 
 目的:
 
-- `aq` の最小量子化形式を実装し、保存、読み込み、dequant、評価を成立させる。
+- `aq` と `sq` の詳細仕様を先に決めず、複数の量子化候補を安全に試せる実験基盤を作る。
+- 保存、読み込み、dequant、評価を、特定 variant に依存せず記録できるようにする。
 
-初期 variant:
+初期候補:
 
-- `aq4_lut16_g64`
-- 4-bit index
-- group size 64
-- tensor family ごとに LUT/codebook を持つ
-- per-group scale
-- per-tensor fallback scale
-- outlier は v0.1 では別 tensor に逃がさず、統計だけ保存する
+- LUT/index 系
+- per-group scale 系
+- per-channel scale 系
+- tensor family 別 metadata
+- outlier handling
+- hardware-native FP8 系
+- dequant-free / near-dequant-free 系
 
 手順:
 
-1. `docs/specs/aq-v0.1.md` を作る。
-2. tensor family を定義する。
+1. `docs/research/quantization-experiment-protocol-v0.1.md` を作る。
+2. `docs/specs/quantization-experiment-result-v0.1.md` を作る。
+3. tensor family を仮定義する。
 
 - attention q/k/v/o
 - MLP up/gate/down
@@ -300,37 +364,38 @@ python -m ullm_eval.compare_hf_logits \
 - output head
 - norm
 
-3. calibration dataset loader を streaming で作る。
-4. layer/tensor ごとの統計を取る。
-5. LUT/codebook の初期生成を実装する。
-6. 4-bit index packing を実装する。
-7. per-group scale を保存する。
-8. dequant reference を実装する。
-9. `.ullm` manifest に `aq4_lut16_g64` metadata を保存する。
-10. dequant 後の MSE、cosine similarity、max error を測る。
-11. reference executor で aq model を実行する。
-12. perplexity の簡易評価を実行する。
+4. calibration dataset loader を streaming で作る。
+5. layer/tensor ごとの統計を取る。
+6. 実験 ID、seed、calibration 条件、payload layout、bpp 計算方法を保存する。
+7. candidate ごとに pack/dequant hook を実装できる interface を作る。
+8. `.ullm` manifest には固定 variant 名ではなく `quant_experiment_id` と `payload_schema` を保存する。
+9. dequant 後の MSE、cosine similarity、max error を測る。
+10. reference executor で候補 model を実行する。
+11. perplexity の簡易評価を実行する。
+12. 結果から採用候補を絞り、仕様化できる段階になってから `docs/specs/aq-*.md` または `docs/specs/sq-*.md` を作る。
 
 成果物:
 
-- `docs/specs/aq-v0.1.md`
-- `python/ullm_quant/aq.py`
+- `docs/research/quantization-experiment-protocol-v0.1.md`
+- `docs/specs/quantization-experiment-result-v0.1.md`
+- `python/ullm_quant/experiments.py`
 - `python/ullm_quant/pack.py`
 - `python/ullm_eval/perplexity.py`
-- `tests/quant/test_aq_roundtrip.py`
+- `tests/quant/test_experiment_roundtrip.py`
 
 完了条件:
 
-- Qwen3-14B と Qwen3-30B-A3B を `aq4_lut16_g64` へ変換できる。
-- `.ullm` から aq tensor を読み、dequant して forward できる。
-- FP16/BF16 baseline と aq の perplexity 差分を測れる。
+- 少なくとも 2 種類の量子化候補を同じ result schema で比較できる。
+- `.ullm` から candidate payload を読み、dequant または native execution 用に解釈できる。
+- FP16/BF16 baseline と candidate の perplexity 差分を測れる。
 - bpp を manifest と評価ログへ保存できる。
+- 仕様として固定しない候補を明確に experimental として扱える。
 
 ### M6: Evaluation baseline
 
 目的:
 
-- `aq` の改善が本当に効いているか判断できる評価基盤を固定する。
+- 量子化 candidate の改善が本当に効いているか判断できる評価基盤を固定する。
 
 手順:
 
@@ -356,7 +421,7 @@ python -m ullm_eval.compare_hf_logits \
 - hardware
 
 4. 結果保存形式を定義する。
-5. baseline と aq の比較レポートを生成する。
+5. baseline と candidate の比較レポートを生成する。
 
 成果物:
 
@@ -366,21 +431,21 @@ python -m ullm_eval.compare_hf_logits \
 
 完了条件:
 
-- 同じモデル、同じ条件で baseline と aq を比較できる。
+- 同じモデル、同じ条件で baseline と candidate を比較できる。
 - 評価結果に bpp、メモリ使用量、tokens/s、perplexity が含まれる。
 - 評価スクリプトが巨大データを一括読みしない。
 
-### M7: `aq` quality iteration
+### M7: Quantization quality iteration
 
 目的:
 
-- Unsloth Dynamic 2.0 GGUF 系と比較できる水準へ向けて `aq` を改善する。
+- Unsloth Dynamic 2.0 GGUF 系と比較できる水準へ向けて、量子化候補を実験で絞る。
 
 手順:
 
 1. Unsloth Dynamic 2.0 GGUF の比較対象モデルを固定する。
 2. llama.cpp/imatrix の比較手順を固定する。
-3. `aq4_lut16_g64` を基準に、次の改善を順に試す。
+3. 候補 variant を複数作り、次の要素を順に試す。
 
 - tensor family 別 LUT
 - layer-wise mixed quantization
@@ -393,19 +458,19 @@ python -m ullm_eval.compare_hf_logits \
 
 4. 各改善を一つずつ feature flag 化する。
 5. 改善ごとに bpp、accuracy、speed、file size を記録する。
-6. 採用する改善だけを `aq-v0.2` へ昇格する。
+6. 採用する改善だけを安定仕様へ昇格する。
 
 成果物:
 
 - `docs/research/aq-quality-iteration-v0.1.md`
-- `docs/specs/aq-v0.2.md`
+- 安定化した場合のみ `docs/specs/aq-*.md`
 - 比較レポート
 
 完了条件:
 
 - 同一 bpp 帯で baseline GGUF との比較表がある。
 - 採用した改善と捨てた改善の理由が記録されている。
-- `aq` の loader が古い v0.1 model を読めるか、明示的に拒否できる。
+- experimental payload を安定仕様へ昇格するか、明示的に捨てられる。
 
 ### M8: C++ runtime foundation
 
@@ -421,7 +486,7 @@ python -m ullm_eval.compare_hf_logits \
 4. tensor mmap reader を実装する。
 5. CPU backend interface を定義する。
 6. FP16/BF16 baseline tensor を読めるようにする。
-7. `aq4_lut16_g64` の CPU dequant を実装する。
+7. 選定済み candidate payload の CPU dequant を実装する。
 8. 小さな matmul path を実装する。
 9. Python reference と C++ runtime の tensor/dequant 結果を比較する。
 
@@ -435,7 +500,7 @@ python -m ullm_eval.compare_hf_logits \
 完了条件:
 
 - C++ runtime が `.ullm` manifest と tensor table を読める。
-- C++ runtime の aq dequant が Python reference と一致する。
+- C++ runtime の candidate dequant が Python reference と一致する。
 - 小さな dummy layer の出力が Python reference と一致する。
 
 ### M9: CPU backend v0.1
@@ -451,7 +516,7 @@ python -m ullm_eval.compare_hf_logits \
 2. AVX2 fallback を作る。
 3. AVX-512 path を作る。
 4. VNNI/AMX の capability detection を作る。
-5. `aq` dequant + GEMM の融合可能性を測る。
+5. selected candidate dequant + GEMM の融合可能性を測る。
 6. small batch decode の latency を測る。
 7. kernel selection log を出す。
 
@@ -467,15 +532,16 @@ python -m ullm_eval.compare_hf_logits \
 - capability detection により使った kernel が記録される。
 - scalar fallback と SIMD path の結果差分が許容範囲内である。
 
-### M10: `sq` specification v0.1
+### M10: `sq` experiment protocol v0.1
 
 目的:
 
-- `sq` を `aq` の高速実行モードではなく、別の量子化系列として仕様化する。
+- `sq` を `aq` の高速実行モードではなく、別の量子化系列として実験する。
+- 詳細仕様は、FP8 候補の benchmark と hardware validation 後に固定する。
 
 手順:
 
-1. `docs/specs/sq-v0.1.md` を作る。
+1. `docs/research/sq-experiment-protocol-v0.1.md` を作る。
 2. 初期対象を FP8 に固定する。
 3. 将来対象 hardware-native format を整理する。
 
@@ -493,19 +559,20 @@ python -m ullm_eval.compare_hf_logits \
 5. `sq` manifest metadata を定義する。
 6. backend capability と required capability を定義する。
 7. A100 など INT8 例外扱いの判断基準を定義する。
-8. `sq8_fp8_block` を最初の prototype variant にする。
+8. FP8 candidate を複数試せるようにする。
 9. FP4 系は検証環境が高額なため、v0.1 の実装対象から外す。
 
 成果物:
 
-- `docs/specs/sq-v0.1.md`
-- `schemas/ullm-manifest-v0.1.schema.json` の sq examples
+- `docs/research/sq-experiment-protocol-v0.1.md`
+- `schemas/ullm-manifest-v0.1.schema.json` の experimental sq examples
 
 完了条件:
 
 - `sq` model を `aq` loader が誤って処理しない。
-- `sq` が要求する hardware capability を manifest で表現できる。
+- `sq` candidate が要求する hardware capability を manifest で表現できる。
 - unsupported backend で明確に拒否できる。
+- FP8 candidate の実測結果が stable spec 化の判断材料として保存されている。
 
 ### M11: GPU backend research and prototype
 
@@ -520,8 +587,8 @@ python -m ullm_eval.compare_hf_logits \
 3. HIP C++ backend の ABI と build path を決める。
 4. kernel API を C++ runtime から呼べる形にする。
 5. GEMM microbenchmark を作る。
-6. `sq8_fp8_block` の prototype を作る。
-7. `aq` dequant + GEMM の prototype を作る。
+6. FP8 `sq` candidate の prototype を作る。
+7. selected candidate dequant + GEMM の prototype を作る。
 8. MI300X で同じ benchmark を実行する準備をする。
 9. NVIDIA backend は参照調査と interface 設計に留め、実機確保後に実装する。
 
@@ -797,20 +864,22 @@ python -m ullm_eval.compare_hf_logits \
 
 最初に着手する順序は次の通り。
 
-1. `docs/specs/ullm-container-v0.1.md` を書く。
-2. `schemas/ullm-manifest-v0.1.schema.json` を作る。
-3. `python/ullm_format/` の manifest validation を作る。
-4. dummy `.ullm` directory container の round-trip test を作る。
-5. Qwen3-14B と Qwen3-30B-A3B の import 調査を行う。
-6. FP16/BF16 `.ullm` import tool を作る。
-7. Python reference executor で HF logits と比較する。
-8. `aq4_lut16_g64` の仕様を書く。
-9. `aq4_lut16_g64` の pack/dequant を実装する。
-10. HIP C++ backend の build skeleton を作る。
-11. V620/R9700 向け GEMM microbenchmark を作る。
-12. perplexity と tokens/s の最小評価を作る。
-13. prefill/decode 速度予測の v0.1 仕様を書く。
-14. 配布計画と release checklist を作る。
+1. `docs/specs/inference-benchmark-result-v0.1.md` を書く。
+2. `docs/plans/existing-engine-benchmark-plan-v0.1.md` を書く。
+3. `benchmarks/results/README.md` を作る。
+4. llama.cpp benchmark wrapper を作る。
+5. V620/R9700 で context length、batch、prompt/generated token 数を振って llama.cpp token/s を測る。
+6. vLLM、SGLang、ROCm/ATOM、TensorRT-LLM は V620 で無理に動かさず、unsupported reason を記録できるようにする。
+7. `.ullm` directory container の `tensors/`、`codebooks/`、`scales/` を「実験 payload 用の論理ストレージ」として文書化する。
+8. `schemas/ullm-manifest-v0.1.schema.json` を作る。
+9. `python/ullm_format/` の manifest validation を作る。
+10. dummy `.ullm` directory container の round-trip test を作る。
+11. 量子化実験 protocol と result schema を作る。
+12. Qwen3-14B と Qwen3-30B-A3B の import 調査に進む。
+13. HIP C++ backend の build skeleton を作る。
+14. V620/R9700 向け GEMM microbenchmark を作る。
+15. prefill/decode 速度予測の v0.1 仕様を書く。
+16. 配布計画と release checklist を作る。
 
 ## Review Points
 
@@ -821,7 +890,8 @@ python -m ullm_eval.compare_hf_logits \
 - single-file `.ullm` を作る場合、pack 方式を tar-like container にするか、custom binary container にするか。
 - Qwen3-14B と Qwen3-30B-A3B のどちらを先に correctness target にするか。
 - Qwen3.5 と Gemma4 のどちらを先に advanced target にするか。
-- `aq4_lut16_g64` を最初の variant にするか。
+- `aq` と `sq` の candidate を stable spec に昇格させる判断基準は何か。
+- 既存推論エンジン benchmark の最初の測定 grid をどこまで広げるか。
 - HIP V620/R9700 でどこまで性能を追うか。
 - MI300X 調達後の発表基準をどこに置くか。
 - AVX-512 backend をどこまで先に作るか。
@@ -832,6 +902,6 @@ python -m ullm_eval.compare_hf_logits \
 
 ## Current Integrated Plan
 
-現時点では、まず `.ullm` directory container と `aq` reference pipeline を完成させる。次に HIP C++ backend を V620/R9700 で進め、MI300X で FP8 `sq` のサーバー級 throughput を確認し、その後 AVX-512 backend を追加する。
+現時点では、まず既存推論エンジンの benchmark schema と測定 harness を作り、llama.cpp on V620/R9700 の token/s baseline を取る。次に `.ullm` directory container と quantization experiment payload の受け皿を作る。その後、HIP C++ backend を V620/R9700 で進め、MI300X で FP8 系 `sq` candidate のサーバー級 throughput を確認し、その後 AVX-512 backend を追加する。
 
-最初の成功条件は、Qwen3-14B と Qwen3-30B-A3B を HF 形式から `.ullm/` directory container へ変換し、FP16/BF16 baseline と `aq4_lut16_g64` model の logits、perplexity、bpp、file size を同じ評価基盤で比較できる状態である。その後、Qwen3.5 または Gemma4 を使って MTP/新技術対応の検証へ進む。
+最初の成功条件は、既存推論エンジンの token/s を context length、batch、prompt/generated tokens、TP、PP、GPU 数などの条件つきで保存できる状態である。量子化方式は、その baseline と評価基盤ができた後に candidate として試し、結果を見てから stable spec へ昇格させる。その後、Qwen3-14B、Qwen3-30B-A3B、Qwen3.5、Gemma4 へ進む。
