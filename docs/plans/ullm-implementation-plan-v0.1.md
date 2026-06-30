@@ -7,10 +7,12 @@
 この版では、最短で価値を確認するために次の順序を採用する。
 
 1. `.ullm` コンテナ仕様を仮固定する。
-2. Qwen3 dense small model を最初の correctness target にする。
+2. Qwen3-14B と Qwen3-30B-A3B を最初の correctness target にする。
 3. CPU/Python reference 実装で `aq` の保存、読み込み、dequant、評価を成立させる。
-4. C++ runtime と CPU backend を作り、同じ `.ullm` を読めるようにする。
-5. ベンチ基盤を固定してから、`aq` の改善と `sq` の GPU backend へ進む。
+4. C++20 runtime と HIP C++ backend を作り、V620/R9700 で同じ `.ullm` を実行できるようにする。
+5. MI300X で FP8 `sq` のサーバー級 benchmark を取る。
+6. AVX-512 CPU backend を追加する。
+7. その段階で発表・宣伝できる demo、benchmark、配布物を整える。
 
 ## Assumptions
 
@@ -18,10 +20,16 @@
 - 具体的な実装計画は `docs/plans/` に置く。
 - 作業記録は `journal/` に置く。
 - 初期実装は、正しさ検証と量子化研究を Python/PyTorch で進める。
-- 長期の runtime は C++20 を中心にし、CUDA/HIP/CANN などの backend を追加する。
+- 演算処理の大部分は C++20 を中心に実装する。
+- 初期 GPU backend は HIP C++ を直接書く。過去プロジェクトの経験を踏まえ、Triton は初期依存にしない。
+- API、scheduler、prefill/decode の割り当て、telemetry、速度予測などの control plane は Rust を活用する。
 - Python は reference、converter、quantizer、evaluation のために使う。
-- Rust を使うかどうかは v0.1 では決めない。C++ runtime が不便になった時点で CLI や manifest tooling への採用を再検討する。
 - 大きなモデルや評価データは一度にメモリへ載せず、streaming と chunk 処理を前提にする。
+- 最初の GPU 検証環境は Radeon PRO V620 と Radeon AI PRO R9700 とする。
+- 次のサーバー級検証環境は MI300X とする。
+- CPU AVX-512 backend は MI300X 後に優先度を上げる。
+- Qwen3.5 または Gemma4 は、Unsloth Dynamic 系との比較と MTP/新技術検証のために早期 target へ昇格させる。
+- JAX/TPU は backend/plugin 構想に含めるが、初期実装 target にはしない。
 
 ## Repository Layout
 
@@ -39,13 +47,18 @@ uLLM-project/
     ullm_quant/
     ullm_format/
     ullm_eval/
+  crates/
+    ullm_control/
+    ullm_scheduler/
+    ullm_api/
   runtime/
     include/
     src/
     backends/
       cpu/
-      cuda/
       hip/
+      cuda/
+      jax_tpu/
       cann/
   kernels/
     cpu/
@@ -59,10 +72,11 @@ uLLM-project/
     runtime/
     eval/
   benchmarks/
+  reference-src/  # ignored
   journal/
 ```
 
-最初にすべてを作る必要はない。Phase 1 では `docs/specs/`、`schemas/`、`python/`、`tests/format/` だけでよい。
+最初にすべてを作る必要はない。Phase 1 では `docs/specs/`、`schemas/`、`python/`、`tests/format/` だけでよい。`reference-src/` は Git 管理外に置き、参照コードを uLLM の実装へ直接コピーしない。
 
 ## Target Milestones
 
@@ -79,7 +93,8 @@ uLLM-project/
 2. この文書を `docs/plans/ullm-implementation-plan-v0.1.md` として置く。
 3. 仕様文書用に `docs/specs/` を作る。
 4. 重要な決定は `docs/decisions/` に ADR として保存する。
-5. 最初の対象モデルを Qwen3 dense small 系に固定する。
+5. 最初の対象モデルを Qwen3-14B と Qwen3-30B-A3B に固定する。
+6. Qwen3.5 または Gemma4 を早期の追加検証 target として扱う。
 
 成果物:
 
@@ -102,8 +117,9 @@ uLLM-project/
 
 1. `docs/specs/ullm-container-v0.1.md` を作る。
 2. `schemas/ullm-manifest-v0.1.schema.json` を作る。
-3. packed single-file ではなく、最初は directory container を採用する。
-4. directory container の標準構成を定義する。
+3. 最終配布では single-file `.ullm` を目指す。
+4. ただし初期実装では、debug と差分確認を優先して directory container の `model.ullm/` を採用する。
+5. directory container の標準構成を定義する。
 
 ```text
 model.ullm/
@@ -120,7 +136,7 @@ model.ullm/
   provenance.json
 ```
 
-5. `manifest.json` に最低限の項目を入れる。
+6. `manifest.json` に最低限の項目を入れる。
 
 - `format_version`
 - `quant_family`
@@ -135,10 +151,11 @@ model.ullm/
 - `backend_hints`
 - `provenance`
 
-6. alignment、endianness、checksum、tensor chunk の扱いを決める。
-7. `aq` 用に codebook/LUT 参照を表現する。
-8. `sq` 用に hardware-native layout と scale metadata を表現する。
-9. 未対応機能を拒否するための capability field を定義する。
+7. alignment、endianness、checksum、tensor chunk の扱いを決める。
+8. `aq` 用に codebook/LUT 参照を表現する。
+9. `sq` 用に hardware-native layout と scale metadata を表現する。
+10. 未対応機能を拒否するための capability field を定義する。
+11. directory container から single-file `.ullm` へ pack する将来仕様の placeholder を定義する。
 
 成果物:
 
@@ -151,6 +168,7 @@ model.ullm/
 - 空の `.ullm` directory container を validate できる。
 - `aq` と `sq` の manifest example を validate できる。
 - manifest schema が unknown field と missing required field を検出できる。
+- single-file 化時にも manifest と tensor table の論理構造を変えずに済む見通しがある。
 
 ### M2: Format tooling v0.1
 
@@ -187,50 +205,54 @@ python -m ullm_format dump-manifest path/to/model.ullm
 - 破損 checksum を検出できる。
 - 1 tensor を一括読み込みせず chunk 単位で読める。
 
-### M3: Qwen3 dense import path
+### M3: Qwen3 import path
 
 目的:
 
-- Hugging Face 形式の Qwen3 dense small model から `.ullm` へ変換する。
+- Hugging Face 形式の Qwen3-14B と Qwen3-30B-A3B から `.ullm` へ変換する。
 - まだ量子化せず、FP16/BF16 tensor を保存する。
 
 手順:
 
-1. Qwen3 dense small の model config と tensor name を調査して `docs/research/qwen3-dense-import-v0.1.md` にまとめる。
+1. Qwen3-14B と Qwen3-30B-A3B の model config と tensor name を調査して `docs/research/qwen3-import-v0.1.md` にまとめる。
 2. `python/ullm_format/import_hf_qwen3.py` を作る。
 3. safetensors を streaming で読む。
 4. tensor name mapping を manifest に保存する。
 5. tokenizer metadata を保存する。
 6. architecture graph の最小表現を manifest に保存する。
 7. HF model と `.ullm` import 後の tensor checksum を比較する。
+8. Qwen3-30B-A3B の MoE/expert tensor を manifest で表現する。
 
 成果物:
 
-- `docs/research/qwen3-dense-import-v0.1.md`
+- `docs/research/qwen3-import-v0.1.md`
 - `python/ullm_format/import_hf_qwen3.py`
-- Qwen3 dense FP16/BF16 `.ullm` sample
+- Qwen3-14B FP16/BF16 `.ullm` sample
+- Qwen3-30B-A3B FP16/BF16 `.ullm` sample
 
 完了条件:
 
-- Qwen3 dense small の全 tensor が `.ullm` に保存される。
+- Qwen3-14B と Qwen3-30B-A3B の全 tensor が `.ullm` に保存される。
 - tensor shape、dtype、checksum が元モデルと一致する。
 - tokenizer metadata が読み戻せる。
+- dense と MoE の architecture graph 差分を manifest で表現できる。
 
 ### M4: Reference executor v0.1
 
 目的:
 
-- `.ullm` から読み込んだ Qwen3 dense model で forward correctness を確認する。
+- `.ullm` から読み込んだ Qwen3-14B と Qwen3-30B-A3B で forward correctness を確認する。
 
 手順:
 
 1. `python/ullm_eval/reference_executor.py` を作る。
 2. `.ullm` tensor reader から PyTorch tensor を構築する。
-3. Qwen3 dense の forward path を最小実装する。
-4. RoPE、GQA、RMSNorm、MLP、attention mask を実装する。
-5. HF Transformers の logits と比較する。
-6. greedy decode で短い生成を確認する。
-7. 比較スクリプトを作る。
+3. Qwen3 dense path を最小実装する。
+4. Qwen3 MoE path を最小実装する。
+5. RoPE、GQA、RMSNorm、MLP、MoE routing、attention mask を実装する。
+6. HF Transformers の logits と比較する。
+7. greedy decode で短い生成を確認する。
+8. 比較スクリプトを作る。
 
 ```bash
 python -m ullm_eval.compare_hf_logits \
@@ -249,6 +271,7 @@ python -m ullm_eval.compare_hf_logits \
 - FP16/BF16 `.ullm` で HF logits と許容誤差内に一致する。
 - 1 prompt の greedy decode が動く。
 - failure 時に layer 単位で差分を追える debug 出力がある。
+- Qwen3-30B-A3B の expert routing 差分を追える。
 
 ### M5: `aq` reference quantizer v0.1
 
@@ -298,7 +321,7 @@ python -m ullm_eval.compare_hf_logits \
 
 完了条件:
 
-- Qwen3 dense small を `aq4_lut16_g64` へ変換できる。
+- Qwen3-14B と Qwen3-30B-A3B を `aq4_lut16_g64` へ変換できる。
 - `.ullm` から aq tensor を読み、dequant して forward できる。
 - FP16/BF16 baseline と aq の perplexity 差分を測れる。
 - bpp を manifest と評価ログへ保存できる。
@@ -453,23 +476,25 @@ python -m ullm_eval.compare_hf_logits \
 手順:
 
 1. `docs/specs/sq-v0.1.md` を作る。
-2. 対象 hardware-native format を整理する。
+2. 初期対象を FP8 に固定する。
+3. 将来対象 hardware-native format を整理する。
 
 - FP8 E4M3/E5M2
 - MXFP8
 - NVFP4
 - AMD FP8/FP4 系
 
-3. dequant 制約を明文化する。
+4. dequant 制約を明文化する。
 
 - LUT 禁止
 - 複雑な非線形補正は禁止
 - scale、shift、単純な型変換、hardware native unpack は許容
 
-4. `sq` manifest metadata を定義する。
-5. backend capability と required capability を定義する。
-6. A100 など INT8 例外扱いの判断基準を定義する。
-7. `sq8_fp8_block` を最初の prototype variant にする。
+5. `sq` manifest metadata を定義する。
+6. backend capability と required capability を定義する。
+7. A100 など INT8 例外扱いの判断基準を定義する。
+8. `sq8_fp8_block` を最初の prototype variant にする。
+9. FP4 系は検証環境が高額なため、v0.1 の実装対象から外す。
 
 成果物:
 
@@ -486,31 +511,34 @@ python -m ullm_eval.compare_hf_logits \
 
 目的:
 
-- GPU backend をすぐ本実装せず、まず target ごとの現実的な順序を決める。
+- HIP backend を最初の GPU backend として実装し、V620/R9700 で検証する。
 
 手順:
 
 1. `docs/research/gpu-backend-matrix-v0.1.md` を作る。
-2. 実機で確認できる GPU と、仕様調査のみの GPU を分ける。
-3. AMD ROCm backend の最初の対象を決める。
-4. NVIDIA backend の最初の対象を決める。
-5. kernel API を C++ runtime から呼べる形にする。
-6. GEMM microbenchmark を作る。
-7. `sq8_fp8_block` の prototype を作る。
-8. `aq` dequant + GEMM の prototype を作る。
+2. V620、R9700、MI300X、AVX-512 CPU、その他 GPU/NPU/TPU を別の priority tier に分ける。
+3. HIP C++ backend の ABI と build path を決める。
+4. kernel API を C++ runtime から呼べる形にする。
+5. GEMM microbenchmark を作る。
+6. `sq8_fp8_block` の prototype を作る。
+7. `aq` dequant + GEMM の prototype を作る。
+8. MI300X で同じ benchmark を実行する準備をする。
+9. NVIDIA backend は参照調査と interface 設計に留め、実機確保後に実装する。
 
 成果物:
 
 - `docs/research/gpu-backend-matrix-v0.1.md`
-- `kernels/cuda/` prototype
 - `kernels/hip/` prototype
+- `kernels/cuda/` interface placeholder
 - GEMM microbenchmark
 
 完了条件:
 
 - GPU ごとの supported dtype、preferred layout、unsupported reason が記録されている。
 - microbenchmark が backend、dtype、batch、shape を記録する。
-- C++ runtime から prototype kernel を呼べる。
+- C++ runtime から HIP prototype kernel を呼べる。
+- V620/R9700 で benchmark を実行できる。
+- MI300X で検証すべき項目が明確になっている。
 
 ### M12: Scheduler and serving v0.1
 
@@ -572,17 +600,18 @@ python -m ullm_eval.compare_hf_logits \
 
 目的:
 
-- Intel/AMD NPU、Huawei Ascend を CPU/GPU backend と同じ前提で扱わない。
+- JAX/TPU、Intel/AMD NPU、Huawei Ascend を CPU/GPU backend と同じ前提で扱わない。
 - vendor SDK 依存を plugin 境界に閉じる。
 
 手順:
 
 1. `docs/plans/vendor-backend-plugin-plan-v0.1.md` を作る。
 2. backend plugin ABI を仮定義する。
-3. CANN/Ascend の LLM inference API と graph import path を調査する。
-4. Intel/AMD NPU の graph compiler path を調査する。
-5. `.ullm` から vendor runtime が必要とする形式への変換責務を決める。
-6. NPU では `aq` と `sq` を直接全対応させず、capability に応じて拒否または変換する。
+3. JAX/TPU の XLA 経由 import path と制約を調査する。
+4. CANN/Ascend の LLM inference API と graph import path を調査する。
+5. Intel/AMD NPU の graph compiler path を調査する。
+6. `.ullm` から vendor runtime が必要とする形式への変換責務を決める。
+7. TPU/NPU/Ascend では `aq` と `sq` を直接全対応させず、capability に応じて拒否または変換する。
 
 成果物:
 
@@ -594,6 +623,175 @@ python -m ullm_eval.compare_hf_logits \
 - vendor backend が未実装でも core runtime が成立する。
 - plugin が対応しない quant format を明確に拒否できる。
 
+### M15: Rust control plane v0.1
+
+目的:
+
+- C++20 runtime と HIP kernels を、Rust 側の control plane から管理する。
+- API、scheduler、telemetry、prefill/decode 割り当て、速度予測を C++ kernel 実装と分離する。
+
+手順:
+
+1. `crates/ullm_control/` を作る。
+2. `crates/ullm_scheduler/` を作る。
+3. `crates/ullm_api/` を作る。
+4. C ABI または cxx bridge で C++ runtime を呼ぶ境界を決める。
+5. model load、request enqueue、prefill dispatch、decode dispatch の state machine を Rust で定義する。
+6. backend capability と runtime telemetry を Rust 側へ集約する。
+7. scheduler が prefill/decode の割り当て先を選べるようにする。
+8. crash 時に C++ backend と Rust control plane の責務境界が分かる log を出す。
+
+成果物:
+
+- `crates/ullm_control/`
+- `crates/ullm_scheduler/`
+- `crates/ullm_api/`
+- C++ runtime FFI draft
+
+完了条件:
+
+- Rust から C++ runtime の dummy backend を呼べる。
+- request lifecycle を Rust 側で追跡できる。
+- backend capability に基づいて prefill/decode の割り当て方針を変えられる。
+
+### M16: Speed prediction v0.1
+
+目的:
+
+- prefill/decode の速度を実測前または軽い probe から予測し、scheduler と配布時の hardware guidance に使う。
+
+手順:
+
+1. `docs/specs/speed-prediction-v0.1.md` を作る。
+2. 入力特徴量を定義する。
+
+- model architecture
+- parameter count
+- active parameter count
+- quant family
+- bpp
+- tensor layout
+- backend
+- GPU/CPU capability
+- memory bandwidth estimate
+- compute throughput estimate
+- context length
+- batch size
+- KV cache size
+- prefill/decode split
+
+3. GEMM microbenchmark と end-to-end benchmark を同じ JSON schema へ保存する。
+4. roofline 近似を使った初期 predictor を作る。
+5. 実測結果で補正する calibration layer を作る。
+6. prediction error を benchmark report に保存する。
+7. scheduler が予測値を参照して prefill/decode 割り当て候補を出せるようにする。
+
+成果物:
+
+- `docs/specs/speed-prediction-v0.1.md`
+- `python/ullm_eval/speed_predictor.py`
+- Rust scheduler から使う predictor interface
+- prediction benchmark report
+
+完了条件:
+
+- V620/R9700 の実測値に対して prefill/decode tokens/s の予測誤差を出せる。
+- MI300X と AVX-512 backend 追加時に同じ predictor schema を使える。
+- scheduler が予測値を log に出せる。
+
+### M17: Distribution plan v0.1
+
+目的:
+
+- 発表・宣伝前に、配布形式と導入経路を最低限決める。
+
+手順:
+
+1. `docs/plans/distribution-plan-v0.1.md` を作る。
+2. ソース配布、binary 配布、model container 配布を分ける。
+3. 初期配布物を定義する。
+
+- source release
+- Python format/quantization package
+- C++/HIP runtime binary
+- Rust API/scheduler binary
+- sample `.ullm/` directory container
+- 将来の single-file `.ullm`
+
+4. Linux x86_64 + ROCm/HIP を最初の binary target にする。
+5. Docker/Podman image を配布するか決める。
+6. GitHub Releases、PyPI、crates.io、container registry の使い分けを決める。
+7. model artifact の checksum、manifest、provenance を公開する。
+8. Apache-2.0 の NOTICE、third-party notices、reference-code policy を release checklist に入れる。
+
+成果物:
+
+- `docs/plans/distribution-plan-v0.1.md`
+- release checklist
+- packaging prototype
+
+完了条件:
+
+- V620/R9700 で動く最小 runtime を第三者が再現できる手順がある。
+- `.ullm/` directory container と将来 single-file `.ullm` の配布方針が明確である。
+- license/notice の確認手順が release checklist に入っている。
+
+### M18: Announcement gate v0.1
+
+目的:
+
+- V620/R9700、MI300X、AVX-512 まで到達した段階で、一度発表・宣伝できる状態を作る。
+
+手順:
+
+1. 発表対象の benchmark scenario を固定する。
+2. Qwen3-14B、Qwen3-30B-A3B、Qwen3.5 または Gemma4 のうち、公開できる結果を選ぶ。
+3. Unsloth Dynamic 2.0 GGUF、llama.cpp、vLLM、SGLang、ATOM、TensorRT-LLM との比較条件を固定する。
+4. prefill/decode throughput と速度予測の結果を含める。
+5. 再現手順、hardware、driver、ROCm version、commit hash を公開する。
+6. 未対応ハードウェアの対応予定を明記する。
+
+成果物:
+
+- announcement benchmark report
+- public demo script
+- release notes draft
+
+完了条件:
+
+- 比較条件が再現可能である。
+- 速度だけでなく精度、bpp、メモリ、予測誤差を提示できる。
+- 未対応機能を誇張せず、次の対応範囲を示せる。
+
+### M19: Reference source policy
+
+目的:
+
+- llama.cpp、vLLM、SGLang、ATOM、TensorRT-LLM を参照できるようにしつつ、uLLM の Apache-2.0 方針と実装の独立性を守る。
+
+手順:
+
+1. `reference-src/` を Git 管理外にする。
+2. `tools/fetch-reference-sources.sh` で浅い clone を再取得できるようにする。
+3. 各参照リポジトリの commit、license、用途を `docs/research/reference-source-inventory-v0.1.md` に記録する。
+4. 参照コードを uLLM 実装へ直接コピーしない。
+5. 実装に必要な知見は、コードではなく設計メモや仕様差分として記録する。
+6. 外部コードを取り込む必要が出た場合は、事前に ADR を追加し、license、NOTICE、著作権表記、変更範囲を確認する。
+7. license 未確認の参照元は、読解と比較だけに限定し、再利用しない。
+
+成果物:
+
+- `.gitignore`
+- `tools/fetch-reference-sources.sh`
+- `docs/research/reference-source-inventory-v0.1.md`
+- `docs/decisions/0001-license-and-reference-code.md`
+
+完了条件:
+
+- 参照ソースが手元にあるが Git には入っていない。
+- 各参照元の commit と license 状態が記録されている。
+- uLLM 実装時の code-copy 禁止ルールが明文化されている。
+
 ## Immediate Work Queue
 
 最初に着手する順序は次の通り。
@@ -602,12 +800,16 @@ python -m ullm_eval.compare_hf_logits \
 2. `schemas/ullm-manifest-v0.1.schema.json` を作る。
 3. `python/ullm_format/` の manifest validation を作る。
 4. dummy `.ullm` directory container の round-trip test を作る。
-5. Qwen3 dense small の import 調査を行う。
+5. Qwen3-14B と Qwen3-30B-A3B の import 調査を行う。
 6. FP16/BF16 `.ullm` import tool を作る。
 7. Python reference executor で HF logits と比較する。
 8. `aq4_lut16_g64` の仕様を書く。
 9. `aq4_lut16_g64` の pack/dequant を実装する。
-10. perplexity と tokens/s の最小評価を作る。
+10. HIP C++ backend の build skeleton を作る。
+11. V620/R9700 向け GEMM microbenchmark を作る。
+12. perplexity と tokens/s の最小評価を作る。
+13. prefill/decode 速度予測の v0.1 仕様を書く。
+14. 配布計画と release checklist を作る。
 
 ## Review Points
 
@@ -615,15 +817,20 @@ python -m ullm_eval.compare_hf_logits \
 
 - 初期 runtime を C++20 中心にする判断が妥当か。
 - `.ullm` を最初から single-file にするか、directory container から始めるか。
-- 最初の Qwen3 target model をどれにするか。
+- single-file `.ullm` の pack 方式を tar-like container にするか、custom binary container にするか。
+- Qwen3-14B と Qwen3-30B-A3B のどちらを先に correctness target にするか。
+- Qwen3.5 と Gemma4 のどちらを先に advanced target にするか。
 - `aq4_lut16_g64` を最初の variant にするか。
-- CPU backend をどこまで先に作るか。
-- NVIDIA backend と AMD backend の優先順。
-- `sq` の最初の target を FP8 にするか、FP4 系まで含めるか。
-- NPU/Ascend をいつ plugin 計画へ進めるか。
+- HIP V620/R9700 でどこまで性能を追うか。
+- MI300X 調達後の発表基準をどこに置くか。
+- AVX-512 backend をどこまで先に作るか。
+- NVIDIA backend、JAX/TPU、NPU/Ascend をいつ plugin 計画へ進めるか。
+- Rust control plane と C++ runtime の FFI 境界をどうするか。
+- 配布を GitHub Releases、PyPI、crates.io、container image のどれから始めるか。
+- Apache-2.0 を維持しながら外部実装を参照するための運用が十分か。
 
 ## Current Integrated Plan
 
-現時点では、まず `.ullm` container と `aq` reference pipeline を完成させる。GPU `sq` は高価値だが、format、evaluation、correctness target が固まる前に着手すると比較不能になりやすい。
+現時点では、まず `.ullm` directory container と `aq` reference pipeline を完成させる。次に HIP C++ backend を V620/R9700 で進め、MI300X で FP8 `sq` のサーバー級 throughput を確認し、その後 AVX-512 backend を追加する。
 
-最初の成功条件は、Qwen3 dense small を HF 形式から `.ullm` へ変換し、FP16/BF16 baseline と `aq4_lut16_g64` model の logits、perplexity、bpp、file size を同じ評価基盤で比較できる状態である。
+最初の成功条件は、Qwen3-14B と Qwen3-30B-A3B を HF 形式から `.ullm/` directory container へ変換し、FP16/BF16 baseline と `aq4_lut16_g64` model の logits、perplexity、bpp、file size を同じ評価基盤で比較できる状態である。その後、Qwen3.5 または Gemma4 を使って MTP/新技術対応の検証へ進む。
