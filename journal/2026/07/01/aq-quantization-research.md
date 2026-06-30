@@ -159,6 +159,7 @@
   - `cargo test -p ullm-quant` passes 5 tests, including a handcrafted safetensors chunk-read test.
   - real-model chunk inspection output: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-inspect-qwen35-9b-layer0-mlp-up.txt`.
   - inspected `model.language_model.layers.0.mlp.up_proj.weight`: BF16 `[12288, 4096]`, payload `100663296` bytes, chunk size `1048576`, chunks `96`, FNV-1a64 `16e6f2e89dfb833b`.
+  - chunked numeric stats for the same tensor: elements `50331648`, min `-0.104980469`, max `0.131835938`, mean_abs `0.008388692`, max_abs `0.131835938`, NaN count `0`.
 
 ## Current Interpretation
 

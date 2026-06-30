@@ -51,6 +51,9 @@ cargo run -p ullm-quant -- \
   --dry-run
 ```
 
+For BF16 and F32 tensors, inspection also reports chunked numeric stats such as
+min, max, mean absolute value, and max absolute value.
+
 Policy presets:
 
 - `all-g16`: all quantizable tensors use the low-budget format.

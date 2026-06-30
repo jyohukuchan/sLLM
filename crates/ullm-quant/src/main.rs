@@ -72,6 +72,18 @@ struct TensorInspectResult {
     chunk_bytes: usize,
     chunks: usize,
     fnv1a64: u64,
+    numeric_stats: Option<NumericStats>,
+}
+
+#[derive(Clone, Debug)]
+struct NumericStats {
+    elements: usize,
+    finite_elements: usize,
+    nan_elements: usize,
+    min: f32,
+    max: f32,
+    sum_abs: f64,
+    max_abs: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -539,6 +551,63 @@ fn fnv1a64_update(mut hash: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
+fn numeric_element_size(dtype: &str) -> Option<usize> {
+    match dtype {
+        "BF16" => Some(2),
+        "F32" => Some(4),
+        _ => None,
+    }
+}
+
+fn decode_numeric_value(dtype: &str, bytes: &[u8]) -> Result<f32, String> {
+    match dtype {
+        "BF16" => {
+            let raw = u16::from_le_bytes([bytes[0], bytes[1]]);
+            Ok(f32::from_bits(u32::from(raw) << 16))
+        }
+        "F32" => Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
+        _ => Err(format!("numeric stats are not supported for dtype {dtype}")),
+    }
+}
+
+fn new_numeric_stats() -> NumericStats {
+    NumericStats {
+        elements: 0,
+        finite_elements: 0,
+        nan_elements: 0,
+        min: f32::INFINITY,
+        max: f32::NEG_INFINITY,
+        sum_abs: 0.0,
+        max_abs: 0.0,
+    }
+}
+
+fn update_numeric_stats(dtype: &str, bytes: &[u8], stats: &mut NumericStats) -> Result<(), String> {
+    let element_size = numeric_element_size(dtype)
+        .ok_or_else(|| format!("numeric stats are not supported for dtype {dtype}"))?;
+    if bytes.len() % element_size != 0 {
+        return Err(format!(
+            "{dtype} numeric chunk has {} bytes, not divisible by element size {element_size}",
+            bytes.len()
+        ));
+    }
+    for chunk in bytes.chunks_exact(element_size) {
+        let value = decode_numeric_value(dtype, chunk)?;
+        stats.elements += 1;
+        if value.is_nan() {
+            stats.nan_elements += 1;
+            continue;
+        }
+        stats.finite_elements += 1;
+        stats.min = stats.min.min(value);
+        stats.max = stats.max.max(value);
+        let abs = value.abs();
+        stats.sum_abs += f64::from(abs);
+        stats.max_abs = stats.max_abs.max(abs);
+    }
+    Ok(())
+}
+
 fn inspect_tensor_chunks(
     model_dir: &Path,
     tensor_name: &str,
@@ -546,6 +615,18 @@ fn inspect_tensor_chunks(
 ) -> Result<TensorInspectResult, String> {
     let location = find_tensor_location(model_dir, tensor_name)?;
     let payload_bytes = tensor_payload_bytes(&location.header)?;
+    let mut numeric_stats = if let Some(element_size) = numeric_element_size(&location.header.dtype)
+    {
+        if chunk_bytes % element_size != 0 {
+            return Err(format!(
+                "--chunk-bytes must be divisible by {element_size} for {} stats",
+                location.header.dtype
+            ));
+        }
+        Some(new_numeric_stats())
+    } else {
+        None
+    };
     let mut offset = 0usize;
     let mut chunks = 0usize;
     let mut hash = 0xcbf2_9ce4_8422_2325;
@@ -561,6 +642,9 @@ fn inspect_tensor_chunks(
             break;
         }
         hash = fnv1a64_update(hash, &bytes);
+        if let Some(stats) = numeric_stats.as_mut() {
+            update_numeric_stats(&location.header.dtype, &bytes, stats)?;
+        }
         offset += bytes.len();
         chunks += 1;
     }
@@ -573,6 +657,7 @@ fn inspect_tensor_chunks(
         chunk_bytes,
         chunks,
         fnv1a64: hash,
+        numeric_stats,
     })
 }
 
@@ -764,6 +849,20 @@ fn run() -> Result<(), String> {
         println!("inspect_chunk_bytes={}", inspect.chunk_bytes);
         println!("inspect_chunks={}", inspect.chunks);
         println!("inspect_fnv1a64={:016x}", inspect.fnv1a64);
+        if let Some(stats) = &inspect.numeric_stats {
+            println!("inspect_numeric_elements={}", stats.elements);
+            println!("inspect_numeric_finite_elements={}", stats.finite_elements);
+            println!("inspect_numeric_nan_elements={}", stats.nan_elements);
+            if stats.finite_elements > 0 {
+                println!("inspect_numeric_min={:.9}", stats.min);
+                println!("inspect_numeric_max={:.9}", stats.max);
+                println!(
+                    "inspect_numeric_mean_abs={:.9}",
+                    stats.sum_abs / stats.finite_elements as f64
+                );
+                println!("inspect_numeric_max_abs={:.9}", stats.max_abs);
+            }
+        }
     }
     if let (Some(plan), Some(output)) = (&plan, options.plan_output.as_deref()) {
         let text = serde_json::to_string_pretty(plan)
@@ -794,7 +893,8 @@ fn main() -> ExitCode {
 mod tests {
     use super::{
         Options, default_threads, effective_bpp, estimate_output_bytes, family_for_tensor,
-        quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
+        new_numeric_stats, quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk,
+        resolve_aq_policy, update_numeric_stats,
     };
     use std::fs;
     use std::io::Write;
@@ -880,5 +980,23 @@ mod tests {
         assert_eq!(chunk, vec![2, 3]);
 
         fs::remove_file(path).expect("remove temp safetensors");
+    }
+
+    #[test]
+    fn bf16_numeric_stats_are_decoded_from_little_endian_payload() {
+        let mut stats = new_numeric_stats();
+        let payload = [
+            0x80, 0x3f, // 1.0
+            0x00, 0xc0, // -2.0
+            0x40, 0x40, // 3.0
+        ];
+        update_numeric_stats("BF16", &payload, &mut stats).expect("bf16 stats");
+        assert_eq!(stats.elements, 3);
+        assert_eq!(stats.finite_elements, 3);
+        assert_eq!(stats.nan_elements, 0);
+        assert_eq!(stats.min, -2.0);
+        assert_eq!(stats.max, 3.0);
+        assert_eq!(stats.max_abs, 3.0);
+        assert_eq!(stats.sum_abs, 6.0);
     }
 }
