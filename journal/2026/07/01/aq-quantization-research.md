@@ -249,17 +249,30 @@
   - Rust full-package merge result: 255 quantized tensors, 520 passthrough tensors, 12 codebooks, passthrough payload bytes `5049777120`, total file bytes `9099409318`, directory size `8.5 GiB`, elapsed `8.77 s`, max RSS `12372 KiB`.
   - Rust full-package verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-verify-passthrough-qwen35-9b-p4p6-full-package.txt`; verified 255 quantized tensors and 520 passthrough tensors; elapsed `54.52 s`, max RSS `103288 KiB`.
   - Python and Rust merged manifest JSON files differ by 281 bytes because serde and Python format a few float values differently. Tensor files, codebook files, passthrough byte counts, and SHA-256 verification are consistent.
+- Linear-attention in-projection activation stats:
+  - fixed `tools/collect-activation-stats.py` default regex so it matches Qwen3.5 `linear_attn.in_proj_qkv`, `in_proj_a`, `in_proj_b`, and `in_proj_z`.
+  - reran R9700 activation stats with calib32 prompts: `benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj/`; log `benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj.log`.
+  - stats result: 32 prompts, 14,061 tokens, 248 matched modules, 744 safetensors stat keys, and 24 modules each for `linear_attn.in_proj_qkv/a/b/z/out_proj`; elapsed `33.02 s`, max RSS `15902624 KiB`.
+  - reran full-family weighted codebook export with `--missing-activation-stats error`: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.json`; 24/24 codebooks weighted, fallback rows `0`, elapsed `12.30 s`, max RSS `618104 KiB`.
+  - reran family4 weighted tensor sample: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-scale-codebook-r9700-calib32-inproj-qwen35-9b-family4.jsonl`; 96 rows, 0 failures, elapsed `15.44 s`, max RSS `633212 KiB`.
+  - policy summary: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-policy-r9700-calib32-inproj-qwen35-9b-family4.json`.
+  - new family4 tensor policy estimates: all-g16 combined weighted relative MSE `0.003225949` at 4.5 bpp; cap 4.60 with `attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_z` high gives `0.002340079` at bpp `4.598865`; cap 4.70 with `attn_k,attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_qkv,linear_attn_z` high gives `0.002139622` at bpp `4.666982`; all-g8 gives `0.001886067` at 5.0 bpp.
+  - in-proj12 logit smoke selection: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj12.json`.
+  - in-proj12 logit smoke result: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-inproj12-r9700-calib32-qwen35-9b-prompts8.jsonl`; log `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-inproj12-r9700-calib32-qwen35-9b-prompts8.log`.
+  - in-proj12 scope: layer0/layer1 `linear_attn.in_proj_a/b/qkv/z`, `linear_attn.out_proj`, and `mlp.up_proj`; 8 prompts; total original selected weight bytes `470810624`; elapsed `5:39.00`; max RSS `16365640 KiB`.
+  - in-proj12 mean logit relative MSE / KL: all-g16 `0.000347698` / `0.001960925`; all-g8 `0.000402234` / `0.001103623`; old p4p6 `0.000416993` / `0.001656361`; p4p46_inproj `0.000349033` / `0.001686816`; p4p65_inproj `0.000361837` / `0.001986985`; p4p10_inproj `0.000403207` / `0.001373638`.
+  - interpretation: tensor metrics strongly prefer promoting several in-proj families to g8, but this in-proj-heavy logit smoke still ranks all-g16 best by relative MSE and all-g8 best by KL. `p4p46_inproj` is the best mixed policy by relative MSE and clearly improves over old p4p6 in this scope, but it needs a wider module/perplexity run before replacing p4p6.
 
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, but it also confirmed that tensor-level weighted MSE and logit-level ranking can disagree.
 
 ## Next
 
 - Add larger C++ vs Python/Rust golden tests across random seeds and output bytes.
-- Add activation-stat support for `linear_attn.in_proj_*` or keep those families explicitly unweighted until model-level evidence requires otherwise.
+- Run a wider in-proj policy smoke that includes dense self-attention modules and non-adjacent layers; decide whether `p4p46_inproj` becomes a named candidate.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
 - Replace the current per-tensor temporary conversion driver with a single `ullm-quant` full-conversion command.

@@ -1,0 +1,23 @@
+	Command being timed: "tools/run-aq-weighted-sample.py --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --activation-stats benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj --candidate aq4_e4m3_g16_ts_flloyd16 --candidate aq4_e4m3_g8_ts_flloyd16 --family mlp_down --family mlp_gate --family mlp_up --family linear_attn_a --family linear_attn_b --family linear_attn_qkv --family linear_attn_z --family linear_attn_out --family attn_q --family attn_k --family attn_v --family attn_o --max-tensors 48 --max-tensors-per-family 4 --max-elements-per-tensor 262144 --codebook-granularity per_family_sample --scale-window 4 --weighted-scale-search --weighted-codebook --torch-threads 64 --torch-interop-threads 1 --run-id aq-weighted-scale-codebook-r9700-calib32-inproj-family4 --output benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-scale-codebook-r9700-calib32-inproj-qwen35-9b-family4.jsonl --note weighted_inproj_stats_family4"
+	User time (seconds): 536.82
+	System time (seconds): 110.25
+	Percent of CPU this job got: 4189%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:15.44
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 633212
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 9779379
+	Voluntary context switches: 35990
+	Involuntary context switches: 9957
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 440
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

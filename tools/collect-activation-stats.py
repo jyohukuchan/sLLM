@@ -189,7 +189,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeat-to-length", action="store_true")
     parser.add_argument(
         "--module-pattern",
-        default=r"(self_attn|linear_attn|mlp).*(q_proj|k_proj|v_proj|o_proj|in_proj|out_proj|gate_proj|up_proj|down_proj)$",
+        default=(
+            r"(self_attn|linear_attn|mlp).*"
+            r"(q_proj|k_proj|v_proj|o_proj|in_proj(_qkv|_qkvz|_ba|_[abz])?|"
+            r"out_proj|gate_proj|up_proj|down_proj)$"
+        ),
     )
     parser.add_argument("--max-modules", type=int, default=None)
     parser.add_argument("--model-class", choices=("auto_model", "causal_lm"), default="auto_model")

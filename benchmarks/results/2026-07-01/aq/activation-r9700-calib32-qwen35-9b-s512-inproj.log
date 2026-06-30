@@ -1,0 +1,32 @@
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/759 [00:00<?, ?it/s]Loading weights: 100%|██████████| 759/759 [00:00<00:00, 8150.37it/s]
+[transformers] [1mQwen3_5Model LOAD REPORT[0m from: /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B
+Key            | Status     |  | 
+---------------+------------+--+-
+lm_head.weight | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+	Command being timed: "build/envs/vllm-rocm-nightly/bin/python tools/collect-activation-stats.py --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --output-dir benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj --prompt-file benchmarks/calibration/qwen35-aq-smoke-prompts-v0.1.txt --max-samples 32 --sequence-length 512 --repeat-to-length --model-class auto_model --dtype bfloat16 --device cuda:0 --run-id activation-r9700-calib32-qwen35-9b-s512-inproj --note default pattern includes linear_attn.in_proj_qkv/a/b/z"
+	User time (seconds): 29.11
+	System time (seconds): 16.60
+	Percent of CPU this job got: 138%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:33.02
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 15902624
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 235643
+	Minor (reclaiming a frame) page faults: 4385080
+	Voluntary context switches: 22475
+	Involuntary context switches: 1359
+	Swaps: 0
+	File system inputs: 392344
+	File system outputs: 399712
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

@@ -1158,6 +1158,116 @@ passthrough contents, but their manifest JSON float formatting differs by 281
 bytes in this run. The verifier checked all 255 quantized tensors plus all 520
 passthrough payload SHA-256 values successfully.
 
+## Linear Attention In-Projection Stats
+
+The previous activation-stat collection pattern matched
+`linear_attn.out_proj` but missed Qwen3.5's gated delta-net input projections:
+
+- `linear_attn.in_proj_qkv`
+- `linear_attn.in_proj_a`
+- `linear_attn.in_proj_b`
+- `linear_attn.in_proj_z`
+
+`tools/collect-activation-stats.py` now includes these names in the default
+module regex. Qwen3.5 applies all four modules directly to hidden states, so
+the existing input-second-moment weighting path can be used without a new
+activation source.
+
+New R9700 activation stats:
+
+- stats dir:
+  `benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj/`
+- log:
+  `benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj.log`
+- calibration prompts: 32
+- calibration tokens: 14,061
+- matched modules: 248
+- safetensors stat keys: 744
+- `linear_attn.in_proj_qkv/a/b/z/out_proj`: 24 modules each
+- elapsed wall time: 33.02 s
+- maximum RSS: 15,902,624 KiB
+
+The weighted family codebook export was rerun with
+`--missing-activation-stats error`:
+
+- output:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.json`
+- log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.log`
+- codebooks: 24
+- activation-weighted codebooks: 24
+- activation fallback rows: 0
+- tensor samples used for export: 48
+- elapsed wall time: 12.30 s
+- maximum RSS: 618,104 KiB
+
+The new in-projection activation stats changed the linear-attention in-proj
+family codebooks materially. Max absolute codebook deltas versus the old
+fallback-unweighted export were about `0.018` to `0.060` for
+`linear_attn_a/b/qkv/z`; `linear_attn_out` was unchanged because it was already
+weighted.
+
+Family4 weighted tensor sample with the new stats:
+
+- output:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-scale-codebook-r9700-calib32-inproj-qwen35-9b-family4.jsonl`
+- log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-weighted-scale-codebook-r9700-calib32-inproj-qwen35-9b-family4.log`
+- rows: 96
+- failures: 0
+- elapsed wall time: 15.44 s
+- maximum RSS: 633,212 KiB
+
+Policy summary from the new family4 weighted rows:
+
+- output:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-policy-r9700-calib32-inproj-qwen35-9b-family4.json`
+
+| policy / cap | high-candidate families | parameter-weighted bpp | combined weighted relative MSE |
+| --- | --- | ---: | ---: |
+| all g16 | none | 4.500000 | 0.003225949 |
+| cap 4.55 | `attn_k,attn_v,linear_attn_a,linear_attn_b,linear_attn_out` | 4.545885 | 0.002518783 |
+| cap 4.60 | `attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_z` | 4.598865 | 0.002340079 |
+| cap 4.65 | `attn_k,attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_qkv` | 4.636708 | 0.002260232 |
+| cap 4.70 | `attn_k,attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_qkv,linear_attn_z` | 4.666982 | 0.002139622 |
+| all g8 | all 12 sampled families | 5.000000 | 0.001886067 |
+
+This tensor-level result says the in-proj families are worth considering for
+g8 promotion. It is not enough to update the main policy by itself because the
+module-level logit results are more mixed.
+
+An in-projection-focused cumulative logit smoke was run on 12 modules:
+
+- selection:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj12.json`
+- result:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-inproj12-r9700-calib32-qwen35-9b-prompts8.jsonl`
+- log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-logit-smoke-inproj12-r9700-calib32-qwen35-9b-prompts8.log`
+- scope: layer 0 and layer 1
+  `linear_attn.in_proj_a/b/qkv/z`, `linear_attn.out_proj`, and `mlp.up_proj`
+- prompts: 8
+- sequence length: 64
+- total original selected weight bytes: 470,810,624
+- elapsed wall time: 5:39.00
+- maximum RSS: 16,365,640 KiB
+
+| variant / policy | mean logit relative MSE | mean abs error | mean KL(ref, candidate) | top1 matches | mean top10 overlap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all g16 weighted | 0.000347698 | 0.035510909 | 0.001960925 | 8 / 8 | 9.625 |
+| all g8 weighted | 0.000402234 | 0.037558737 | 0.001103623 | 8 / 8 | 9.750 |
+| p4p6: only `linear_attn_out` high in this scope | 0.000416993 | 0.038574185 | 0.001656361 | 8 / 8 | 9.875 |
+| p4p46: `linear_attn_a,b,out,z` high; `qkv,mlp_up` low | 0.000349033 | 0.036177373 | 0.001686816 | 8 / 8 | 9.875 |
+| p4p65: `linear_attn_a,b,out,qkv` high; `z,mlp_up` low | 0.000361837 | 0.035491206 | 0.001986985 | 8 / 8 | 9.875 |
+| p4p10: all linear-attention modules high; `mlp_up` low | 0.000403207 | 0.036969288 | 0.001373638 | 8 / 8 | 9.875 |
+
+For this in-proj-heavy smoke, all-g16 was best by logit relative MSE, all-g8
+was best by KL, and p4p46 was the best mixed policy by logit relative MSE.
+Compared with the old p4p6 policy in the same scope, p4p46 reduced mean logit
+relative MSE from `0.000416993` to `0.000349033`. This supports keeping
+in-proj g8 promotion as an active candidate, but it does not justify replacing
+the main p4p6 policy before a wider module-level or perplexity run.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -1169,11 +1279,21 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 - Family-level or tensor-level LUT aggregation must be tested because sample-local codebooks are too optimistic for final format decisions.
 - Zero-preserving versus free16 codebooks must be evaluated with model-level quality, not only MSE.
 - GGUF linear-attention comparison must apply the Qwen3.5 V-head reorder used by llama.cpp conversion.
+- Activation weighting now covers Qwen3.5 linear-attention in-projection
+  modules, but tensor-level improvements and logit-level improvements do not
+  rank the same. The main policy should therefore stay conservative until a
+  wider module-level or perplexity run confirms an in-proj promotion.
 
 ## Next Actions
 
-1. Add activation-stat collection for `linear_attn.in_proj_*`, or explicitly decide that those families use unweighted codebooks until model-level evidence says otherwise.
-2. Replace the current per-tensor temporary conversion driver with a single `ullm-quant` full-conversion command now that Rust-side merge exists.
-3. Replace or approximate the exact tensor-scale pre-pass before scaling from 12 tensors to all p4p6 tensors.
-4. Run a wider p4p6 prototype conversion with more tensors per family, then all 255 quantized tensors.
-5. Add SIMD and multithreaded scheduling only after the scalar C++ semantics remain stable across wider conversion.
+1. Run a wider in-proj policy smoke that includes dense self-attention modules
+   and more non-adjacent layers, then decide whether p4p46 should become a
+   named candidate.
+2. Replace the current per-tensor temporary conversion driver with a single
+   `ullm-quant` full-conversion command now that Rust-side merge exists.
+3. Replace or approximate the exact tensor-scale pre-pass before scaling from
+   12 tensors to all policy-selected tensors.
+4. Rerun full prototype conversion with the in-proj-weighted codebooks for the
+   current conservative policy and compare against the previous p4p6 package.
+5. Add SIMD and multithreaded scheduling only after the scalar C++ semantics
+   remain stable across wider conversion.
