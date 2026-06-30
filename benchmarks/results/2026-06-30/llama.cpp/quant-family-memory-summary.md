@@ -23,4 +23,4 @@
 
 - The `Decode x GiB` column is `decode tokens/s * consumed VRAM GiB`. It is a reference column, not a standalone quality score.
 - Existing earlier rows from this date do not contain memory metrics; use this run or later runs for memory comparisons.
-- The local Qwen3-14B-FP8 artifact is not present yet. External-engine R9700 runs should use `Qwen/Qwen3-14B-FP8` after downloading it.
+- The local Qwen3-14B-FP8 artifact is now present at `~/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8/`; external-engine R9700 results are tracked separately under `benchmarks/results/2026-06-30/{vllm,sglang,atom}/`.

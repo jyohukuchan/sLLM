@@ -14,8 +14,8 @@ Measure whether vLLM, SGLang, and ROCm/ATOM can run a smaller FP8 workload on th
 
 ## Procedure
 
-1. Download `Qwen/Qwen3-14B-FP8` to `~/datapool/ai_models/hf/Qwen/Qwen3-14B-FP8/`.
-2. Keep V620 out of the process with `HIP_VISIBLE_DEVICES=1` or an engine-specific R9700-only setting.
+1. Download `Qwen/Qwen3-14B-FP8` with `hf download` to `~/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8/`.
+2. Keep V620 out of the process with `ROCR_VISIBLE_DEVICES=1` for ROCm Python engines. `HIP_VISIBLE_DEVICES=1` can leave AITER seeing a V620 first.
 3. Record the exact engine commit, Python environment, PyTorch/ROCm version, and launch command.
 4. Run a minimal load test first.
 5. Run a representative benchmark: `prompt_tokens=512`, `generated_tokens=128`, `concurrent_requests=1`, `tp=1`, `pp=1`.
@@ -34,3 +34,4 @@ Measure whether vLLM, SGLang, and ROCm/ATOM can run a smaller FP8 workload on th
 - This is not a replacement for MI300X TP/PP testing. It is a local feasibility and baseline pass.
 - Qwen3-14B-FP8 is a safetensors/Hugging Face target, not a GGUF comparison target.
 - llama.cpp GGUF quant-family results remain separate from vLLM/SGLang/ATOM FP8 results.
+- The 2026-06-30 run is recorded in `benchmarks/results/2026-06-30/external-r9700-qwen3-14b-fp8-summary.md`.
