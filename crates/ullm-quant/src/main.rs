@@ -6,6 +6,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -84,6 +85,13 @@ struct Options {
     verify_prototype_dir: Option<PathBuf>,
     verify_prototype_all: bool,
     verify_passthrough: bool,
+    merge_policy_summary: Option<PathBuf>,
+    merge_plan_json: Option<PathBuf>,
+    merge_output_dir: Option<PathBuf>,
+    merge_summary_output: Option<PathBuf>,
+    merge_include_passthrough: bool,
+    merge_copy_buffer_bytes: usize,
+    merge_overwrite: bool,
     tensor_scale_override: Option<f32>,
     chunk_bytes: usize,
     scale_window: usize,
@@ -189,7 +197,7 @@ struct QuantDryRunStats {
     scale_window_improved_groups: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct TensorPlan {
     name: String,
     source_file: String,
@@ -206,7 +214,7 @@ struct TensorPlan {
     estimated_effective_bpp: f64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct AqPolicyPlan {
     policy_id: String,
     low_format: String,
@@ -214,7 +222,7 @@ struct AqPolicyPlan {
     high_families: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ModelPlan {
     schema_version: String,
     model_dir: String,
@@ -234,7 +242,7 @@ struct PrototypeManifest {
     source_model_dir: String,
     tensors: Vec<PrototypeTensorManifest>,
     codebooks: Vec<PrototypeCodebookManifest>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     passthrough_tensors: Vec<PrototypePassthroughTensorManifest>,
 }
 
@@ -292,6 +300,35 @@ struct PrototypeCodebookManifest {
     file: String,
     encoding: String,
     entries: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrototypePolicySmokeSummary {
+    results: Vec<PrototypePolicySmokeResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrototypePolicySmokeResult {
+    returncode: i32,
+    output_dir: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CopiedFileSummary {
+    path: String,
+    bytes: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct PrototypeMergeSummary {
+    schema_version: String,
+    policy_summary: String,
+    output_dir: String,
+    tensor_count: usize,
+    passthrough_tensor_count: usize,
+    codebook_count: usize,
+    total_file_bytes: usize,
+    files: Vec<CopiedFileSummary>,
 }
 
 #[derive(Debug)]
@@ -360,6 +397,13 @@ fn parse_options() -> Result<Options, String> {
         verify_prototype_dir: None,
         verify_prototype_all: false,
         verify_passthrough: false,
+        merge_policy_summary: None,
+        merge_plan_json: None,
+        merge_output_dir: None,
+        merge_summary_output: None,
+        merge_include_passthrough: false,
+        merge_copy_buffer_bytes: 8 * 1024 * 1024,
+        merge_overwrite: false,
         tensor_scale_override: None,
         chunk_bytes: 64 * 1024 * 1024,
         scale_window: 0,
@@ -432,6 +476,36 @@ fn parse_options() -> Result<Options, String> {
             }
             "--verify-prototype-all" => options.verify_prototype_all = true,
             "--verify-passthrough" => options.verify_passthrough = true,
+            "--merge-policy-summary" => {
+                options.merge_policy_summary =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--merge-policy-summary requires a value".to_string()
+                    })?));
+            }
+            "--merge-plan-json" => {
+                options.merge_plan_json =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--merge-plan-json requires a value".to_string()
+                    })?));
+            }
+            "--merge-output-dir" => {
+                options.merge_output_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--merge-output-dir requires a value".to_string()
+                    })?));
+            }
+            "--merge-summary-output" => {
+                options.merge_summary_output =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--merge-summary-output requires a value".to_string()
+                    })?));
+            }
+            "--merge-include-passthrough" => options.merge_include_passthrough = true,
+            "--merge-copy-buffer-bytes" => {
+                options.merge_copy_buffer_bytes =
+                    parse_usize("--merge-copy-buffer-bytes", args.next())?;
+            }
+            "--merge-overwrite" => options.merge_overwrite = true,
             "--tensor-scale-override" => {
                 options.tensor_scale_override =
                     Some(parse_positive_f32("--tensor-scale-override", args.next())?)
@@ -498,6 +572,13 @@ fn print_help() {
     println!(
         "  --verify-passthrough          verify passthrough payloads in --verify-prototype-dir"
     );
+    println!("  --merge-policy-summary <PATH> merge per-tensor prototype summary JSON");
+    println!("  --merge-plan-json <PATH>      model plan JSON for passthrough merge");
+    println!("  --merge-output-dir <PATH>     merged prototype .ullm.d output directory");
+    println!("  --merge-summary-output <PATH> write merge summary JSON");
+    println!("  --merge-include-passthrough   include passthrough tensors from --merge-plan-json");
+    println!("  --merge-copy-buffer-bytes <N> payload copy buffer size for merge");
+    println!("  --merge-overwrite             replace existing --merge-output-dir");
     println!("  --tensor-scale-override <F>   skip tensor-scale estimation for prototype output");
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
@@ -1921,6 +2002,335 @@ fn bytes_to_lower_hex(bytes: &[u8]) -> String {
     out
 }
 
+fn read_json_file<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    serde_json::from_str(&text).map_err(|err| format!("failed to parse {}: {err}", path.display()))
+}
+
+fn write_json_pretty_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|err| format!("failed to serialize {}: {err}", path.display()))?;
+    fs::write(path, text + "\n").map_err(|err| format!("failed to write {}: {err}", path.display()))
+}
+
+fn file_len_usize(path: &Path) -> Result<usize, String> {
+    let len = fs::metadata(path)
+        .map_err(|err| format!("failed to stat {}: {err}", path.display()))?
+        .len();
+    usize::try_from(len).map_err(|_| format!("{} is too large for usize", path.display()))
+}
+
+fn prepare_merge_output_dir(output_dir: &Path, overwrite: bool) -> Result<(), String> {
+    if output_dir.exists() {
+        if !overwrite {
+            return Err(format!(
+                "{} already exists; pass --merge-overwrite to replace it",
+                output_dir.display()
+            ));
+        }
+        let metadata = fs::symlink_metadata(output_dir)
+            .map_err(|err| format!("failed to stat {}: {err}", output_dir.display()))?;
+        if metadata.is_dir() {
+            fs::remove_dir_all(output_dir)
+                .map_err(|err| format!("failed to remove {}: {err}", output_dir.display()))?;
+        } else {
+            fs::remove_file(output_dir)
+                .map_err(|err| format!("failed to remove {}: {err}", output_dir.display()))?;
+        }
+    }
+    fs::create_dir_all(output_dir.join("tensors")).map_err(|err| {
+        format!(
+            "failed to create {}: {err}",
+            output_dir.join("tensors").display()
+        )
+    })?;
+    fs::create_dir_all(output_dir.join("codebooks")).map_err(|err| {
+        format!(
+            "failed to create {}: {err}",
+            output_dir.join("codebooks").display()
+        )
+    })
+}
+
+fn copy_file_for_merge(src: &Path, dst: &Path, overwrite: bool) -> Result<usize, String> {
+    if dst.exists() && !overwrite {
+        return Err(format!(
+            "{} already exists; pass --merge-overwrite to replace it",
+            dst.display()
+        ));
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    let bytes = fs::copy(src, dst).map_err(|err| {
+        format!(
+            "failed to copy {} to {}: {err}",
+            src.display(),
+            dst.display()
+        )
+    })?;
+    usize::try_from(bytes).map_err(|_| format!("{} is too large for usize", dst.display()))
+}
+
+fn copy_safetensors_payload_for_merge(
+    src_file: &Path,
+    tensor_name: &str,
+    dst: &Path,
+    overwrite: bool,
+    buffer_bytes: usize,
+) -> Result<(usize, String), String> {
+    if dst.exists() && !overwrite {
+        return Err(format!(
+            "{} already exists; pass --merge-overwrite to replace it",
+            dst.display()
+        ));
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    let metadata = read_safetensors_metadata(src_file)?;
+    let header = metadata
+        .tensors
+        .get(tensor_name)
+        .ok_or_else(|| format!("tensor {tensor_name} not found in {}", src_file.display()))?;
+    if header.data_offsets[1] < header.data_offsets[0] {
+        return Err(format!(
+            "tensor {tensor_name} has invalid data_offsets {:?}",
+            header.data_offsets
+        ));
+    }
+    let payload_bytes = header.data_offsets[1] - header.data_offsets[0];
+    let absolute_offset = metadata
+        .data_start
+        .checked_add(header.data_offsets[0] as u64)
+        .ok_or_else(|| format!("tensor data offset overflows for {}", src_file.display()))?;
+
+    let mut src = fs::File::open(src_file)
+        .map_err(|err| format!("failed to open {}: {err}", src_file.display()))?;
+    src.seek(SeekFrom::Start(absolute_offset))
+        .map_err(|err| format!("failed to seek {}: {err}", src_file.display()))?;
+    let dst_file = fs::File::create(dst)
+        .map_err(|err| format!("failed to create {}: {err}", dst.display()))?;
+    let mut writer = BufWriter::new(dst_file);
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; buffer_bytes.max(1)];
+    let mut remaining = payload_bytes;
+    let mut copied = 0usize;
+    while remaining > 0 {
+        let read_len = remaining.min(buffer.len());
+        src.read_exact(&mut buffer[..read_len])
+            .map_err(|err| format!("failed to read payload from {}: {err}", src_file.display()))?;
+        writer
+            .write_all(&buffer[..read_len])
+            .map_err(|err| format!("failed to write {}: {err}", dst.display()))?;
+        hasher.update(&buffer[..read_len]);
+        copied = copied
+            .checked_add(read_len)
+            .ok_or_else(|| "copied payload byte count overflows".to_string())?;
+        remaining -= read_len;
+    }
+    writer
+        .flush()
+        .map_err(|err| format!("failed to flush {}: {err}", dst.display()))?;
+    Ok((copied, bytes_to_lower_hex(&hasher.finalize())))
+}
+
+fn merge_passthrough_tensors(
+    plan: &ModelPlan,
+    output_dir: &Path,
+    overwrite: bool,
+    buffer_bytes: usize,
+    copied_files: &mut Vec<CopiedFileSummary>,
+) -> Result<Vec<PrototypePassthroughTensorManifest>, String> {
+    let mut passthrough = Vec::new();
+    for (index, tensor) in plan.tensors.iter().enumerate() {
+        if tensor.action != "passthrough" {
+            continue;
+        }
+        let src_file = PathBuf::from(&tensor.source_file);
+        let tensor_stem = format!("{index:03}-{}", sanitize_file_stem(&tensor.name));
+        let dst_rel = PathBuf::from("passthrough").join(format!("{tensor_stem}.raw"));
+        let dst = output_dir.join(&dst_rel);
+        let (bytes_copied, sha256) = copy_safetensors_payload_for_merge(
+            &src_file,
+            &tensor.name,
+            &dst,
+            overwrite,
+            buffer_bytes,
+        )?;
+        if bytes_copied != tensor.n_bytes {
+            return Err(format!(
+                "copied {bytes_copied} bytes for {}, expected {}",
+                tensor.name, tensor.n_bytes
+            ));
+        }
+        copied_files.push(CopiedFileSummary {
+            path: relative_path_string(&dst_rel),
+            bytes: bytes_copied,
+        });
+        passthrough.push(PrototypePassthroughTensorManifest {
+            name: tensor.name.clone(),
+            source_file: tensor.source_file.clone(),
+            dtype: tensor.dtype.clone(),
+            shape: tensor.shape.clone(),
+            family: tensor.family.clone(),
+            elements: tensor.n_elements,
+            payload_file: relative_path_string(&dst_rel),
+            payload_encoding: "raw_safetensors_payload".to_string(),
+            payload_bytes: bytes_copied,
+            payload_sha256: sha256,
+        });
+    }
+    Ok(passthrough)
+}
+
+fn merge_prototype_dirs(
+    policy_summary_path: &Path,
+    plan_json_path: Option<&Path>,
+    output_dir: &Path,
+    summary_output_path: &Path,
+    include_passthrough: bool,
+    copy_buffer_bytes: usize,
+    overwrite: bool,
+) -> Result<PrototypeMergeSummary, String> {
+    if include_passthrough && plan_json_path.is_none() {
+        return Err("--merge-include-passthrough requires --merge-plan-json".to_string());
+    }
+    let summary: PrototypePolicySmokeSummary = read_json_file(policy_summary_path)?;
+    let plan = if include_passthrough {
+        Some(read_json_file::<ModelPlan>(
+            plan_json_path.expect("checked above"),
+        )?)
+    } else {
+        None
+    };
+    prepare_merge_output_dir(output_dir, overwrite)?;
+
+    let mut merged_tensors = Vec::new();
+    let mut merged_codebooks = Vec::new();
+    let mut codebook_files: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut copied_files = Vec::new();
+    let mut source_model_dir: Option<String> = None;
+
+    for (result_index, result) in summary.results.iter().enumerate() {
+        if result.returncode != 0 {
+            return Err(format!(
+                "cannot merge failed result {result_index}: returncode={} output_dir={}",
+                result.returncode, result.output_dir
+            ));
+        }
+        let src_dir = PathBuf::from(&result.output_dir);
+        let manifest_path = src_dir.join("manifest.json");
+        let manifest: PrototypeManifest = read_json_file(&manifest_path)?;
+        if source_model_dir.is_none() {
+            source_model_dir = Some(manifest.source_model_dir.clone());
+        }
+
+        for tensor in manifest.tensors {
+            let tensor_stem = format!("{result_index:03}-{}", sanitize_file_stem(&tensor.name));
+            let src_index = src_dir.join(&tensor.index_file);
+            let src_scale = src_dir.join(&tensor.scale_file);
+            let dst_index_rel = PathBuf::from("tensors").join(format!("{tensor_stem}.idx4"));
+            let dst_scale_rel = PathBuf::from("tensors").join(format!("{tensor_stem}.scale_u8"));
+            let index_bytes =
+                copy_file_for_merge(&src_index, &output_dir.join(&dst_index_rel), overwrite)?;
+            let scale_bytes =
+                copy_file_for_merge(&src_scale, &output_dir.join(&dst_scale_rel), overwrite)?;
+            copied_files.push(CopiedFileSummary {
+                path: relative_path_string(&dst_index_rel),
+                bytes: index_bytes,
+            });
+            copied_files.push(CopiedFileSummary {
+                path: relative_path_string(&dst_scale_rel),
+                bytes: scale_bytes,
+            });
+
+            let codebook_key = (tensor.family.clone(), tensor.candidate_id.clone());
+            let codebook_file = if let Some(existing) = codebook_files.get(&codebook_key) {
+                existing.clone()
+            } else {
+                let src_codebook = src_dir.join(&tensor.codebook_file);
+                let codebook_rel = PathBuf::from("codebooks").join(format!(
+                    "{}.f32",
+                    sanitize_file_stem(&format!("{}__{}", codebook_key.0, codebook_key.1))
+                ));
+                let codebook_bytes =
+                    copy_file_for_merge(&src_codebook, &output_dir.join(&codebook_rel), overwrite)?;
+                let codebook_file = relative_path_string(&codebook_rel);
+                merged_codebooks.push(PrototypeCodebookManifest {
+                    family: codebook_key.0.clone(),
+                    candidate_id: codebook_key.1.clone(),
+                    file: codebook_file.clone(),
+                    encoding: "f32_le".to_string(),
+                    entries: 16,
+                });
+                copied_files.push(CopiedFileSummary {
+                    path: codebook_file.clone(),
+                    bytes: codebook_bytes,
+                });
+                codebook_files.insert(codebook_key, codebook_file.clone());
+                codebook_file
+            };
+
+            let mut merged = tensor;
+            merged.index_file = relative_path_string(&dst_index_rel);
+            merged.scale_file = relative_path_string(&dst_scale_rel);
+            merged.codebook_file = codebook_file;
+            merged_tensors.push(merged);
+        }
+    }
+
+    let passthrough_tensors = if let Some(plan) = plan.as_ref() {
+        merge_passthrough_tensors(
+            plan,
+            output_dir,
+            overwrite,
+            copy_buffer_bytes,
+            &mut copied_files,
+        )?
+    } else {
+        Vec::new()
+    };
+
+    let manifest = PrototypeManifest {
+        schema_version: "ullm-prototype-manifest-v0.1".to_string(),
+        source_model_dir: source_model_dir.unwrap_or_default(),
+        tensors: merged_tensors,
+        codebooks: merged_codebooks,
+        passthrough_tensors,
+    };
+    let manifest_path = output_dir.join("manifest.json");
+    write_json_pretty_file(&manifest_path, &manifest)?;
+    copied_files.push(CopiedFileSummary {
+        path: "manifest.json".to_string(),
+        bytes: file_len_usize(&manifest_path)?,
+    });
+
+    let total_file_bytes = copied_files.iter().try_fold(0usize, |acc, item| {
+        acc.checked_add(item.bytes)
+            .ok_or_else(|| "merged file byte count overflows".to_string())
+    })?;
+    let merge_summary = PrototypeMergeSummary {
+        schema_version: "ullm-prototype-merge-summary-v0.1".to_string(),
+        policy_summary: policy_summary_path.display().to_string(),
+        output_dir: output_dir.display().to_string(),
+        tensor_count: manifest.tensors.len(),
+        passthrough_tensor_count: manifest.passthrough_tensors.len(),
+        codebook_count: manifest.codebooks.len(),
+        total_file_bytes,
+        files: copied_files,
+    };
+    write_json_pretty_file(summary_output_path, &merge_summary)?;
+    Ok(merge_summary)
+}
+
 fn verify_passthrough_tensors(
     output_dir: &Path,
     buffer_bytes: usize,
@@ -2530,6 +2940,44 @@ fn run() -> Result<(), String> {
             println!("prototype_verify=skipped");
         }
     }
+    if options.merge_policy_summary.is_some()
+        || options.merge_plan_json.is_some()
+        || options.merge_output_dir.is_some()
+        || options.merge_summary_output.is_some()
+        || options.merge_include_passthrough
+    {
+        let policy_summary = options
+            .merge_policy_summary
+            .as_deref()
+            .ok_or_else(|| "--merge-policy-summary is required for prototype merge".to_string())?;
+        let output_dir = options
+            .merge_output_dir
+            .as_deref()
+            .ok_or_else(|| "--merge-output-dir is required for prototype merge".to_string())?;
+        let summary_output = options
+            .merge_summary_output
+            .as_deref()
+            .ok_or_else(|| "--merge-summary-output is required for prototype merge".to_string())?;
+        let merge_summary = merge_prototype_dirs(
+            policy_summary,
+            options.merge_plan_json.as_deref(),
+            output_dir,
+            summary_output,
+            options.merge_include_passthrough,
+            options.merge_copy_buffer_bytes,
+            options.merge_overwrite,
+        )?;
+        println!("merge_policy_summary={}", policy_summary.display());
+        println!("merge_output_dir={}", output_dir.display());
+        println!("merge_summary_output={}", summary_output.display());
+        println!("merge_tensor_count={}", merge_summary.tensor_count);
+        println!(
+            "merge_passthrough_tensor_count={}",
+            merge_summary.passthrough_tensor_count
+        );
+        println!("merge_codebook_count={}", merge_summary.codebook_count);
+        println!("merge_total_file_bytes={}", merge_summary.total_file_bytes);
+    }
     if let Some(output_dir) = options.verify_prototype_dir.as_deref() {
         let count = if options.verify_prototype_all {
             prototype_tensor_count(output_dir)?
@@ -2606,10 +3054,10 @@ mod tests {
         AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport, Options,
         PrototypeManifest, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, bytes_to_lower_hex,
         default_threads, effective_bpp, empty_aq_quant_metrics, estimate_output_bytes,
-        family_for_tensor, new_aq_group_stats, new_numeric_stats, new_quant_dry_run_stats,
-        quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
-        select_codebook, ullm_aq_quantize_chunk_v1, update_aq_group_stats, update_numeric_stats,
-        update_quant_dry_run_stats,
+        family_for_tensor, merge_prototype_dirs, new_aq_group_stats, new_numeric_stats,
+        new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
+        read_tensor_payload_chunk, resolve_aq_policy, select_codebook, ullm_aq_quantize_chunk_v1,
+        update_aq_group_stats, update_numeric_stats, update_quant_dry_run_stats,
     };
     use std::fs;
     use std::io::Write;
@@ -2650,6 +3098,13 @@ mod tests {
             verify_prototype_dir: None,
             verify_prototype_all: false,
             verify_passthrough: false,
+            merge_policy_summary: None,
+            merge_plan_json: None,
+            merge_output_dir: None,
+            merge_summary_output: None,
+            merge_include_passthrough: false,
+            merge_copy_buffer_bytes: 1024,
+            merge_overwrite: false,
             tensor_scale_override: None,
             chunk_bytes: 1024,
             scale_window: 0,
@@ -2724,6 +3179,210 @@ mod tests {
     #[test]
     fn bytes_to_lower_hex_uses_two_digits_per_byte() {
         assert_eq!(bytes_to_lower_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+    }
+
+    #[test]
+    fn merge_prototype_dirs_copies_quantized_and_passthrough_payloads() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ullm-merge-test-{unique}"));
+        let part_dir = root.join("parts").join("000-quant.ullm.d");
+        let part_dir2 = root.join("parts").join("001-quant2.ullm.d");
+        let output_dir = root.join("merged.ullm.d");
+        let summary_path = root.join("summary.json");
+        let plan_path = root.join("plan.json");
+        let merge_summary_path = root.join("merge-summary.json");
+        let safetensors_path = root.join("model.safetensors");
+        fs::create_dir_all(part_dir.join("tensors")).expect("part tensors dir");
+        fs::create_dir_all(part_dir.join("codebooks")).expect("part codebooks dir");
+        fs::create_dir_all(part_dir2.join("tensors")).expect("part2 tensors dir");
+        fs::create_dir_all(part_dir2.join("codebooks")).expect("part2 codebooks dir");
+
+        fs::write(part_dir.join("tensors").join("quant.idx4"), [0x21, 0x43]).expect("index");
+        fs::write(part_dir.join("tensors").join("quant.scale_u8"), [7]).expect("scale");
+        let mut codebook =
+            fs::File::create(part_dir.join("codebooks").join("mlp_up.f32")).expect("codebook");
+        for index in 0..16u32 {
+            codebook
+                .write_all(&(index as f32).to_le_bytes())
+                .expect("codebook value");
+        }
+        drop(codebook);
+        fs::write(part_dir2.join("tensors").join("quant2.idx4"), [0x65, 0x87]).expect("index2");
+        fs::write(part_dir2.join("tensors").join("quant2.scale_u8"), [8]).expect("scale2");
+        let mut codebook2 =
+            fs::File::create(part_dir2.join("codebooks").join("mlp_up.f32")).expect("codebook2");
+        for index in 0..16u32 {
+            codebook2
+                .write_all(&((100 + index) as f32).to_le_bytes())
+                .expect("codebook2 value");
+        }
+        drop(codebook2);
+
+        let header = br#"{"keep":{"dtype":"U8","shape":[4],"data_offsets":[0,4]}}"#;
+        let mut safetensors = fs::File::create(&safetensors_path).expect("safetensors");
+        safetensors
+            .write_all(&(header.len() as u64).to_le_bytes())
+            .expect("header len");
+        safetensors.write_all(header).expect("header");
+        safetensors.write_all(&[9, 8, 7, 6]).expect("payload");
+        drop(safetensors);
+
+        let manifest = serde_json::json!({
+            "schema_version": "ullm-prototype-manifest-v0.1",
+            "source_model_dir": root.join("model").display().to_string(),
+            "tensors": [{
+                "name": "quant.weight",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "BF16",
+                "shape": [2, 2],
+                "family": "mlp_up",
+                "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+                "scale_format": "e4m3",
+                "group_size": 16,
+                "tensor_scale": 1.0,
+                "scale_window": 4,
+                "elements": 4,
+                "groups": 1,
+                "index_file": "tensors/quant.idx4",
+                "index_encoding": "idx4_low_nibble_first",
+                "scale_file": "tensors/quant.scale_u8",
+                "scale_encoding": "u8_scale_table_index",
+                "codebook_file": "codebooks/mlp_up.f32",
+                "metrics": {
+                    "mse": 0.0,
+                    "relative_mse": 0.0,
+                    "max_abs_error": 0.0,
+                    "scale_index_min": 0,
+                    "scale_index_max": 0,
+                    "scale_window_improved_groups": 0,
+                    "index_counts": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+                }
+            }],
+            "codebooks": [{
+                "family": "mlp_up",
+                "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+                "file": "codebooks/mlp_up.f32",
+                "encoding": "f32_le",
+                "entries": 16
+            }]
+        });
+        fs::write(
+            part_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("manifest");
+        let mut manifest2 = manifest.clone();
+        manifest2["tensors"][0]["name"] = serde_json::json!("quant2.weight");
+        manifest2["tensors"][0]["index_file"] = serde_json::json!("tensors/quant2.idx4");
+        manifest2["tensors"][0]["scale_file"] = serde_json::json!("tensors/quant2.scale_u8");
+        fs::write(
+            part_dir2.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest2).expect("manifest2 json"),
+        )
+        .expect("manifest2");
+
+        let summary = serde_json::json!({
+            "results": [{
+                "returncode": 0,
+                "output_dir": part_dir.display().to_string()
+            }, {
+                "returncode": 0,
+                "output_dir": part_dir2.display().to_string()
+            }]
+        });
+        fs::write(
+            &summary_path,
+            serde_json::to_string_pretty(&summary).expect("summary json"),
+        )
+        .expect("summary");
+
+        let plan = serde_json::json!({
+            "schema_version": "ullm-quant-plan-v0.3",
+            "model_dir": root.join("model").display().to_string(),
+            "aq_policy": {
+                "policy_id": "all-g16",
+                "low_format": "aq4_e4m3_g16_ts_flloyd16",
+                "high_format": "aq4_e4m3_g8_ts_flloyd16",
+                "high_families": []
+            },
+            "tensor_count": 1,
+            "supported_tensor_count": 0,
+            "passthrough_tensor_count": 1,
+            "total_tensor_bytes": 4,
+            "total_estimated_output_bytes": 4,
+            "estimated_output_to_input_ratio": 1.0,
+            "tensors": [{
+                "name": "keep",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "U8",
+                "shape": [4],
+                "family": "other",
+                "n_elements": 4,
+                "n_bytes": 4,
+                "supported_input": false,
+                "action": "passthrough",
+                "quant_format": null,
+                "quant_role": null,
+                "estimated_output_bytes": 4,
+                "estimated_effective_bpp": 8.0
+            }]
+        });
+        fs::write(
+            &plan_path,
+            serde_json::to_string_pretty(&plan).expect("plan json"),
+        )
+        .expect("plan");
+
+        let merge = merge_prototype_dirs(
+            &summary_path,
+            Some(&plan_path),
+            &output_dir,
+            &merge_summary_path,
+            true,
+            2,
+            false,
+        )
+        .expect("merge");
+        assert_eq!(merge.tensor_count, 2);
+        assert_eq!(merge.passthrough_tensor_count, 1);
+        assert_eq!(merge.codebook_count, 1);
+        assert_eq!(
+            fs::read(output_dir.join("tensors").join("000-quant_weight.idx4")).expect("idx4"),
+            vec![0x21, 0x43]
+        );
+        assert_eq!(
+            fs::read(output_dir.join("tensors").join("001-quant2_weight.idx4")).expect("idx4 2"),
+            vec![0x65, 0x87]
+        );
+        assert_eq!(
+            fs::read(output_dir.join("passthrough").join("000-keep.raw")).expect("passthrough"),
+            vec![9, 8, 7, 6]
+        );
+        assert_eq!(
+            fs::read(
+                output_dir
+                    .join("codebooks")
+                    .join("mlp_up__aq4_e4m3_g16_ts_flloyd16.f32")
+            )
+            .expect("deduped codebook")[..4],
+            0.0f32.to_le_bytes()
+        );
+        let merged_manifest: PrototypeManifest =
+            serde_json::from_str(&fs::read_to_string(output_dir.join("manifest.json")).unwrap())
+                .expect("merged manifest");
+        assert_eq!(
+            merged_manifest.tensors[0].codebook_file,
+            "codebooks/mlp_up__aq4_e4m3_g16_ts_flloyd16.f32"
+        );
+        assert_eq!(
+            merged_manifest.passthrough_tensors[0].payload_sha256,
+            "63d987d1c6d69751c17297f410f5b3547a65d096a8993b35bcb4f9cad054f176"
+        );
+
+        fs::remove_dir_all(root).expect("remove temp root");
     }
 
     #[test]

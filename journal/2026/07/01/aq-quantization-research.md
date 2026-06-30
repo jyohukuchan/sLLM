@@ -237,6 +237,18 @@
   - added explicit Rust passthrough verification via `--verify-passthrough`; `sha2` dependency added for SHA-256. The verifier streams payload files and checks byte length plus `payload_sha256`.
   - passthrough verification log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-merged-verify-passthrough-qwen35-9b-p4p6-full-package.txt`; verified 255 quantized tensors and 520 passthrough tensors; passthrough payload bytes `5049777120`; elapsed `55.37 s`, max RSS `104596 KiB`.
   - `cargo test -p ullm-quant` passes 20 tests after adding manifest default and hex encoding tests.
+  - moved prototype merge behavior into `ullm-quant` itself.
+  - added merge CLI flags: `--merge-policy-summary`, `--merge-plan-json`, `--merge-output-dir`, `--merge-summary-output`, `--merge-include-passthrough`, `--merge-copy-buffer-bytes`, and `--merge-overwrite`.
+  - Rust merge copies quantized index/scale files, deduplicates codebooks by `(family,candidate_id)`, and streams passthrough safetensors payloads while computing SHA-256.
+  - added a unit fixture covering two quantized tensors sharing one codebook plus one passthrough tensor copied with a tiny buffer.
+  - test status after merge implementation: `cargo fmt -p ullm-quant --check`, `cargo test -p ullm-quant`, and `cargo build -p ullm-quant --release` pass. `cargo test -p ullm-quant` now passes 21 tests.
+  - Rust full-quantized merge summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-full-quantized.json`; log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-full-quantized.log`; output `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-rust-merged.ullm.d`.
+  - Rust full-quantized merge result: 255 tensors, 12 codebooks, total file bytes `4049329123`, directory size `3.8 GiB`, elapsed `1.55 s`, max RSS `2076 KiB`.
+  - Rust full-quantized verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-verify-qwen35-9b-p4p6-full-quantized.txt`; all 255 tensors verified; elapsed `52.55 s`, max RSS `102216 KiB`.
+  - Rust full-package merge summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-full-package.json`; log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-full-package.log`; output `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-package-rust-merged.ullm.d`.
+  - Rust full-package merge result: 255 quantized tensors, 520 passthrough tensors, 12 codebooks, passthrough payload bytes `5049777120`, total file bytes `9099409318`, directory size `8.5 GiB`, elapsed `8.77 s`, max RSS `12372 KiB`.
+  - Rust full-package verify log: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-verify-passthrough-qwen35-9b-p4p6-full-package.txt`; verified 255 quantized tensors and 520 passthrough tensors; elapsed `54.52 s`, max RSS `103288 KiB`.
+  - Python and Rust merged manifest JSON files differ by 281 bytes because serde and Python format a few float values differently. Tensor files, codebook files, passthrough byte counts, and SHA-256 verification are consistent.
 
 ## Current Interpretation
 
@@ -250,5 +262,5 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Add activation-stat support for `linear_attn.in_proj_*` or keep those families explicitly unweighted until model-level evidence requires otherwise.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
-- Move merge behavior into `ullm-quant` itself so multi-tensor output does not require per-tensor temporary directories.
-- Move full-package merge behavior into `ullm-quant` itself; passthrough payload size/hash verification now exists.
+- Replace the current per-tensor temporary conversion driver with a single `ullm-quant` full-conversion command.
+- Decide whether manifest JSON needs canonical float/text formatting or whether semantic JSON plus payload hashes are sufficient for the prototype.

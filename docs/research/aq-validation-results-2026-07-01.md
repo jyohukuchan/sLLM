@@ -1088,6 +1088,76 @@ compares SHA-256 against `payload_sha256` without materializing the payloads.
 | elapsed wall time | 55.37 s |
 | maximum RSS | 104,596 KiB |
 
+### Rust Merge CLI Smoke
+
+The Python merge behavior was moved into `ullm-quant` so prototype directories
+can be merged from the Rust CLI. New merge flags:
+
+- `--merge-policy-summary`
+- `--merge-plan-json`
+- `--merge-output-dir`
+- `--merge-summary-output`
+- `--merge-include-passthrough`
+- `--merge-copy-buffer-bytes`
+- `--merge-overwrite`
+
+The Rust merge keeps the same manifest structure: quantized tensors under
+`tensors`, shared codebooks under `codebooks`, and passthrough safetensors
+payloads under top-level `passthrough_tensors`. Passthrough copying is streamed
+from safetensors payload offsets while computing SHA-256.
+
+Full quantized-only Rust merge:
+
+- merge summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-full-quantized.json`
+- merge log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-full-quantized.log`
+- output:
+  `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-quantized-rust-merged.ullm.d`
+- verify log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-verify-qwen35-9b-p4p6-full-quantized.txt`
+
+| item | value |
+| --- | ---: |
+| quantized tensors | 255 |
+| passthrough tensors | 0 |
+| codebooks | 12 |
+| total file bytes | 4,049,329,123 |
+| directory size | 3.8 GiB |
+| merge elapsed wall time | 1.55 s |
+| merge maximum RSS | 2,076 KiB |
+| verify elapsed wall time | 52.55 s |
+| verify maximum RSS | 102,216 KiB |
+
+Full package Rust merge:
+
+- merge summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-full-package.json`
+- merge log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-qwen35-9b-p4p6-full-package.log`
+- output:
+  `/tmp/ullm-prototype-policy-smoke-qwen35-9b-p4p6-full-package-rust-merged.ullm.d`
+- verify log:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-prototype-policy-smoke-rust-merged-verify-passthrough-qwen35-9b-p4p6-full-package.txt`
+
+| item | value |
+| --- | ---: |
+| quantized tensors | 255 |
+| passthrough tensors | 520 |
+| codebooks | 12 |
+| passthrough payload bytes | 5,049,777,120 |
+| total file bytes | 9,099,409,318 |
+| directory size | 8.5 GiB |
+| merge elapsed wall time | 8.77 s |
+| merge maximum RSS | 12,372 KiB |
+| verify elapsed wall time | 54.52 s |
+| verify maximum RSS | 103,288 KiB |
+
+The Rust and Python merge manifests are semantically equivalent for tensor and
+passthrough contents, but their manifest JSON float formatting differs by 281
+bytes in this run. The verifier checked all 255 quantized tensors plus all 520
+passthrough payload SHA-256 values successfully.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -1103,7 +1173,7 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 ## Next Actions
 
 1. Add activation-stat collection for `linear_attn.in_proj_*`, or explicitly decide that those families use unweighted codebooks until model-level evidence says otherwise.
-2. Move merge behavior into `ullm-quant` itself so the full conversion path does not depend on per-tensor temporary directories.
+2. Replace the current per-tensor temporary conversion driver with a single `ullm-quant` full-conversion command now that Rust-side merge exists.
 3. Replace or approximate the exact tensor-scale pre-pass before scaling from 12 tensors to all p4p6 tensors.
 4. Run a wider p4p6 prototype conversion with more tensors per family, then all 255 quantized tensors.
 5. Add SIMD and multithreaded scheduling only after the scalar C++ semantics remain stable across wider conversion.
