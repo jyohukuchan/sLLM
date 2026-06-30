@@ -305,6 +305,21 @@ Rust implementation status:
   - throughput: about `5.75M` elements/s
   - note: source tensor is read twice because tensor-scale estimation is still
     a pre-pass.
+- First C++20 BF16 chunk kernel:
+  - ABI entry: `ullm_aq_quantize_bf16_chunk`
+  - owns best-scale search, nearest-codebook assignment, idx4 packing,
+    scale-index output, and chunk metric accumulation.
+  - Rust still owns safetensors I/O, tensor-scale estimation, manifest writing,
+    and prototype re-read/dequant verification.
+  - requires BF16 input, 16-entry codebook, `scale_count <= 256`, group-aligned
+    input chunks, and preallocated output buffers.
+- C++ scalar baseline benchmark:
+  - `mlp_up` g16 write-only: `7.13 s`, `21516 KiB`, about `7.06M`
+    elements/s, same relative MSE `0.005283509762`.
+  - scalar Rust write-only baseline was `8.76 s`, so the C++ chunk path is
+    about `1.23x` faster before SIMD/multithreading.
+  - `attn_k` g8 write + re-read verification succeeded with relative MSE
+    `0.003677692937`.
 
 ## Output Directory Prototype
 
@@ -382,11 +397,13 @@ Performance tests:
 
 ## Immediate Steps
 
-1. Move hot loops from scalar Rust prototype code into C++20 kernels:
-   best-scale search, nearest-codebook assignment, index packing, and metric
-   accumulation.
-2. Avoid the tensor-scale pre-pass where possible by either storing group amax
+1. Generalize the C++ ABI from BF16-only to a versioned `quantize_chunk_v1`
+   with an explicit dtype enum and struct size/version fields.
+2. Add C++/Rust golden tests for invalid buffers, all-zero groups, NaN groups,
+   and scale/codebook argument validation.
+3. Avoid the tensor-scale pre-pass where possible by either storing group amax
    summaries or fusing estimation with a bounded histogram.
-3. Extend from one tensor to all tensors selected by the p4p6 plan.
-4. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
+4. Add SIMD kernels after the scalar C++ semantics are locked.
+5. Extend from one tensor to all tensors selected by the p4p6 plan.
+6. Run a full Qwen3.5-9B conversion once RSS, throughput, and one-tensor
    reconstruction metrics are acceptable.

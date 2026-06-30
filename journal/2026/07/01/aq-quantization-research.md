@@ -191,6 +191,11 @@
   - added `--skip-inspect` and `--prototype-skip-verify` so write-only prototype benchmarks do not rerun duplicate inspection or re-read verification.
   - larger scalar Rust write-only benchmark: `model.language_model.layers.0.mlp.up_proj.weight`, `aq4_e4m3_g16_ts_flloyd16`, output written under `/tmp`, log retained at `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-write-benchmark-qwen35-9b-layer0-mlp-up-g16-scale-window4.txt`.
   - `mlp_up` write-only benchmark: relative MSE `0.005283509762`, idx4 bytes `25165824`, scale bytes `3145728`, elapsed `8.76 s`, max RSS `21560 KiB`, throughput about `5.75M` elements/s.
+  - added first C++20 BF16 chunk quantization kernel behind `ullm_aq_quantize_bf16_chunk`.
+  - C++ kernel owns best-scale search, nearest-codebook assignment, idx4 packing, scale-index output, and chunk metrics; Rust still owns safetensors I/O, tensor-scale estimation, manifest writing, and verification.
+  - C++ kernel write-only benchmark for `mlp_up` g16: relative MSE `0.005283509762`, elapsed `7.13 s`, max RSS `21516 KiB`, about `7.06M` elements/s, log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-write-benchmark-cxx-qwen35-9b-layer0-mlp-up-g16-scale-window4.txt`.
+  - C++ kernel real-tensor re-read verification for `attn_k` g8 succeeded: relative MSE and verified relative MSE `0.003677692937`, elapsed `0.74 s`, max RSS `8220 KiB`, log `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-cxx-verify-qwen35-9b-layer3-attn-k-g8-scale-window4.txt`.
+  - `cargo test -p ullm-quant` passes 11 tests including a C++ BF16 kernel scale-window/packing smoke.
 
 ## Current Interpretation
 
@@ -200,6 +205,8 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 
 ## Next
 
-- Move hot quantization loops from scalar Rust prototype code into C++20 kernels.
+- Generalize the C++ ABI from BF16-only to a versioned dtype-explicit `quantize_chunk_v1`.
+- Add invalid-buffer/all-zero/NaN/scale-count/codebook validation tests for the C++ kernel.
 - Reduce or fuse the tensor-scale pre-pass, because current prototype reads the source tensor twice.
+- Add SIMD kernels after scalar C++ semantics are locked.
 - Extend the output path from one tensor to all tensors selected by the p4p6 plan.

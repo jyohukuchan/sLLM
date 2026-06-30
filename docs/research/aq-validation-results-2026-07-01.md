@@ -659,6 +659,34 @@ This is still scalar Rust prototype code and reads the source tensor twice
 because tensor scale is estimated before quantization. It is useful as a
 correctness and memory baseline, not as the intended final CPU throughput.
 
+The chunk hot loop was then moved behind a C++20 BF16 kernel for:
+
+- best-scale search,
+- nearest-codebook assignment,
+- idx4 packing,
+- scale-index output,
+- metric accumulation.
+
+The Rust side still owns metadata, safetensors reads, tensor-scale estimation,
+manifest writing, and verification. The C++ kernel currently requires a
+16-entry codebook and BF16 input.
+
+Run logs:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-write-benchmark-cxx-qwen35-9b-layer0-mlp-up-g16-scale-window4.txt`
+- `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-prototype-cxx-verify-qwen35-9b-layer3-attn-k-g8-scale-window4.txt`
+
+| run | tensor | relative MSE | elapsed | max RSS | elements/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| scalar Rust write-only | `mlp_up` g16 | 0.005283509762 | 8.76 s | 21,560 KiB | 5,745,622 |
+| C++ BF16 write-only | `mlp_up` g16 | 0.005283509762 | 7.13 s | 21,516 KiB | 7,059,137 |
+| C++ BF16 write + verify | `attn_k` g8 | 0.003677692937 | 0.74 s | 8,220 KiB | n/a |
+
+The first C++ kernel is only a scalar baseline, but it preserved metrics and
+improved the large-tensor write path by about `1.23x`. The next optimization
+target is not only SIMD: the prototype still reads the tensor twice because
+tensor-scale estimation is a pre-pass.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.

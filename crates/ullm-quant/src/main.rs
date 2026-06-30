@@ -16,9 +16,39 @@ struct KernelVersion {
     patch: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct AqQuantMetrics {
+    elements: u64,
+    groups: u64,
+    sse: f64,
+    ref_sse: f64,
+    max_abs_error: f32,
+    index_counts: [u64; 16],
+    scale_index_min: u32,
+    scale_index_max: u32,
+    scale_window_improved_groups: u64,
+}
+
 unsafe extern "C" {
     fn ullm_aq_get_kernel_version() -> KernelVersion;
     fn ullm_aq_pack_nibbles(low: *const u8, high: *const u8, output: *mut u8, len: usize) -> usize;
+    fn ullm_aq_quantize_bf16_chunk(
+        input: *const u8,
+        input_bytes: usize,
+        group_size: usize,
+        scale_values: *const f32,
+        scale_count: usize,
+        codebook: *const f32,
+        codebook_count: usize,
+        tensor_scale: f32,
+        scale_window: usize,
+        packed_indices: *mut u8,
+        packed_indices_bytes: usize,
+        scale_indices: *mut u8,
+        scale_indices_bytes: usize,
+        metrics: *mut AqQuantMetrics,
+    ) -> i32;
 }
 
 #[derive(Debug)]
@@ -1269,6 +1299,48 @@ fn read_f32_le_file(path: &Path) -> Result<Vec<f32>, String> {
     Ok(values)
 }
 
+fn empty_aq_quant_metrics() -> AqQuantMetrics {
+    AqQuantMetrics {
+        elements: 0,
+        groups: 0,
+        sse: 0.0,
+        ref_sse: 0.0,
+        max_abs_error: 0.0,
+        index_counts: [0; 16],
+        scale_index_min: u32::MAX,
+        scale_index_max: 0,
+        scale_window_improved_groups: 0,
+    }
+}
+
+fn merge_cxx_quant_metrics(stats: &mut QuantDryRunStats, metrics: &AqQuantMetrics) {
+    stats.elements += metrics.elements as usize;
+    stats.groups += metrics.groups as usize;
+    stats.sse += metrics.sse;
+    stats.ref_sse += metrics.ref_sse;
+    stats.max_abs_error = stats.max_abs_error.max(metrics.max_abs_error);
+    for (index, count) in metrics.index_counts.iter().enumerate() {
+        if index < stats.index_counts.len() {
+            stats.index_counts[index] += *count as usize;
+        }
+    }
+    if metrics.groups > 0 {
+        stats.scale_index_min = stats.scale_index_min.min(metrics.scale_index_min as usize);
+        stats.scale_index_max = stats.scale_index_max.max(metrics.scale_index_max as usize);
+    }
+    stats.scale_window_improved_groups += metrics.scale_window_improved_groups as usize;
+}
+
+fn cxx_error_message(code: i32) -> &'static str {
+    match code {
+        -1 => "null pointer",
+        -2 => "invalid argument",
+        -3 => "invalid input byte layout",
+        -4 => "output buffer is too small",
+        _ => "unknown error",
+    }
+}
+
 fn quantize_chunk_to_writers<WIndex: Write, WScale: Write>(
     dtype: &str,
     bytes: &[u8],
@@ -1297,6 +1369,48 @@ fn quantize_chunk_to_writers<WIndex: Write, WScale: Write>(
     }
 
     let groups = bytes.len() / group_bytes;
+    if dtype == "BF16" {
+        if codebook.len() != 16 {
+            return Err("C++ BF16 prototype kernel requires 16 codebook entries".to_string());
+        }
+        let elements = bytes.len() / element_size;
+        let mut packed_indices = vec![0u8; elements.div_ceil(2)];
+        let mut scale_indices = vec![0u8; groups];
+        let mut metrics = empty_aq_quant_metrics();
+        let status = unsafe {
+            ullm_aq_quantize_bf16_chunk(
+                bytes.as_ptr(),
+                bytes.len(),
+                group_size,
+                scale_values.as_ptr(),
+                scale_values.len(),
+                codebook.as_ptr(),
+                codebook.len(),
+                tensor_scale,
+                scale_window,
+                packed_indices.as_mut_ptr(),
+                packed_indices.len(),
+                scale_indices.as_mut_ptr(),
+                scale_indices.len(),
+                &mut metrics,
+            )
+        };
+        if status != 0 {
+            return Err(format!(
+                "C++ BF16 prototype kernel failed with {status}: {}",
+                cxx_error_message(status)
+            ));
+        }
+        merge_cxx_quant_metrics(stats, &metrics);
+        index_writer
+            .write_all(&packed_indices)
+            .map_err(|err| format!("failed to write prototype index bytes: {err}"))?;
+        scale_writer
+            .write_all(&scale_indices)
+            .map_err(|err| format!("failed to write prototype scale bytes: {err}"))?;
+        return Ok(());
+    }
+
     let mut packed_indices = Vec::with_capacity(bytes.len() / (2 * element_size));
     let mut scale_indices = Vec::with_capacity(groups);
     let max_code = max_codebook_abs(codebook);
@@ -2232,10 +2346,10 @@ fn main() -> ExitCode {
 mod tests {
     use super::{
         CodebookEntry, CodebookExport, Options, default_threads, effective_bpp,
-        estimate_output_bytes, family_for_tensor, new_aq_group_stats, new_numeric_stats,
-        new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
-        read_tensor_payload_chunk, resolve_aq_policy, select_codebook, update_aq_group_stats,
-        update_numeric_stats, update_quant_dry_run_stats,
+        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, new_aq_group_stats,
+        new_numeric_stats, new_quant_dry_run_stats, quant_assignment, read_safetensors_metadata,
+        read_tensor_payload_chunk, resolve_aq_policy, select_codebook, ullm_aq_quantize_bf16_chunk,
+        update_aq_group_stats, update_numeric_stats, update_quant_dry_run_stats,
     };
     use std::fs;
     use std::io::Write;
@@ -2410,6 +2524,48 @@ mod tests {
         assert_eq!(stats.scale_index_max, 0);
         assert_eq!(stats.scale_window_improved_groups, 1);
         assert!((stats.sse - 0.9975).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cxx_bf16_kernel_quantizes_and_packs_scale_window_result() {
+        let payload = [
+            0xf3, 0x3f, // 1.8984375
+            0x40, 0x3f, // 0.75
+            0x40, 0x3f, // 0.75
+            0x40, 0x3f, // 0.75
+        ];
+        let scales = [1.0f32, 2.0];
+        let codebook = [
+            0.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        ];
+        let mut packed = [0u8; 2];
+        let mut scale_indices = [0u8; 1];
+        let mut metrics = empty_aq_quant_metrics();
+        let status = unsafe {
+            ullm_aq_quantize_bf16_chunk(
+                payload.as_ptr(),
+                payload.len(),
+                4,
+                scales.as_ptr(),
+                scales.len(),
+                codebook.as_ptr(),
+                codebook.len(),
+                1.0,
+                1,
+                packed.as_mut_ptr(),
+                packed.len(),
+                scale_indices.as_mut_ptr(),
+                scale_indices.len(),
+                &mut metrics,
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(scale_indices, [0]);
+        assert_eq!(packed, [0x11, 0x11]);
+        assert_eq!(metrics.groups, 1);
+        assert_eq!(metrics.elements, 4);
+        assert_eq!(metrics.scale_window_improved_groups, 1);
+        assert_eq!(metrics.index_counts[1], 4);
     }
 
     #[test]
