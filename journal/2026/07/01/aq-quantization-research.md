@@ -407,12 +407,32 @@
     - verification: command exit status `0`; `--verify-prototype-all` and `--verify-passthrough` both completed. The summary schema does not currently persist verify counts.
     - resource use: elapsed `1:04.26`, max RSS `103344 KiB`, CPU `99%`.
     - comparison with the earlier Rust full-package merge from the Python-driver summary: same tensor/passthrough/codebook counts, total file bytes delta `+89`; this appears to be manifest text/metadata representation, not payload data.
+  - direct package output path:
+    - added `--convert-package-output-dir`, `--convert-package-summary-output`, `--convert-include-passthrough`, and `--convert-copy-buffer-bytes`.
+    - the direct path uses the existing convert tensor selection and writes selected quantized tensors into one `.ullm.d` package, optionally streaming passthrough safetensors payloads into the same manifest.
+    - summary schema: `ullm-prototype-direct-package-summary-v0.1`.
+    - current constraint: direct package output intentionally supports only `--convert-jobs 1`; parallel direct package scheduling needs separate memory and I/O validation.
+    - verification: `cargo fmt -p ullm-quant --check`, `cargo test -p ullm-quant`, and `cargo build -p ullm-quant --release` passed. Unit tests now pass `27` tests, including a direct package fixture with one BF16 quantized tensor and one U8 passthrough tensor.
+    - quantized-only p4p6 family2 smoke summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-smoke-qwen35-9b-p4p6-reservoir65536-family2.json`.
+    - quantized-only smoke time: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-smoke-qwen35-9b-p4p6-reservoir65536-family2.time`.
+    - quantized-only smoke verify log/time: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-smoke-verify-qwen35-9b-p4p6-reservoir65536-family2.txt`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-smoke-verify-qwen35-9b-p4p6-reservoir65536-family2.time`.
+    - quantized-only output: `/tmp/ullm-quant-direct-package-smoke-qwen35-9b-p4p6-reservoir65536-family2.ullm.d`.
+    - quantized-only result: selected `4`, failures `0`, tensor count `4`, passthrough `0`, codebooks `2`, total file bytes `61872570`, directory size `60M`.
+    - quantized-only relative MSE values: `0.005245252663`, `0.005250488442`, `0.003724312490`, `0.003697220971`.
+    - quantized-only resource use: convert+inline verify elapsed `0:16.79`, max RSS `109000 KiB`; separate verify elapsed `0:00.87`, max RSS `95272 KiB`; both exit status `0`.
+    - comparison with the same 4-tensor convert+merge smoke: direct package total bytes `61872570` vs merged bytes `61872601`, delta `-31`, with identical relative MSE values.
+    - full-package family2 smoke summary: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-fullpkg-smoke-qwen35-9b-p4p6-reservoir65536-family2.json`.
+    - full-package family2 smoke time: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-fullpkg-smoke-qwen35-9b-p4p6-reservoir65536-family2.time`.
+    - full-package family2 verify log/time: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-fullpkg-smoke-verify-qwen35-9b-p4p6-reservoir65536-family2.txt`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-fullpkg-smoke-verify-qwen35-9b-p4p6-reservoir65536-family2.time`.
+    - full-package family2 output: `/tmp/ullm-quant-direct-package-fullpkg-smoke-qwen35-9b-p4p6-reservoir65536-family2.ullm.d`.
+    - full-package family2 result: selected `4`, failures `0`, tensor count `4`, passthrough tensors `520`, passthrough payload bytes `5049777120`, codebooks `2`, total file bytes `5111952765`, directory size `4.8G`.
+    - full-package family2 resource use: convert+inline quantized verify+passthrough copy elapsed `0:24.91`, max RSS `108232 KiB`; separate verify checked 4 quantized tensors and 520 passthrough tensors, elapsed `0:04.99`, max RSS `94600 KiB`; both exit status `0`.
 
 ## Current Interpretation
 
 Concrete measurement should continue in parallel with quantizer optimization. A separate long theory-only phase is not useful now, but full-model conversion will require a dedicated CPU-multithreaded quantizer implementation.
 
-The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, but repeated-prompt and both 22-module/44-module project-text next-token loss smokes keep p4p6 as the safer policy. The 44-module run ranks p4p46 second among mixed policies, so p4p46 remains the main follow-up candidate. The Rust multi-tensor conversion path now replaces the Python per-tensor driver for bounded conversion and full p4p6/p4p46/p4p65 quantized-only conversion, supports explicit tensor-level parallel jobs, can feed the Rust merge path in the same process, and has produced a p4p6 full-package prototype with passthrough verification. It still writes per-tensor directories before merge, so direct streaming full-package output remains a future optimization.
+The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slightly beats sampled UD `Q4_K` rows. The family-level LUT result remained close even at up to 8 tensors per family, so the next uncertainty is not obvious LUT instability. The larger risk is activation sensitivity and model-level behavior. The in-proj stats fix removed an unweighted fallback, and p4p6/p4p46/p4p65 now all complete full quantized-tensor conversion plus Rust-side merge/verify. Tensor-level full conversion favors p4p65, wider final-token logit relative MSE favors p4p46, but repeated-prompt and both 22-module/44-module project-text next-token loss smokes keep p4p6 as the safer policy. The 44-module run ranks p4p46 second among mixed policies, so p4p46 remains the main follow-up candidate. The Rust multi-tensor conversion path now replaces the Python per-tensor driver for bounded conversion and full p4p6/p4p46/p4p65 quantized-only conversion, supports explicit tensor-level parallel jobs, can feed the Rust merge path in the same process, and has produced a p4p6 full-package prototype with passthrough verification. The new direct package path also avoids per-tensor intermediate directories for bounded package output, including real passthrough payloads; it is still single-job only, so full-model direct package conversion needs parallel scheduling before it can replace the jobs=4 convert+merge route.
 
 ## Next
 
@@ -420,7 +440,7 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Add real-tensor or cross-process golden tests if the C++ kernel changes again; the first pseudo-random BF16/F16 byte-level golden is now in place.
 - Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65, preferably after the full-model loader path is available.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.
-- Extend the Rust conversion command toward direct streaming full-package output. The current convert-summary + Rust merge + verify path works for p4p6 full-package output, but it still writes per-tensor intermediate directories before merge.
+- Extend direct package output with controlled parallel scheduling. The current direct path works for bounded `.ullm.d` package output and real passthrough copying, but it intentionally rejects `--convert-jobs > 1`.
 - Tune controlled CPU parallelism for full conversion. `--convert-jobs 4` is validated for p4p6/p4p46/p4p65 quantized-only conversion with max RSS around `326-339 MiB`, but larger jobs need memory and I/O measurements before using them as defaults.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.

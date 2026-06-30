@@ -89,11 +89,15 @@ struct Options {
     convert_plan_json: Option<PathBuf>,
     convert_output_root: Option<PathBuf>,
     convert_summary_output: Option<PathBuf>,
+    convert_package_output_dir: Option<PathBuf>,
+    convert_package_summary_output: Option<PathBuf>,
     convert_families: Vec<String>,
     convert_max_tensors: usize,
     convert_per_family: usize,
     convert_jobs: usize,
     convert_verify: bool,
+    convert_include_passthrough: bool,
+    convert_copy_buffer_bytes: usize,
     convert_overwrite: bool,
     merge_policy_summary: Option<PathBuf>,
     merge_plan_json: Option<PathBuf>,
@@ -278,7 +282,7 @@ struct PrototypePassthroughTensorManifest {
     payload_sha256: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct PrototypeTensorManifest {
     name: String,
     source_file: String,
@@ -300,7 +304,7 @@ struct PrototypeTensorManifest {
     metrics: PrototypeTensorMetrics,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct PrototypeTensorMetrics {
     mse: f64,
     relative_mse: f64,
@@ -370,6 +374,31 @@ struct PrototypeConvertSummary {
     verify: bool,
     selected_count: usize,
     results: Vec<PrototypeConvertResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct PrototypeDirectPackageSummary {
+    schema_version: String,
+    plan_json: String,
+    codebook_json: String,
+    aq_policy: AqPolicyPlan,
+    output_dir: String,
+    tensor_scale_estimator: String,
+    tensor_scale_reservoir_size: usize,
+    scale_window: usize,
+    chunk_bytes: usize,
+    families: Vec<String>,
+    max_tensors: usize,
+    per_family: usize,
+    include_passthrough: bool,
+    verify: bool,
+    selected_count: usize,
+    tensor_count: usize,
+    passthrough_tensor_count: usize,
+    codebook_count: usize,
+    total_file_bytes: usize,
+    results: Vec<PrototypeConvertResult>,
+    files: Vec<CopiedFileSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -478,11 +507,15 @@ fn parse_options() -> Result<Options, String> {
         convert_plan_json: None,
         convert_output_root: None,
         convert_summary_output: None,
+        convert_package_output_dir: None,
+        convert_package_summary_output: None,
         convert_families: Vec::new(),
         convert_max_tensors: usize::MAX,
         convert_per_family: usize::MAX,
         convert_jobs: 1,
         convert_verify: false,
+        convert_include_passthrough: false,
+        convert_copy_buffer_bytes: 8 * 1024 * 1024,
         convert_overwrite: false,
         merge_policy_summary: None,
         merge_plan_json: None,
@@ -583,6 +616,18 @@ fn parse_options() -> Result<Options, String> {
                         "--convert-summary-output requires a value".to_string()
                     })?));
             }
+            "--convert-package-output-dir" => {
+                options.convert_package_output_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--convert-package-output-dir requires a value".to_string()
+                    })?));
+            }
+            "--convert-package-summary-output" => {
+                options.convert_package_summary_output =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--convert-package-summary-output requires a value".to_string()
+                    })?));
+            }
             "--convert-family" => {
                 options.convert_families.push(
                     args.next()
@@ -603,6 +648,11 @@ fn parse_options() -> Result<Options, String> {
                 options.convert_jobs = jobs;
             }
             "--convert-verify" => options.convert_verify = true,
+            "--convert-include-passthrough" => options.convert_include_passthrough = true,
+            "--convert-copy-buffer-bytes" => {
+                options.convert_copy_buffer_bytes =
+                    parse_usize("--convert-copy-buffer-bytes", args.next())?;
+            }
             "--convert-overwrite" => options.convert_overwrite = true,
             "--merge-policy-summary" => {
                 options.merge_policy_summary =
@@ -710,12 +760,24 @@ fn print_help() {
     println!("  --convert-plan-json <PATH>    convert quantized tensors from a plan JSON");
     println!("  --convert-output-root <PATH>  output root for per-tensor prototype dirs");
     println!("  --convert-summary-output <PATH>");
+    println!("  --convert-package-output-dir <PATH>");
+    println!(
+        "                                 write selected tensors directly to one .ullm.d package"
+    );
+    println!("  --convert-package-summary-output <PATH>");
     println!("  --convert-family <FAMILY>     restrict conversion to family; repeatable");
     println!("  --convert-max-tensors <N>     maximum tensors for --convert-plan-json");
     println!("  --convert-per-family <N>      maximum tensors per family for conversion");
     println!("  --convert-jobs <N>            parallel tensor conversion jobs; default 1");
     println!("  --convert-verify              verify each converted prototype tensor");
-    println!("  --convert-overwrite           replace existing per-tensor prototype dirs");
+    println!(
+        "  --convert-include-passthrough include passthrough tensors in direct package output"
+    );
+    println!("  --convert-copy-buffer-bytes <N>");
+    println!(
+        "                                 payload copy buffer size for direct package passthrough"
+    );
+    println!("  --convert-overwrite           replace existing convert outputs");
     println!("  --merge-policy-summary <PATH> merge per-tensor prototype summary JSON");
     println!("  --merge-plan-json <PATH>      model plan JSON for passthrough merge");
     println!("  --merge-output-dir <PATH>     merged prototype .ullm.d output directory");
@@ -2368,6 +2430,215 @@ fn run_prototype_convert(options: &Options) -> Result<PrototypeConvertSummary, S
     Ok(summary)
 }
 
+fn run_direct_prototype_package(
+    options: &Options,
+) -> Result<PrototypeDirectPackageSummary, String> {
+    if options.convert_jobs != 1 {
+        return Err(
+            "--convert-package-output-dir currently supports only --convert-jobs 1".to_string(),
+        );
+    }
+    if options.convert_output_root.is_some() || options.convert_summary_output.is_some() {
+        return Err(
+            "--convert-package-output-dir cannot be combined with --convert-output-root or --convert-summary-output"
+                .to_string(),
+        );
+    }
+    let plan_json = options
+        .convert_plan_json
+        .as_deref()
+        .ok_or_else(|| "--convert-plan-json is required".to_string())?;
+    let codebook_json = options.codebook_json.as_deref().ok_or_else(|| {
+        "--codebook-json is required for --convert-package-output-dir".to_string()
+    })?;
+    let output_dir = options
+        .convert_package_output_dir
+        .as_deref()
+        .ok_or_else(|| "--convert-package-output-dir is required".to_string())?;
+    let summary_output = options
+        .convert_package_summary_output
+        .as_deref()
+        .ok_or_else(|| "--convert-package-summary-output is required".to_string())?;
+
+    let plan: ModelPlan = read_json_file(plan_json)?;
+    let export = load_codebook_export(codebook_json)?;
+    let families = options
+        .convert_families
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let selected = select_convert_tensors(
+        &plan,
+        &export,
+        &families,
+        options.convert_max_tensors,
+        options.convert_per_family,
+    );
+    prepare_merge_output_dir(output_dir, options.convert_overwrite)?;
+
+    let mut tensors = Vec::new();
+    let mut codebooks = Vec::new();
+    let mut codebook_files: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut copied_files = Vec::new();
+    let mut results = Vec::with_capacity(selected.len());
+    let mut success_result_indices = Vec::new();
+
+    for tensor in &selected {
+        let candidate = tensor.quant_format.as_deref().unwrap_or("<missing>");
+        let row = (|| -> Result<PrototypeConvertResult, String> {
+            let codebook = select_codebook(&export, &tensor.family, candidate)?;
+            let manifest = write_prototype_tensor(
+                Path::new(&plan.model_dir),
+                &tensor.name,
+                candidate,
+                &tensor.family,
+                candidate,
+                codebook,
+                options.chunk_bytes,
+                options.scale_window,
+                options.tensor_scale_override,
+                options.tensor_scale_estimator,
+                options.tensor_scale_reservoir_size,
+                output_dir,
+            )?;
+            let tensor_manifest = manifest
+                .tensors
+                .into_iter()
+                .next()
+                .ok_or_else(|| "prototype manifest has no tensors".to_string())?;
+            let codebook_manifest = manifest
+                .codebooks
+                .into_iter()
+                .next()
+                .ok_or_else(|| "prototype manifest has no codebooks".to_string())?;
+            let index_bytes = file_len_usize(&output_dir.join(&tensor_manifest.index_file))?;
+            let scale_bytes = file_len_usize(&output_dir.join(&tensor_manifest.scale_file))?;
+            copied_files.push(CopiedFileSummary {
+                path: tensor_manifest.index_file.clone(),
+                bytes: index_bytes,
+            });
+            copied_files.push(CopiedFileSummary {
+                path: tensor_manifest.scale_file.clone(),
+                bytes: scale_bytes,
+            });
+            let codebook_key = (
+                codebook_manifest.family.clone(),
+                codebook_manifest.candidate_id.clone(),
+            );
+            if codebook_files.insert(codebook_key) {
+                let codebook_bytes = file_len_usize(&output_dir.join(&codebook_manifest.file))?;
+                copied_files.push(CopiedFileSummary {
+                    path: codebook_manifest.file.clone(),
+                    bytes: codebook_bytes,
+                });
+                codebooks.push(codebook_manifest);
+            }
+            tensors.push(tensor_manifest.clone());
+            Ok(PrototypeConvertResult {
+                tensor: tensor.name.clone(),
+                family: tensor.family.clone(),
+                candidate: candidate.to_string(),
+                status: "ok".to_string(),
+                returncode: 0,
+                output_dir: output_dir.display().to_string(),
+                error: None,
+                manifest: Some(tensor_manifest),
+                verification: None,
+            })
+        })()
+        .unwrap_or_else(|error| {
+            failed_convert_result(tensor, candidate.to_string(), output_dir, error)
+        });
+        if row.status == "ok" {
+            success_result_indices.push(results.len());
+        }
+        results.push(row);
+    }
+
+    let passthrough_tensors = if options.convert_include_passthrough {
+        merge_passthrough_tensors(
+            &plan,
+            output_dir,
+            options.convert_overwrite,
+            options.convert_copy_buffer_bytes,
+            &mut copied_files,
+        )?
+    } else {
+        Vec::new()
+    };
+
+    let manifest = PrototypeManifest {
+        schema_version: "ullm-prototype-manifest-v0.1".to_string(),
+        source_model_dir: plan.model_dir.clone(),
+        tensors,
+        codebooks,
+        passthrough_tensors,
+    };
+    let manifest_path = output_dir.join("manifest.json");
+    write_json_pretty_file(&manifest_path, &manifest)?;
+
+    if options.convert_verify {
+        for (tensor_index, result_index) in success_result_indices.iter().copied().enumerate() {
+            let verification = convert_verification_summary(verify_prototype_tensor(
+                output_dir,
+                tensor_index,
+                options.chunk_bytes,
+            )?);
+            if let Some(manifest) = results
+                .get(result_index)
+                .and_then(|result| result.manifest.as_ref())
+            {
+                let delta = (verification.relative_mse - manifest.metrics.relative_mse).abs();
+                if delta > 1e-9 {
+                    return Err(format!(
+                        "direct package verification relative MSE delta {delta:.12} exceeds tolerance for {}",
+                        manifest.name
+                    ));
+                }
+            }
+            if let Some(result) = results.get_mut(result_index) {
+                result.verification = Some(verification);
+            }
+        }
+    }
+
+    copied_files.push(CopiedFileSummary {
+        path: "manifest.json".to_string(),
+        bytes: file_len_usize(&manifest_path)?,
+    });
+    let total_file_bytes = copied_files.iter().try_fold(0usize, |acc, item| {
+        acc.checked_add(item.bytes)
+            .ok_or_else(|| "direct package file byte count overflows".to_string())
+    })?;
+
+    let summary = PrototypeDirectPackageSummary {
+        schema_version: "ullm-prototype-direct-package-summary-v0.1".to_string(),
+        plan_json: plan_json.display().to_string(),
+        codebook_json: codebook_json.display().to_string(),
+        aq_policy: plan.aq_policy.clone(),
+        output_dir: output_dir.display().to_string(),
+        tensor_scale_estimator: tensor_scale_estimator_name(options.tensor_scale_estimator)
+            .to_string(),
+        tensor_scale_reservoir_size: options.tensor_scale_reservoir_size,
+        scale_window: options.scale_window,
+        chunk_bytes: options.chunk_bytes,
+        families: options.convert_families.clone(),
+        max_tensors: options.convert_max_tensors,
+        per_family: options.convert_per_family,
+        include_passthrough: options.convert_include_passthrough,
+        verify: options.convert_verify,
+        selected_count: selected.len(),
+        tensor_count: manifest.tensors.len(),
+        passthrough_tensor_count: manifest.passthrough_tensors.len(),
+        codebook_count: manifest.codebooks.len(),
+        total_file_bytes,
+        results,
+        files: copied_files,
+    };
+    write_json_pretty_file(summary_output, &summary)?;
+    Ok(summary)
+}
+
 fn verify_prototype_tensor(
     output_dir: &Path,
     tensor_index: usize,
@@ -3378,7 +3649,35 @@ fn run() -> Result<(), String> {
             .join(",");
         println!("inspect_codebook_values={values}");
     }
-    if options.convert_plan_json.is_some()
+    let direct_package_requested = options.convert_package_output_dir.is_some()
+        || options.convert_package_summary_output.is_some()
+        || options.convert_include_passthrough;
+    if direct_package_requested {
+        let summary = run_direct_prototype_package(&options)?;
+        println!("convert_package_plan_json={}", summary.plan_json);
+        println!("convert_package_aq_policy={}", summary.aq_policy.policy_id);
+        println!("convert_package_output_dir={}", summary.output_dir);
+        if let Some(path) = options.convert_package_summary_output.as_deref() {
+            println!("convert_package_summary_output={}", path.display());
+        }
+        println!("convert_package_selected_count={}", summary.selected_count);
+        println!("convert_package_tensor_count={}", summary.tensor_count);
+        println!(
+            "convert_package_passthrough_tensor_count={}",
+            summary.passthrough_tensor_count
+        );
+        println!("convert_package_codebook_count={}", summary.codebook_count);
+        println!(
+            "convert_package_total_file_bytes={}",
+            summary.total_file_bytes
+        );
+        let failure_count = summary
+            .results
+            .iter()
+            .filter(|row| row.status != "ok")
+            .count();
+        println!("convert_package_failure_count={failure_count}");
+    } else if options.convert_plan_json.is_some()
         || options.convert_output_root.is_some()
         || options.convert_summary_output.is_some()
     {
@@ -3618,8 +3917,9 @@ mod tests {
         merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats, new_numeric_stats,
         new_quant_dry_run_stats, numeric_element_size, parse_tensor_scale_estimator,
         quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
-        select_codebook, select_convert_tensors, ullm_aq_quantize_chunk_v1, update_aq_group_stats,
-        update_numeric_stats, update_quant_dry_run_stats,
+        run_direct_prototype_package, select_codebook, select_convert_tensors,
+        ullm_aq_quantize_chunk_v1, update_aq_group_stats, update_numeric_stats,
+        update_quant_dry_run_stats, verify_passthrough_tensors,
     };
     use std::collections::BTreeSet;
     use std::fs;
@@ -3696,11 +3996,15 @@ mod tests {
             convert_plan_json: None,
             convert_output_root: None,
             convert_summary_output: None,
+            convert_package_output_dir: None,
+            convert_package_summary_output: None,
             convert_families: Vec::new(),
             convert_max_tensors: usize::MAX,
             convert_per_family: usize::MAX,
             convert_jobs: 1,
             convert_verify: false,
+            convert_include_passthrough: false,
+            convert_copy_buffer_bytes: 1024,
             convert_overwrite: false,
             merge_policy_summary: None,
             merge_plan_json: None,
@@ -4105,6 +4409,138 @@ mod tests {
             merged_manifest.passthrough_tensors[0].payload_sha256,
             "63d987d1c6d69751c17297f410f5b3547a65d096a8993b35bcb4f9cad054f176"
         );
+
+        fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[test]
+    fn direct_package_writes_quantized_and_passthrough_payloads() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ullm-direct-package-test-{unique}"));
+        let model_dir = root.join("model");
+        let output_dir = root.join("direct.ullm.d");
+        let plan_path = root.join("plan.json");
+        let codebook_path = root.join("codebooks.json");
+        let summary_path = root.join("summary.json");
+        let safetensors_path = model_dir.join("model.safetensors");
+        fs::create_dir_all(&model_dir).expect("model dir");
+
+        let header = br#"{"quant":{"dtype":"BF16","shape":[16],"data_offsets":[0,32]},"keep":{"dtype":"U8","shape":[4],"data_offsets":[32,36]}}"#;
+        let mut safetensors = fs::File::create(&safetensors_path).expect("safetensors");
+        safetensors
+            .write_all(&(header.len() as u64).to_le_bytes())
+            .expect("header len");
+        safetensors.write_all(header).expect("header");
+        for _ in 0..16 {
+            safetensors.write_all(&[0x80, 0x3f]).expect("bf16 1.0");
+        }
+        safetensors.write_all(&[9, 8, 7, 6]).expect("passthrough");
+        drop(safetensors);
+        fs::write(
+            model_dir.join("model.safetensors.index.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "metadata": {},
+                "weight_map": {
+                    "quant": "model.safetensors",
+                    "keep": "model.safetensors"
+                }
+            }))
+            .expect("index json"),
+        )
+        .expect("index");
+
+        let plan = serde_json::json!({
+            "schema_version": "ullm-quant-plan-v0.3",
+            "model_dir": model_dir.display().to_string(),
+            "aq_policy": {
+                "policy_id": "all-g16",
+                "low_format": "aq4_e4m3_g16_ts_flloyd16",
+                "high_format": "aq4_e4m3_g8_ts_flloyd16",
+                "high_families": []
+            },
+            "tensor_count": 2,
+            "supported_tensor_count": 1,
+            "passthrough_tensor_count": 1,
+            "total_tensor_bytes": 36,
+            "total_estimated_output_bytes": 45,
+            "estimated_output_to_input_ratio": 1.25,
+            "tensors": [{
+                "name": "quant",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "BF16",
+                "shape": [16],
+                "family": "mlp_up",
+                "n_elements": 16,
+                "n_bytes": 32,
+                "supported_input": true,
+                "action": "quantize",
+                "quant_format": "aq4_e4m3_g16_ts_flloyd16",
+                "quant_role": "low",
+                "estimated_output_bytes": 9,
+                "estimated_effective_bpp": 4.5
+            }, {
+                "name": "keep",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "U8",
+                "shape": [4],
+                "family": "other",
+                "n_elements": 4,
+                "n_bytes": 4,
+                "supported_input": false,
+                "action": "passthrough",
+                "quant_format": null,
+                "quant_role": null,
+                "estimated_output_bytes": 4,
+                "estimated_effective_bpp": 8.0
+            }]
+        });
+        fs::write(
+            &plan_path,
+            serde_json::to_string_pretty(&plan).expect("plan json"),
+        )
+        .expect("plan");
+        fs::write(
+            &codebook_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "codebooks": [{
+                    "family": "mlp_up",
+                    "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+                    "values_f32": vec![1.0f32; 16]
+                }]
+            }))
+            .expect("codebook json"),
+        )
+        .expect("codebook");
+
+        let mut options = test_options("all-g16");
+        options.convert_plan_json = Some(plan_path);
+        options.codebook_json = Some(codebook_path);
+        options.convert_package_output_dir = Some(output_dir.clone());
+        options.convert_package_summary_output = Some(summary_path);
+        options.convert_include_passthrough = true;
+        options.convert_verify = true;
+        options.chunk_bytes = 32;
+
+        let summary = run_direct_prototype_package(&options).expect("direct package");
+        assert_eq!(summary.selected_count, 1);
+        assert_eq!(summary.tensor_count, 1);
+        assert_eq!(summary.passthrough_tensor_count, 1);
+        assert_eq!(summary.codebook_count, 1);
+        assert_eq!(summary.results[0].status, "ok");
+        assert!(summary.results[0].verification.is_some());
+        assert!(output_dir.join("manifest.json").exists());
+        assert!(output_dir.join("tensors").join("quant.idx4").exists());
+        assert_eq!(
+            fs::read(output_dir.join("passthrough").join("001-keep.raw")).expect("passthrough"),
+            vec![9, 8, 7, 6]
+        );
+        let passthrough =
+            verify_passthrough_tensors(&output_dir, 2).expect("passthrough verification");
+        assert_eq!(passthrough.count, 1);
+        assert_eq!(passthrough.payload_bytes, 4);
 
         fs::remove_dir_all(root).expect("remove temp root");
     }

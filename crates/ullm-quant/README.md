@@ -107,6 +107,34 @@ opts in.
 The generated convert summary can be passed to `--merge-policy-summary` in the
 same or a later `ullm-quant` invocation.
 
+Direct package output example:
+
+```text
+cargo run -p ullm-quant --release -- \
+  --convert-plan-json /path/to/ullm-plan.json \
+  --codebook-json /path/to/codebooks.json \
+  --convert-package-output-dir /tmp/model.ullm.d \
+  --convert-package-summary-output /tmp/model-package-summary.json \
+  --convert-family mlp_up \
+  --convert-family attn_k \
+  --convert-max-tensors 4 \
+  --convert-per-family 2 \
+  --scale-window 4 \
+  --tensor-scale-estimator reservoir \
+  --tensor-scale-reservoir-size 65536 \
+  --convert-include-passthrough \
+  --convert-copy-buffer-bytes 67108864 \
+  --convert-verify \
+  --convert-overwrite \
+  --dry-run
+```
+
+This writes selected quantized tensors directly into a single `.ullm.d`
+prototype package and can optionally stream passthrough safetensors payloads
+into the same manifest. It avoids the per-tensor directory plus merge copy step.
+For now this direct path intentionally accepts only `--convert-jobs 1`; parallel
+direct package writing needs separate scheduling and memory/I/O validation.
+
 Policy presets:
 
 - `all-g16`: all quantizable tensors use the low-budget format.
