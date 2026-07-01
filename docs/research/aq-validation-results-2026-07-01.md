@@ -1496,6 +1496,44 @@ among the in-proj-heavy policies. p4p65 is still supported by tensor-level MSE
 and KL signals, but this real-text loss run does not support promoting it ahead
 of p4p6 or p4p46.
 
+The same corpus was then expanded to the full in-proj-stat selection:
+
+- selection:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj248-all.json`
+- result:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-projecttext32-inproj248-all-r9700-qwen35-9b-s256.jsonl`
+- summary:
+  `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-summary-projecttext32-inproj248-all-r9700-qwen35-9b-s256.json`
+- scope: 248 cumulative modules covering `attn_q/k/v/o`,
+  `linear_attn_a/b/out/qkv/z`, and `mlp_up/gate/down`
+- selected original-weight storage estimate: 13,196.0 MiB
+- prompts: 32
+- sequence length: 256
+- target tokens per variant: 7,136
+- repeat-to-length: false
+- elapsed wall time: 2:23:58
+- maximum RSS: 16,371,476 KiB
+
+| variant / policy | token-weighted ref loss | token-weighted candidate loss | token-weighted loss delta | relative delta |
+| --- | ---: | ---: | ---: | ---: |
+| all g16 weighted | 3.293687835 | 3.293380290 | -0.000307545 | -0.000093374 |
+| all g8 weighted | 3.293687835 | 3.293526344 | -0.000161491 | -0.000049031 |
+| p4p6 | 3.293687835 | 3.298941739 | +0.005253904 | +0.001595143 |
+| p4p46_inproj | 3.293687835 | 3.299502291 | +0.005814455 | +0.001765333 |
+| p4p65_inproj | 3.293687835 | 3.303046718 | +0.009358883 | +0.002841460 |
+
+This full-scope result overrides the smaller 22/44-module policy signal. The
+current conservative quality baseline is all-g16, not p4p6. all-g8 is slightly
+worse than all-g16 but still much better than the tested mixed policies on this
+prompt set. The scope-comparison summary is:
+
+- `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-scope-comparison-projecttext32-qwen35-9b.json`
+
+It shows that mixed-policy degradation relative to all-g16 grows sharply when
+the selection expands to all 248 modules. The next policy experiment should
+promote one family at a time rather than promoting several attention or
+linear-attention families together.
+
 ## Interpretation
 
 The current evidence supports continuing measurement and quantizer optimization together, not doing a long isolated quantizer-theory phase before measuring. The best gains so far came from trying concrete variants and measuring them quickly.
@@ -1510,23 +1548,27 @@ However, a dedicated quantization-tool optimization track is necessary before fu
 - Activation weighting now covers Qwen3.5 linear-attention in-projection
   modules, and p4p6/p4p46/p4p65 all complete full quantized-tensor prototype
   conversion plus Rust-side merge/verify. Tensor-level full conversion favors
-  p4p65, wider final-token logit relative MSE favors p4p46, but both
-  repeated-prompt and project-text next-token loss smokes keep p4p6 as the
-  safer policy. The wider 44-module project-text run ranks p4p46 second among
-  mixed policies and p4p65 third. The next policy decision should use a wider
-  real-text evaluation or full-model loader path, not another tensor-only
-  metric.
+  p4p65, and wider final-token logit relative MSE favored p4p46, but the full
+  inproj248 project-text next-token loss smoke ranks all-g16 first, all-g8
+  second, and all mixed policies worse than both. The next policy decision
+  should isolate mixed-policy degradation with one-family-at-a-time promotion
+  tests, not another tensor-only metric.
 
 ## Next Actions
 
-1. Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65,
-   preferably after the full-model loader path is available.
-2. Build full-package p4p46/p4p65 prototypes with passthrough tensors only if
+1. Use all-g16 as the current conservative aq quality baseline.
+2. Run one-family-at-a-time g8 promotion tests following
+   `docs/plans/aq-policy-isolation-plan-v0.1.md`, starting with
+   `linear_attn_out`, `attn_o`, `attn_v`, and `mlp_up`.
+3. Use `tools/run-aq-module-loss-smoke.py --quantized-cache-dir <dir>` or a
+   future Rust `.ullm.d` loader path before running more full-scope policy
+   tests.
+4. Build full-package p4p46/p4p65 prototypes with passthrough tensors only if
    packaging or loader work needs them; quantized-only merge/verify already
    succeeded.
-3. Replace the current per-tensor temporary conversion driver with a single
+5. Replace the current per-tensor temporary conversion driver with a single
    `ullm-quant` full-conversion command now that Rust-side merge exists.
-4. Replace or approximate the exact tensor-scale pre-pass before wider
+6. Replace or approximate the exact tensor-scale pre-pass before wider
    multi-tensor conversion and packaging work.
-5. Add SIMD and multithreaded scheduling only after the scalar C++ semantics
+7. Add SIMD and multithreaded scheduling only after the scalar C++ semantics
    remain stable across wider conversion.
