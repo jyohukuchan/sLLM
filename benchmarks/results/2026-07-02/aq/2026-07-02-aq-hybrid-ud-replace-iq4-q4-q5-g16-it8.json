@@ -1,0 +1,1572 @@
+{
+  "schema_version": "aq-hybrid-ud-replacement-estimate-v0.1",
+  "description": "Replace UD IQ4_XS/Q4_K/Q5_K rows with aq g16 alternating, keep Q6_K/Q8_0 rows unchanged, using the same sampled tensors as the UD reordered comparison.",
+  "settings": {
+    "ud_source": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b-reordered.jsonl",
+    "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "replace_ggml_types": [
+      "IQ4_XS",
+      "Q4_K",
+      "Q5_K"
+    ],
+    "keep_ggml_types": [
+      "Q6_K",
+      "Q8_0"
+    ],
+    "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+    "aq_iterations": 8,
+    "aq_scale_window": 4,
+    "aq_global_scale_dtype": "fp16",
+    "max_elements_per_tensor": 262144,
+    "torch_threads": 32,
+    "torch_interop_threads": 1
+  },
+  "summary": {
+    "total_rows": 36,
+    "replaced_rows": 27,
+    "kept_rows": 9,
+    "original_arithmetic_bpp": 5.522569444444445,
+    "hybrid_arithmetic_bpp": 5.230902777777778,
+    "original_parameter_weighted_bpp": 5.255106209150327,
+    "hybrid_parameter_weighted_bpp": 5.039419934640523,
+    "original_arithmetic_relative_mse": 0.0028574673827615267,
+    "hybrid_arithmetic_relative_mse": 0.0038498392140321577,
+    "original_element_weighted_relative_mse_estimate": 0.003330448580405519,
+    "hybrid_element_weighted_relative_mse_estimate": 0.004040111358336856,
+    "elapsed_sec": 27.55028680502437
+  },
+  "replaced_results": [
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.0013546230096210185,
+      "n_elements": 16777216,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005204069281279264,
+      "aq_alternating_relative_mse": 0.0050800757299272045,
+      "aq_timing_sec": {
+        "sampling_sec": 0.01931194300414063,
+        "baseline_sec": 0.14321379599277861,
+        "final_assignment_sec": 0.05807982099941,
+        "alternating_sec": 0.9768366679782048,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.11644605800393037
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.10098648600978777
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.09995028399862349
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.0998987430066336
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.10096413502469659
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.09968182901502587
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.09979414101690054
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.10056089601130225
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.146469374973094
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.0013457437907501665,
+      "n_elements": 33554432,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.00516589232040477,
+      "aq_alternating_relative_mse": 0.005055153708057031,
+      "aq_timing_sec": {
+        "sampling_sec": 0.023099300975445658,
+        "baseline_sec": 0.11679479500162415,
+        "final_assignment_sec": 0.05439125400152989,
+        "alternating_sec": 0.9426539889827836,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.10407401897828095
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.1012387599912472
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.10191649501211941
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.10499413899378851
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.10258087798138149
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.10251025698380545
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.09770886600017548
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.0908874040178489
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.0881856720079668
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005345742697959077,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005149808277624554,
+      "aq_alternating_relative_mse": 0.005046304900565432,
+      "aq_timing_sec": {
+        "sampling_sec": 0.02951545498217456,
+        "baseline_sec": 0.10937435898813419,
+        "final_assignment_sec": 0.06102482101414353,
+        "alternating_sec": 0.9154386860027444,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09051154600456357
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.08969982000417076
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.09299840801395476
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.10046981301275082
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.10220850000041537
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.09967990801669657
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.09735143798752688
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.10390978498617187
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.0611474420002196
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005288427797066388,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005151721055171973,
+      "aq_alternating_relative_mse": 0.005043601443028669,
+      "aq_timing_sec": {
+        "sampling_sec": 0.03247909701894969,
+        "baseline_sec": 0.11891110698343255,
+        "final_assignment_sec": 0.05394194400287233,
+        "alternating_sec": 0.8928379289864097,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.10255260701524094
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09793080997769721
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.09178113198140636
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08760775497648865
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08977433000109158
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.09960827502072789
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.09662866301368922
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08843351100222208
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.0498384200036526
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.001353589089115999,
+      "n_elements": 16777216,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005153582094418114,
+      "aq_alternating_relative_mse": 0.0050466220159456655,
+      "aq_timing_sec": {
+        "sampling_sec": 0.011216784012503922,
+        "baseline_sec": 0.11473135001142509,
+        "final_assignment_sec": 0.05980495599214919,
+        "alternating_sec": 0.9569277380069252,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.10111730601056479
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.10814097197726369
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.10461712902178988
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.10161758601316251
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.0980531919922214
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.09876086600706913
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.1024103729869239
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.10231531001045369
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.0897147840005346
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.0013530832824190998,
+      "n_elements": 33554432,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.00517713199618358,
+      "aq_alternating_relative_mse": 0.005074968827457677,
+      "aq_timing_sec": {
+        "sampling_sec": 0.021515658008866012,
+        "baseline_sec": 0.11468939800397493,
+        "final_assignment_sec": 0.05744736499036662,
+        "alternating_sec": 0.9840201250044629,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.10597915700054727
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.10971709500881843
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.10944669801392592
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.10420942900236696
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.10357610697974451
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.10252196399960667
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.10030612800619565
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.09752062999177724
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.126126874005422
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.0013319212506025444,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005209350774586587,
+      "aq_alternating_relative_mse": 0.005116426351118306,
+      "aq_timing_sec": {
+        "sampling_sec": 0.031567376980092376,
+        "baseline_sec": 0.10771416200441308,
+        "final_assignment_sec": 0.053605836001224816,
+        "alternating_sec": 0.8418923319841269,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09089606298948638
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09201608499279246
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08867398501024581
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08838453999487683
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08876872700056992
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08715031400788575
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08704089099774137
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08938335999846458
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9869235799997114
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "original_ggml_type": "IQ4_XS",
+      "original_bpp": 4.25,
+      "original_relative_mse": 0.005895709933920995,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005144848841624675,
+      "aq_alternating_relative_mse": 0.005042285510450267,
+      "aq_timing_sec": {
+        "sampling_sec": 0.03074519001529552,
+        "baseline_sec": 0.1067981930100359,
+        "final_assignment_sec": 0.053337269986514,
+        "alternating_sec": 0.8385517269780394,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09022213800926693
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09097115299664438
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.0874591690080706
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.0868606869771611
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.0893162380089052
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08732983699883334
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08828158699907362
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.0886815550038591
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.98178102800739
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "original_ggml_type": "IQ4_XS",
+      "original_bpp": 4.25,
+      "original_relative_mse": 0.005887334779614531,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005170858200718003,
+      "aq_alternating_relative_mse": 0.005063284630418124,
+      "aq_timing_sec": {
+        "sampling_sec": 0.031037316017318517,
+        "baseline_sec": 0.10765466999146156,
+        "final_assignment_sec": 0.05501089399331249,
+        "alternating_sec": 0.8529072710080072,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09180374999414198
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.08988659997703508
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08950014199945144
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.09159647501655854
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08993750001536682
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08926386700477451
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.09189509099815041
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08910229301545769
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9972894050006289
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.001335691607630601,
+      "n_elements": 16777216,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005165177551349525,
+      "aq_alternating_relative_mse": 0.005064214569390763,
+      "aq_timing_sec": {
+        "sampling_sec": 0.011776164988987148,
+        "baseline_sec": 0.1074877259961795,
+        "final_assignment_sec": 0.05385755997849628,
+        "alternating_sec": 0.8407434929977171,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09051869201357476
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.0908093889884185
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.0880690420162864
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08760121098021045
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08952499099541456
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08688335699844174
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08805125099024735
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.09038198899361305
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9658192350179888
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.0013393611469410733,
+      "n_elements": 33554432,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005156956554874685,
+      "aq_alternating_relative_mse": 0.0050460751987034475,
+      "aq_timing_sec": {
+        "sampling_sec": 0.021204471006058156,
+        "baseline_sec": 0.10657348597305827,
+        "final_assignment_sec": 0.057806761004030704,
+        "alternating_sec": 0.8463618739915546,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.0892369550128933
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09008660301333293
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08910166300483979
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08761048098676838
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.09037507898756303
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08696125700953417
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08687412599101663
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.09302507399115711
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9798108999966644
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005171930459334988,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005128883620320905,
+      "aq_alternating_relative_mse": 0.0050265293828932805,
+      "aq_timing_sec": {
+        "sampling_sec": 0.030194887978723273,
+        "baseline_sec": 0.11709746401174925,
+        "final_assignment_sec": 0.05348164102178998,
+        "alternating_sec": 0.8458024880092125,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.08956510198186152
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.0911281640001107
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08892612799536437
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.088095170998713
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.0900372710020747
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08798035798827186
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.0885535409906879
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.0891243520018179
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9987279270135332
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005195931102408447,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.00514162954782075,
+      "aq_alternating_relative_mse": 0.005036712852248855,
+      "aq_timing_sec": {
+        "sampling_sec": 0.030279748985776678,
+        "baseline_sec": 0.10751353501109406,
+        "final_assignment_sec": 0.053632144001312554,
+        "alternating_sec": 0.8596173499827273,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.08892230701167136
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09021828501136042
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08784087499952875
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08754883898654953
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08916112300357781
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.0876160399930086
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08751647800090723
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08918238300248049
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.0030956119881012
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.self_attn.k_proj.weight",
+      "family": "attn_k",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005592235815188147,
+      "n_elements": 4194304,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005257819885484776,
+      "aq_alternating_relative_mse": 0.005155132217813116,
+      "aq_timing_sec": {
+        "sampling_sec": 0.0017486069991718978,
+        "baseline_sec": 0.13962438100134023,
+        "final_assignment_sec": 0.05443107002065517,
+        "alternating_sec": 0.8705140009988099,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09223612700589001
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09145638000336476
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08866177100571804
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08880590499029495
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.09013149200472981
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08860890998039395
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08875172300031409
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.09000717999879271
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.0175447069923393
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.self_attn.o_proj.weight",
+      "family": "attn_o",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005794176217455263,
+      "n_elements": 16777216,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005254696984584912,
+      "aq_alternating_relative_mse": 0.005123035497564054,
+      "aq_timing_sec": {
+        "sampling_sec": 0.011307164997560903,
+        "baseline_sec": 0.10943164300988428,
+        "final_assignment_sec": 0.05373330501606688,
+        "alternating_sec": 0.8399028009735048,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09017235197825357
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.08987934602191672
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08792860599351116
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08682613298879005
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08860377999371849
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.0870952180121094
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08773680200101808
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08878461399581283
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9663200170034543
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.self_attn.q_proj.weight",
+      "family": "attn_q",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005474738046462908,
+      "n_elements": 33554432,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005212240473807639,
+      "aq_alternating_relative_mse": 0.0050933519619192355,
+      "aq_timing_sec": {
+        "sampling_sec": 0.021195220004301518,
+        "baseline_sec": 0.10897968302015215,
+        "final_assignment_sec": 0.054163123975740746,
+        "alternating_sec": 0.8500491669983603,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09234452800592408
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09085416598827578
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08896023698616773
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08928099300828762
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.0907500839966815
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08896578699932434
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08878798299701884
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.09018857197952457
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9858923580031842
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005190027201540555,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005128491017240191,
+      "aq_alternating_relative_mse": 0.005035578538329059,
+      "aq_timing_sec": {
+        "sampling_sec": 0.030683267017593607,
+        "baseline_sec": 0.10591566798393615,
+        "final_assignment_sec": 0.054084231989691034,
+        "alternating_sec": 0.8794703930034302,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09068125201156363
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09062606099178083
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08841934497468174
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.09616199601441622
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.10227493202546611
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.09677838900825009
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.09352623100858182
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.09107428000424989
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.0218329280032776
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005226282007225258,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005156379300273386,
+      "aq_alternating_relative_mse": 0.005045821859225773,
+      "aq_timing_sec": {
+        "sampling_sec": 0.032551994983805344,
+        "baseline_sec": 0.11451728700194508,
+        "final_assignment_sec": 0.05395108900847845,
+        "alternating_sec": 0.848550836002687,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.09245032901526429
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09135903502465226
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08854893798707053
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08786967297783121
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08978124198620208
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.0892484619980678
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08805557698360644
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.09051027800887823
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.0013695069937967
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.0013258828013069349,
+      "n_elements": 16777216,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.0051297978393697215,
+      "aq_alternating_relative_mse": 0.005032554649960258,
+      "aq_timing_sec": {
+        "sampling_sec": 0.011527039023349062,
+        "baseline_sec": 0.10668381297728047,
+        "final_assignment_sec": 0.05318626301595941,
+        "alternating_sec": 0.8405942569952458,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.08985118501004763
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09086131499498151
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08837398301693611
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08746349401189946
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.0894458550028503
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08769595899502747
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08781095099402592
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08992735500214621
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9643982950074133
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.0013322811789448217,
+      "n_elements": 33554432,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005193912287477393,
+      "aq_alternating_relative_mse": 0.0050900385795902255,
+      "aq_timing_sec": {
+        "sampling_sec": 0.02200350700877607,
+        "baseline_sec": 0.10547064698766917,
+        "final_assignment_sec": 0.05309241099166684,
+        "alternating_sec": 0.8369223060144577,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.08880168199539185
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09063287000753917
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08827544999076054
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08778607100248337
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08964966901112348
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08726827899226919
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08725098898867145
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08909348800079897
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9700740270200185
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005242208760724943,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005172379676083478,
+      "aq_alternating_relative_mse": 0.005070841353693703,
+      "aq_timing_sec": {
+        "sampling_sec": 0.031045754003571346,
+        "baseline_sec": 0.10642590699717402,
+        "final_assignment_sec": 0.05336074699880555,
+        "alternating_sec": 0.8428596039884724,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.08966241899179295
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09227074298541993
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08898779499577358
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08784654099144973
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.09006368700647727
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08760349598014727
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.0880626059952192
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.0893790319969412
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.986115495004924
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.00522536374593705,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005145606142631555,
+      "aq_alternating_relative_mse": 0.005047461883727663,
+      "aq_timing_sec": {
+        "sampling_sec": 0.030978572001913562,
+        "baseline_sec": 0.11283812898909673,
+        "final_assignment_sec": 0.05324553299578838,
+        "alternating_sec": 0.84633155100164,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.08716518699657172
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.08749438400263898
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08742240199353546
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08709369497955777
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08701101297629066
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08704446401679888
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08693752199178562
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08714247599709779
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.995847620011773
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.001332711720040487,
+      "n_elements": 16777216,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005191385696262955,
+      "aq_alternating_relative_mse": 0.005064479745570144,
+      "aq_timing_sec": {
+        "sampling_sec": 0.011235382000450045,
+        "baseline_sec": 0.1124850409978535,
+        "final_assignment_sec": 0.05383939598686993,
+        "alternating_sec": 0.8926171049824916,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.0916722789988853
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.09631562599679455
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.09567735300515778
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.09868371399352327
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.09198259600088932
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08811142601189204
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08843944198451936
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.09060646698344499
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 1.0220742569945287
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "original_ggml_type": "Q5_K",
+      "original_bpp": 5.5,
+      "original_relative_mse": 0.0013565941465470482,
+      "n_elements": 33554432,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005193906413715709,
+      "aq_alternating_relative_mse": 0.005102587948224084,
+      "aq_timing_sec": {
+        "sampling_sec": 0.021636197983752936,
+        "baseline_sec": 0.1056115880201105,
+        "final_assignment_sec": 0.0525514789915178,
+        "alternating_sec": 0.8322011689888313,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.08952741499524564
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.08943382298457436
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08759551498224027
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08698149098199792
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.0892823199974373
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08693933999165893
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08653161299298517
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08905514399521053
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9652229240164161
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.0052911603922304465,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.00519311340198078,
+      "aq_alternating_relative_mse": 0.005091186187527518,
+      "aq_timing_sec": {
+        "sampling_sec": 0.03113136501633562,
+        "baseline_sec": 0.10664478901890106,
+        "final_assignment_sec": 0.05239628499839455,
+        "alternating_sec": 0.8267789520032238,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.08931381002184935
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.08901555399643257
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.0870323319977615
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08693106999271549
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08660594400134869
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08682938799029216
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08677600699593313
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.0875494530191645
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9703236350032967
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.005212504929951682,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.005152851978292977,
+      "aq_alternating_relative_mse": 0.005048118206797918,
+      "aq_timing_sec": {
+        "sampling_sec": 0.03078265700605698,
+        "baseline_sec": 0.10572797001805156,
+        "final_assignment_sec": 0.05446431698510423,
+        "alternating_sec": 0.8342693719896488,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.08981975997448899
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.08946435200050473
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08775448700180277
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08736665899050422
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08809631402255036
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.08643957899766974
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08593815899803303
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.09031205999781378
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9765554490149952
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "original_ggml_type": "Q4_K",
+      "original_bpp": 4.5,
+      "original_relative_mse": 0.0052912405915377415,
+      "n_elements": 50331648,
+      "aq_candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "aq_bpp": 4.5,
+      "aq_baseline_relative_mse": 0.0051839500487321916,
+      "aq_alternating_relative_mse": 0.00506943967807344,
+      "aq_timing_sec": {
+        "sampling_sec": 0.0308374380110763,
+        "baseline_sec": 0.1062237590085715,
+        "final_assignment_sec": 0.05381196300731972,
+        "alternating_sec": 0.8430336590099614,
+        "iterations": [
+          {
+            "iteration": 0,
+            "elapsed_sec": 0.0919411139911972
+          },
+          {
+            "iteration": 1,
+            "elapsed_sec": 0.0910072140104603
+          },
+          {
+            "iteration": 2,
+            "elapsed_sec": 0.08823097599088214
+          },
+          {
+            "iteration": 3,
+            "elapsed_sec": 0.08839151900610887
+          },
+          {
+            "iteration": 4,
+            "elapsed_sec": 0.08903109200764447
+          },
+          {
+            "iteration": 5,
+            "elapsed_sec": 0.0881278240121901
+          },
+          {
+            "iteration": 6,
+            "elapsed_sec": 0.08781486700172536
+          },
+          {
+            "iteration": 7,
+            "elapsed_sec": 0.08930174901615828
+          }
+        ],
+        "exhaustive_local_assignment_sec": null,
+        "total_sec": 0.9857804339844733
+      }
+    }
+  ],
+  "kept_ud_rows": [
+    {
+      "tensor_name": "model.language_model.layers.0.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ggml_type": "Q6_K",
+      "bpp": 6.5625,
+      "relative_mse": 0.0003312815380371682,
+      "n_elements": 50331648
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.out_proj.weight",
+      "family": "linear_attn_out",
+      "ggml_type": "Q8_0",
+      "bpp": 8.5,
+      "relative_mse": 3.096138323996385e-05,
+      "n_elements": 16777216
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.out_proj.weight",
+      "family": "linear_attn_out",
+      "ggml_type": "Q8_0",
+      "bpp": 8.5,
+      "relative_mse": 3.0158605841962205e-05,
+      "n_elements": 16777216
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ggml_type": "Q6_K",
+      "bpp": 6.5625,
+      "relative_mse": 0.0003250637856880892,
+      "n_elements": 50331648
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.linear_attn.out_proj.weight",
+      "family": "linear_attn_out",
+      "ggml_type": "Q8_0",
+      "bpp": 8.5,
+      "relative_mse": 3.015118753861681e-05,
+      "n_elements": 16777216
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.self_attn.v_proj.weight",
+      "family": "attn_v",
+      "ggml_type": "Q6_K",
+      "bpp": 6.5625,
+      "relative_mse": 0.0003678362685195566,
+      "n_elements": 4194304
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ggml_type": "Q6_K",
+      "bpp": 6.5625,
+      "relative_mse": 0.00031720160525644845,
+      "n_elements": 50331648
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ggml_type": "Q6_K",
+      "bpp": 6.5625,
+      "relative_mse": 0.00032003896712510626,
+      "n_elements": 50331648
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.linear_attn.out_proj.weight",
+      "family": "linear_attn_out",
+      "ggml_type": "Q8_0",
+      "bpp": 8.5,
+      "relative_mse": 2.9634935689827538e-05,
+      "n_elements": 16777216
+    }
+  ]
+}
