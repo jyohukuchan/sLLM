@@ -475,6 +475,17 @@
     - token-weighted loss deltas: all-g16 `-0.000307545`, all-g8 `-0.000161491`, p4p6 `+0.005253904`, p4p46 `+0.005814455`, p4p65 `+0.009358883`.
     - interpretation update: full inproj248 project-text loss ranks all-g16 first and all-g8 second; all three mixed policies increase loss, with p4p65 worst. This contradicts the smaller 22/44-module project-text smokes where p4p6 looked safest among mixed policies. Treat the full-scope loss result as stronger policy evidence than tensor MSE or smaller policy smokes for the current codebook artifact.
     - tooling note: this Python/PyTorch loss smoke re-quantizes all selected weights for every variant and is CPU-quantization-bound. Future full-scope loss evaluation should reuse Rust-converted weights, add a quantized-weight cache, or evaluate through a loader path instead of re-running Python quantization for every policy.
+  - project-text loss scope comparison:
+    - summary: `benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-scope-comparison-projecttext32-qwen35-9b.json`.
+    - rank by token-weighted loss delta:
+      - inproj22 self-attn: all-g16, p4p6, p4p65, p4p46, all-g8.
+      - inproj44 self-attn: all-g16, p4p6, p4p46, p4p65, all-g8.
+      - inproj248 all: all-g16, all-g8, p4p6, p4p46, p4p65.
+    - mixed-policy loss delta minus all-g16:
+      - inproj22 p4p6 `+0.000928007`, p4p46 `+0.001949616`, p4p65 `+0.001512036`.
+      - inproj44 p4p6 `+0.000526816`, p4p46 `+0.001080275`, p4p65 `+0.002476983`.
+      - inproj248 p4p6 `+0.005561449`, p4p46 `+0.006122001`, p4p65 `+0.009666428`.
+    - interpretation: the full-scope degradation is not visible in the smaller module subsets. The next targeted policy experiment should not promote several families at once; it should test one-family-at-a-time g8 promotion against all-g16, ideally using cached or Rust-converted weights.
 
 ## Current Interpretation
 

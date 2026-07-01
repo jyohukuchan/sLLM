@@ -1,0 +1,148 @@
+{
+  "interpretation": "As project-text loss scope expands from 22/44 selected modules to all 248 in-proj-stat modules, mixed policies become much worse relative to all-g16. In the full inproj248 scope, all-g16 is the best baseline, all-g8 is slightly worse but still near reference, and p4p6/p4p46/p4p65 all increase loss. The next policy step should test one-family-at-a-time promotions rather than assuming tensor-MSE-ranked mixed policies improve model loss.",
+  "model": "Qwen/Qwen3.5-9B",
+  "next_experiments": [
+    "Run one-family-at-a-time project-text loss promotions over the inproj248 selection, preferably using cached/Rust-converted weights.",
+    "Start with attn_k, attn_o, attn_v, linear_attn_out, linear_attn_qkv, and linear_attn_z because they dominate mixed-policy differences.",
+    "Keep all-g16 as the current conservative aq quality baseline until full-scope loss improves."
+  ],
+  "policy_high_scope_estimates": {
+    "p4p46": {
+      "high_families": [
+        "attn_o",
+        "attn_v",
+        "linear_attn_a",
+        "linear_attn_b",
+        "linear_attn_out",
+        "linear_attn_z"
+      ],
+      "high_original_weight_mib_in_inproj248": 1868.0
+    },
+    "p4p6": {
+      "high_families": [
+        "attn_k",
+        "attn_o",
+        "attn_v",
+        "linear_attn_out"
+      ],
+      "high_original_weight_mib_in_inproj248": 1152.0
+    },
+    "p4p65": {
+      "high_families": [
+        "attn_k",
+        "attn_o",
+        "attn_v",
+        "linear_attn_a",
+        "linear_attn_b",
+        "linear_attn_out",
+        "linear_attn_qkv"
+      ],
+      "high_original_weight_mib_in_inproj248": 2700.0
+    }
+  },
+  "prompt_file": "benchmarks/calibration/qwen35-aq-project-text-v0.1.txt",
+  "schema_version": "aq-loss-scope-comparison-v0.1",
+  "scopes": [
+    {
+      "delta_minus_all_g16": {
+        "g8_weighted": 0.004014864563941956,
+        "p4p46": 0.0019496157765388489,
+        "p4p6": 0.0009280070662498474,
+        "p4p65": 0.0015120357275009155
+      },
+      "loss_delta_by_variant": {
+        "g16_weighted": -0.0010989680886268616,
+        "g8_weighted": 0.002915896475315094,
+        "p4p46": 0.0008506476879119873,
+        "p4p6": -0.00017096102237701416,
+        "p4p65": 0.00041306763887405396
+      },
+      "module_count": null,
+      "rank_by_loss_delta": [
+        "g16_weighted",
+        "p4p6",
+        "p4p65",
+        "p4p46",
+        "g8_weighted"
+      ],
+      "rows": 160,
+      "scope_id": "inproj22_selfattn",
+      "selection_json": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj22-selfattn.json",
+      "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-summary-projecttext32-inproj22-selfattn-r9700-qwen35-9b-s256.json",
+      "timing": {
+        "max_rss_kib": 16367072,
+        "wall": "9:48.82"
+      },
+      "total_original_weight_mib": null,
+      "total_tokens_per_variant": 7136
+    },
+    {
+      "delta_minus_all_g16": {
+        "g8_weighted": 0.005044892430305481,
+        "p4p46": 0.0010802745819091797,
+        "p4p6": 0.00052681565284729,
+        "p4p65": 0.0024769827723503113
+      },
+      "loss_delta_by_variant": {
+        "g16_weighted": -0.002063170075416565,
+        "g8_weighted": 0.002981722354888916,
+        "p4p46": -0.0009828954935073853,
+        "p4p6": -0.001536354422569275,
+        "p4p65": 0.00041381269693374634
+      },
+      "module_count": null,
+      "rank_by_loss_delta": [
+        "g16_weighted",
+        "p4p6",
+        "p4p46",
+        "p4p65",
+        "g8_weighted"
+      ],
+      "rows": 160,
+      "scope_id": "inproj44_selfattn",
+      "selection_json": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj44-selfattn.json",
+      "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-summary-projecttext32-inproj44-selfattn-r9700-qwen35-9b-s256.json",
+      "timing": {
+        "max_rss_kib": 16364436,
+        "wall": "17:46.24"
+      },
+      "total_original_weight_mib": null,
+      "total_tokens_per_variant": 7136
+    },
+    {
+      "delta_minus_all_g16": {
+        "g8_weighted": 0.0001460537314414978,
+        "p4p46": 0.006122000515460968,
+        "p4p6": 0.005561448633670807,
+        "p4p65": 0.009666427969932556
+      },
+      "loss_delta_by_variant": {
+        "g16_weighted": -0.0003075450658798218,
+        "g8_weighted": -0.00016149133443832397,
+        "p4p46": 0.005814455449581146,
+        "p4p6": 0.005253903567790985,
+        "p4p65": 0.009358882904052734
+      },
+      "module_count": 248,
+      "rank_by_loss_delta": [
+        "g16_weighted",
+        "g8_weighted",
+        "p4p6",
+        "p4p46",
+        "p4p65"
+      ],
+      "rows": 160,
+      "scope_id": "inproj248_all",
+      "selection_json": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj248-all.json",
+      "summary": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-summary-projecttext32-inproj248-all-r9700-qwen35-9b-s256.json",
+      "timing": {
+        "cpu_percent": "5149%",
+        "exit_status": 0,
+        "max_rss_kib": 16371476,
+        "wall": "2:23:58"
+      },
+      "total_original_weight_mib": 13196.0,
+      "total_tokens_per_variant": 7136
+    }
+  ]
+}
