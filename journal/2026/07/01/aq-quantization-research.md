@@ -458,6 +458,11 @@
       - jobs32: elapsed `1:02.70`, max RSS `1979796 KiB`, CPU `1722%`.
       - jobs64: elapsed `0:35.39`, max RSS `3735740 KiB`, CPU `3314%`.
     - all jobs8/16/32/64 runs produced identical relative MSE mean/min/max `0.005016281038` / `0.003639662156` / `0.005783048676`, identical total file bytes `4049329133`, and verify exit status `0`.
+    - full p4p46 direct quantized-only jobs64 summary/time/verify: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p46-inproj-reservoir65536-jobs64.json`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p46-inproj-reservoir65536-jobs64.time`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-verify-qwen35-9b-p4p46-inproj-reservoir65536-jobs64.txt`.
+    - p4p46 jobs64 result: selected `255`, failures `0`, total file bytes `4072528707`, mean/min/max relative MSE `0.004596850016` / `0.003604247093` / `0.005739970802`, convert elapsed `0:35.65`, max RSS `3748148 KiB`, verify checked 255 tensors and exited `0`.
+    - full p4p65 direct quantized-only jobs64 summary/time/verify: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p65-inproj-reservoir65536-jobs64.json`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p65-inproj-reservoir65536-jobs64.time`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-verify-qwen35-9b-p4p65-inproj-reservoir65536-jobs64.txt`.
+    - p4p65 jobs64 result: selected `255`, failures `0`, total file bytes `4100053806`, mean/min/max relative MSE `0.004533534868` / `0.003602888240` / `0.005461354363`, convert elapsed `0:35.76`, max RSS `3773344 KiB`, verify checked 255 tensors and exited `0`.
+    - current-codebook tensor-MSE ranking at jobs64 remains p4p65 best, p4p46 second, p4p6 third. Size deltas versus p4p6 are `+23199574` bytes for p4p46 and `+50724673` bytes for p4p65.
 
 ## Current Interpretation
 
