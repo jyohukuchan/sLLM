@@ -1,0 +1,18 @@
+uLLM-projectで使用される用語とその意味について
+用語:意味
+bpp:bit/parameter
+BF16-error:BF16のraw-valueまたは出力を基準にした誤差
+decode-tps:decode token/s
+prefill-tps:prefill token/s
+raw-value:scale・codebookを一切考慮しない各パラメータの値
+codebook:LUTによる変換表
+codebook-index:codebookを参照するために保存されるindex値
+LUT:実装上の表参照機構。量子化仕様上の変換表はcodebookと書く
+block:同じlocal-scaleを共有するraw-valueのまとまり
+block-size:1つのblockに含まれるraw-valueの数
+group:実装上のblockの旧称または変数名。文書ではblockを優先する
+local-scale:数十個のraw-valueごとのscale
+tensor-scale:1つのtensor全体にかかるscale
+family-scale:同じfamilyに属するtensorで共有または補正に使うscale
+global-scale:local-scaleより大きい単位でのscale。tensor-scaleやfamily-scaleを含む上位概念として使う
+family:Q/K/V/OやMLPなど、性質が近いtensorをまとめる分類
