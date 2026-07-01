@@ -1,0 +1,23 @@
+	Command being timed: "build/envs/vllm-rocm-nightly/bin/python tools/run-aq-module-loss-smoke.py --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --activation-stats benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj --selection-json benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj248-all.json --prompt-file benchmarks/calibration/qwen35-aq-project-text-v0.1.txt --max-prompts 32 --sequence-length 256 --policy p4p6=attn_k,attn_o,attn_v,linear_attn_out --policy p4p46=attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_z --policy p4p65=attn_k,attn_o,attn_v,linear_attn_a,linear_attn_b,linear_attn_out,linear_attn_qkv --variant g16_weighted --variant g8_weighted --max-original-weight-mib 15000 --output benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-projecttext32-inproj248-all-r9700-qwen35-9b-s256.jsonl --run-id aq-module-loss-projecttext32-inproj248-all-qwen35-9b-s256 --note selection=inproj248-all --dtype bfloat16 --device cuda --torch-threads 64"
+	User time (seconds): 344864.19
+	System time (seconds): 99957.99
+	Percent of CPU this job got: 5149%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:23:58
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 16371476
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 476127
+	Minor (reclaiming a frame) page faults: 8463719273
+	Voluntary context switches: 32300574
+	Involuntary context switches: 11392822
+	Swaps: 0
+	File system inputs: 3390307
+	File system outputs: 411256
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

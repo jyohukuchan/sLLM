@@ -1,0 +1,91 @@
+{
+  "activation_stats": "benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512-inproj",
+  "interpretation": "On the full inproj248 selection, all-g16 has the best token-weighted next-token loss. All-g8 is slightly worse but still negative relative to BF16 reference on this prompt set. The mixed p4p6, p4p46, and p4p65 policies all increase loss, unlike the earlier inproj44 self-attention-only smoke; treat full-scope project-text loss as stronger evidence than tensor MSE for current policy selection.",
+  "model": "Qwen/Qwen3.5-9B",
+  "prompt_count": 32,
+  "prompt_file": "benchmarks/calibration/qwen35-aq-project-text-v0.1.txt",
+  "repeat_to_length": false,
+  "result_jsonl": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-module-loss-smoke-projecttext32-inproj248-all-r9700-qwen35-9b-s256.jsonl",
+  "rows": 160,
+  "run_id": "aq-module-loss-projecttext32-inproj248-all-qwen35-9b-s256",
+  "schema_version": "aq-module-loss-summary-v0.1",
+  "selection": {
+    "family_counts": {
+      "attn_k": 8,
+      "attn_o": 8,
+      "attn_q": 8,
+      "attn_v": 8,
+      "linear_attn_a": 24,
+      "linear_attn_b": 24,
+      "linear_attn_out": 24,
+      "linear_attn_qkv": 24,
+      "linear_attn_z": 24,
+      "mlp_down": 32,
+      "mlp_gate": 32,
+      "mlp_up": 32
+    },
+    "module_count": 248,
+    "total_original_weight_bytes": 13837008896,
+    "total_original_weight_mib": 13196.0
+  },
+  "selection_json": "benchmarks/results/2026-07-01/aq/2026-07-01-aq-logit-smoke-selection-inproj248-all.json",
+  "sequence_length": 256,
+  "status_counts": {
+    "ok": 160
+  },
+  "timing": {
+    "cpu_percent": "5149%",
+    "exit_status": 0,
+    "max_rss_kib": 16371476,
+    "wall": "2:23:58"
+  },
+  "tooling_note": "This Python/PyTorch smoke re-quantizes the selected weights per variant and is CPU-quantization-bound; the 248-module run took over two hours despite stable memory. Future full-scope loss evaluation should reuse Rust-converted weights or cache quantized tensors.",
+  "total_tokens_per_variant": 7136,
+  "variants": [
+    {
+      "relative_loss_delta": -9.337407831439896e-05,
+      "rows": 32,
+      "token_weighted_candidate_loss": 3.2933802902698517,
+      "token_weighted_loss_delta": -0.0003075450658798218,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "tokens": 7136,
+      "variant_id": "g16_weighted"
+    },
+    {
+      "relative_loss_delta": -4.903055253317984e-05,
+      "rows": 32,
+      "token_weighted_candidate_loss": 3.293526344001293,
+      "token_weighted_loss_delta": -0.00016149133443832397,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "tokens": 7136,
+      "variant_id": "g8_weighted"
+    },
+    {
+      "relative_loss_delta": 0.0015951431436292884,
+      "rows": 32,
+      "token_weighted_candidate_loss": 3.2989417389035225,
+      "token_weighted_loss_delta": 0.005253903567790985,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "tokens": 7136,
+      "variant_id": "p4p6"
+    },
+    {
+      "relative_loss_delta": 0.0017653328852849433,
+      "rows": 32,
+      "token_weighted_candidate_loss": 3.2995022907853127,
+      "token_weighted_loss_delta": 0.005814455449581146,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "tokens": 7136,
+      "variant_id": "p4p46"
+    },
+    {
+      "relative_loss_delta": 0.002841460202648126,
+      "rows": 32,
+      "token_weighted_candidate_loss": 3.3030467182397842,
+      "token_weighted_loss_delta": 0.009358882904052734,
+      "token_weighted_reference_loss": 3.2936878353357315,
+      "tokens": 7136,
+      "variant_id": "p4p65"
+    }
+  ]
+}
