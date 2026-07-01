@@ -447,6 +447,17 @@
     - full p4p6 direct full-package jobs4 verify log/time: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-fullpkg-verify-qwen35-9b-p4p6-reservoir65536-jobs4.txt`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-fullpkg-verify-qwen35-9b-p4p6-reservoir65536-jobs4.time`.
     - full p4p6 direct full-package jobs4 result: selected `255`, jobs `4`, failures `0`, tensor count `255`, passthrough tensors `520`, passthrough payload bytes `5049777120`, codebooks `12`, total file bytes `9099409328`, directory size `8.5G`.
     - full p4p6 direct full-package jobs4 resource use: convert+passthrough copy elapsed `7:11.03`, max RSS `329672 KiB`, CPU `247%`; verify checked 255 quantized tensors and 520 passthrough tensors, elapsed `0:51.77`, max RSS `104280 KiB`; both exit status `0`.
+    - full p4p6 direct quantized-only jobs8 summary/time/verify: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p6-reservoir65536-jobs8.json`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p6-reservoir65536-jobs8.time`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-verify-qwen35-9b-p4p6-reservoir65536-jobs8.txt`.
+    - full p4p6 direct quantized-only jobs16 summary/time/verify: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p6-reservoir65536-jobs16.json`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p6-reservoir65536-jobs16.time`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-verify-qwen35-9b-p4p6-reservoir65536-jobs16.txt`.
+    - full p4p6 direct quantized-only jobs32 summary/time/verify: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p6-reservoir65536-jobs32.json`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p6-reservoir65536-jobs32.time`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-verify-qwen35-9b-p4p6-reservoir65536-jobs32.txt`.
+    - full p4p6 direct quantized-only jobs64 summary/time/verify: `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p6-reservoir65536-jobs64.json`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-qwen35-9b-p4p6-reservoir65536-jobs64.time`, `benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-direct-package-full-verify-qwen35-9b-p4p6-reservoir65536-jobs64.txt`.
+    - jobs scaling result for full p4p6 direct quantized-only conversion:
+      - jobs4: elapsed `7:03.70`, max RSS `333132 KiB`, CPU `250%`.
+      - jobs8: elapsed `3:58.26`, max RSS `596984 KiB`, CPU `447%`.
+      - jobs16: elapsed `2:04.02`, max RSS `1075104 KiB`, CPU `867%`.
+      - jobs32: elapsed `1:02.70`, max RSS `1979796 KiB`, CPU `1722%`.
+      - jobs64: elapsed `0:35.39`, max RSS `3735740 KiB`, CPU `3314%`.
+    - all jobs8/16/32/64 runs produced identical relative MSE mean/min/max `0.005016281038` / `0.003639662156` / `0.005783048676`, identical total file bytes `4049329133`, and verify exit status `0`.
 
 ## Current Interpretation
 
@@ -460,7 +471,7 @@ The current aq result is promising at 4.5 bpp: it beats sampled NVFP4 and slight
 - Add real-tensor or cross-process golden tests if the C++ kernel changes again; the first pseudo-random BF16/F16 byte-level golden is now in place.
 - Run a wider real-text loss/perplexity evaluation for p4p6, p4p46, and p4p65, preferably after the full-model loader path is available.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.
-- Tune controlled CPU parallelism for full direct package conversion. `--convert-jobs 4` is validated for full p4p6 direct full-package conversion with max RSS about `330 MiB`; larger jobs need memory and I/O measurements before using them as defaults.
+- Tune controlled CPU parallelism for full direct package conversion. Jobs64 is validated for p4p6 quantized-only direct conversion with max RSS about `3.6 GiB`; jobs64 currently looks like the fastest validated point, but full-package jobs64 with passthrough and larger policy variants still need confirmation before making it a default.
 - Re-run direct full-package conversion for p4p46/p4p65 only if package/loader work needs those variants.
 - Replace exact tensor-scale pre-pass with a lower-memory estimator or scheduling strategy for multi-tensor conversion.
 - Add SIMD kernels after scalar C++ semantics are locked.
