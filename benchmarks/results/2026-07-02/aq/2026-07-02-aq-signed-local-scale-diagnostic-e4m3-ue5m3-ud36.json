@@ -1,0 +1,1380 @@
+{
+  "schema_version": "aq-signed-local-scale-diagnostic-v0.1",
+  "description": "Diagnostic allowing per-block signed local-scale for E4M3 and UE5M3. Current production experiments use positive local-scale only; this checks whether asymmetric codebooks could benefit from sign flips.",
+  "settings": {
+    "source_rows": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b-reordered.jsonl",
+    "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "formats": [
+      "e4m3",
+      "ue5m3"
+    ],
+    "group_size": 16,
+    "codebook_bits": 4,
+    "iterations": 8,
+    "scale_window": 4,
+    "global_scale_dtype": "fp16",
+    "max_elements_per_tensor": 262144,
+    "torch_threads": 32,
+    "torch_interop_threads": 1
+  },
+  "summary": {
+    "total_rows": 36,
+    "elapsed_sec": 171.67552753299242,
+    "formats": {
+      "e4m3": {
+        "unsigned_alt_mean": 0.0050725933605757145,
+        "signed_alt_mean": 0.004469880946718508,
+        "signed_over_unsigned_ratio_mean": 0.8811818882057577,
+        "negative_scale_block_rate_mean": 0.4992251925998264,
+        "initial_codebook_symmetry_mean": 0.0010189643516140576,
+        "unsigned_final_codebook_symmetry_mean": 0.0016162072376270469,
+        "signed_final_codebook_symmetry_mean": 0.016588664018652506
+      },
+      "ue5m3": {
+        "unsigned_alt_mean": 0.005086940844639057,
+        "signed_alt_mean": 0.004492363143734271,
+        "signed_over_unsigned_ratio_mean": 0.8831196665739092,
+        "negative_scale_block_rate_mean": 0.4985063340928819,
+        "initial_codebook_symmetry_mean": 0.0009698214085397518,
+        "unsigned_final_codebook_symmetry_mean": 0.0017598994761808878,
+        "signed_final_codebook_symmetry_mean": 0.016050449184452493
+      }
+    },
+    "signed_ue5m3_over_signed_e4m3_ratio_mean": 1.005071459815207,
+    "unsigned_ue5m3_over_unsigned_e4m3_ratio_mean": 1.0028348302747263
+  },
+  "results": [
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005206069373859503,
+          "signed_baseline_relative_mse": 0.0051363597797332294,
+          "unsigned_alternating_relative_mse": 0.005090836202519659,
+          "signed_alternating_relative_mse": 0.004477055696347954,
+          "signed_negative_scale_block_rate": 0.49737548828125,
+          "signed_negative_scale_blocks": 8149,
+          "initial_codebook_symmetry_mean": 0.0009091624524444342,
+          "initial_codebook_symmetry_max": 0.0022670025937259197,
+          "unsigned_final_codebook_symmetry_mean": 0.0012990528484806418,
+          "unsigned_final_codebook_symmetry_max": 0.002844582311809063,
+          "signed_final_codebook_symmetry_mean": 0.0163416787981987,
+          "signed_final_codebook_symmetry_max": 0.04989764466881752,
+          "elapsed_sec": 2.362579990993254
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005234401880042167,
+          "signed_baseline_relative_mse": 0.005186965467757269,
+          "unsigned_alternating_relative_mse": 0.005115395017444954,
+          "signed_alternating_relative_mse": 0.004513707557191781,
+          "signed_negative_scale_block_rate": 0.497802734375,
+          "signed_negative_scale_blocks": 8156,
+          "initial_codebook_symmetry_mean": 0.0006023242603987455,
+          "initial_codebook_symmetry_max": 0.0012597631430253386,
+          "unsigned_final_codebook_symmetry_mean": 0.0018996837316080928,
+          "unsigned_final_codebook_symmetry_max": 0.00567888468503952,
+          "signed_final_codebook_symmetry_mean": 0.015246560797095299,
+          "signed_final_codebook_symmetry_max": 0.04615774750709534,
+          "elapsed_sec": 2.3220857070118655
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.00517993217850567,
+          "signed_baseline_relative_mse": 0.005145765352791178,
+          "unsigned_alternating_relative_mse": 0.005069741914064889,
+          "signed_alternating_relative_mse": 0.004466462334569424,
+          "signed_negative_scale_block_rate": 0.50238037109375,
+          "signed_negative_scale_blocks": 8231,
+          "initial_codebook_symmetry_mean": 0.0004213394713588059,
+          "initial_codebook_symmetry_max": 0.0010080644860863686,
+          "unsigned_final_codebook_symmetry_mean": 0.0008175871917046607,
+          "unsigned_final_codebook_symmetry_max": 0.001550387591123581,
+          "signed_final_codebook_symmetry_mean": 0.016305558383464813,
+          "signed_final_codebook_symmetry_max": 0.043301068246364594,
+          "elapsed_sec": 2.2792562390095554
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005193084365223005,
+          "signed_baseline_relative_mse": 0.005086471219437251,
+          "unsigned_alternating_relative_mse": 0.0050726696050062995,
+          "signed_alternating_relative_mse": 0.004478748399234646,
+          "signed_negative_scale_block_rate": 0.4981689453125,
+          "signed_negative_scale_blocks": 8162,
+          "initial_codebook_symmetry_mean": 0.0018355735810473561,
+          "initial_codebook_symmetry_max": 0.0025654747150838375,
+          "unsigned_final_codebook_symmetry_mean": 0.0034304694272577763,
+          "unsigned_final_codebook_symmetry_max": 0.00439617270603776,
+          "signed_final_codebook_symmetry_mean": 0.01776435226202011,
+          "signed_final_codebook_symmetry_max": 0.04189154505729675,
+          "elapsed_sec": 2.4800171249953564
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ud_ggml_type": "Q6_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.0051831948516906255,
+          "signed_baseline_relative_mse": 0.00515695098336399,
+          "unsigned_alternating_relative_mse": 0.00509382147480603,
+          "signed_alternating_relative_mse": 0.0044910031706059984,
+          "signed_negative_scale_block_rate": 0.49639892578125,
+          "signed_negative_scale_blocks": 8133,
+          "initial_codebook_symmetry_mean": 0.00034429298830218613,
+          "initial_codebook_symmetry_max": 0.0007554772309958935,
+          "unsigned_final_codebook_symmetry_mean": 0.001595821580849588,
+          "unsigned_final_codebook_symmetry_max": 0.006166495382785797,
+          "signed_final_codebook_symmetry_mean": 0.015152597799897194,
+          "signed_final_codebook_symmetry_max": 0.04776422679424286,
+          "elapsed_sec": 2.4735362470091786
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005179198833807194,
+          "signed_baseline_relative_mse": 0.005120974899765352,
+          "unsigned_alternating_relative_mse": 0.005074277100672159,
+          "signed_alternating_relative_mse": 0.004481219970581948,
+          "signed_negative_scale_block_rate": 0.4931640625,
+          "signed_negative_scale_blocks": 8080,
+          "initial_codebook_symmetry_mean": 0.0008186398190446198,
+          "initial_codebook_symmetry_max": 0.002015113364905119,
+          "unsigned_final_codebook_symmetry_mean": 0.0017888906877487898,
+          "unsigned_final_codebook_symmetry_max": 0.006209573242813349,
+          "signed_final_codebook_symmetry_mean": 0.01623447798192501,
+          "signed_final_codebook_symmetry_max": 0.04979570955038071,
+          "elapsed_sec": 2.252137355011655
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005155961289402041,
+          "signed_baseline_relative_mse": 0.005094545057778269,
+          "unsigned_alternating_relative_mse": 0.0050499399054690875,
+          "signed_alternating_relative_mse": 0.0044952557527824,
+          "signed_negative_scale_block_rate": 0.5081787109375,
+          "signed_negative_scale_blocks": 8326,
+          "initial_codebook_symmetry_mean": 0.0008483717683702707,
+          "initial_codebook_symmetry_max": 0.0013857395388185978,
+          "unsigned_final_codebook_symmetry_mean": 0.0010475990129634738,
+          "unsigned_final_codebook_symmetry_max": 0.003882992547005415,
+          "signed_final_codebook_symmetry_mean": 0.01584646850824356,
+          "signed_final_codebook_symmetry_max": 0.03412006050348282,
+          "elapsed_sec": 2.3660122269939166
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005168086543758586,
+          "signed_baseline_relative_mse": 0.005089150798476942,
+          "unsigned_alternating_relative_mse": 0.005078717173062548,
+          "signed_alternating_relative_mse": 0.004500492029817109,
+          "signed_negative_scale_block_rate": 0.4931640625,
+          "signed_negative_scale_blocks": 8080,
+          "initial_codebook_symmetry_mean": 0.0010132051538676023,
+          "initial_codebook_symmetry_max": 0.0025182573590427637,
+          "unsigned_final_codebook_symmetry_mean": 0.0020507308654487133,
+          "unsigned_final_codebook_symmetry_max": 0.007727975491434336,
+          "signed_final_codebook_symmetry_mean": 0.014656639657914639,
+          "signed_final_codebook_symmetry_max": 0.04759480804204941,
+          "elapsed_sec": 2.3273584129929077
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005141459635964865,
+          "signed_baseline_relative_mse": 0.005095060742661138,
+          "unsigned_alternating_relative_mse": 0.005039972742748302,
+          "signed_alternating_relative_mse": 0.004461338381481856,
+          "signed_negative_scale_block_rate": 0.502685546875,
+          "signed_negative_scale_blocks": 8236,
+          "initial_codebook_symmetry_mean": 0.0005369618302211165,
+          "initial_codebook_symmetry_max": 0.0013846928486600518,
+          "unsigned_final_codebook_symmetry_mean": 0.0005411605234257877,
+          "unsigned_final_codebook_symmetry_max": 0.0018092530081048608,
+          "signed_final_codebook_symmetry_mean": 0.01602349616587162,
+          "signed_final_codebook_symmetry_max": 0.038510583341121674,
+          "elapsed_sec": 2.3688878399843816
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005150391522429888,
+          "signed_baseline_relative_mse": 0.005115480359164216,
+          "unsigned_alternating_relative_mse": 0.005052142655532738,
+          "signed_alternating_relative_mse": 0.0045089179729497575,
+          "signed_negative_scale_block_rate": 0.4979248046875,
+          "signed_negative_scale_blocks": 8158,
+          "initial_codebook_symmetry_mean": 0.0004484516684897244,
+          "initial_codebook_symmetry_max": 0.0010070493444800377,
+          "unsigned_final_codebook_symmetry_mean": 0.0008696248987689614,
+          "unsigned_final_codebook_symmetry_max": 0.0038739668671041727,
+          "signed_final_codebook_symmetry_mean": 0.015064964070916176,
+          "signed_final_codebook_symmetry_max": 0.0396825410425663,
+          "elapsed_sec": 2.217882765980903
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.out_proj.weight",
+      "family": "linear_attn_out",
+      "ud_ggml_type": "Q8_0",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005253970052590443,
+          "signed_baseline_relative_mse": 0.005208612108862562,
+          "unsigned_alternating_relative_mse": 0.0051200759398279975,
+          "signed_alternating_relative_mse": 0.0045663561107471455,
+          "signed_negative_scale_block_rate": 0.50042724609375,
+          "signed_negative_scale_blocks": 8199,
+          "initial_codebook_symmetry_mean": 0.0005726543022319674,
+          "initial_codebook_symmetry_max": 0.0015113350236788392,
+          "unsigned_final_codebook_symmetry_mean": 0.0004897992475889623,
+          "unsigned_final_codebook_symmetry_max": 0.0016839378513395786,
+          "signed_final_codebook_symmetry_mean": 0.012921898625791073,
+          "signed_final_codebook_symmetry_max": 0.05201428011059761,
+          "elapsed_sec": 2.152864472998772
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.00527973835103897,
+          "signed_baseline_relative_mse": 0.005202299156754327,
+          "unsigned_alternating_relative_mse": 0.005110256471281872,
+          "signed_alternating_relative_mse": 0.0045105065409184915,
+          "signed_negative_scale_block_rate": 0.50006103515625,
+          "signed_negative_scale_blocks": 8193,
+          "initial_codebook_symmetry_mean": 0.0012620495399460196,
+          "initial_codebook_symmetry_max": 0.001953125,
+          "unsigned_final_codebook_symmetry_mean": 0.005575126968324184,
+          "unsigned_final_codebook_symmetry_max": 0.015360583551228046,
+          "signed_final_codebook_symmetry_mean": 0.014486011117696762,
+          "signed_final_codebook_symmetry_max": 0.044404517859220505,
+          "elapsed_sec": 2.133896901010303
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005157741093981325,
+          "signed_baseline_relative_mse": 0.005088235239973195,
+          "unsigned_alternating_relative_mse": 0.005057069324987916,
+          "signed_alternating_relative_mse": 0.004472203105235962,
+          "signed_negative_scale_block_rate": 0.50103759765625,
+          "signed_negative_scale_blocks": 8209,
+          "initial_codebook_symmetry_mean": 0.0010286851320415735,
+          "initial_codebook_symmetry_max": 0.001762336352840066,
+          "unsigned_final_codebook_symmetry_mean": 0.0011212570825591683,
+          "unsigned_final_codebook_symmetry_max": 0.0030975735280662775,
+          "signed_final_codebook_symmetry_mean": 0.016137490049004555,
+          "signed_final_codebook_symmetry_max": 0.05059750750660896,
+          "elapsed_sec": 2.4730978769948706
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005197931357997916,
+          "signed_baseline_relative_mse": 0.0051457743901353456,
+          "unsigned_alternating_relative_mse": 0.005101632201522224,
+          "signed_alternating_relative_mse": 0.004544126016101542,
+          "signed_negative_scale_block_rate": 0.49713134765625,
+          "signed_negative_scale_blocks": 8145,
+          "initial_codebook_symmetry_mean": 0.000808596727438271,
+          "initial_codebook_symmetry_max": 0.0012591286795213819,
+          "unsigned_final_codebook_symmetry_mean": 0.002119498560205102,
+          "unsigned_final_codebook_symmetry_max": 0.004388228990137577,
+          "signed_final_codebook_symmetry_mean": 0.016268547624349594,
+          "signed_final_codebook_symmetry_max": 0.03504732623696327,
+          "elapsed_sec": 2.4684088680078276
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005185659020920174,
+          "signed_baseline_relative_mse": 0.005160949024603149,
+          "unsigned_alternating_relative_mse": 0.005097617136554666,
+          "signed_alternating_relative_mse": 0.00451930046264373,
+          "signed_negative_scale_block_rate": 0.504638671875,
+          "signed_negative_scale_blocks": 8268,
+          "initial_codebook_symmetry_mean": 0.00034249809687025845,
+          "initial_codebook_symmetry_max": 0.000503905292134732,
+          "unsigned_final_codebook_symmetry_mean": 0.0006944444612599909,
+          "unsigned_final_codebook_symmetry_max": 0.0020671833772212267,
+          "signed_final_codebook_symmetry_mean": 0.015366851352155209,
+          "signed_final_codebook_symmetry_max": 0.04380122944712639,
+          "elapsed_sec": 2.4017690279870294
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005175383803462684,
+          "signed_baseline_relative_mse": 0.005106606955884064,
+          "unsigned_alternating_relative_mse": 0.00506781741177246,
+          "signed_alternating_relative_mse": 0.004466166384232635,
+          "signed_negative_scale_block_rate": 0.49664306640625,
+          "signed_negative_scale_blocks": 8137,
+          "initial_codebook_symmetry_mean": 0.0008737405296415091,
+          "initial_codebook_symmetry_max": 0.002015113364905119,
+          "unsigned_final_codebook_symmetry_mean": 0.001905093202367425,
+          "unsigned_final_codebook_symmetry_max": 0.007507118862122297,
+          "signed_final_codebook_symmetry_mean": 0.015109212137758732,
+          "signed_final_codebook_symmetry_max": 0.04996176436543465,
+          "elapsed_sec": 2.470019667001907
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.00522680813553668,
+          "signed_baseline_relative_mse": 0.005179587870784314,
+          "unsigned_alternating_relative_mse": 0.005127195227942283,
+          "signed_alternating_relative_mse": 0.004523333408822863,
+          "signed_negative_scale_block_rate": 0.50262451171875,
+          "signed_negative_scale_blocks": 8235,
+          "initial_codebook_symmetry_mean": 0.0005885455757379532,
+          "initial_codebook_symmetry_max": 0.0015117158181965351,
+          "unsigned_final_codebook_symmetry_mean": 0.001252339337952435,
+          "unsigned_final_codebook_symmetry_max": 0.0025813113898038864,
+          "signed_final_codebook_symmetry_mean": 0.016527973115444183,
+          "signed_final_codebook_symmetry_max": 0.04073319584131241,
+          "elapsed_sec": 2.4885694490221795
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005269860166092526,
+          "signed_baseline_relative_mse": 0.005206379795043749,
+          "unsigned_alternating_relative_mse": 0.005171178312350775,
+          "signed_alternating_relative_mse": 0.004546367487089815,
+          "signed_negative_scale_block_rate": 0.49951171875,
+          "signed_negative_scale_blocks": 8184,
+          "initial_codebook_symmetry_mean": 0.0009209697600454092,
+          "initial_codebook_symmetry_max": 0.0015113350236788392,
+          "unsigned_final_codebook_symmetry_mean": 0.001455507124774158,
+          "unsigned_final_codebook_symmetry_max": 0.005943152587860823,
+          "signed_final_codebook_symmetry_mean": 0.016162557527422905,
+          "signed_final_codebook_symmetry_max": 0.051732923835515976,
+          "elapsed_sec": 2.4566858540056273
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "ud_ggml_type": "IQ4_XS",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005144027090013763,
+          "signed_baseline_relative_mse": 0.005050879785465985,
+          "unsigned_alternating_relative_mse": 0.005047833017285462,
+          "signed_alternating_relative_mse": 0.004448589318287081,
+          "signed_negative_scale_block_rate": 0.50152587890625,
+          "signed_negative_scale_blocks": 8217,
+          "initial_codebook_symmetry_mean": 0.0015097474679350853,
+          "initial_codebook_symmetry_max": 0.002409297041594982,
+          "unsigned_final_codebook_symmetry_mean": 0.001368143130093813,
+          "unsigned_final_codebook_symmetry_max": 0.0020280710887163877,
+          "signed_final_codebook_symmetry_mean": 0.016769953072071075,
+          "signed_final_codebook_symmetry_max": 0.044324878603219986,
+          "elapsed_sec": 2.260767311992822
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005156675177414937,
+          "signed_baseline_relative_mse": 0.005125888822576497,
+          "unsigned_alternating_relative_mse": 0.005052313629072496,
+          "signed_alternating_relative_mse": 0.004484385341096411,
+          "signed_negative_scale_block_rate": 0.497802734375,
+          "signed_negative_scale_blocks": 8156,
+          "initial_codebook_symmetry_mean": 0.000434902380220592,
+          "initial_codebook_symmetry_max": 0.0008816120680421591,
+          "unsigned_final_codebook_symmetry_mean": 0.0005942755378782749,
+          "unsigned_final_codebook_symmetry_max": 0.00132600252982229,
+          "signed_final_codebook_symmetry_mean": 0.014733627438545227,
+          "signed_final_codebook_symmetry_max": 0.04911741986870766,
+          "elapsed_sec": 2.219751096010441
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "ud_ggml_type": "IQ4_XS",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005147338541281713,
+          "signed_baseline_relative_mse": 0.005084585536016319,
+          "unsigned_alternating_relative_mse": 0.005043227404371335,
+          "signed_alternating_relative_mse": 0.00444653974965771,
+          "signed_negative_scale_block_rate": 0.498291015625,
+          "signed_negative_scale_blocks": 8164,
+          "initial_codebook_symmetry_mean": 0.0009915638947859406,
+          "initial_codebook_symmetry_max": 0.0019201711984351277,
+          "unsigned_final_codebook_symmetry_mean": 0.0018454883247613907,
+          "unsigned_final_codebook_symmetry_max": 0.0028460542671382427,
+          "signed_final_codebook_symmetry_mean": 0.015685096383094788,
+          "signed_final_codebook_symmetry_max": 0.04769230633974075,
+          "elapsed_sec": 2.2156083539885003
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005161100509993915,
+          "signed_baseline_relative_mse": 0.005059922972250567,
+          "unsigned_alternating_relative_mse": 0.005054208353292042,
+          "signed_alternating_relative_mse": 0.00444305944403292,
+          "signed_negative_scale_block_rate": 0.50189208984375,
+          "signed_negative_scale_blocks": 8223,
+          "initial_codebook_symmetry_mean": 0.0014716066652908921,
+          "initial_codebook_symmetry_max": 0.002140518743544817,
+          "unsigned_final_codebook_symmetry_mean": 0.0014065321302041411,
+          "unsigned_final_codebook_symmetry_max": 0.004384833853691816,
+          "signed_final_codebook_symmetry_mean": 0.01789640076458454,
+          "signed_final_codebook_symmetry_max": 0.03376822546124458,
+          "elapsed_sec": 2.2177645989868324
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.out_proj.weight",
+      "family": "linear_attn_out",
+      "ud_ggml_type": "Q8_0",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.00517976210497236,
+          "signed_baseline_relative_mse": 0.00511396293530209,
+          "unsigned_alternating_relative_mse": 0.00511185870544456,
+          "signed_alternating_relative_mse": 0.004463081184755695,
+          "signed_negative_scale_block_rate": 0.49090576171875,
+          "signed_negative_scale_blocks": 8043,
+          "initial_codebook_symmetry_mean": 0.0010859984904527664,
+          "initial_codebook_symmetry_max": 0.0014479979872703552,
+          "unsigned_final_codebook_symmetry_mean": 0.002464157762005925,
+          "unsigned_final_codebook_symmetry_max": 0.0051203276962041855,
+          "signed_final_codebook_symmetry_mean": 0.01810770109295845,
+          "signed_final_codebook_symmetry_max": 0.04715530574321747,
+          "elapsed_sec": 2.3095203209959436
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005189085701558663,
+          "signed_baseline_relative_mse": 0.005091244168902696,
+          "unsigned_alternating_relative_mse": 0.0050221754223252766,
+          "signed_alternating_relative_mse": 0.00443652028382653,
+          "signed_negative_scale_block_rate": 0.4967041015625,
+          "signed_negative_scale_blocks": 8138,
+          "initial_codebook_symmetry_mean": 0.0014436997007578611,
+          "initial_codebook_symmetry_max": 0.0027693856973201036,
+          "unsigned_final_codebook_symmetry_mean": 0.002273209160193801,
+          "unsigned_final_codebook_symmetry_max": 0.005741127301007509,
+          "signed_final_codebook_symmetry_mean": 0.01768563687801361,
+          "signed_final_codebook_symmetry_max": 0.04943934828042984,
+          "elapsed_sec": 2.555584234010894
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005178567419608216,
+          "signed_baseline_relative_mse": 0.005127280078656202,
+          "unsigned_alternating_relative_mse": 0.005084784908746568,
+          "signed_alternating_relative_mse": 0.004465643329270407,
+          "signed_negative_scale_block_rate": 0.4964599609375,
+          "signed_negative_scale_blocks": 8134,
+          "initial_codebook_symmetry_mean": 0.0006454659742303193,
+          "initial_codebook_symmetry_max": 0.0012594457948580384,
+          "unsigned_final_codebook_symmetry_mean": 0.0022626807913184166,
+          "unsigned_final_codebook_symmetry_max": 0.006453278474509716,
+          "signed_final_codebook_symmetry_mean": 0.016246110200881958,
+          "signed_final_codebook_symmetry_max": 0.04521209001541138,
+          "elapsed_sec": 2.329501631000312
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005144305979854043,
+          "signed_baseline_relative_mse": 0.005051815160819463,
+          "unsigned_alternating_relative_mse": 0.005073574530574525,
+          "signed_alternating_relative_mse": 0.0044557557274105845,
+          "signed_negative_scale_block_rate": 0.50323486328125,
+          "signed_negative_scale_blocks": 8245,
+          "initial_codebook_symmetry_mean": 0.0012054020771756768,
+          "initial_codebook_symmetry_max": 0.002768688602373004,
+          "unsigned_final_codebook_symmetry_mean": 0.0021033654920756817,
+          "unsigned_final_codebook_symmetry_max": 0.006923076696693897,
+          "signed_final_codebook_symmetry_mean": 0.016043491661548615,
+          "signed_final_codebook_symmetry_max": 0.04366590455174446,
+          "elapsed_sec": 2.4756405009829905
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.0051783662904118935,
+          "signed_baseline_relative_mse": 0.00507774325260207,
+          "unsigned_alternating_relative_mse": 0.005063288265760812,
+          "signed_alternating_relative_mse": 0.004440024155261573,
+          "signed_negative_scale_block_rate": 0.49945068359375,
+          "signed_negative_scale_blocks": 8183,
+          "initial_codebook_symmetry_mean": 0.0014125850284472108,
+          "initial_codebook_symmetry_max": 0.0022664316929876804,
+          "unsigned_final_codebook_symmetry_mean": 0.0019146696431562304,
+          "unsigned_final_codebook_symmetry_max": 0.005440414417535067,
+          "signed_final_codebook_symmetry_mean": 0.017383260652422905,
+          "signed_final_codebook_symmetry_max": 0.04439908266067505,
+          "elapsed_sec": 2.332368594012223
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.0051802297849026105,
+          "signed_baseline_relative_mse": 0.005119161206795209,
+          "unsigned_alternating_relative_mse": 0.005074150218666585,
+          "signed_alternating_relative_mse": 0.004466163505656554,
+          "signed_negative_scale_block_rate": 0.49713134765625,
+          "signed_negative_scale_blocks": 8145,
+          "initial_codebook_symmetry_mean": 0.000983446603640914,
+          "initial_codebook_symmetry_max": 0.0012588116806000471,
+          "unsigned_final_codebook_symmetry_mean": 0.002085617044940591,
+          "unsigned_final_codebook_symmetry_max": 0.004384833853691816,
+          "signed_final_codebook_symmetry_mean": 0.018042536452412605,
+          "signed_final_codebook_symmetry_max": 0.042487841099500656,
+          "elapsed_sec": 2.253752485004952
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ud_ggml_type": "Q6_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.0051471792013233954,
+          "signed_baseline_relative_mse": 0.005016924697716116,
+          "unsigned_alternating_relative_mse": 0.0050518910492209,
+          "signed_alternating_relative_mse": 0.004451534603105836,
+          "signed_negative_scale_block_rate": 0.49468994140625,
+          "signed_negative_scale_blocks": 8105,
+          "initial_codebook_symmetry_mean": 0.0021415974479168653,
+          "initial_codebook_symmetry_max": 0.002897455357015133,
+          "unsigned_final_codebook_symmetry_mean": 0.0024196936283260584,
+          "unsigned_final_codebook_symmetry_max": 0.0034901758190244436,
+          "signed_final_codebook_symmetry_mean": 0.019080450758337975,
+          "signed_final_codebook_symmetry_max": 0.031169500201940536,
+          "elapsed_sec": 2.210774473991478
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005181018892461215,
+          "signed_baseline_relative_mse": 0.005088777245298935,
+          "unsigned_alternating_relative_mse": 0.00507897480162978,
+          "signed_alternating_relative_mse": 0.004489907689885865,
+          "signed_negative_scale_block_rate": 0.49224853515625,
+          "signed_negative_scale_blocks": 8065,
+          "initial_codebook_symmetry_mean": 0.0013279872946441174,
+          "initial_codebook_symmetry_max": 0.0022664316929876804,
+          "unsigned_final_codebook_symmetry_mean": 0.0020395375322550535,
+          "unsigned_final_codebook_symmetry_max": 0.004398447461426258,
+          "signed_final_codebook_symmetry_mean": 0.015133848413825035,
+          "signed_final_codebook_symmetry_max": 0.04446716234087944,
+          "elapsed_sec": 2.416559976991266
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005146802489145441,
+          "signed_baseline_relative_mse": 0.005043754850559024,
+          "unsigned_alternating_relative_mse": 0.00504395862836874,
+          "signed_alternating_relative_mse": 0.004442102041460126,
+          "signed_negative_scale_block_rate": 0.501708984375,
+          "signed_negative_scale_blocks": 8220,
+          "initial_codebook_symmetry_mean": 0.0016066028038039804,
+          "initial_codebook_symmetry_max": 0.00233114929869771,
+          "unsigned_final_codebook_symmetry_mean": 0.0024289442226290703,
+          "unsigned_final_codebook_symmetry_max": 0.005413766484707594,
+          "signed_final_codebook_symmetry_mean": 0.018658077344298363,
+          "signed_final_codebook_symmetry_max": 0.03409382328391075,
+          "elapsed_sec": 2.499933767976472
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.00518098691539886,
+          "signed_baseline_relative_mse": 0.0051401439931273605,
+          "unsigned_alternating_relative_mse": 0.005082484508584584,
+          "signed_alternating_relative_mse": 0.004473896282132807,
+          "signed_negative_scale_block_rate": 0.50006103515625,
+          "signed_negative_scale_blocks": 8193,
+          "initial_codebook_symmetry_mean": 0.000584167311899364,
+          "initial_codebook_symmetry_max": 0.0010070493444800377,
+          "unsigned_final_codebook_symmetry_mean": 0.0012647657422348857,
+          "unsigned_final_codebook_symmetry_max": 0.0023237799759954214,
+          "signed_final_codebook_symmetry_mean": 0.01581110619008541,
+          "signed_final_codebook_symmetry_max": 0.04257475957274437,
+          "elapsed_sec": 2.553106317005586
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005174059221028651,
+          "signed_baseline_relative_mse": 0.005100439161863188,
+          "unsigned_alternating_relative_mse": 0.005060662649643562,
+          "signed_alternating_relative_mse": 0.0044660717550934715,
+          "signed_negative_scale_block_rate": 0.5059814453125,
+          "signed_negative_scale_blocks": 8290,
+          "initial_codebook_symmetry_mean": 0.0009356877417303622,
+          "initial_codebook_symmetry_max": 0.0020171457435935736,
+          "unsigned_final_codebook_symmetry_mean": 0.0014616805128753185,
+          "unsigned_final_codebook_symmetry_max": 0.0025913449935615063,
+          "signed_final_codebook_symmetry_mean": 0.015682825818657875,
+          "signed_final_codebook_symmetry_max": 0.04492087662220001,
+          "elapsed_sec": 2.440816852002172
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005177731719448244,
+          "signed_baseline_relative_mse": 0.005157609251019702,
+          "unsigned_alternating_relative_mse": 0.005075173722273283,
+          "signed_alternating_relative_mse": 0.004559823795581391,
+          "signed_negative_scale_block_rate": 0.49493408203125,
+          "signed_negative_scale_blocks": 8109,
+          "initial_codebook_symmetry_mean": 0.00025969528360292315,
+          "initial_codebook_symmetry_max": 0.0005036514485254884,
+          "unsigned_final_codebook_symmetry_mean": 0.0014268761733546853,
+          "unsigned_final_codebook_symmetry_max": 0.004391630180180073,
+          "signed_final_codebook_symmetry_mean": 0.013125796802341938,
+          "signed_final_codebook_symmetry_max": 0.03290816396474838,
+          "elapsed_sec": 2.246550540003227
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.2.linear_attn.out_proj.weight",
+      "family": "linear_attn_out",
+      "ud_ggml_type": "Q8_0",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005214914585894682,
+          "signed_baseline_relative_mse": 0.005073108895636061,
+          "unsigned_alternating_relative_mse": 0.005100921346010385,
+          "signed_alternating_relative_mse": 0.004444250442289929,
+          "signed_negative_scale_block_rate": 0.49908447265625,
+          "signed_negative_scale_blocks": 8177,
+          "initial_codebook_symmetry_mean": 0.0023837080225348473,
+          "initial_codebook_symmetry_max": 0.003480095649138093,
+          "unsigned_final_codebook_symmetry_mean": 0.0031532987486571074,
+          "unsigned_final_codebook_symmetry_max": 0.005174644291400909,
+          "signed_final_codebook_symmetry_mean": 0.01893582195043564,
+          "signed_final_codebook_symmetry_max": 0.043989770114421844,
+          "elapsed_sec": 2.254101530998014
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005246640353035059,
+          "signed_baseline_relative_mse": 0.005134278573914647,
+          "unsigned_alternating_relative_mse": 0.005149307905510403,
+          "signed_alternating_relative_mse": 0.0045091892544906476,
+          "signed_negative_scale_block_rate": 0.49786376953125,
+          "signed_negative_scale_blocks": 8157,
+          "initial_codebook_symmetry_mean": 0.0017551531782373786,
+          "initial_codebook_symmetry_max": 0.0022692889906466007,
+          "unsigned_final_codebook_symmetry_mean": 0.0016979301581159234,
+          "unsigned_final_codebook_symmetry_max": 0.0036222508642822504,
+          "signed_final_codebook_symmetry_mean": 0.017504043877124786,
+          "signed_final_codebook_symmetry_max": 0.04407995939254761,
+          "elapsed_sec": 2.477566827001283
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.self_attn.k_proj.weight",
+      "family": "attn_k",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005253764618755299,
+          "signed_baseline_relative_mse": 0.00516731119067355,
+          "unsigned_alternating_relative_mse": 0.005119668920570039,
+          "signed_alternating_relative_mse": 0.004516211776881973,
+          "signed_negative_scale_block_rate": 0.49627685546875,
+          "signed_negative_scale_blocks": 8131,
+          "initial_codebook_symmetry_mean": 0.0012935515260323882,
+          "initial_codebook_symmetry_max": 0.0027564263436943293,
+          "unsigned_final_codebook_symmetry_mean": 0.002201132709160447,
+          "unsigned_final_codebook_symmetry_max": 0.00433329027146101,
+          "signed_final_codebook_symmetry_mean": 0.017328161746263504,
+          "signed_final_codebook_symmetry_max": 0.05052577704191208,
+          "elapsed_sec": 2.4180631369818
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005263960482343968,
+          "signed_baseline_relative_mse": 0.005208943573193088,
+          "unsigned_alternating_relative_mse": 0.00517394544025406,
+          "signed_alternating_relative_mse": 0.004552969267014204,
+          "signed_negative_scale_block_rate": 0.49456787109375,
+          "signed_negative_scale_blocks": 8103,
+          "initial_codebook_symmetry_mean": 0.000857997452840209,
+          "initial_codebook_symmetry_max": 0.0013224181020632386,
+          "unsigned_final_codebook_symmetry_mean": 0.0012178723700344563,
+          "unsigned_final_codebook_symmetry_max": 0.0023189899511635303,
+          "signed_final_codebook_symmetry_mean": 0.01761665754020214,
+          "signed_final_codebook_symmetry_max": 0.0412503220140934,
+          "elapsed_sec": 2.2010544479999226
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.self_attn.o_proj.weight",
+      "family": "attn_o",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005205102978341698,
+          "signed_baseline_relative_mse": 0.005098832886027192,
+          "unsigned_alternating_relative_mse": 0.005079556545296235,
+          "signed_alternating_relative_mse": 0.004431686767898369,
+          "signed_negative_scale_block_rate": 0.498779296875,
+          "signed_negative_scale_blocks": 8172,
+          "initial_codebook_symmetry_mean": 0.001703936606645584,
+          "initial_codebook_symmetry_max": 0.002584467874839902,
+          "unsigned_final_codebook_symmetry_mean": 0.002319462364539504,
+          "unsigned_final_codebook_symmetry_max": 0.005181347019970417,
+          "signed_final_codebook_symmetry_mean": 0.019423160701990128,
+          "signed_final_codebook_symmetry_max": 0.04355623945593834,
+          "elapsed_sec": 2.4129450139880646
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005249807904556529,
+          "signed_baseline_relative_mse": 0.005175166771683564,
+          "unsigned_alternating_relative_mse": 0.005143678234555843,
+          "signed_alternating_relative_mse": 0.004560690869041687,
+          "signed_negative_scale_block_rate": 0.4945068359375,
+          "signed_negative_scale_blocks": 8102,
+          "initial_codebook_symmetry_mean": 0.0010764326434582472,
+          "initial_codebook_symmetry_max": 0.0017632241360843182,
+          "unsigned_final_codebook_symmetry_mean": 0.0012990528484806418,
+          "unsigned_final_codebook_symmetry_max": 0.0023273855913430452,
+          "signed_final_codebook_symmetry_mean": 0.01602044329047203,
+          "signed_final_codebook_symmetry_max": 0.036742035299539566,
+          "elapsed_sec": 2.481847329006996
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.self_attn.q_proj.weight",
+      "family": "attn_q",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005195341552627268,
+          "signed_baseline_relative_mse": 0.005152830964941919,
+          "unsigned_alternating_relative_mse": 0.0050865762838231115,
+          "signed_alternating_relative_mse": 0.004496106304272952,
+          "signed_negative_scale_block_rate": 0.49591064453125,
+          "signed_negative_scale_blocks": 8125,
+          "initial_codebook_symmetry_mean": 0.0006415302050299942,
+          "initial_codebook_symmetry_max": 0.0012594457948580384,
+          "unsigned_final_codebook_symmetry_mean": 0.001809572335332632,
+          "unsigned_final_codebook_symmetry_max": 0.003364389296621084,
+          "signed_final_codebook_symmetry_mean": 0.017462585121393204,
+          "signed_final_codebook_symmetry_max": 0.02983539178967476,
+          "elapsed_sec": 2.2607732999895234
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005175325499794683,
+          "signed_baseline_relative_mse": 0.0050820367227906735,
+          "unsigned_alternating_relative_mse": 0.0050792418269233275,
+          "signed_alternating_relative_mse": 0.004503887256010197,
+          "signed_negative_scale_block_rate": 0.49578857421875,
+          "signed_negative_scale_blocks": 8123,
+          "initial_codebook_symmetry_mean": 0.0010530832223594189,
+          "initial_codebook_symmetry_max": 0.0025195262860506773,
+          "unsigned_final_codebook_symmetry_mean": 0.0013421112671494484,
+          "unsigned_final_codebook_symmetry_max": 0.004649961367249489,
+          "signed_final_codebook_symmetry_mean": 0.013100715354084969,
+          "signed_final_codebook_symmetry_max": 0.04575664550065994,
+          "elapsed_sec": 2.465837403025944
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.self_attn.v_proj.weight",
+      "family": "attn_v",
+      "ud_ggml_type": "Q6_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.00526314767738373,
+          "signed_baseline_relative_mse": 0.005183143673725874,
+          "unsigned_alternating_relative_mse": 0.005114823602675513,
+          "signed_alternating_relative_mse": 0.0045025875493639855,
+          "signed_negative_scale_block_rate": 0.501708984375,
+          "signed_negative_scale_blocks": 8220,
+          "initial_codebook_symmetry_mean": 0.001153180142864585,
+          "initial_codebook_symmetry_max": 0.002015113364905119,
+          "unsigned_final_codebook_symmetry_mean": 0.0021113220136612654,
+          "unsigned_final_codebook_symmetry_max": 0.003374870168045163,
+          "signed_final_codebook_symmetry_mean": 0.017068855464458466,
+          "signed_final_codebook_symmetry_max": 0.03706563636660576,
+          "elapsed_sec": 2.4841736500093248
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005255425550610407,
+          "signed_baseline_relative_mse": 0.005222241268833574,
+          "unsigned_alternating_relative_mse": 0.005124728019079645,
+          "signed_alternating_relative_mse": 0.004553606114625963,
+          "signed_negative_scale_block_rate": 0.4986572265625,
+          "signed_negative_scale_blocks": 8170,
+          "initial_codebook_symmetry_mean": 0.00038619167753495276,
+          "initial_codebook_symmetry_max": 0.0008827238343656063,
+          "unsigned_final_codebook_symmetry_mean": 0.0008250356768257916,
+          "unsigned_final_codebook_symmetry_max": 0.0025947068352252245,
+          "signed_final_codebook_symmetry_mean": 0.01445802953094244,
+          "signed_final_codebook_symmetry_max": 0.048424288630485535,
+          "elapsed_sec": 2.3531829660059884
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ud_ggml_type": "Q6_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005142692763867235,
+          "signed_baseline_relative_mse": 0.005112721580363733,
+          "unsigned_alternating_relative_mse": 0.005034593416954928,
+          "signed_alternating_relative_mse": 0.004417355994446394,
+          "signed_negative_scale_block_rate": 0.49700927734375,
+          "signed_negative_scale_blocks": 8143,
+          "initial_codebook_symmetry_mean": 0.00045053198118694127,
+          "initial_codebook_symmetry_max": 0.0007554772309958935,
+          "unsigned_final_codebook_symmetry_mean": 0.001542364712804556,
+          "unsigned_final_codebook_symmetry_max": 0.00463917525485158,
+          "signed_final_codebook_symmetry_mean": 0.01567973755300045,
+          "signed_final_codebook_symmetry_max": 0.05783439427614212,
+          "elapsed_sec": 2.21628367798985
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005184066993429911,
+          "signed_baseline_relative_mse": 0.005127319234136523,
+          "unsigned_alternating_relative_mse": 0.005075086289966495,
+          "signed_alternating_relative_mse": 0.004459871987478006,
+          "signed_negative_scale_block_rate": 0.5013427734375,
+          "signed_negative_scale_blocks": 8214,
+          "initial_codebook_symmetry_mean": 0.0007147020078264177,
+          "initial_codebook_symmetry_max": 0.001764112850651145,
+          "unsigned_final_codebook_symmetry_mean": 0.0016303820302709937,
+          "unsigned_final_codebook_symmetry_max": 0.006464960053563118,
+          "signed_final_codebook_symmetry_mean": 0.01695769652724266,
+          "signed_final_codebook_symmetry_max": 0.03910043463110924,
+          "elapsed_sec": 2.466514794010436
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.0051380385853096126,
+          "signed_baseline_relative_mse": 0.005028063520534347,
+          "unsigned_alternating_relative_mse": 0.005031472844594199,
+          "signed_alternating_relative_mse": 0.004470316686161737,
+          "signed_negative_scale_block_rate": 0.49456787109375,
+          "signed_negative_scale_blocks": 8103,
+          "initial_codebook_symmetry_mean": 0.0013473219005391002,
+          "initial_codebook_symmetry_max": 0.0031470293179154396,
+          "unsigned_final_codebook_symmetry_mean": 0.0019228908931836486,
+          "unsigned_final_codebook_symmetry_max": 0.006191950291395187,
+          "signed_final_codebook_symmetry_mean": 0.014872640371322632,
+          "signed_final_codebook_symmetry_max": 0.035952746868133545,
+          "elapsed_sec": 2.413417264993768
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.0051520343661896366,
+          "signed_baseline_relative_mse": 0.005007800491365345,
+          "unsigned_alternating_relative_mse": 0.005036108100754704,
+          "signed_alternating_relative_mse": 0.004419386181251397,
+          "signed_negative_scale_block_rate": 0.50189208984375,
+          "signed_negative_scale_blocks": 8223,
+          "initial_codebook_symmetry_mean": 0.002462550299242139,
+          "initial_codebook_symmetry_max": 0.0033358510117977858,
+          "unsigned_final_codebook_symmetry_mean": 0.002740129828453064,
+          "unsigned_final_codebook_symmetry_max": 0.005169294308871031,
+          "signed_final_codebook_symmetry_mean": 0.018105698749423027,
+          "signed_final_codebook_symmetry_max": 0.04177344962954521,
+          "elapsed_sec": 2.2171297209861223
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.3.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005132921505331282,
+          "signed_baseline_relative_mse": 0.0050393327839340805,
+          "unsigned_alternating_relative_mse": 0.005037537560093474,
+          "signed_alternating_relative_mse": 0.0044034204085643775,
+          "signed_negative_scale_block_rate": 0.50152587890625,
+          "signed_negative_scale_blocks": 8217,
+          "initial_codebook_symmetry_mean": 0.001448362716473639,
+          "initial_codebook_symmetry_max": 0.00239294720813632,
+          "unsigned_final_codebook_symmetry_mean": 0.0015277867205440998,
+          "unsigned_final_codebook_symmetry_max": 0.004133298993110657,
+          "signed_final_codebook_symmetry_mean": 0.019439103081822395,
+          "signed_final_codebook_symmetry_max": 0.03435897454619408,
+          "elapsed_sec": 2.3929464430257212
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.0051779393366972095,
+          "signed_baseline_relative_mse": 0.005154331336687278,
+          "unsigned_alternating_relative_mse": 0.005065061020978595,
+          "signed_alternating_relative_mse": 0.004428804130465532,
+          "signed_negative_scale_block_rate": 0.50439453125,
+          "signed_negative_scale_blocks": 8264,
+          "initial_codebook_symmetry_mean": 0.00035045991535298526,
+          "initial_codebook_symmetry_max": 0.0007245463784784079,
+          "unsigned_final_codebook_symmetry_mean": 0.0011583074228838086,
+          "unsigned_final_codebook_symmetry_max": 0.0031104199588298798,
+          "signed_final_codebook_symmetry_mean": 0.017656609416007996,
+          "signed_final_codebook_symmetry_max": 0.045815203338861465,
+          "elapsed_sec": 2.3115523640008178
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005171306183756651,
+          "signed_baseline_relative_mse": 0.005136908902132562,
+          "unsigned_alternating_relative_mse": 0.005081276117012943,
+          "signed_alternating_relative_mse": 0.004506924737546243,
+          "signed_negative_scale_block_rate": 0.501708984375,
+          "signed_negative_scale_blocks": 8220,
+          "initial_codebook_symmetry_mean": 0.0004369803355075419,
+          "initial_codebook_symmetry_max": 0.001007810584269464,
+          "unsigned_final_codebook_symmetry_mean": 0.0008653660188429058,
+          "unsigned_final_codebook_symmetry_max": 0.0038729666266590357,
+          "signed_final_codebook_symmetry_mean": 0.014276639558374882,
+          "signed_final_codebook_symmetry_max": 0.04909230396151543,
+          "elapsed_sec": 2.507854697993025
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005187076147009089,
+          "signed_baseline_relative_mse": 0.005054569361345472,
+          "unsigned_alternating_relative_mse": 0.005075281719855315,
+          "signed_alternating_relative_mse": 0.004440741788361827,
+          "signed_negative_scale_block_rate": 0.50189208984375,
+          "signed_negative_scale_blocks": 8223,
+          "initial_codebook_symmetry_mean": 0.0021487323101609945,
+          "initial_codebook_symmetry_max": 0.003035354893654585,
+          "unsigned_final_codebook_symmetry_mean": 0.0027064227033406496,
+          "unsigned_final_codebook_symmetry_max": 0.006974942050874233,
+          "signed_final_codebook_symmetry_mean": 0.018455078825354576,
+          "signed_final_codebook_symmetry_max": 0.04536135494709015,
+          "elapsed_sec": 2.3175778410222847
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005165225091841245,
+          "signed_baseline_relative_mse": 0.005093263122817153,
+          "unsigned_alternating_relative_mse": 0.005067618340359783,
+          "signed_alternating_relative_mse": 0.004477424900766831,
+          "signed_negative_scale_block_rate": 0.49432373046875,
+          "signed_negative_scale_blocks": 8099,
+          "initial_codebook_symmetry_mean": 0.0009347449522465467,
+          "initial_codebook_symmetry_max": 0.002518891589716077,
+          "unsigned_final_codebook_symmetry_mean": 0.0015988372033461928,
+          "unsigned_final_codebook_symmetry_max": 0.0036175709683448076,
+          "signed_final_codebook_symmetry_mean": 0.014517896808683872,
+          "signed_final_codebook_symmetry_max": 0.05178571492433548,
+          "elapsed_sec": 2.466661819984438
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005199867218949937,
+          "signed_baseline_relative_mse": 0.005138008082187999,
+          "unsigned_alternating_relative_mse": 0.00509477231762548,
+          "signed_alternating_relative_mse": 0.004476382525235544,
+          "signed_negative_scale_block_rate": 0.50897216796875,
+          "signed_negative_scale_blocks": 8339,
+          "initial_codebook_symmetry_mean": 0.0009485201444476843,
+          "initial_codebook_symmetry_max": 0.0015113350236788392,
+          "unsigned_final_codebook_symmetry_mean": 0.0011455101193860173,
+          "unsigned_final_codebook_symmetry_max": 0.0018101887544617057,
+          "signed_final_codebook_symmetry_mean": 0.017860136926174164,
+          "signed_final_codebook_symmetry_max": 0.04574495181441307,
+          "elapsed_sec": 2.4903221460117493
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ud_ggml_type": "Q6_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005165830570821788,
+          "signed_baseline_relative_mse": 0.005132829302571302,
+          "unsigned_alternating_relative_mse": 0.0050550631384775994,
+          "signed_alternating_relative_mse": 0.004499626393903554,
+          "signed_negative_scale_block_rate": 0.5001220703125,
+          "signed_negative_scale_blocks": 8194,
+          "initial_codebook_symmetry_mean": 0.00039751260192133486,
+          "initial_codebook_symmetry_max": 0.0010075566824525595,
+          "unsigned_final_codebook_symmetry_mean": 0.001185916131362319,
+          "unsigned_final_codebook_symmetry_max": 0.00219808635301888,
+          "signed_final_codebook_symmetry_mean": 0.014241266064345837,
+          "signed_final_codebook_symmetry_max": 0.04607115313410759,
+          "elapsed_sec": 2.2545075489906594
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005197213851478086,
+          "signed_baseline_relative_mse": 0.005095054521622899,
+          "unsigned_alternating_relative_mse": 0.005091168337264715,
+          "signed_alternating_relative_mse": 0.004435311415604172,
+          "signed_negative_scale_block_rate": 0.4937744140625,
+          "signed_negative_scale_blocks": 8090,
+          "initial_codebook_symmetry_mean": 0.0016226869774982333,
+          "initial_codebook_symmetry_max": 0.0025805640034377575,
+          "unsigned_final_codebook_symmetry_mean": 0.0021387524902820587,
+          "unsigned_final_codebook_symmetry_max": 0.0033574379049241543,
+          "signed_final_codebook_symmetry_mean": 0.019297074526548386,
+          "signed_final_codebook_symmetry_max": 0.04387754946947098,
+          "elapsed_sec": 2.3098155750194564
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005165087324431788,
+          "signed_baseline_relative_mse": 0.005064101564554822,
+          "unsigned_alternating_relative_mse": 0.005052933600984644,
+          "signed_alternating_relative_mse": 0.004432915908416825,
+          "signed_negative_scale_block_rate": 0.5015869140625,
+          "signed_negative_scale_blocks": 8218,
+          "initial_codebook_symmetry_mean": 0.0015125408535823226,
+          "initial_codebook_symmetry_max": 0.002265861025080085,
+          "unsigned_final_codebook_symmetry_mean": 0.001806615386158228,
+          "unsigned_final_codebook_symmetry_max": 0.0036213139537721872,
+          "signed_final_codebook_symmetry_mean": 0.017312923446297646,
+          "signed_final_codebook_symmetry_max": 0.04338948428630829,
+          "elapsed_sec": 2.36921856799745
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005145318441330443,
+          "signed_baseline_relative_mse": 0.005104866039113835,
+          "unsigned_alternating_relative_mse": 0.005050514045096825,
+          "signed_alternating_relative_mse": 0.004464955020088289,
+          "signed_negative_scale_block_rate": 0.501708984375,
+          "signed_negative_scale_blocks": 8220,
+          "initial_codebook_symmetry_mean": 0.0006023242603987455,
+          "initial_codebook_symmetry_max": 0.001007810584269464,
+          "unsigned_final_codebook_symmetry_mean": 0.000998196774162352,
+          "unsigned_final_codebook_symmetry_max": 0.0020607933402061462,
+          "signed_final_codebook_symmetry_mean": 0.01602398231625557,
+          "signed_final_codebook_symmetry_max": 0.04814060032367706,
+          "elapsed_sec": 2.559962181985611
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.0051519791153586195,
+          "signed_baseline_relative_mse": 0.0050491522517075345,
+          "unsigned_alternating_relative_mse": 0.005062853222087612,
+          "signed_alternating_relative_mse": 0.00444434506056042,
+          "signed_negative_scale_block_rate": 0.49884033203125,
+          "signed_negative_scale_blocks": 8173,
+          "initial_codebook_symmetry_mean": 0.001412940793670714,
+          "initial_codebook_symmetry_max": 0.0030226700473576784,
+          "unsigned_final_codebook_symmetry_mean": 0.0033332796301692724,
+          "unsigned_final_codebook_symmetry_max": 0.008749356493353844,
+          "signed_final_codebook_symmetry_mean": 0.015650751069188118,
+          "signed_final_codebook_symmetry_max": 0.04918863996863365,
+          "elapsed_sec": 2.5376318499911577
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.0052040787821954395,
+          "signed_baseline_relative_mse": 0.005150856901174313,
+          "unsigned_alternating_relative_mse": 0.005086926981640979,
+          "signed_alternating_relative_mse": 0.00451881295769996,
+          "signed_negative_scale_block_rate": 0.49456787109375,
+          "signed_negative_scale_blocks": 8103,
+          "initial_codebook_symmetry_mean": 0.0005684321513399482,
+          "initial_codebook_symmetry_max": 0.0015105740167200565,
+          "unsigned_final_codebook_symmetry_mean": 0.0012653050944209099,
+          "unsigned_final_codebook_symmetry_max": 0.00310961389914155,
+          "signed_final_codebook_symmetry_mean": 0.013146606273949146,
+          "signed_final_codebook_symmetry_max": 0.04778851196169853,
+          "elapsed_sec": 2.4827461809909437
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.4.linear_attn.out_proj.weight",
+      "family": "linear_attn_out",
+      "ud_ggml_type": "Q8_0",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005197336994547289,
+          "signed_baseline_relative_mse": 0.0051291683477005835,
+          "unsigned_alternating_relative_mse": 0.005072721694979646,
+          "signed_alternating_relative_mse": 0.0044531140926761205,
+          "signed_negative_scale_block_rate": 0.4954833984375,
+          "signed_negative_scale_blocks": 8118,
+          "initial_codebook_symmetry_mean": 0.0010227845050394535,
+          "initial_codebook_symmetry_max": 0.001762336352840066,
+          "unsigned_final_codebook_symmetry_mean": 0.0019470405532047153,
+          "unsigned_final_codebook_symmetry_max": 0.0031801662407815456,
+          "signed_final_codebook_symmetry_mean": 0.017788538709282875,
+          "signed_final_codebook_symmetry_max": 0.04123711213469505,
+          "elapsed_sec": 2.4486042800126597
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005188270921786039,
+          "signed_baseline_relative_mse": 0.005135299401074018,
+          "unsigned_alternating_relative_mse": 0.00506469231148341,
+          "signed_alternating_relative_mse": 0.004505122321272142,
+          "signed_negative_scale_block_rate": 0.49932861328125,
+          "signed_negative_scale_blocks": 8181,
+          "initial_codebook_symmetry_mean": 0.0008088003960438073,
+          "initial_codebook_symmetry_max": 0.0011335012968629599,
+          "unsigned_final_codebook_symmetry_mean": 0.0027025388553738594,
+          "unsigned_final_codebook_symmetry_max": 0.009055627509951591,
+          "signed_final_codebook_symmetry_mean": 0.015904726460576057,
+          "signed_final_codebook_symmetry_max": 0.051295071840286255,
+          "elapsed_sec": 2.465580912976293
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_z.weight",
+      "family": "linear_attn_z",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005183460716416044,
+          "signed_baseline_relative_mse": 0.005089460778252355,
+          "unsigned_alternating_relative_mse": 0.005079020191537707,
+          "signed_alternating_relative_mse": 0.0044495714465932765,
+          "signed_negative_scale_block_rate": 0.49835205078125,
+          "signed_negative_scale_blocks": 8165,
+          "initial_codebook_symmetry_mean": 0.0013814546400681138,
+          "initial_codebook_symmetry_max": 0.0021410579793155193,
+          "unsigned_final_codebook_symmetry_mean": 0.0008850806625559926,
+          "unsigned_final_codebook_symmetry_max": 0.001677419408224523,
+          "signed_final_codebook_symmetry_mean": 0.018454598262906075,
+          "signed_final_codebook_symmetry_max": 0.034934498369693756,
+          "elapsed_sec": 2.4850921940233093
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005196659277863156,
+          "signed_baseline_relative_mse": 0.005106311861892066,
+          "unsigned_alternating_relative_mse": 0.005082525354089322,
+          "signed_alternating_relative_mse": 0.004487373535767906,
+          "signed_negative_scale_block_rate": 0.50250244140625,
+          "signed_negative_scale_blocks": 8233,
+          "initial_codebook_symmetry_mean": 0.001486126915551722,
+          "initial_codebook_symmetry_max": 0.002015621168538928,
+          "unsigned_final_codebook_symmetry_mean": 0.0014724493958055973,
+          "unsigned_final_codebook_symmetry_max": 0.0031152646988630295,
+          "signed_final_codebook_symmetry_mean": 0.01878390647470951,
+          "signed_final_codebook_symmetry_max": 0.03775038570165634,
+          "elapsed_sec": 2.2214835780032445
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_qkv.weight",
+      "family": "linear_attn_qkv",
+      "ud_ggml_type": "Q5_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005213574536108575,
+          "signed_baseline_relative_mse": 0.00515921785774535,
+          "unsigned_alternating_relative_mse": 0.005091265136363571,
+          "signed_alternating_relative_mse": 0.004538014269015224,
+          "signed_negative_scale_block_rate": 0.50152587890625,
+          "signed_negative_scale_blocks": 8217,
+          "initial_codebook_symmetry_mean": 0.0008172895177267492,
+          "initial_codebook_symmetry_max": 0.0011343584628775716,
+          "unsigned_final_codebook_symmetry_mean": 0.0011598900891840458,
+          "unsigned_final_codebook_symmetry_max": 0.0023400934878736734,
+          "signed_final_codebook_symmetry_mean": 0.016119297593832016,
+          "signed_final_codebook_symmetry_max": 0.039271045476198196,
+          "elapsed_sec": 2.2505471209879033
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005218615407152507,
+          "signed_baseline_relative_mse": 0.005200879293513993,
+          "unsigned_alternating_relative_mse": 0.005108153911526465,
+          "signed_alternating_relative_mse": 0.004562657035859219,
+          "signed_negative_scale_block_rate": 0.50213623046875,
+          "signed_negative_scale_blocks": 8227,
+          "initial_codebook_symmetry_mean": 0.00021663095685653389,
+          "initial_codebook_symmetry_max": 0.0005041593103669584,
+          "unsigned_final_codebook_symmetry_mean": 0.0013850806280970573,
+          "unsigned_final_codebook_symmetry_max": 0.004903225693851709,
+          "signed_final_codebook_symmetry_mean": 0.013700817711651325,
+          "signed_final_codebook_symmetry_max": 0.03883495181798935,
+          "elapsed_sec": 2.570028034009738
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.mlp.down_proj.weight",
+      "family": "mlp_down",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.00517630025371266,
+          "signed_baseline_relative_mse": 0.005141420980118589,
+          "unsigned_alternating_relative_mse": 0.005081789464575216,
+          "signed_alternating_relative_mse": 0.0044877997005140354,
+          "signed_negative_scale_block_rate": 0.4984130859375,
+          "signed_negative_scale_blocks": 8166,
+          "initial_codebook_symmetry_mean": 0.0003480524756014347,
+          "initial_codebook_symmetry_max": 0.0012584947980940342,
+          "unsigned_final_codebook_symmetry_mean": 0.0010138512589037418,
+          "unsigned_final_codebook_symmetry_max": 0.0030959751456975937,
+          "signed_final_codebook_symmetry_mean": 0.014481514692306519,
+          "signed_final_codebook_symmetry_max": 0.04786021634936333,
+          "elapsed_sec": 2.5833611100097187
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005215566743399966,
+          "signed_baseline_relative_mse": 0.005194280114932354,
+          "unsigned_alternating_relative_mse": 0.005113112794511269,
+          "signed_alternating_relative_mse": 0.004512472694983085,
+          "signed_negative_scale_block_rate": 0.5048828125,
+          "signed_negative_scale_blocks": 8272,
+          "initial_codebook_symmetry_mean": 0.00029525699210353196,
+          "initial_codebook_symmetry_max": 0.000503905292134732,
+          "unsigned_final_codebook_symmetry_mean": 0.0006692385068163276,
+          "unsigned_final_codebook_symmetry_max": 0.0025879917666316032,
+          "signed_final_codebook_symmetry_mean": 0.01505481731146574,
+          "signed_final_codebook_symmetry_max": 0.04660691320896149,
+          "elapsed_sec": 2.606084664002992
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.mlp.gate_proj.weight",
+      "family": "mlp_gate",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005128379980688619,
+          "signed_baseline_relative_mse": 0.005098746744351633,
+          "unsigned_alternating_relative_mse": 0.0050432594518167615,
+          "signed_alternating_relative_mse": 0.004414827584274872,
+          "signed_negative_scale_block_rate": 0.4981689453125,
+          "signed_negative_scale_blocks": 8162,
+          "initial_codebook_symmetry_mean": 0.0004383964405860752,
+          "initial_codebook_symmetry_max": 0.0008020885870791972,
+          "unsigned_final_codebook_symmetry_mean": 0.001009491621516645,
+          "unsigned_final_codebook_symmetry_max": 0.004118404351174831,
+          "signed_final_codebook_symmetry_mean": 0.017706679180264473,
+          "signed_final_codebook_symmetry_max": 0.044980939477682114,
+          "elapsed_sec": 2.4723179469874594
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005172623279466527,
+          "signed_baseline_relative_mse": 0.005141214481155566,
+          "unsigned_alternating_relative_mse": 0.005069817856982927,
+          "signed_alternating_relative_mse": 0.004488220212772345,
+          "signed_negative_scale_block_rate": 0.49810791015625,
+          "signed_negative_scale_blocks": 8161,
+          "initial_codebook_symmetry_mean": 0.00041315160342492163,
+          "initial_codebook_symmetry_max": 0.0007554772309958935,
+          "unsigned_final_codebook_symmetry_mean": 0.0006050083902664483,
+          "unsigned_final_codebook_symmetry_max": 0.002590002492070198,
+          "signed_final_codebook_symmetry_mean": 0.013954604044556618,
+          "signed_final_codebook_symmetry_max": 0.04731457680463791,
+          "elapsed_sec": 2.3314724499941804
+        }
+      }
+    },
+    {
+      "tensor_name": "model.language_model.layers.5.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "ud_ggml_type": "Q4_K",
+      "formats": {
+        "e4m3": {
+          "unsigned_baseline_relative_mse": 0.005171217907073472,
+          "signed_baseline_relative_mse": 0.00506495353432974,
+          "unsigned_alternating_relative_mse": 0.0050666356047495914,
+          "signed_alternating_relative_mse": 0.004433319497589939,
+          "signed_negative_scale_block_rate": 0.49395751953125,
+          "signed_negative_scale_blocks": 8093,
+          "initial_codebook_symmetry_mean": 0.0016361359739676118,
+          "initial_codebook_symmetry_max": 0.0022681450936943293,
+          "unsigned_final_codebook_symmetry_mean": 0.0017657421994954348,
+          "unsigned_final_codebook_symmetry_max": 0.005430566146969795,
+          "signed_final_codebook_symmetry_mean": 0.01819424517452717,
+          "signed_final_codebook_symmetry_max": 0.04418901726603508,
+          "elapsed_sec": 2.228557152004214
+        },
+        "ue5m3": {
+          "unsigned_baseline_relative_mse": 0.005198488382029063,
+          "signed_baseline_relative_mse": 0.005137458113483305,
+          "unsigned_alternating_relative_mse": 0.005088606803841697,
+          "signed_alternating_relative_mse": 0.004484854178670852,
+          "signed_negative_scale_block_rate": 0.49176025390625,
+          "signed_negative_scale_blocks": 8057,
+          "initial_codebook_symmetry_mean": 0.0008518792456015944,
+          "initial_codebook_symmetry_max": 0.001510954461991787,
+          "unsigned_final_codebook_symmetry_mean": 0.0020682523027062416,
+          "unsigned_final_codebook_symmetry_max": 0.004653567913919687,
+          "signed_final_codebook_symmetry_mean": 0.01474875770509243,
+          "signed_final_codebook_symmetry_max": 0.04843232035636902,
+          "elapsed_sec": 2.515147319994867
+        }
+      }
+    }
+  ]
+}

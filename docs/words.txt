@@ -12,6 +12,8 @@ block:同じlocal-scaleを共有するraw-valueのまとまり
 block-size:1つのblockに含まれるraw-valueの数
 group:実装上のblockの旧称または変数名。文書ではblockを優先する
 local-scale:数十個のraw-valueごとのscale
+unsigned local-scale:符号bitを持たず、常に正値として扱うlocal-scale
+signed local-scale:符号bitを持ち、blockごとに正負を選べるlocal-scale。診断・比較用語として使い、仕様候補として扱う場合は明記する
 tensor-scale:1つのtensor全体にかかるscale
 family-scale:同じfamilyに属するtensorで共有または補正に使うscale
 global-scale:local-scaleより大きい単位でのscale。tensor-scaleやfamily-scaleを含む上位概念として使う
