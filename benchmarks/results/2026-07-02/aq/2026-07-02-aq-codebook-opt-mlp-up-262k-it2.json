@@ -1,0 +1,209 @@
+{
+  "schema_version": "aq-codebook-opt-experiment-v0.1",
+  "timestamp_utc": "2026-07-01T16:10:27.237218+00:00",
+  "settings": {
+    "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "tensor_pattern": "\\.weight$",
+    "families": [
+      "mlp_up"
+    ],
+    "candidate": [
+      "aq4_e4m3_g16_ts_flloyd16",
+      "aq4_e4m3_g8_ts_flloyd16"
+    ],
+    "max_tensors": 1,
+    "max_tensors_per_family": 1,
+    "max_elements_per_tensor": 262144,
+    "iterations": 2,
+    "scale_window": 4,
+    "global_scale_dtype": "fp16",
+    "torch_threads": 32,
+    "torch_interop_threads": 1,
+    "seed": 17
+  },
+  "results": [
+    {
+      "tensor_name": "model.language_model.layers.14.mlp.up_proj.weight",
+      "family": "mlp_up",
+      "tensor_shape": [
+        12288,
+        4096
+      ],
+      "tensor_dtype": "bfloat16",
+      "candidate_results": [
+        {
+          "candidate_id": "aq4_e4m3_g8_ts_flloyd16",
+          "status": "ok",
+          "timing_sec": {
+            "sampling_sec": 0.040039418992819265,
+            "baseline_sec": 0.13860917600686662,
+            "final_assignment_sec": 0.09890033298870549,
+            "alternating_sec": 0.5280185070005246,
+            "iterations": [
+              {
+                "iteration": 0,
+                "elapsed_sec": 0.1663386060099583
+              },
+              {
+                "iteration": 1,
+                "elapsed_sec": 0.15404208601103164
+              }
+            ],
+            "exhaustive_local_assignment_sec": null,
+            "total_sec": 0.7196214919968043
+          },
+          "baseline": {
+            "effective_bpp": 5.0,
+            "mse": 4.748400499465788e-07,
+            "relative_mse": 0.0036347389370975343,
+            "weighted_mse": null,
+            "weighted_relative_mse": null,
+            "max_abs_error": 0.003824867308139801,
+            "cosine_similarity": 0.9981810658273338,
+            "saturation_rate": 0.0,
+            "zero_preservation_rate": null,
+            "mean_group_error": 3.7987203995726304e-06,
+            "p95_group_error": 8.884146154741757e-06,
+            "sampled_groups": 32768,
+            "sampled_elements": 262144,
+            "tensor_scale_value": 0.013249997049570084
+          },
+          "alternating": {
+            "mse": 4.692111178731361e-07,
+            "relative_mse": 0.0035916513262367225,
+            "max_abs_error": 0.0038778864545747638,
+            "cosine_similarity": 0.9982026240948205,
+            "mean_group_error": 3.753688942985089e-06,
+            "p95_group_error": 8.792791114812428e-06,
+            "sampled_blocks": 32768,
+            "sampled_elements": 262144,
+            "global_scale": 0.01325225830078125,
+            "codebook": [
+              -0.98681640625,
+              -0.8115234375,
+              -0.64453125,
+              -0.492919921875,
+              -0.365234375,
+              -0.2498779296875,
+              -0.144287109375,
+              -0.047210693359375,
+              0.04522705078125,
+              0.1424560546875,
+              0.2486572265625,
+              0.364013671875,
+              0.490478515625,
+              0.64111328125,
+              0.8046875,
+              0.98681640625
+            ],
+            "iterations": 2,
+            "local_scale_format": "e4m3",
+            "codebook_mode": "free_lloyd16",
+            "final_global_scale": 0.01325225830078125,
+            "effective_bpp": 5.0
+          },
+          "operation_counts": {
+            "scale_candidates": 119,
+            "baseline_ops": 37748736,
+            "alternating_per_iteration_ops": 38273024,
+            "final_assignment_ops": 37748736,
+            "alternating_ops": 114294784,
+            "exhaustive_local_assignment_ops": 499122176,
+            "alternating_to_baseline_ratio": 3.0277777777777777,
+            "exhaustive_to_baseline_ratio": 13.222222222222221,
+            "exhaustive_to_alternating_ratio": 4.36697247706422
+          },
+          "seed": 17,
+          "sampled_blocks": 32768,
+          "sampled_elements": 262144
+        },
+        {
+          "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+          "status": "ok",
+          "timing_sec": {
+            "sampling_sec": 0.034278574981726706,
+            "baseline_sec": 0.12682735599810258,
+            "final_assignment_sec": 0.07179423299385235,
+            "alternating_sec": 0.41362757299793884,
+            "iterations": [
+              {
+                "iteration": 0,
+                "elapsed_sec": 0.11627395398681983
+              },
+              {
+                "iteration": 1,
+                "elapsed_sec": 0.12169060300220735
+              }
+            ],
+            "exhaustive_local_assignment_sec": null,
+            "total_sec": 0.5825530510046519
+          },
+          "baseline": {
+            "effective_bpp": 4.5,
+            "mse": 6.832034387116437e-07,
+            "relative_mse": 0.005228647217309667,
+            "weighted_mse": null,
+            "weighted_relative_mse": null,
+            "max_abs_error": 0.004591565579175949,
+            "cosine_similarity": 0.9973821811219348,
+            "saturation_rate": 0.0,
+            "zero_preservation_rate": null,
+            "mean_group_error": 1.0931255019386299e-05,
+            "p95_group_error": 2.1236526663415134e-05,
+            "sampled_groups": 16384,
+            "sampled_elements": 262144,
+            "tensor_scale_value": 0.016032705704371136
+          },
+          "alternating": {
+            "mse": 6.769695504156458e-07,
+            "relative_mse": 0.005180938763536114,
+            "max_abs_error": 0.004348844289779663,
+            "cosine_similarity": 0.9974061676961379,
+            "mean_group_error": 1.0831512806650332e-05,
+            "p95_group_error": 2.109629528712827e-05,
+            "sampled_blocks": 16384,
+            "sampled_elements": 262144,
+            "global_scale": 0.016021728515625,
+            "codebook": [
+              -0.9599609375,
+              -0.73828125,
+              -0.5625,
+              -0.424072265625,
+              -0.30859375,
+              -0.2081298828125,
+              -0.12030029296875,
+              -0.03887939453125,
+              0.039703369140625,
+              0.1207275390625,
+              0.209228515625,
+              0.309326171875,
+              0.42431640625,
+              0.56640625,
+              0.73974609375,
+              0.96142578125
+            ],
+            "iterations": 2,
+            "local_scale_format": "e4m3",
+            "codebook_mode": "free_lloyd16",
+            "final_global_scale": 0.016021728515625,
+            "effective_bpp": 4.5
+          },
+          "operation_counts": {
+            "scale_candidates": 119,
+            "baseline_ops": 37748736,
+            "alternating_per_iteration_ops": 38273024,
+            "final_assignment_ops": 37748736,
+            "alternating_ops": 114294784,
+            "exhaustive_local_assignment_ops": 499122176,
+            "alternating_to_baseline_ratio": 3.0277777777777777,
+            "exhaustive_to_baseline_ratio": 13.222222222222221,
+            "exhaustive_to_alternating_ratio": 4.36697247706422
+          },
+          "seed": 9990,
+          "sampled_blocks": 16384,
+          "sampled_elements": 262144
+        }
+      ]
+    }
+  ]
+}
