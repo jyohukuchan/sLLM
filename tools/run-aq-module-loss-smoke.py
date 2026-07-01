@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -70,6 +72,93 @@ def repeat_prompts_to_length(tokenizer, prompts: list[str], sequence_length: int
             text = f"{text}\n{prompt}"
         repeated.append(text)
     return repeated
+
+
+def safe_cache_component(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value)[:180]
+
+
+def quantized_cache_metadata(
+    args: argparse.Namespace,
+    module_name: str,
+    variant,
+    original: torch.Tensor,
+) -> dict[str, object]:
+    return {
+        "schema_version": "aq-quantized-weight-cache-v0.1",
+        "model_dir": str(args.model_dir),
+        "activation_stats": str(args.activation_stats),
+        "module": module_name,
+        "shape": list(original.shape),
+        "dtype": str(original.dtype),
+        "variant_id": variant.variant_id,
+        "candidate_id": variant.candidate_id,
+        "weighted_scale_search": variant.weighted_scale_search,
+        "weighted_codebook": variant.weighted_codebook,
+        "max_codebook_elements": args.max_codebook_elements,
+        "scale_window": args.scale_window,
+        "seed": args.seed,
+    }
+
+
+def quantized_cache_path(cache_dir: Path, metadata: dict[str, object]) -> Path:
+    payload = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()[:24]
+    module = safe_cache_component(str(metadata["module"]))
+    variant = safe_cache_component(str(metadata["variant_id"]))
+    return cache_dir / f"{module}--{variant}--{digest}.pt"
+
+
+def load_or_quantize_weight(
+    logit_smoke,
+    sampler,
+    args: argparse.Namespace,
+    module_name: str,
+    original: torch.Tensor,
+    activation: torch.Tensor,
+    variant,
+) -> torch.Tensor:
+    if args.quantized_cache_dir is None:
+        return logit_smoke.quantize_weight(
+            sampler,
+            original,
+            activation,
+            variant,
+            args.max_codebook_elements,
+            args.scale_window,
+            args.seed,
+        )
+
+    metadata = quantized_cache_metadata(args, module_name, variant, original)
+    cache_path = quantized_cache_path(args.quantized_cache_dir, metadata)
+    if cache_path.exists():
+        payload = torch.load(cache_path, map_location="cpu")
+        if not isinstance(payload, dict) or "weight" not in payload:
+            raise ValueError(f"invalid quantized cache payload: {cache_path}")
+        cached_metadata = payload.get("metadata")
+        if cached_metadata != metadata:
+            raise ValueError(f"quantized cache metadata mismatch: {cache_path}")
+        weight = payload["weight"]
+        if not isinstance(weight, torch.Tensor):
+            raise ValueError(f"quantized cache weight is not a tensor: {cache_path}")
+        if tuple(weight.shape) != tuple(original.shape):
+            raise ValueError(f"quantized cache shape mismatch: {cache_path}")
+        return weight
+
+    quantized = logit_smoke.quantize_weight(
+        sampler,
+        original,
+        activation,
+        variant,
+        args.max_codebook_elements,
+        args.scale_window,
+        args.seed,
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.tmp")
+    torch.save({"metadata": metadata, "weight": quantized.detach().cpu()}, tmp_path)
+    tmp_path.replace(cache_path)
+    return quantized
 
 
 def forward_sequence_loss(
@@ -142,6 +231,12 @@ def parse_args(logit_smoke) -> argparse.Namespace:
     parser.add_argument("--max-codebook-elements", type=int, default=262144)
     parser.add_argument("--scale-window", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--quantized-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional directory for cached quantized CPU tensors keyed by model/module/variant settings.",
+    )
     parser.add_argument("--dtype", choices=("auto", "float32", "bfloat16", "float16"), default="bfloat16")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--torch-threads", type=int, default=64)
@@ -173,6 +268,11 @@ def main() -> int:
     args.activation_stats = args.activation_stats.expanduser().resolve()
     args.selection_json = args.selection_json.expanduser().resolve() if args.selection_json else None
     args.prompt_file = args.prompt_file.expanduser().resolve() if args.prompt_file else None
+    args.quantized_cache_dir = (
+        args.quantized_cache_dir.expanduser().resolve() if args.quantized_cache_dir else None
+    )
+    if args.quantized_cache_dir is not None:
+        args.quantized_cache_dir.mkdir(parents=True, exist_ok=True)
 
     sampler = logit_smoke.load_sampler_module()
     stats = logit_smoke.load_activation_stats(args.activation_stats)
@@ -226,14 +326,14 @@ def main() -> int:
                         variant = logit_smoke.variant_for_policy(policy, str(entry["family"]))
                     else:
                         variant = uniform_variant
-                    quantized = logit_smoke.quantize_weight(
+                    quantized = load_or_quantize_weight(
+                        logit_smoke,
                         sampler,
+                        args,
+                        str(entry["name"]),
                         original,
                         activation,
                         variant,
-                        args.max_codebook_elements,
-                        args.scale_window,
-                        args.seed,
                     ).to(device=module.weight.device, dtype=module.weight.dtype)
                     module.weight.data.copy_(quantized)
 

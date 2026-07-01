@@ -489,6 +489,11 @@
   - added policy isolation plan:
     - `docs/plans/aq-policy-isolation-plan-v0.1.md`.
     - purpose: use all-g16 as the current conservative baseline, add cached or Rust-prototype-backed loss evaluation, then test one-family-at-a-time g8 promotions before trying mixed policies again.
+  - added quantized-weight cache support to `tools/run-aq-module-loss-smoke.py`:
+    - new flag: `--quantized-cache-dir`.
+    - cache key includes model path, activation stats path, module name, shape, dtype, variant settings, scale window, codebook sample cap, and seed.
+    - verified with `python -m py_compile tools/run-aq-module-loss-smoke.py`.
+    - fake quantizer smoke wrote one cache file and confirmed the second lookup reused it (`calls 1`, `equal True`, `cache_files 1`).
 
 ## Current Interpretation
 
@@ -500,7 +505,7 @@ The current aq result is promising at 4.5 bpp on tensor-level and sampled-weight
 
 - Keep exact as the default for now; reservoir65536 is promising for conversion memory, but model-level quality must be checked before making it the default.
 - Add real-tensor or cross-process golden tests if the C++ kernel changes again; the first pseudo-random BF16/F16 byte-level golden is now in place.
-- Isolate why full inproj248 project-text loss penalizes mixed policies: compare all-g16 against one-family-at-a-time promotions, especially `attn_k/o/v`, `linear_attn_out`, and in-proj families, and prefer cached/Rust-converted weights over Python re-quantization.
+- Isolate why full inproj248 project-text loss penalizes mixed policies: compare all-g16 against one-family-at-a-time promotions, especially `attn_k/o/v`, `linear_attn_out`, and in-proj families, using `--quantized-cache-dir` or a future Rust loader path.
 - Follow `docs/plans/aq-policy-isolation-plan-v0.1.md` for the next policy tests.
 - Run a wider real-text loss/perplexity evaluation after the full-model loader path is available; use all-g16 as the current conservative baseline, not p4p6.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.

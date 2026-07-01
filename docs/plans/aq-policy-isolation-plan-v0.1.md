@@ -65,9 +65,10 @@ Before running many full-scope policy tests, add one of these evaluation paths:
 
 1. Preferred: load Rust-converted `.ullm.d` prototype tensors into the Python
    model for loss evaluation.
-2. Acceptable short-term path: add a disk cache keyed by
-   `(tensor_name, candidate_id, codebook_artifact, scale_window, tensor_scale_estimator)`
-   so `run-aq-module-loss-smoke.py` can reuse quantized tensors.
+2. Implemented short-term path: add a disk cache keyed by model path,
+   activation stats path, tensor name, shape, dtype, variant settings,
+   scale window, codebook sample cap, and seed so
+   `run-aq-module-loss-smoke.py` can reuse quantized tensors.
 3. Fallback only for narrow smokes: keep the current Python re-quantization path
    and reduce scope or prompt count.
 
@@ -145,5 +146,10 @@ Only after a Phase 1/2 policy beats or matches all-g16:
 
 ## Immediate Next Step
 
-Implement cached or Rust-prototype-backed loss evaluation. Then run Phase 1 for
+Use `tools/run-aq-module-loss-smoke.py --quantized-cache-dir <dir>` for Phase 1
+so repeated policies can reuse quantized tensors. Then run Phase 1 for
 `linear_attn_out`, `attn_o`, `attn_v`, and `mlp_up` first.
+
+The current cache is a short-term Python/PyTorch cache. It is not a substitute
+for a Rust `.ullm.d` loader path, but it avoids re-quantizing identical
+module/variant/settings combinations across policy experiments.
