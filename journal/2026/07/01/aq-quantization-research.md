@@ -486,6 +486,9 @@
       - inproj44 p4p6 `+0.000526816`, p4p46 `+0.001080275`, p4p65 `+0.002476983`.
       - inproj248 p4p6 `+0.005561449`, p4p46 `+0.006122001`, p4p65 `+0.009666428`.
     - interpretation: the full-scope degradation is not visible in the smaller module subsets. The next targeted policy experiment should not promote several families at once; it should test one-family-at-a-time g8 promotion against all-g16, ideally using cached or Rust-converted weights.
+  - added policy isolation plan:
+    - `docs/plans/aq-policy-isolation-plan-v0.1.md`.
+    - purpose: use all-g16 as the current conservative baseline, add cached or Rust-prototype-backed loss evaluation, then test one-family-at-a-time g8 promotions before trying mixed policies again.
 
 ## Current Interpretation
 
@@ -498,6 +501,7 @@ The current aq result is promising at 4.5 bpp on tensor-level and sampled-weight
 - Keep exact as the default for now; reservoir65536 is promising for conversion memory, but model-level quality must be checked before making it the default.
 - Add real-tensor or cross-process golden tests if the C++ kernel changes again; the first pseudo-random BF16/F16 byte-level golden is now in place.
 - Isolate why full inproj248 project-text loss penalizes mixed policies: compare all-g16 against one-family-at-a-time promotions, especially `attn_k/o/v`, `linear_attn_out`, and in-proj families, and prefer cached/Rust-converted weights over Python re-quantization.
+- Follow `docs/plans/aq-policy-isolation-plan-v0.1.md` for the next policy tests.
 - Run a wider real-text loss/perplexity evaluation after the full-model loader path is available; use all-g16 as the current conservative baseline, not p4p6.
 - Build full-package p4p46/p4p65 prototypes with passthrough tensors only if package/loader work needs them.
 - Tune controlled CPU parallelism for full direct package conversion. Jobs64 is validated for p4p6 quantized-only direct conversion with max RSS about `3.6 GiB`; jobs64 currently looks like the fastest validated point, but full-package jobs64 with passthrough and larger policy variants still need confirmation before making it a default.
