@@ -139,3 +139,13 @@ Rust dry-run chain:
 - C++ kernelが`scale_window=usize::MAX`を受けても正常に完了することをunit testで確認した。
 
 結論として、理論的なUEaMb支配性を検証する場合は`--scale-window all`を使う。速度重視の通常変換で小さいwindowを使う場合、その結果は近似探索であり、数学的な支配性保証とは分けて扱う。
+
+## Python補助ツールの追記
+
+`export-aq-family-codebooks.py`と`verify-aq-one-tensor.py`も、固定候補リストだけでなく`candidate_from_id`経由の動的UEaMb candidateを解決できるようにした。
+
+smoke:
+
+- `export-aq-family-codebooks.py`で`aq4_ue4m3_g16_ts_flloyd16`の`attn_k` codebook exportが成功。
+- `verify-aq-one-tensor.py`で`model.language_model.layers.3.self_attn.k_proj.weight`、`aq4_ue4m3_g16_ts_flloyd16`の検証が成功。
+- Python verify relative MSE: `0.005399505821193474`

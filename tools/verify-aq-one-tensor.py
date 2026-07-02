@@ -25,6 +25,17 @@ def load_sampler_module():
     return module
 
 
+def resolve_candidate(sampler, candidate_id: str):
+    for candidate in sampler.ROUND1_CANDIDATES:
+        if candidate.candidate_id == candidate_id:
+            return candidate
+    if hasattr(sampler, "candidate_from_id"):
+        candidate = sampler.candidate_from_id(candidate_id)
+        if candidate is not None:
+            return candidate
+    raise KeyError(f"unknown candidate: {candidate_id}")
+
+
 def load_codebook(path: Path, family: str, candidate_id: str) -> torch.Tensor:
     data = json.loads(path.read_text(encoding="utf-8"))
     for entry in data.get("codebooks", []):
@@ -81,9 +92,7 @@ def choose_tensor_scale_chunked(
 
 def verify_tensor(args: argparse.Namespace) -> dict:
     sampler = load_sampler_module()
-    candidate = next(
-        item for item in sampler.ROUND1_CANDIDATES if item.candidate_id == args.candidate
-    )
+    candidate = resolve_candidate(sampler, args.candidate)
     codebook = load_codebook(args.codebook_json, args.family, args.candidate)
     scales = sampler.scale_values(candidate.scale_format)
     tensor_path = find_tensor_path(sampler, args.model_dir, args.tensor)

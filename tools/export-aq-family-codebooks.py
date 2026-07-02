@@ -38,6 +38,23 @@ def load_sampler_module():
     return module
 
 
+def resolve_candidates(sampler, candidate_ids: list[str]):
+    by_id = {candidate.candidate_id: candidate for candidate in sampler.ROUND1_CANDIDATES}
+    candidates = []
+    missing = []
+    for candidate_id in candidate_ids:
+        candidate = by_id.get(candidate_id)
+        if candidate is None and hasattr(sampler, "candidate_from_id"):
+            candidate = sampler.candidate_from_id(candidate_id)
+        if candidate is None:
+            missing.append(candidate_id)
+        else:
+            candidates.append(candidate)
+    if missing:
+        raise SystemExit(f"unknown candidates: {', '.join(sorted(missing))}")
+    return candidates
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path, required=True)
@@ -152,11 +169,7 @@ def main() -> int:
     args.activation_stats = args.activation_stats.expanduser().resolve() if args.activation_stats else None
     sampler = load_sampler_module()
 
-    selected_candidate_ids = set(args.candidate or DEFAULT_CANDIDATES)
-    candidates = [item for item in sampler.ROUND1_CANDIDATES if item.candidate_id in selected_candidate_ids]
-    missing = selected_candidate_ids - {item.candidate_id for item in candidates}
-    if missing:
-        raise SystemExit(f"unknown candidates: {', '.join(sorted(missing))}")
+    candidates = resolve_candidates(sampler, args.candidate or DEFAULT_CANDIDATES)
 
     tensors = sampler.discover_tensors(args.model_dir, re.compile(args.tensor_pattern))
     if args.family:
@@ -209,7 +222,7 @@ def main() -> int:
         "max_tensors": args.max_tensors,
         "max_tensors_per_family": args.max_tensors_per_family,
         "family_filter": args.family,
-        "candidate_filter": sorted(selected_candidate_ids),
+        "candidate_filter": [candidate.candidate_id for candidate in candidates],
         "tensor_names": [name for name, _ in tensors],
         "notes": args.note,
         "codebooks": rows,
