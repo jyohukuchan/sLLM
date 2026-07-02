@@ -149,3 +149,21 @@ smoke:
 - `export-aq-family-codebooks.py`で`aq4_ue4m3_g16_ts_flloyd16`の`attn_k` codebook exportが成功。
 - `verify-aq-one-tensor.py`で`model.language_model.layers.3.self_attn.k_proj.weight`、`aq4_ue4m3_g16_ts_flloyd16`の検証が成功。
 - Python verify relative MSE: `0.005399505821193474`
+
+## weighted条件の追記
+
+activation weightedのscale search + codebook条件でもUEaMb支配性を確認した。
+
+- 出力: `benchmarks/results/2026-07-02/aq/2026-07-02-aq-weighted-scale-dominance-ue4m2-ue5m4-mlp3.jsonl`
+- activation stats: `benchmarks/results/2026-07-01/aq/activation-r9700-calib32-qwen35-9b-s512`
+- families: `mlp_down`, `mlp_gate`, `mlp_up`
+- tensor数: `12`
+- candidates: `UE4M2 -> UE4M3 -> UE5M3 -> UE5M4`
+- dominance pair: `72`
+- 違反: `0`
+- UE5M3/UE4M3 weighted relative MSE ratio:
+  - min: `1.0`
+  - mean: `1.0`
+  - max: `1.0`
+
+UE5M3はUE4M3と同じmantissa bitでrangeだけが広いため、今回のMLP weighted sampleではUE4M3をfloorとして完全再現した。UE5M4は一部tensorでさらに改善した。
