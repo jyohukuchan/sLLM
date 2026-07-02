@@ -456,10 +456,14 @@ fn parse_usize(flag: &str, value: Option<String>) -> Result<usize, String> {
     Ok(parsed)
 }
 
-fn parse_usize_zero_allowed(flag: &str, value: Option<String>) -> Result<usize, String> {
-    let raw = value.ok_or_else(|| format!("{flag} requires a value"))?;
-    raw.parse::<usize>()
-        .map_err(|_| format!("{flag} must be a non-negative integer"))
+fn parse_scale_window(value: Option<String>) -> Result<usize, String> {
+    let raw = value.ok_or_else(|| "--scale-window requires a value".to_string())?;
+    match raw.as_str() {
+        "all" | "exhaustive" => Ok(usize::MAX),
+        _ => raw.parse::<usize>().map_err(|_| {
+            "--scale-window must be a non-negative integer, all, or exhaustive".to_string()
+        }),
+    }
 }
 
 fn parse_positive_f32(flag: &str, value: Option<String>) -> Result<f32, String> {
@@ -697,9 +701,7 @@ fn parse_options() -> Result<Options, String> {
                     parse_usize("--tensor-scale-reservoir-size", args.next())?
             }
             "--chunk-bytes" => options.chunk_bytes = parse_usize("--chunk-bytes", args.next())?,
-            "--scale-window" => {
-                options.scale_window = parse_usize_zero_allowed("--scale-window", args.next())?
-            }
+            "--scale-window" => options.scale_window = parse_scale_window(args.next())?,
             "--aq-policy" => {
                 options.aq_policy = args
                     .next()
@@ -788,6 +790,7 @@ fn print_help() {
     println!("  --merge-overwrite             replace existing --merge-output-dir");
     println!("  --tensor-scale-override <F>   skip tensor-scale estimation for prototype output");
     println!("  --tensor-scale-estimator <ID> exact or reservoir; default exact");
+    println!("  --scale-window <N|all>        local scale search window; all means exhaustive");
     println!(
         "  --tensor-scale-reservoir-size <N> sample cap for reservoir tensor-scale estimation"
     );
@@ -4077,7 +4080,7 @@ mod tests {
         default_threads, effective_bpp, empty_aq_quant_metrics, estimate_output_bytes,
         family_for_tensor, lower_median, max_codebook_abs, merge_prototype_dirs,
         nearest_codebook_index, new_aq_group_stats, new_numeric_stats, new_quant_dry_run_stats,
-        numeric_element_size, parse_tensor_scale_estimator, quant_assignment,
+        numeric_element_size, parse_scale_window, parse_tensor_scale_estimator, quant_assignment,
         read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
         run_direct_prototype_package, scale_format_dominates, scale_table_contains_all,
         scale_values, select_codebook, select_convert_tensors, ullm_aq_quantize_chunk_v1,
@@ -4105,6 +4108,21 @@ mod tests {
             TensorScaleEstimator::Reservoir
         );
         assert!(parse_tensor_scale_estimator(Some("median".to_string())).is_err());
+    }
+
+    #[test]
+    fn scale_window_parser_accepts_exhaustive_mode() {
+        assert_eq!(parse_scale_window(Some("0".to_string())).expect("zero"), 0);
+        assert_eq!(parse_scale_window(Some("4".to_string())).expect("four"), 4);
+        assert_eq!(
+            parse_scale_window(Some("all".to_string())).expect("all"),
+            usize::MAX
+        );
+        assert_eq!(
+            parse_scale_window(Some("exhaustive".to_string())).expect("exhaustive"),
+            usize::MAX
+        );
+        assert!(parse_scale_window(Some("wide".to_string())).is_err());
     }
 
     #[test]
@@ -4186,6 +4204,37 @@ mod tests {
                 scale_table_contains_all(upper, lower),
                 "{upper_name} scale table should contain all {lower_name} values"
             );
+        }
+    }
+
+    #[test]
+    fn exhaustive_scale_window_preserves_unsigned_em_quant_error_dominance() {
+        let payload = make_pseudo_random_16bit_payload("BF16", 0x5eed, 16 * 17);
+        let codebook = [
+            -1.0f32, -0.75, -0.5, -0.25, -0.125, -0.0625, -0.03125, -0.01, 0.01, 0.03125, 0.0625,
+            0.125, 0.25, 0.5, 0.75, 1.0,
+        ];
+        let mut previous_relative_mse = f64::INFINITY;
+        for format in ["ue4m2", "ue4m3", "ue5m3", "ue5m4"] {
+            let scales = scale_values(format).expect("scale values");
+            let mut stats = new_quant_dry_run_stats(codebook.len(), 1.0, usize::MAX);
+            update_quant_dry_run_stats(
+                "BF16",
+                &payload,
+                16,
+                &scales,
+                &codebook,
+                1.0,
+                usize::MAX,
+                &mut stats,
+            )
+            .expect("exhaustive dry run");
+            let relative_mse = stats.sse / stats.ref_sse;
+            assert!(
+                relative_mse <= previous_relative_mse + 1e-15,
+                "{format} relative MSE {relative_mse} exceeded previous {previous_relative_mse}"
+            );
+            previous_relative_mse = relative_mse;
         }
     }
 
@@ -5266,6 +5315,48 @@ mod tests {
         for (left, right) in rust_stats.index_counts.iter().zip(cxx_metrics.index_counts) {
             assert_eq!(*left, right as usize);
         }
+    }
+
+    #[test]
+    fn cxx_v1_kernel_accepts_exhaustive_scale_window() {
+        let payload = make_pseudo_random_16bit_payload("BF16", 0xace, 16 * 3);
+        let scales = [0.25f32, 0.5, 1.0, 2.0];
+        let codebook = [
+            -1.0f32, -0.75, -0.5, -0.25, -0.125, -0.0625, -0.03125, -0.01, 0.01, 0.03125, 0.0625,
+            0.125, 0.25, 0.5, 0.75, 1.0,
+        ];
+        let mut packed = vec![0u8; (16 * 3_usize).div_ceil(2)];
+        let mut scale_indices = vec![0u8; 3];
+        let mut metrics = empty_aq_quant_metrics();
+        let request = AqQuantizeChunkRequestV1 {
+            struct_size: std::mem::size_of::<AqQuantizeChunkRequestV1>(),
+            dtype: ULLM_AQ_DTYPE_BF16,
+            reserved0: 0,
+            input: payload.as_ptr(),
+            input_bytes: payload.len(),
+            group_size: 16,
+            scale_values: scales.as_ptr(),
+            scale_count: scales.len(),
+            codebook: codebook.as_ptr(),
+            codebook_count: codebook.len(),
+            tensor_scale: 1.0,
+            reserved1: 0,
+            scale_window: usize::MAX,
+            packed_indices: packed.as_mut_ptr(),
+            packed_indices_bytes: packed.len(),
+            scale_indices: scale_indices.as_mut_ptr(),
+            scale_indices_bytes: scale_indices.len(),
+        };
+        let status = unsafe {
+            ullm_aq_quantize_chunk_v1(
+                &request,
+                &mut metrics,
+                std::mem::size_of::<AqQuantMetrics>(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(metrics.elements, 48);
+        assert!(metrics.sse.is_finite());
     }
 
     fn next_lcg_u32(state: &mut u64) -> u32 {

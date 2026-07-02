@@ -126,3 +126,16 @@ Rust dry-run chain:
   - UE5M4: `0.005150528234`
 
 `UE5M4`はscale候補数が`495`で、現行prototype packageのu8 scale-index保存上限を超える。そのため、今回は書き出しではなくdry-run探索の検証対象として扱った。
+
+## scale-windowに関する注意
+
+`center +/- scale_window`だけを探索する場合、上位scale tableが下位scale tableを含んでいても、下位形式で選ばれたscaleが上位形式の探索窓外へ出る可能性がある。実際に合成データでは`scale_window=4`でUE5M3がUE4M3よりわずかに悪くなるblockが作れた。
+
+対応:
+
+- Rust CLIに`--scale-window all`/`--scale-window exhaustive`を追加した。
+- C++ kernelのwindow終端計算をoverflowしない形に修正した。
+- unit testで`scale_window=usize::MAX`時のUE4M2 -> UE4M3 -> UE5M3 -> UE5M4のrelative MSE単調非増加を固定した。
+- C++ kernelが`scale_window=usize::MAX`を受けても正常に完了することをunit testで確認した。
+
+結論として、理論的なUEaMb支配性を検証する場合は`--scale-window all`を使う。速度重視の通常変換で小さいwindowを使う場合、その結果は近似探索であり、数学的な支配性保証とは分けて扱う。

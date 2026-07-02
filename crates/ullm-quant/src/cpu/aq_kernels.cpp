@@ -190,7 +190,8 @@ int quantize_16bit_chunk_impl(
         const float scale_target = absmax / tensor_scale / max_code;
         const std::size_t center = nearest_scale_index(scale_target, scale_values, scale_count);
         const std::size_t start = center > scale_window ? center - scale_window : 0;
-        const std::size_t end = std::min(center + scale_window, scale_count - 1);
+        const std::size_t max_right = scale_count - 1 - center;
+        const std::size_t end = center + std::min(scale_window, max_right);
         std::size_t best_scale_index = center;
         double best_group_sse = std::numeric_limits<double>::infinity();
 
