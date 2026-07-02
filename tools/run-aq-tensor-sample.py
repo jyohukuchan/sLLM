@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,14 @@ from typing import Iterable
 
 import torch
 from safetensors import safe_open
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from aq_scale_formats import (  # noqa: E402
+    scale_complexity,
+    scale_format_dominates,
+    scale_subset_index_map,
+    scale_values as shared_scale_values,
+)
 
 
 SCHEMA_VERSION = "aq-experiment-result-v0.1"
@@ -35,6 +44,20 @@ class Candidate:
     family_scale: str
     codebook_mode: str
     codebook_granularity: str = "per_tensor_sample"
+
+
+@dataclass
+class EvaluationState:
+    candidate_id: str
+    scale_format: str
+    group_size: int
+    codebook_mode: str
+    tensor_scale: float
+    scales: torch.Tensor
+    codebook: torch.Tensor
+    local_indices: torch.Tensor
+    code_indices: torch.Tensor
+    metrics: dict[str, float | int | str | None]
 
 
 ROUND1_CANDIDATES = [
@@ -58,6 +81,30 @@ ROUND1_CANDIDATES = [
     Candidate("aq4_ue5m3_g16_ts_zlloyd15", "ue5m3", 16, "bf16", "none", "zero_lloyd15"),
     Candidate("aq4_e8m0_g16_zlloyd15", "e8m0", 16, "none", "none", "zero_lloyd15"),
 ]
+
+
+def candidate_from_id(candidate_id: str) -> Candidate | None:
+    match = re.fullmatch(
+        r"aq4_(?P<scale>e8m0|u?e\d+m\d+)_g(?P<group>\d+)_(?:(?P<tensor_scale>ts)_)?(?P<codebook>zf15|zlloyd15|flloyd16|free16|sym7)",
+        candidate_id,
+    )
+    if match is None:
+        return None
+    codebook_mode_by_token = {
+        "zf15": "zero_free15",
+        "zlloyd15": "zero_lloyd15",
+        "flloyd16": "free_lloyd16",
+        "free16": "free16",
+        "sym7": "symmetric7",
+    }
+    return Candidate(
+        candidate_id=candidate_id,
+        scale_format=match.group("scale"),
+        group_size=int(match.group("group")),
+        tensor_scale="bf16" if match.group("tensor_scale") else "none",
+        family_scale="none",
+        codebook_mode=codebook_mode_by_token[match.group("codebook")],
+    )
 
 
 def utc_now() -> str:
@@ -181,15 +228,7 @@ def decode_ue5m3() -> torch.Tensor:
 
 
 def scale_values(scale_format: str) -> torch.Tensor:
-    if scale_format == "e8m0":
-        return decode_e8m0()
-    if scale_format == "e5m2":
-        return decode_ieee_like_float(exp_bits=5, mant_bits=2, bias=15)
-    if scale_format == "e4m3":
-        return decode_ieee_like_float(exp_bits=4, mant_bits=3, bias=7)
-    if scale_format == "ue5m3":
-        return decode_ue5m3()
-    raise ValueError(f"unknown scale format: {scale_format}")
+    return shared_scale_values(scale_format)
 
 
 def sample_groups(
@@ -405,51 +444,26 @@ def nearest_scale_indices(target: torch.Tensor, scales: torch.Tensor) -> torch.T
     return torch.where(choose_prev, prev, idx)
 
 
-def evaluate_candidate(
+def objective_error(
+    square_error: torch.Tensor,
+    group_weights: torch.Tensor | None,
+    weighted_scale_search: bool,
+) -> torch.Tensor:
+    if weighted_scale_search and group_weights is not None:
+        return (square_error * group_weights.to(torch.float32).clamp_min(0)).sum(dim=1)
+    return square_error.sum(dim=1)
+
+
+def metrics_from_recon(
     groups: torch.Tensor,
+    recon: torch.Tensor,
+    best_error: torch.Tensor,
     candidate: Candidate,
-    scale_window: int,
-    codebook_override: torch.Tensor | None = None,
-    group_weights: torch.Tensor | None = None,
-    weighted_scale_search: bool = False,
-    weighted_codebook: bool = False,
+    group_weights: torch.Tensor | None,
+    scales: torch.Tensor,
+    best_scale: torch.Tensor,
 ) -> dict[str, float | int | str | None]:
-    scales = scale_values(candidate.scale_format)
-    if codebook_override is not None:
-        codebook = codebook_override
-    else:
-        codebook_weights = group_weights if weighted_codebook else None
-        codebook = codebook_from_groups(groups, candidate.codebook_mode, codebook_weights)
-    tensor_scale = choose_tensor_scale(groups, candidate, scales, codebook)
-    scaled_groups = groups / tensor_scale
-    max_code = codebook.abs().max().clamp_min(1e-12)
-    target_scale = scaled_groups.abs().amax(dim=1) / max_code
-    center = nearest_scale_indices(target_scale, scales)
-
-    best_error = torch.full((groups.shape[0],), torch.inf, dtype=torch.float32)
-    best_scale = torch.zeros((groups.shape[0],), dtype=torch.float32)
-    best_recon = torch.zeros_like(groups)
-
-    offsets = range(-scale_window, scale_window + 1)
-    for offset in offsets:
-        idx = (center + offset).clamp(0, scales.numel() - 1)
-        group_scale = scales.index_select(0, idx)
-        normalized = scaled_groups / group_scale[:, None]
-        distances = (normalized[:, :, None] - codebook[None, None, :]).abs()
-        nearest = distances.argmin(dim=2)
-        quantized = codebook.index_select(0, nearest.flatten()).view_as(groups)
-        recon = quantized * group_scale[:, None] * tensor_scale
-        square_error = (groups - recon).square()
-        if weighted_scale_search and group_weights is not None:
-            error = (square_error * group_weights.to(torch.float32).clamp_min(0)).sum(dim=1)
-        else:
-            error = square_error.sum(dim=1)
-        mask = error < best_error
-        best_error = torch.where(mask, error, best_error)
-        best_scale = torch.where(mask, group_scale, best_scale)
-        best_recon = torch.where(mask[:, None], recon, best_recon)
-
-    diff = groups - best_recon
+    diff = groups - recon
     mse = float(diff.square().mean())
     denom = float(groups.square().mean().clamp_min(1e-30))
     weighted_mse = None
@@ -462,12 +476,12 @@ def evaluate_candidate(
         weighted_denom = (groups.square() * weights).sum().clamp_min(1e-30)
         weighted_mse = float(weighted_sse / weights.sum().clamp_min(1e-30))
         weighted_relative_mse = float(weighted_sse / weighted_denom)
-    dot = float((groups * best_recon).sum())
-    norm = float(groups.square().sum().sqrt() * best_recon.square().sum().sqrt())
+    dot = float((groups * recon).sum())
+    norm = float(groups.square().sum().sqrt() * recon.square().sum().sqrt())
     zero_mask = groups == 0
     zero_preservation = None
     if bool(zero_mask.any()):
-        zero_preservation = float((best_recon[zero_mask] == 0).to(torch.float32).mean())
+        zero_preservation = float((recon[zero_mask] == 0).to(torch.float32).mean())
     max_scale = float(scales[-1])
     min_scale = float(scales[0])
     saturation = ((best_scale == max_scale) | (best_scale == min_scale)).to(torch.float32).mean()
@@ -487,8 +501,112 @@ def evaluate_candidate(
         "p95_group_error": float(torch.quantile(best_error, 0.95)),
         "sampled_groups": int(groups.shape[0]),
         "sampled_elements": int(groups.numel()),
-        "tensor_scale_value": tensor_scale,
     }
+
+
+def evaluate_candidate(
+    groups: torch.Tensor,
+    candidate: Candidate,
+    scale_window: int,
+    codebook_override: torch.Tensor | None = None,
+    group_weights: torch.Tensor | None = None,
+    weighted_scale_search: bool = False,
+    weighted_codebook: bool = False,
+    floor_states: list[EvaluationState] | None = None,
+) -> dict[str, float | int | str | None]:
+    scales = scale_values(candidate.scale_format)
+    if codebook_override is not None:
+        codebook = codebook_override
+    else:
+        codebook_weights = group_weights if weighted_codebook else None
+        codebook = codebook_from_groups(groups, candidate.codebook_mode, codebook_weights)
+    tensor_scale = choose_tensor_scale(groups, candidate, scales, codebook)
+    scaled_groups = groups / tensor_scale
+    max_code = codebook.abs().max().clamp_min(1e-12)
+    target_scale = scaled_groups.abs().amax(dim=1) / max_code
+    center = nearest_scale_indices(target_scale, scales)
+
+    best_error = torch.full((groups.shape[0],), torch.inf, dtype=torch.float32)
+    best_scale = torch.zeros((groups.shape[0],), dtype=torch.float32)
+    best_scale_idx = torch.zeros((groups.shape[0],), dtype=torch.long)
+    best_code_idx = torch.zeros((groups.shape[0], groups.shape[1]), dtype=torch.long)
+    best_recon = torch.zeros_like(groups)
+
+    offsets = range(-scale_window, scale_window + 1)
+    for offset in offsets:
+        idx = (center + offset).clamp(0, scales.numel() - 1)
+        group_scale = scales.index_select(0, idx)
+        normalized = scaled_groups / group_scale[:, None]
+        distances = (normalized[:, :, None] - codebook[None, None, :]).abs()
+        nearest = distances.argmin(dim=2)
+        quantized = codebook.index_select(0, nearest.flatten()).view_as(groups)
+        recon = quantized * group_scale[:, None] * tensor_scale
+        square_error = (groups - recon).square()
+        error = objective_error(square_error, group_weights, weighted_scale_search)
+        mask = error < best_error
+        best_error = torch.where(mask, error, best_error)
+        best_scale = torch.where(mask, group_scale, best_scale)
+        best_scale_idx = torch.where(mask, idx, best_scale_idx)
+        best_code_idx = torch.where(mask[:, None], nearest, best_code_idx)
+        best_recon = torch.where(mask[:, None], recon, best_recon)
+
+    metrics = metrics_from_recon(groups, best_recon, best_error, candidate, group_weights, scales, best_scale)
+    metrics["tensor_scale_value"] = tensor_scale
+    best_state = EvaluationState(
+        candidate_id=candidate.candidate_id,
+        scale_format=candidate.scale_format,
+        group_size=candidate.group_size,
+        codebook_mode=candidate.codebook_mode,
+        tensor_scale=tensor_scale,
+        scales=scales.detach().to(torch.float32).cpu().clone(),
+        codebook=codebook.detach().to(torch.float32).cpu().clone(),
+        local_indices=best_scale_idx.detach().cpu().clone(),
+        code_indices=best_code_idx.detach().cpu().clone(),
+        metrics={key: value for key, value in metrics.items() if not key.startswith("_")},
+    )
+    objective_key = "weighted_relative_mse" if weighted_scale_search and group_weights is not None else "relative_mse"
+    best_objective = float(metrics[objective_key] or metrics["relative_mse"])
+    lifted_floor_count = 0
+
+    for floor_state in floor_states or []:
+        if floor_state.group_size != candidate.group_size:
+            continue
+        if floor_state.codebook_mode != candidate.codebook_mode:
+            continue
+        if not scale_format_dominates(candidate.scale_format, floor_state.scale_format):
+            continue
+        mapping = scale_subset_index_map(floor_state.scales, scales)
+        lifted_scale_idx = mapping.index_select(0, floor_state.local_indices)
+        group_scale = scales.index_select(0, lifted_scale_idx)
+        quantized = floor_state.codebook.index_select(0, floor_state.code_indices.flatten()).view_as(groups)
+        recon = quantized * group_scale[:, None] * float(floor_state.tensor_scale)
+        square_error = (groups - recon).square()
+        error = objective_error(square_error, group_weights, weighted_scale_search)
+        floor_metrics = metrics_from_recon(groups, recon, error, candidate, group_weights, scales, group_scale)
+        floor_metrics["tensor_scale_value"] = float(floor_state.tensor_scale)
+        floor_metrics["lifted_from_candidate_id"] = floor_state.candidate_id
+        floor_metrics["lifted_from_scale_format"] = floor_state.scale_format
+        lifted_floor_count += 1
+        floor_objective = float(floor_metrics[objective_key] or floor_metrics["relative_mse"])
+        if floor_objective < best_objective - 1e-15:
+            best_objective = floor_objective
+            metrics = floor_metrics
+            best_state = EvaluationState(
+                candidate_id=candidate.candidate_id,
+                scale_format=candidate.scale_format,
+                group_size=candidate.group_size,
+                codebook_mode=candidate.codebook_mode,
+                tensor_scale=float(floor_state.tensor_scale),
+                scales=scales.detach().to(torch.float32).cpu().clone(),
+                codebook=floor_state.codebook.detach().to(torch.float32).cpu().clone(),
+                local_indices=lifted_scale_idx.detach().cpu().clone(),
+                code_indices=floor_state.code_indices.detach().cpu().clone(),
+                metrics={key: value for key, value in floor_metrics.items() if not key.startswith("_")},
+            )
+
+    metrics["lifted_floor_count"] = lifted_floor_count
+    metrics["_evaluation_state"] = best_state
+    return metrics
 
 
 def row_for_result(
@@ -562,6 +680,9 @@ def row_for_result(
             "torch_threads": args.torch_threads,
             "torch_interop_threads": args.torch_interop_threads,
             "activation_stats": str(args.activation_stats) if args.activation_stats else None,
+            "sampling_policy": "shared_by_block_size",
+            "candidate_order": "scale_dominance_first",
+            "monotonic_floor": "enabled_for_dominated_unsigned_em_scale_formats",
         },
         "metrics": metrics,
         "artifacts": {},
@@ -681,13 +802,33 @@ def main() -> int:
     args.model_name = args.model_name or args.model_dir.name
     activation_stats = load_activation_stats(args.activation_stats)
     tensor_pattern = re.compile(args.tensor_pattern)
-    candidates = ROUND1_CANDIDATES
+    candidates = list(ROUND1_CANDIDATES)
     if args.candidate:
-        selected = set(args.candidate)
-        candidates = [candidate for candidate in ROUND1_CANDIDATES if candidate.candidate_id in selected]
-        missing = selected - {candidate.candidate_id for candidate in candidates}
+        by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        candidates = []
+        missing = []
+        for candidate_id in args.candidate:
+            candidate = by_id.get(candidate_id) or candidate_from_id(candidate_id)
+            if candidate is None:
+                missing.append(candidate_id)
+            else:
+                candidates.append(candidate)
         if missing:
             raise SystemExit(f"unknown candidate IDs: {', '.join(sorted(missing))}")
+    candidates = [
+        candidate
+        for _, candidate in sorted(
+            enumerate(candidates),
+            key=lambda item: (
+                item[1].group_size,
+                item[1].codebook_mode,
+                item[1].tensor_scale,
+                item[1].family_scale,
+                scale_complexity(item[1].scale_format),
+                item[0],
+            ),
+        )
+    ]
 
     tensors = discover_tensors(args.model_dir, tensor_pattern)
     if args.family:
@@ -714,6 +855,8 @@ def main() -> int:
             tensor_dtype = str(tensor.dtype).replace("torch.", "")
             if tensor.ndim < 2 or not tensor.is_floating_point():
                 continue
+            sample_cache: dict[int, tuple[torch.Tensor, torch.Tensor | None]] = {}
+            evaluation_states: list[EvaluationState] = []
             activation_second_moment = None
             activation_stats_error: Exception | None = None
             if activation_stats:
@@ -725,12 +868,16 @@ def main() -> int:
                 try:
                     if activation_stats_error is not None:
                         raise activation_stats_error
-                    groups, columns = sample_groups_with_columns(
-                        tensor,
-                        candidate.group_size,
-                        args.max_elements_per_tensor,
-                        generator,
-                    )
+                    cached = sample_cache.get(candidate.group_size)
+                    if cached is None:
+                        cached = sample_groups_with_columns(
+                            tensor,
+                            candidate.group_size,
+                            args.max_elements_per_tensor,
+                            generator,
+                        )
+                        sample_cache[candidate.group_size] = cached
+                    groups, columns = cached
                     group_weights = None
                     if activation_second_moment is not None:
                         if columns is None:
@@ -745,7 +892,11 @@ def main() -> int:
                         group_weights=group_weights,
                         weighted_scale_search=args.weighted_scale_search,
                         weighted_codebook=args.weighted_codebook,
+                        floor_states=evaluation_states,
                     )
+                    evaluation_state = metrics.pop("_evaluation_state", None)
+                    if isinstance(evaluation_state, EvaluationState):
+                        evaluation_states.append(evaluation_state)
                     row = row_for_result(
                         args,
                         tensor_name,

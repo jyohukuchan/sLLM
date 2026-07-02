@@ -11,14 +11,37 @@ import math
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 import torch
 from safetensors import safe_open
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from aq_scale_formats import (  # noqa: E402
+    scale_complexity,
+    scale_format_dominates,
+    scale_subset_index_map,
+)
+
 
 SCHEMA_VERSION = "aq-codebook-opt-experiment-v0.1"
+
+
+@dataclass
+class OptimizedState:
+    candidate_id: str
+    scale_format: str
+    group_size: int
+    codebook_mode: str
+    global_scale_dtype: str
+    global_scale: float
+    scales: torch.Tensor
+    codebook: torch.Tensor
+    local_indices: torch.Tensor
+    code_indices: torch.Tensor
+    metrics: dict[str, Any]
 
 
 def utc_now() -> str:
@@ -65,6 +88,75 @@ def quantize_global_scale(value: float, dtype: str) -> float:
     if dtype == "fp16":
         return float(torch.tensor(value, dtype=torch.float16).to(torch.float32))
     return float(torch.tensor(value, dtype=torch.float32))
+
+
+def public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in metrics.items() if not key.startswith("_")}
+
+
+def clone_state(
+    *,
+    candidate_id: str,
+    scale_format: str,
+    group_size: int,
+    codebook_mode: str,
+    global_scale_dtype: str,
+    global_scale: float,
+    scales: torch.Tensor,
+    codebook: torch.Tensor,
+    local_indices: torch.Tensor,
+    code_indices: torch.Tensor,
+    metrics: dict[str, Any],
+) -> OptimizedState:
+    return OptimizedState(
+        candidate_id=candidate_id,
+        scale_format=scale_format,
+        group_size=group_size,
+        codebook_mode=codebook_mode,
+        global_scale_dtype=global_scale_dtype,
+        global_scale=float(global_scale),
+        scales=scales.detach().to(torch.float32).cpu().clone(),
+        codebook=codebook.detach().to(torch.float32).cpu().clone(),
+        local_indices=local_indices.detach().cpu().clone(),
+        code_indices=code_indices.detach().cpu().clone(),
+        metrics=dict(metrics),
+    )
+
+
+def lift_state_to_scales(
+    state: OptimizedState,
+    groups: torch.Tensor,
+    target_candidate_id: str,
+    target_scale_format: str,
+    target_scales: torch.Tensor,
+    assignment_chunk: int,
+) -> OptimizedState:
+    mapping = scale_subset_index_map(state.scales, target_scales)
+    lifted_local_indices = mapping.index_select(0, state.local_indices.to(torch.long))
+    metrics = metrics_from_assignments(
+        groups,
+        state.global_scale,
+        lifted_local_indices,
+        state.code_indices,
+        target_scales,
+        state.codebook,
+        assignment_chunk=assignment_chunk,
+    )
+    metrics["lifted_from_candidate_id"] = state.candidate_id
+    metrics["lifted_from_scale_format"] = state.scale_format
+    return clone_state(
+        candidate_id=target_candidate_id,
+        scale_format=target_scale_format,
+        group_size=state.group_size,
+        codebook_mode=state.codebook_mode,
+        global_scale_dtype=state.global_scale_dtype,
+        global_scale=state.global_scale,
+        scales=target_scales,
+        codebook=state.codebook,
+        local_indices=lifted_local_indices,
+        code_indices=state.code_indices,
+        metrics=metrics,
+    )
 
 
 def chunk_slices(count: int, chunk: int) -> Iterable[tuple[int, int]]:
@@ -323,6 +415,151 @@ def run_exhaustive_local_assignment(
         _ = errors.reshape(block.shape[0], -1).argmin(dim=1)
 
 
+def maybe_replace_best(
+    best: OptimizedState | None,
+    candidate_state: OptimizedState,
+    *,
+    tolerance: float = 1e-15,
+) -> OptimizedState:
+    if best is None:
+        return candidate_state
+    current = float(candidate_state.metrics["relative_mse"])
+    previous = float(best.metrics["relative_mse"])
+    if current < previous - tolerance:
+        return candidate_state
+    return best
+
+
+def optimize_alternating_from_seed(
+    groups: torch.Tensor,
+    candidate_id: str,
+    scale_format: str,
+    group_size: int,
+    codebook_mode: str,
+    global_scale_dtype: str,
+    scales: torch.Tensor,
+    initial_codebook: torch.Tensor,
+    initial_global_scale: float,
+    iterations: int,
+    scale_window: int,
+    fixed_zero: bool,
+    seed_label: str,
+    assignment_chunk: int,
+    initial_best: OptimizedState | None = None,
+) -> tuple[OptimizedState, list[dict[str, Any]]]:
+    import time
+
+    codebook = initial_codebook.to(torch.float32).clone()
+    global_scale = float(initial_global_scale)
+    best = initial_best
+    iter_timings: list[dict[str, Any]] = []
+
+    for iteration in range(iterations):
+        it_start = time.perf_counter()
+        local_indices, code_indices = assign_codebook_and_local_scale(
+            groups,
+            global_scale,
+            scales,
+            codebook,
+            scale_window,
+            assignment_chunk=assignment_chunk,
+        )
+        metrics = metrics_from_assignments(
+            groups,
+            global_scale,
+            local_indices,
+            code_indices,
+            scales,
+            codebook,
+            assignment_chunk=assignment_chunk,
+        )
+        metrics["seed_label"] = seed_label
+        metrics["iteration"] = iteration
+        best = maybe_replace_best(
+            best,
+            clone_state(
+                candidate_id=candidate_id,
+                scale_format=scale_format,
+                group_size=group_size,
+                codebook_mode=codebook_mode,
+                global_scale_dtype=global_scale_dtype,
+                global_scale=global_scale,
+                scales=scales,
+                codebook=codebook,
+                local_indices=local_indices,
+                code_indices=code_indices,
+                metrics=metrics,
+            ),
+        )
+        codebook = update_codebook_chunked(
+            groups,
+            global_scale,
+            codebook,
+            local_indices,
+            code_indices,
+            scales,
+            codebook_size=codebook.numel(),
+            assignment_chunk=assignment_chunk,
+            fixed_zero=fixed_zero,
+        )
+        next_scale = update_global_scale_chunked(
+            groups,
+            local_indices,
+            code_indices,
+            scales,
+            codebook,
+            fallback=global_scale,
+            assignment_chunk=assignment_chunk,
+        )
+        next_scale = quantize_global_scale(next_scale, global_scale_dtype)
+        if next_scale > 0 and math.isfinite(next_scale):
+            global_scale = float(next_scale)
+        iter_timings.append(
+            {
+                "seed_label": seed_label,
+                "iteration": iteration,
+                "elapsed_sec": time.perf_counter() - it_start,
+            }
+        )
+
+    local_indices, code_indices = assign_codebook_and_local_scale(
+        groups,
+        global_scale,
+        scales,
+        codebook,
+        scale_window,
+        assignment_chunk=assignment_chunk,
+    )
+    metrics = metrics_from_assignments(
+        groups,
+        global_scale,
+        local_indices,
+        code_indices,
+        scales,
+        codebook,
+        assignment_chunk=assignment_chunk,
+    )
+    metrics["seed_label"] = seed_label
+    metrics["iteration"] = iterations
+    best = maybe_replace_best(
+        best,
+        clone_state(
+            candidate_id=candidate_id,
+            scale_format=scale_format,
+            group_size=group_size,
+            codebook_mode=codebook_mode,
+            global_scale_dtype=global_scale_dtype,
+            global_scale=global_scale,
+            scales=scales,
+            codebook=codebook,
+            local_indices=local_indices,
+            code_indices=code_indices,
+            metrics=metrics,
+        ),
+    )
+    return best, iter_timings
+
+
 def run_candidate(
     sampler,
     args: argparse.Namespace,
@@ -330,6 +567,7 @@ def run_candidate(
     tensor: torch.Tensor,
     candidate,
     seed: int,
+    floor_states: list[OptimizedState] | None = None,
     assignment_chunk: int = 1024,
 ) -> dict[str, Any]:
     import time
@@ -355,6 +593,7 @@ def run_candidate(
 
     baseline_start = time.perf_counter()
     baseline = sampler.evaluate_candidate(groups, candidate, args.scale_window)
+    baseline.pop("_evaluation_state", None)
     timing["baseline_sec"] = time.perf_counter() - baseline_start
 
     alternating_start = time.perf_counter()
@@ -363,71 +602,69 @@ def run_candidate(
     global_scale = quantize_global_scale(global_scale, args.global_scale_dtype)
     fixed_zero = candidate.codebook_mode.startswith("zero_")
 
+    best_state: OptimizedState | None = None
+    lifted_floor_count = 0
+    seed_specs: list[tuple[str, torch.Tensor, float]] = [("own_init", codebook, global_scale)]
+    for floor_state in floor_states or []:
+        if floor_state.group_size != candidate.group_size:
+            continue
+        if floor_state.codebook_mode != candidate.codebook_mode:
+            continue
+        if not scale_format_dominates(candidate.scale_format, floor_state.scale_format):
+            continue
+        lifted_state = lift_state_to_scales(
+            floor_state,
+            groups,
+            candidate.candidate_id,
+            candidate.scale_format,
+            scales,
+            assignment_chunk,
+        )
+        lifted_state.metrics["seed_label"] = f"lifted_floor:{floor_state.candidate_id}"
+        best_state = maybe_replace_best(best_state, lifted_state)
+        seed_specs.append((f"floor_init:{floor_state.candidate_id}", lifted_state.codebook, lifted_state.global_scale))
+        lifted_floor_count += 1
+
     iter_timings = []
-    local_indices = torch.empty((groups.shape[0],), dtype=torch.long, device=groups.device)
-    code_indices = torch.empty((groups.shape[0],), dtype=torch.long, device=groups.device)
-    for iteration in range(args.iterations):
-        it_start = time.perf_counter()
-        local_indices, code_indices = assign_codebook_and_local_scale(
-            groups,
-            global_scale,
-            scales,
-            codebook,
-            args.scale_window,
-            assignment_chunk=assignment_chunk,
-        )
-        codebook = update_codebook_chunked(
-            groups,
-            global_scale,
-            codebook,
-            local_indices,
-            code_indices,
-            scales,
-            assignment_chunk=assignment_chunk,
+    for seed_label, seed_codebook, seed_global_scale in seed_specs:
+        best_state, timings = optimize_alternating_from_seed(
+            groups=groups,
+            candidate_id=candidate.candidate_id,
+            scale_format=candidate.scale_format,
+            group_size=candidate.group_size,
+            codebook_mode=candidate.codebook_mode,
+            global_scale_dtype=args.global_scale_dtype,
+            scales=scales,
+            initial_codebook=seed_codebook,
+            initial_global_scale=seed_global_scale,
+            iterations=args.iterations,
+            scale_window=args.scale_window,
             fixed_zero=fixed_zero,
-        )
-        next_scale = update_global_scale_chunked(
-            groups,
-            local_indices,
-            code_indices,
-            scales,
-            codebook,
-            fallback=global_scale,
+            seed_label=seed_label,
             assignment_chunk=assignment_chunk,
+            initial_best=best_state,
         )
-        next_scale = quantize_global_scale(next_scale, args.global_scale_dtype)
-        if next_scale > 0 and math.isfinite(next_scale):
-            global_scale = float(next_scale)
-        iter_timings.append({"iteration": iteration, "elapsed_sec": time.perf_counter() - it_start})
+        iter_timings.extend(timings)
 
     final_assign_start = time.perf_counter()
-    local_indices, code_indices = assign_codebook_and_local_scale(
-        groups,
-        global_scale,
-        scales,
-        codebook,
-        args.scale_window,
-        assignment_chunk=assignment_chunk,
-    )
     timing["final_assignment_sec"] = time.perf_counter() - final_assign_start
     timing["alternating_sec"] = time.perf_counter() - alternating_start
     timing["iterations"] = iter_timings
 
-    alt = metrics_from_assignments(
-        groups,
-        global_scale,
-        local_indices,
-        code_indices,
-        scales,
-        codebook,
-        assignment_chunk=assignment_chunk,
-    )
-    alt["codebook"] = [float(v) for v in codebook.to(torch.float32).tolist()]
+    if best_state is None:
+        raise RuntimeError("alternating optimizer produced no state")
+
+    global_scale = best_state.global_scale
+    codebook = best_state.codebook
+    alt = public_metrics(best_state.metrics)
+    alt["codebook"] = [float(v) for v in best_state.codebook.to(torch.float32).tolist()]
     alt["iterations"] = args.iterations
     alt["local_scale_format"] = candidate.scale_format
     alt["codebook_mode"] = candidate.codebook_mode
     alt["final_global_scale"] = float(global_scale)
     alt["effective_bpp"] = 4.0 + 8.0 / candidate.group_size
+    alt["lifted_floor_count"] = lifted_floor_count
+    alt["selected_seed_label"] = best_state.metrics.get("seed_label")
 
     exhaustive = None
     if groups.shape[0] <= 2048:
@@ -454,6 +691,7 @@ def run_candidate(
         "seed": run_seed,
         "sampled_blocks": int(groups.shape[0]),
         "sampled_elements": int(groups.numel()),
+        "_optimized_state": best_state,
     }
 
 
@@ -483,11 +721,33 @@ def main() -> int:
 
     candidates = list(sampler.ROUND1_CANDIDATES)
     if args.candidate:
-        selected = set(args.candidate)
-        candidates = [candidate for candidate in candidates if candidate.candidate_id in selected]
-        missing = selected - {candidate.candidate_id for candidate in candidates}
+        by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        candidates = []
+        missing = []
+        for candidate_id in args.candidate:
+            candidate = by_id.get(candidate_id)
+            if candidate is None and hasattr(sampler, "candidate_from_id"):
+                candidate = sampler.candidate_from_id(candidate_id)
+            if candidate is None:
+                missing.append(candidate_id)
+            else:
+                candidates.append(candidate)
         if missing:
             raise SystemExit(f"unknown candidate IDs: {', '.join(sorted(missing))}")
+    candidates = [
+        candidate
+        for _, candidate in sorted(
+            enumerate(candidates),
+            key=lambda item: (
+                item[1].group_size,
+                item[1].codebook_mode,
+                item[1].tensor_scale,
+                item[1].family_scale,
+                scale_complexity(item[1].scale_format),
+                item[0],
+            ),
+        )
+    ]
 
     tensor_pattern = re.compile(args.tensor_pattern)
     tensors = sampler.discover_tensors(args.model_dir, tensor_pattern)
@@ -510,6 +770,7 @@ def main() -> int:
         tensor_dtype = str(tensor.dtype).replace("torch.", "")
 
         candidate_results = []
+        optimized_states: list[OptimizedState] = []
         for idx, candidate in enumerate(candidates):
             try:
                 candidate_row = run_candidate(
@@ -518,9 +779,13 @@ def main() -> int:
                     tensor_name,
                     tensor,
                     candidate,
-                    seed=args.seed + idx * 9973,
+                    seed=args.seed + candidate.group_size * 1_000_003,
+                    floor_states=optimized_states,
                     assignment_chunk=assignment_chunk,
                 )
+                optimized_state = candidate_row.pop("_optimized_state", None)
+                if isinstance(optimized_state, OptimizedState):
+                    optimized_states.append(optimized_state)
             except Exception as exc:  # noqa: BLE001
                 candidate_row = {
                     "candidate_id": candidate.candidate_id,
@@ -556,6 +821,9 @@ def main() -> int:
             "torch_threads": args.torch_threads,
             "torch_interop_threads": args.torch_interop_threads,
             "seed": args.seed,
+            "sampling_policy": "shared_by_block_size",
+            "candidate_order": "scale_dominance_first",
+            "monotonic_floor": "enabled_for_dominated_unsigned_em_scale_formats",
         },
         "results": tensor_rows,
     }
