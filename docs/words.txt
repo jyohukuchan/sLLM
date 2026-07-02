@@ -8,6 +8,9 @@ raw-value:scale・codebookを一切考慮しない各パラメータの値
 codebook:LUTによる変換表
 codebook-index:codebookを参照するために保存されるindex値
 LUT:実装上の表参照機構。量子化仕様上の変換表はcodebookと書く
+payload:FP8やFP16など、演算器または後段処理へ渡すための実際の保存・受け渡し値
+fused dequant:GEMM/GEMVなどの演算kernel内でcodebook-indexやscaleを実効値へ変換し、そのまま演算へ使う処理
+materialize:変換後のpayloadや実効値を別bufferへ一度書き出す処理
 block:同じlocal-scaleを共有するraw-valueのまとまり
 block-size:1つのblockに含まれるraw-valueの数
 group:実装上のblockの旧称または変数名。文書ではblockを優先する
