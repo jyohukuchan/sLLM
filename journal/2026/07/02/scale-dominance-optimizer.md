@@ -89,4 +89,40 @@ first-pass sampler smoke:
 
 - 同じ仕組みをweighted scale/codebook実験にも適用する。
 - UE5M4、UE6M4など、mantissa bitを増やした形式でも36 tensor checkを追加する。
-- Rust/C++側の本変換器にも、候補比較時のmonotonic floorとUEaMb scale tableの入れ子性テストを移植する。
+- u8 scale-indexを超えるUEaMb形式を、仕様上どのbppとして扱うか整理する。
+
+## Rust本変換経路への追記
+
+Rust側の`ullm-quant`にもUEaMb scale table生成を移植した。
+
+- `aq4_ue4m3_g16_ts_flloyd16`のようなcandidate IDから`ue4m3`を解釈できるようにした。
+- `ue4m2`、`ue4m3`、`ue5m3`、`ue5m4`、`ue6m4`のscale table生成をunit testで固定した。
+- 入れ子性は`scale_table_contains_all`で検証する。
+- OOM防止のため、Rust parserはexp bit/mantissa bitともに8bit以下へ制限した。
+
+Rust prototype output smoke:
+
+- codebook artifact: `benchmarks/results/2026-07-02/aq/2026-07-02-aq-scale-dominance-rust-codebooks-qwen35-9b-g16.json`
+- tensor: `model.language_model.layers.3.self_attn.k_proj.weight`
+- family: `attn_k`
+- candidates: `UE4M3`, `UE5M3`
+- UE4M3 relative MSE: `0.005399506075`
+- UE5M3 relative MSE: `0.005399506075`
+- 違反: `0`
+
+このtensorではUE4M3でclampが発生していないため、rangeだけ広いUE5M3はUE4M3と同値になった。これは「UE5M3がUE4M3より悪くならない」ことの検証であり、strict改善が出ないこと自体は自然である。
+
+Rust dry-run chain:
+
+- 出力: `benchmarks/results/2026-07-02/aq/2026-07-02-ullm-quant-scale-dominance-chain-dry-run-attn-k.json`
+- tensor: `model.language_model.layers.3.self_attn.k_proj.weight`
+- family: `attn_k`
+- candidates: `UE4M2 -> UE4M3 -> UE5M3 -> UE5M4`
+- 違反: `0`
+- relative MSE:
+  - UE4M2: `0.006104047419`
+  - UE4M3: `0.005399506075`
+  - UE5M3: `0.005399506075`
+  - UE5M4: `0.005150528234`
+
+`UE5M4`はscale候補数が`495`で、現行prototype packageのu8 scale-index保存上限を超える。そのため、今回は書き出しではなくdry-run探索の検証対象として扱った。

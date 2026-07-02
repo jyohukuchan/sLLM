@@ -983,41 +983,52 @@ fn aq_group_size(format: &str) -> Result<usize, String> {
     }
 }
 
-fn aq_scale_format(format: &str) -> Result<&'static str, String> {
-    if format.contains("_e8m0_") {
-        Ok("e8m0")
-    } else if format.contains("_e5m2_") {
-        Ok("e5m2")
-    } else if format.contains("_e4m3_") {
-        Ok("e4m3")
-    } else if format.contains("_ue5m3_") {
-        Ok("ue5m3")
-    } else {
-        Err(format!(
-            "cannot infer aq scale format from format: {format}"
-        ))
+fn aq_scale_format(format: &str) -> Result<String, String> {
+    for token in format.split('_') {
+        if token == "e8m0" || parse_unsigned_em_scale_format(token).is_some() {
+            return Ok(token.to_string());
+        }
     }
+    Err(format!(
+        "cannot infer aq scale format from format: {format}"
+    ))
 }
 
 fn decode_e8m0() -> Vec<f32> {
     (0..255).map(|code| 2.0f32.powi(code - 127)).collect()
 }
 
-fn decode_ieee_like_float(exp_bits: u32, mant_bits: u32, bias: i32) -> Vec<f32> {
+fn parse_unsigned_em_scale_format(scale_format: &str) -> Option<(u32, u32)> {
+    let rest = scale_format
+        .strip_prefix("ue")
+        .or_else(|| scale_format.strip_prefix('e'))?;
+    let (exp, mant) = rest.split_once('m')?;
+    if exp.is_empty() || mant.is_empty() {
+        return None;
+    }
+    let exp_bits = exp.parse::<u32>().ok()?;
+    let mant_bits = mant.parse::<u32>().ok()?;
+    if exp_bits == 0 || exp_bits > 8 || mant_bits > 8 {
+        return None;
+    }
+    Some((exp_bits, mant_bits))
+}
+
+fn decode_unsigned_em(exp_bits: u32, mant_bits: u32) -> Vec<f32> {
     let mut values = Vec::new();
+    let bias = (1i32 << (exp_bits - 1)) - 1;
     let max_exp = (1u32 << exp_bits) - 1;
+    let mant_count = 1u32 << mant_bits;
     for exp in 0..max_exp {
-        for mant in 0..(1u32 << mant_bits) {
+        for mant in 0..mant_count {
             if exp == 0 {
                 if mant == 0 {
                     continue;
                 }
-                values.push((mant as f32 / (1u32 << mant_bits) as f32) * 2.0f32.powi(1 - bias));
+                values.push((mant as f32 / mant_count as f32) * 2.0f32.powi(1 - bias));
             } else {
-                values.push(
-                    (1.0 + mant as f32 / (1u32 << mant_bits) as f32)
-                        * 2.0f32.powi(exp as i32 - bias),
-                );
+                values
+                    .push((1.0 + mant as f32 / mant_count as f32) * 2.0f32.powi(exp as i32 - bias));
             }
         }
     }
@@ -1027,13 +1038,35 @@ fn decode_ieee_like_float(exp_bits: u32, mant_bits: u32, bias: i32) -> Vec<f32> 
 }
 
 fn scale_values(scale_format: &str) -> Result<Vec<f32>, String> {
-    match scale_format {
-        "e8m0" => Ok(decode_e8m0()),
-        "e5m2" => Ok(decode_ieee_like_float(5, 2, 15)),
-        "e4m3" => Ok(decode_ieee_like_float(4, 3, 7)),
-        "ue5m3" => Ok(decode_ieee_like_float(5, 3, 15)),
-        _ => Err(format!("unknown aq scale format: {scale_format}")),
+    if scale_format == "e8m0" {
+        return Ok(decode_e8m0());
     }
+    if let Some((exp_bits, mant_bits)) = parse_unsigned_em_scale_format(scale_format) {
+        return Ok(decode_unsigned_em(exp_bits, mant_bits));
+    }
+    Err(format!("unknown aq scale format: {scale_format}"))
+}
+
+#[cfg(test)]
+fn scale_format_dominates(upper: &str, lower: &str) -> bool {
+    let Some((upper_exp, upper_mant)) = parse_unsigned_em_scale_format(upper) else {
+        return false;
+    };
+    let Some((lower_exp, lower_mant)) = parse_unsigned_em_scale_format(lower) else {
+        return false;
+    };
+    upper_exp >= lower_exp
+        && upper_mant >= lower_mant
+        && (upper_exp > lower_exp || upper_mant > lower_mant)
+}
+
+#[cfg(test)]
+fn scale_table_contains_all(upper: &[f32], lower: &[f32]) -> bool {
+    lower.iter().all(|value| {
+        upper
+            .binary_search_by(|candidate| candidate.total_cmp(value))
+            .is_ok()
+    })
 }
 
 fn nearest_scale_index(target: f32, scales: &[f32]) -> (usize, bool, bool) {
@@ -1348,7 +1381,7 @@ fn update_numeric_stats(dtype: &str, bytes: &[u8], stats: &mut NumericStats) -> 
 
 fn new_aq_group_stats(format: &str, group_size: usize) -> Result<AqGroupStats, String> {
     let scale_format = aq_scale_format(format)?;
-    let scale_values = scale_values(scale_format)?;
+    let scale_values = scale_values(&scale_format)?;
     Ok(AqGroupStats {
         format: format.to_string(),
         scale_format: scale_format.to_string(),
@@ -4039,15 +4072,17 @@ mod tests {
     use super::{
         AqPolicyPlan, AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport,
         ModelPlan, Options, PrototypeManifest, TensorPlan, TensorScaleEstimator,
-        TensorScaleSampleCollector, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, bytes_to_lower_hex,
-        choose_best_scale_index_for_group, decode_numeric_value, default_threads, effective_bpp,
-        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, max_codebook_abs,
-        merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats, new_numeric_stats,
-        new_quant_dry_run_stats, numeric_element_size, parse_tensor_scale_estimator,
-        quant_assignment, read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
-        run_direct_prototype_package, select_codebook, select_convert_tensors,
-        ullm_aq_quantize_chunk_v1, update_aq_group_stats, update_numeric_stats,
-        update_quant_dry_run_stats, verify_passthrough_tensors,
+        TensorScaleSampleCollector, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, aq_scale_format,
+        bytes_to_lower_hex, choose_best_scale_index_for_group, decode_numeric_value,
+        default_threads, effective_bpp, empty_aq_quant_metrics, estimate_output_bytes,
+        family_for_tensor, lower_median, max_codebook_abs, merge_prototype_dirs,
+        nearest_codebook_index, new_aq_group_stats, new_numeric_stats, new_quant_dry_run_stats,
+        numeric_element_size, parse_tensor_scale_estimator, quant_assignment,
+        read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
+        run_direct_prototype_package, scale_format_dominates, scale_table_contains_all,
+        scale_values, select_codebook, select_convert_tensors, ullm_aq_quantize_chunk_v1,
+        update_aq_group_stats, update_numeric_stats, update_quant_dry_run_stats,
+        verify_passthrough_tensors,
     };
     use std::collections::BTreeSet;
     use std::fs;
@@ -4101,6 +4136,57 @@ mod tests {
             family_for_tensor("model.language_model.layers.0.mlp.down_proj.weight"),
             "mlp_down"
         );
+    }
+
+    #[test]
+    fn aq_scale_format_accepts_generic_unsigned_em_tokens() {
+        assert_eq!(
+            aq_scale_format("aq4_ue4m3_g16_ts_flloyd16").expect("ue4m3"),
+            "ue4m3"
+        );
+        assert_eq!(
+            aq_scale_format("aq4_ue5m4_g16_ts_flloyd16").expect("ue5m4"),
+            "ue5m4"
+        );
+        assert_eq!(
+            aq_scale_format("aq4_e4m3_g16_ts_flloyd16").expect("e4m3"),
+            "e4m3"
+        );
+    }
+
+    #[test]
+    fn unsigned_em_scale_tables_are_nested_by_exp_and_mantissa_bits() {
+        let ue4m2 = scale_values("ue4m2").expect("ue4m2");
+        let ue4m3 = scale_values("ue4m3").expect("ue4m3");
+        let e4m3 = scale_values("e4m3").expect("e4m3");
+        let ue5m3 = scale_values("ue5m3").expect("ue5m3");
+        let ue5m4 = scale_values("ue5m4").expect("ue5m4");
+        let ue6m4 = scale_values("ue6m4").expect("ue6m4");
+
+        assert_eq!(ue4m3, e4m3);
+        assert_eq!(ue4m2.len(), 59);
+        assert_eq!(ue4m3.len(), 119);
+        assert_eq!(ue5m3.len(), 247);
+        assert_eq!(ue5m4.len(), 495);
+        assert_eq!(ue6m4.len(), 1007);
+        assert_eq!(lower_median(&mut ue4m3.clone()), Some(1.5));
+        assert_eq!(lower_median(&mut ue5m3.clone()), Some(1.5));
+
+        for (upper_name, upper, lower_name, lower) in [
+            ("ue4m3", &ue4m3, "ue4m2", &ue4m2),
+            ("ue5m3", &ue5m3, "ue4m3", &ue4m3),
+            ("ue5m4", &ue5m4, "ue5m3", &ue5m3),
+            ("ue6m4", &ue6m4, "ue5m4", &ue5m4),
+        ] {
+            assert!(
+                scale_format_dominates(upper_name, lower_name),
+                "{upper_name} should dominate {lower_name}"
+            );
+            assert!(
+                scale_table_contains_all(upper, lower),
+                "{upper_name} scale table should contain all {lower_name} values"
+            );
+        }
     }
 
     fn test_options(policy: &str) -> Options {

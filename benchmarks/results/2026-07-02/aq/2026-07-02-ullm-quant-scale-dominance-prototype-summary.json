@@ -1,0 +1,94 @@
+{
+  "schema_version": "ullm-quant-scale-dominance-prototype-summary-v0.1",
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "codebook_json": "benchmarks/results/2026-07-02/aq/2026-07-02-aq-scale-dominance-rust-codebooks-qwen35-9b-g16.json",
+  "results": [
+    {
+      "family": "attn_k",
+      "tensor": "model.language_model.layers.3.self_attn.k_proj.weight",
+      "candidates": {
+        "aq4_ue4m3_g16_ts_flloyd16": {
+          "returncode": 0,
+          "log": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-02/aq/2026-07-02-ullm-quant-scale-dominance-ue4m3-attn_k.log",
+          "prototype_relative_mse": 0.005399506075,
+          "prototype_verify_relative_mse": 0.005399506075,
+          "prototype_max_abs_error": 0.012171157,
+          "prototype_verify_groups": 262144,
+          "prototype_verify_elements": 4194304,
+          "prototype_tensor_scale_source": "estimated"
+        },
+        "aq4_ue5m3_g16_ts_flloyd16": {
+          "returncode": 0,
+          "log": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-02/aq/2026-07-02-ullm-quant-scale-dominance-ue5m3-attn_k.log",
+          "prototype_relative_mse": 0.005399506075,
+          "prototype_verify_relative_mse": 0.005399506075,
+          "prototype_max_abs_error": 0.012171157,
+          "prototype_verify_groups": 262144,
+          "prototype_verify_elements": 4194304,
+          "prototype_tensor_scale_source": "estimated"
+        }
+      },
+      "ue5m3_over_ue4m3_ratio": 1.0,
+      "ue5m3_minus_ue4m3": 0.0,
+      "dominance_violation": false
+    },
+    {
+      "family": "attn_v",
+      "tensor": "model.language_model.layers.3.self_attn.v_proj.weight",
+      "candidates": {
+        "aq4_ue4m3_g16_ts_flloyd16": {
+          "returncode": 0,
+          "log": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-02/aq/2026-07-02-ullm-quant-scale-dominance-ue4m3-attn_v.log",
+          "prototype_relative_mse": 0.00565440107,
+          "prototype_verify_relative_mse": 0.00565440107,
+          "prototype_max_abs_error": 0.009277344,
+          "prototype_verify_groups": 262144,
+          "prototype_verify_elements": 4194304,
+          "prototype_tensor_scale_source": "estimated"
+        },
+        "aq4_ue5m3_g16_ts_flloyd16": {
+          "returncode": 0,
+          "log": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-02/aq/2026-07-02-ullm-quant-scale-dominance-ue5m3-attn_v.log",
+          "prototype_relative_mse": 0.00565440107,
+          "prototype_verify_relative_mse": 0.00565440107,
+          "prototype_max_abs_error": 0.009277344,
+          "prototype_verify_groups": 262144,
+          "prototype_verify_elements": 4194304,
+          "prototype_tensor_scale_source": "estimated"
+        }
+      },
+      "ue5m3_over_ue4m3_ratio": 1.0,
+      "ue5m3_minus_ue4m3": 0.0,
+      "dominance_violation": false
+    },
+    {
+      "family": "attn_o",
+      "tensor": "model.language_model.layers.3.self_attn.o_proj.weight",
+      "candidates": {
+        "aq4_ue4m3_g16_ts_flloyd16": {
+          "returncode": 0,
+          "log": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-02/aq/2026-07-02-ullm-quant-scale-dominance-ue4m3-attn_o.log",
+          "prototype_relative_mse": 0.005332500885,
+          "prototype_verify_relative_mse": 0.005332500885,
+          "prototype_max_abs_error": 0.068752646,
+          "prototype_verify_groups": 1048576,
+          "prototype_verify_elements": 16777216,
+          "prototype_tensor_scale_source": "estimated"
+        },
+        "aq4_ue5m3_g16_ts_flloyd16": {
+          "returncode": 0,
+          "log": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-02/aq/2026-07-02-ullm-quant-scale-dominance-ue5m3-attn_o.log",
+          "prototype_relative_mse": 0.005332500885,
+          "prototype_verify_relative_mse": 0.005332500885,
+          "prototype_max_abs_error": 0.068752646,
+          "prototype_verify_groups": 1048576,
+          "prototype_verify_elements": 16777216,
+          "prototype_tensor_scale_source": "estimated"
+        }
+      },
+      "ue5m3_over_ue4m3_ratio": 1.0,
+      "ue5m3_minus_ue4m3": 0.0,
+      "dominance_violation": false
+    }
+  ]
+}
