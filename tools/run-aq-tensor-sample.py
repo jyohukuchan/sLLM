@@ -192,41 +192,6 @@ def family_for_tensor(name: str) -> str:
     return "other"
 
 
-def decode_e8m0() -> torch.Tensor:
-    codes = torch.arange(0, 255, dtype=torch.float32)
-    return torch.pow(torch.tensor(2.0, dtype=torch.float32), codes - 127.0)
-
-
-def decode_ieee_like_float(exp_bits: int, mant_bits: int, bias: int) -> torch.Tensor:
-    values = []
-    max_exp = (1 << exp_bits) - 1
-    for exp in range(max_exp):
-        for mant in range(1 << mant_bits):
-            if exp == 0:
-                if mant == 0:
-                    continue
-                value = (mant / float(1 << mant_bits)) * (2.0 ** (1 - bias))
-            else:
-                value = (1.0 + mant / float(1 << mant_bits)) * (2.0 ** (exp - bias))
-            values.append(value)
-    return torch.tensor(sorted(set(values)), dtype=torch.float32)
-
-
-def decode_ue5m3() -> torch.Tensor:
-    values = []
-    bias = 15
-    for exp in range(32):
-        for mant in range(8):
-            if exp == 0:
-                if mant == 0:
-                    continue
-                value = (mant / 8.0) * (2.0 ** (1 - bias))
-            else:
-                value = (1.0 + mant / 8.0) * (2.0 ** (exp - bias))
-            values.append(value)
-    return torch.tensor(sorted(set(values)), dtype=torch.float32)
-
-
 def scale_values(scale_format: str) -> torch.Tensor:
     return shared_scale_values(scale_format)
 
