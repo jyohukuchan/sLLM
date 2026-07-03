@@ -86,6 +86,14 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_rmsnorm_f32(
+        input_buffer: *const RawRuntimeBuffer,
+        weight_buffer: *const RawRuntimeBuffer,
+        elements: usize,
+        epsilon: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_smoke_add_f32(
         lhs: *const f32,
         rhs: *const f32,
@@ -357,6 +365,39 @@ pub fn matvec_f32(
     })
 }
 
+pub fn rmsnorm_f32(
+    input_buffer: &RuntimeBuffer,
+    weight_buffer: &RuntimeBuffer,
+    elements: usize,
+    epsilon: f32,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if elements == 0 {
+        return Err("f32 RMSNorm elements must be greater than zero".to_string());
+    }
+    if !epsilon.is_finite() || epsilon <= 0.0 {
+        return Err("f32 RMSNorm epsilon must be finite and greater than zero".to_string());
+    }
+    let required_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 RMSNorm byte size overflows".to_string())?;
+    check_copy_range(0, required_bytes, input_buffer.size()?)?;
+    check_copy_range(0, required_bytes, weight_buffer.size()?)?;
+    check_copy_range(0, required_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_rmsnorm_f32(
+            input_buffer.raw.as_ptr(),
+            weight_buffer.raw.as_ptr(),
+            elements,
+            epsilon,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 fn status_to_result(status: c_int) -> Result<(), String> {
     match status {
         STATUS_OK => Ok(()),
@@ -520,6 +561,68 @@ mod tests {
         let mut output = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
 
         let err = matvec_f32(&matrix, &input, 2, 3, &mut output, None).unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
+    fn cpu_rmsnorm_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let input_values = [1.0_f32, 2.0, -3.0, 4.0];
+        let weight_values = [0.5_f32, 1.0, 1.5, -2.0];
+        let epsilon = 1e-5_f32;
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut weight = context
+            .alloc_buffer(weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        weight
+            .copy_from_host(0, &f32s_to_le_bytes(&weight_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        rmsnorm_f32(
+            &input,
+            &weight,
+            input_values.len(),
+            epsilon,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; input_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_rmsnorm(&input_values, &weight_values, epsilon);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_rmsnorm_f32_rejects_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let input = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let weight = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let err = rmsnorm_f32(&input, &weight, 4, 1e-5, &mut output, None).unwrap_err();
         assert!(err.contains("out of bounds") || err.contains("output"));
     }
 
@@ -694,6 +797,54 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_rmsnorm_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let input_values = [1.0_f32, 2.0, -3.0, 4.0];
+        let weight_values = [0.5_f32, 1.0, 1.5, -2.0];
+        let epsilon = 1e-5_f32;
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut weight = context
+            .alloc_buffer(weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        weight
+            .copy_from_host(0, &f32s_to_le_bytes(&weight_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        rmsnorm_f32(
+            &input,
+            &weight,
+            input_values.len(),
+            epsilon,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; input_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_rmsnorm(&input_values, &weight_values, epsilon);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
     fn first_hip_context_allocates_runtime_buffer_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -748,5 +899,25 @@ mod tests {
             .chunks_exact(std::mem::size_of::<f32>())
             .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
             .collect()
+    }
+
+    fn expected_rmsnorm(input: &[f32], weight: &[f32], epsilon: f32) -> Vec<f32> {
+        let sum_squares = input.iter().map(|value| value * value).sum::<f32>();
+        let inv_rms = 1.0 / (sum_squares / input.len() as f32 + epsilon).sqrt();
+        input
+            .iter()
+            .zip(weight)
+            .map(|(input, weight)| input * inv_rms * weight)
+            .collect()
+    }
+
+    fn assert_f32s_close(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "index {index}: actual={actual} expected={expected}"
+            );
+        }
     }
 }
