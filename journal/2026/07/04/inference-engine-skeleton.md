@@ -82,6 +82,8 @@
 - `ullm-engine package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]` を追加した。実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split` と `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` をrecurrent境界へ接続する。
 - `docs/words.txt` に `package linear attention recurrent smoke` を追加した。
 - `NOTICE` と `THIRD_PARTY_NOTICES.md` を更新し、llama.cpp、ROCm/ATOM、AITER、vLLM、SGLang、TensorRT-LLMの参照記録と、コード再利用時に著作権表示・LICENSE/NOTICEを保持する方針を明記した。
+- `ullm-engine package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]` を追加した。実packageの `linear_attn.in_proj_z.weight`、`linear_attn.norm.weight`、`linear_attn.out_proj.weight` を使い、post-recurrentの `RMSNorm(core) * silu(z) -> out_proj` 境界を検証する。
+- `docs/words.txt` に `package linear attention post smoke` を追加した。
 
 ## 実測・検証
 
@@ -336,6 +338,15 @@
   - R9700 HIP deviceでAQ4 materialize、matvec、depthwise conv1d、gate/beta、recurrent kernelを必須指定した状態で同じpackage smokeが成功した。
   - conv max diff `0.000000142`、gate/beta max diff `0.000000238`、recurrent max diff `0.000000030`。
   - `linear_attn.norm`、`in_proj_z`、`out_proj` はrecurrent後の境界なので、このsmokeにはまだ含めていない。
+- package linear attention post smoke追加後の `cargo build -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo fmt --all --check`、`cargo test --workspace -- --test-threads=1`、`git diff --check` は成功した。
+- `target/debug/ullm-engine package-linear-attn-post-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 4`
+  - CPU fallbackでlayer0の実package `in_proj_z -> linear_attn.norm -> out_proj` をpost-recurrent境界として接続できた。
+  - core入力は決定的f32列で、実recurrent outputとはまだ接続していない。`linear_attn.norm` はheadごとの128要素RMSNorm、gateは `silu(z)` として適用した。
+  - z preview `[-0.8506662,-0.4211669,1.2555698,0.1271277,0.7821553,-0.4219488,0.0438144,0.1496184]`、activated preview `[-0.0000000,-0.0029635,0.0339896,0.0033484,0.0365583,-0.0146778,0.0023123,0.0097779]`、output preview `[-0.3459239,-0.2148373,0.3252895,-0.1309181,0.2301259,1.0020589,-0.4513367,0.2318908]`。
+  - norm max diff `0.000000000`、activation max diff `0.000000000`、output max diff `0.000000000`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 target/debug/ullm-engine package-linear-attn-post-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 4`
+  - R9700 HIP deviceでAQ4 materialize、matvec、RMSNorm、SiLU-mul kernelを必須指定した状態で同じpackage smokeが成功した。
+  - norm max diff `0.000000477`、activation max diff `0.000000477`、output max diff `0.000004053`。
 
 ## 作成したgit checkpoints
 
@@ -380,9 +391,10 @@
 - `8790a58 Journal linear attention gate beta smoke`
 - `1a2ecd2 Add linear attention recurrent smoke`
 - `f240634 Add package linear attention recurrent smoke`
+- `73e518b Add package linear attention post smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smokeも通った。次はpost-recurrentの `norm/z/out_proj` 接続、または通常attention本体の計算境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smokeも通った。次はlinear attentionの前段recurrent smokeとpost smokeを1つのworkflowに統合するか、通常attention本体の計算境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
