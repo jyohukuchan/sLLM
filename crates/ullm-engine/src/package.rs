@@ -226,6 +226,30 @@ pub fn select_tensor_payload_bundle(
         .tensors
         .get(tensor_index)
         .ok_or_else(|| format!("tensor index {tensor_index} is out of range"))?;
+    tensor_payload_bundle_from_manifest(package_dir, tensor_index, tensor)
+}
+
+pub fn list_tensor_payload_bundles(
+    path: impl AsRef<Path>,
+) -> Result<Vec<TensorPayloadBundle>, String> {
+    let package_dir = path.as_ref();
+    let manifest = read_manifest(package_dir)?;
+    let mut bundles = Vec::with_capacity(manifest.tensors.len());
+    for (tensor_index, tensor) in manifest.tensors.iter().enumerate() {
+        bundles.push(tensor_payload_bundle_from_manifest(
+            package_dir,
+            tensor_index,
+            tensor,
+        )?);
+    }
+    Ok(bundles)
+}
+
+fn tensor_payload_bundle_from_manifest(
+    package_dir: &Path,
+    tensor_index: usize,
+    tensor: &QuantizedTensor,
+) -> Result<TensorPayloadBundle, String> {
     let tensor_name = tensor
         .name
         .clone()
@@ -743,6 +767,65 @@ mod tests {
             select_tensor_payload_bundle(&root, &TensorSelector::Name("layer.0".to_string()))
                 .unwrap_err();
         assert!(ambiguous.contains("matched 2 tensors"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lists_tensor_payload_bundles_in_manifest_order() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-tensor-bundle-list-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("tensors/a.idx4"), [1_u8]).unwrap();
+        fs::write(root.join("tensors/a.scale_u8"), [2_u8]).unwrap();
+        fs::write(root.join("codebooks/a.f32"), [3_u8]).unwrap();
+        fs::write(root.join("tensors/b.idx4"), [4_u8, 5]).unwrap();
+        fs::write(root.join("tensors/b.scale_u8"), [6_u8]).unwrap();
+        fs::write(root.join("codebooks/b.f32"), [7_u8]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "tensor-a",
+                "family": "family-a",
+                "candidate_id": "candidate-a",
+                "elements": 2,
+                "groups": 1,
+                "index_file": "tensors/a.idx4",
+                "scale_file": "tensors/a.scale_u8",
+                "codebook_file": "codebooks/a.f32"
+              }, {
+                "name": "tensor-b",
+                "family": "family-b",
+                "candidate_id": "candidate-b",
+                "elements": 4,
+                "groups": 1,
+                "index_file": "tensors/b.idx4",
+                "scale_file": "tensors/b.scale_u8",
+                "codebook_file": "codebooks/b.f32"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let bundles = list_tensor_payload_bundles(&root).unwrap();
+        assert_eq!(bundles.len(), 2);
+        assert_eq!(bundles[0].tensor_index, 0);
+        assert_eq!(bundles[0].tensor_name, "tensor-a");
+        assert_eq!(bundles[0].family.as_deref(), Some("family-a"));
+        assert_eq!(bundles[0].candidate_id.as_deref(), Some("candidate-a"));
+        assert_eq!(bundles[0].index_file.relative_path, "tensors/a.idx4");
+        assert_eq!(bundles[1].tensor_index, 1);
+        assert_eq!(bundles[1].tensor_name, "tensor-b");
+        assert_eq!(bundles[1].family.as_deref(), Some("family-b"));
+        assert_eq!(bundles[1].candidate_id.as_deref(), Some("candidate-b"));
+        assert_eq!(bundles[1].index_file.relative_path, "tensors/b.idx4");
 
         fs::remove_dir_all(root).unwrap();
     }
