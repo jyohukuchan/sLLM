@@ -52,6 +52,12 @@ fn main() -> ExitCode {
             env::args().nth(4),
             env::args().nth(5),
         ),
+        Some("package-mlp-smoke") => package_mlp_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+        ),
         Some("package-materialize-matvec-smoke") => package_materialize_matvec_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -1864,9 +1870,342 @@ fn package_materialize_matvec_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_mlp_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-mlp-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut registry = WeightRegistry::new();
+    let (gate_rows, gate_cols, gate_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &gate_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize gate tensor: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (up_rows, up_cols, up_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &up_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize up tensor: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (down_rows, down_cols, down_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &down_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize down tensor: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if gate_rows != up_rows || gate_cols != up_cols {
+        eprintln!("gate and up tensor shapes must match");
+        return ExitCode::from(1);
+    }
+    if down_cols != up_rows {
+        eprintln!(
+            "down tensor shape mismatch: expected cols={} but got {}",
+            up_rows, down_cols
+        );
+        return ExitCode::from(1);
+    }
+    if down_rows != up_cols {
+        eprintln!(
+            "down tensor shape mismatch: expected rows={} but got {}",
+            up_cols, down_rows
+        );
+        return ExitCode::from(1);
+    }
+
+    let intermediate = gate_rows;
+    let hidden = gate_cols;
+
+    let mut input = Vec::with_capacity(hidden);
+    for i in 0..hidden {
+        input.push((i % 23) as f32 / 16.0 - 11.0 / 16.0);
+    }
+    let input_bytes = encode_f32_to_bytes(&input);
+    let mut input_buffer = match context.alloc_buffer(input_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy input vector into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let intermediate_bytes = match intermediate.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("intermediate byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut gate_buffer = match context.alloc_buffer(intermediate_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate gate output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &gate_matrix,
+        &input_buffer,
+        gate_rows,
+        gate_cols,
+        &mut gate_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run gate matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gate matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut up_buffer = match context.alloc_buffer(intermediate_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate up output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &up_matrix,
+        &input_buffer,
+        up_rows,
+        up_cols,
+        &mut up_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run up matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after up matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut activated_buffer = match context.alloc_buffer(intermediate_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate activated output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::silu_mul_f32(
+        &gate_buffer,
+        &up_buffer,
+        intermediate,
+        &mut activated_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run silu_mul: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after silu_mul: {err}");
+        return ExitCode::from(1);
+    }
+
+    let hidden_bytes = match hidden.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("output byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut output_buffer = match context.alloc_buffer(hidden_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &down_matrix,
+        &activated_buffer,
+        down_rows,
+        down_cols,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run down matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let preview_count = hidden.min(8);
+    let mut output_preview_bytes = vec![0_u8; preview_count * std::mem::size_of::<f32>()];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_preview_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy output preview to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after preview copy: {err}");
+        return ExitCode::from(1);
+    }
+    let preview = decode_f32_le_values(&output_preview_bytes);
+
+    println!(
+        "package-mlp-smoke package={} layer={} gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} intermediate={} backend={} device_index={} name=\"{}\" preview={} verified=true",
+        path,
+        layer_index,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        hidden,
+        intermediate,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(&preview)
+    );
+    ExitCode::SUCCESS
+}
+
+fn materialize_selected_aq4_matrix(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    registry: &mut WeightRegistry,
+    path: &str,
+    tensor_name: &str,
+    chunk_bytes: usize,
+) -> Result<(usize, usize, ullm_runtime_sys::RuntimeBuffer), String> {
+    let selector = TensorSelector::Name(tensor_name.to_string());
+    let bundle = ullm_engine::package::select_tensor_payload_bundle(path, &selector)
+        .map_err(|err| format!("failed to select tensor payloads for {tensor_name}: {err}"))?;
+    let registry_index = registry
+        .load_and_insert(
+            context,
+            stream,
+            &bundle,
+            LoadOptions {
+                chunk_bytes,
+                verify: true,
+            },
+        )
+        .map_err(|err| format!("failed to register tensor payloads for {tensor_name}: {err}"))?;
+    let loaded = registry
+        .get(registry_index)
+        .ok_or_else(|| "registered tensor disappeared from weight registry".to_string())?;
+    let materialize = materialize_config(loaded).map_err(|err| {
+        format!(
+            "failed to prepare materialize config for {tensor_name} (registry index {registry_index}): {err}"
+        )
+    })?;
+    let (rows, cols) = matrix_shape_rows_cols(&loaded.shape, materialize.elements)
+        .map_err(|err| format!("invalid shape for {tensor_name}: {err}"))?;
+    let mut output = context
+        .alloc_buffer(materialize.output_bytes)
+        .map_err(|err| {
+            format!("failed to allocate materialized output for {tensor_name}: {err}")
+        })?;
+    if let Err(err) = ullm_runtime_sys::aq4_dequant_f32(
+        loaded.index.buffer.as_ref(),
+        loaded.scale.buffer.as_ref(),
+        loaded.codebook.buffer.as_ref(),
+        &materialize.scale_values,
+        materialize.group_size,
+        materialize.tensor_scale,
+        materialize.elements,
+        &mut output,
+        Some(stream),
+    ) {
+        return Err(format!(
+            "failed to materialize AQ4 tensor {tensor_name}: {err}"
+        ));
+    }
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize runtime stream after materializing {tensor_name}: {err}")
+    })?;
+    Ok((rows, cols, output))
+}
+
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
