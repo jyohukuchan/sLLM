@@ -3,6 +3,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+pub const DEFAULT_KV_BLOCK_SIZE_TOKENS: u32 = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(pub u64);
 
@@ -67,8 +69,19 @@ pub struct BlockAllocation {
     pub blocks: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvBlockAllocatorStats {
+    pub block_size_tokens: u32,
+    pub total_blocks: u32,
+    pub free_blocks: usize,
+    pub allocated_blocks: usize,
+    pub free_runs: usize,
+    pub largest_free_run: usize,
+}
+
 #[derive(Debug)]
 pub struct KvBlockAllocator {
+    block_size_tokens: u32,
     total_blocks: u32,
     free: VecDeque<u32>,
     allocations: BTreeMap<RequestId, Vec<u32>>,
@@ -76,7 +89,13 @@ pub struct KvBlockAllocator {
 
 impl KvBlockAllocator {
     pub fn new(total_blocks: u32) -> Self {
+        Self::with_block_size(total_blocks, DEFAULT_KV_BLOCK_SIZE_TOKENS)
+    }
+
+    pub fn with_block_size(total_blocks: u32, block_size_tokens: u32) -> Self {
+        assert!(block_size_tokens > 0, "block size must be nonzero");
         Self {
+            block_size_tokens,
             total_blocks,
             free: (0..total_blocks).collect(),
             allocations: BTreeMap::new(),
@@ -85,6 +104,10 @@ impl KvBlockAllocator {
 
     pub fn total_blocks(&self) -> u32 {
         self.total_blocks
+    }
+
+    pub fn block_size_tokens(&self) -> u32 {
+        self.block_size_tokens
     }
 
     pub fn free_blocks(&self) -> usize {
@@ -135,6 +158,40 @@ impl KvBlockAllocator {
     pub fn allocation(&self, request_id: RequestId) -> Option<&[u32]> {
         self.allocations.get(&request_id).map(Vec::as_slice)
     }
+
+    pub fn stats(&self) -> KvBlockAllocatorStats {
+        let (free_runs, largest_free_run) = free_run_stats(&self.free);
+        KvBlockAllocatorStats {
+            block_size_tokens: self.block_size_tokens,
+            total_blocks: self.total_blocks,
+            free_blocks: self.free_blocks(),
+            allocated_blocks: self.allocated_blocks(),
+            free_runs,
+            largest_free_run,
+        }
+    }
+}
+
+fn free_run_stats(free: &VecDeque<u32>) -> (usize, usize) {
+    if free.is_empty() {
+        return (0, 0);
+    }
+    let mut sorted = free.iter().copied().collect::<Vec<_>>();
+    sorted.sort_unstable();
+    let mut runs = 1_usize;
+    let mut current = 1_usize;
+    let mut largest = 1_usize;
+    for pair in sorted.windows(2) {
+        if pair[1] == pair[0] + 1 {
+            current += 1;
+        } else {
+            largest = largest.max(current);
+            runs += 1;
+            current = 1;
+        }
+    }
+    largest = largest.max(current);
+    (runs, largest)
 }
 
 #[cfg(test)]
@@ -178,6 +235,7 @@ mod tests {
     #[test]
     fn kv_allocator_allocates_and_reuses_blocks() {
         let mut allocator = KvBlockAllocator::new(4);
+        assert_eq!(allocator.block_size_tokens(), DEFAULT_KV_BLOCK_SIZE_TOKENS);
         let a = allocator.allocate(RequestId(10), 3).unwrap();
         assert_eq!(a.blocks, vec![0, 1, 2]);
         assert_eq!(allocator.free_blocks(), 1);
@@ -190,5 +248,22 @@ mod tests {
         let b = allocator.allocate(RequestId(11), 2).unwrap();
         assert_eq!(b.blocks, vec![3, 0]);
         assert_eq!(allocator.allocation(RequestId(11)), Some([3, 0].as_slice()));
+    }
+
+    #[test]
+    fn kv_allocator_reports_fragmentation_stats() {
+        let mut allocator = KvBlockAllocator::with_block_size(8, 16);
+        let _a = allocator.allocate(RequestId(1), 2).unwrap();
+        let _b = allocator.allocate(RequestId(2), 2).unwrap();
+        let _c = allocator.allocate(RequestId(3), 2).unwrap();
+        assert_eq!(allocator.free_request(RequestId(2)), 2);
+
+        let stats = allocator.stats();
+        assert_eq!(stats.block_size_tokens, 16);
+        assert_eq!(stats.total_blocks, 8);
+        assert_eq!(stats.free_blocks, 4);
+        assert_eq!(stats.allocated_blocks, 4);
+        assert_eq!(stats.free_runs, 2);
+        assert_eq!(stats.largest_free_run, 2);
     }
 }
