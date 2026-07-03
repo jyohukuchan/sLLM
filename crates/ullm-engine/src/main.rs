@@ -22,6 +22,9 @@ fn main() -> ExitCode {
         Some("runtime-copy-smoke") => runtime_copy_smoke(env::args().nth(2)),
         Some("runtime-rmsnorm-smoke") => runtime_rmsnorm_smoke(env::args().nth(2)),
         Some("runtime-silu-mul-smoke") => runtime_silu_mul_smoke(env::args().nth(2)),
+        Some("runtime-depthwise-conv1d-smoke") => {
+            runtime_depthwise_conv1d_smoke(env::args().nth(2))
+        }
         Some("runtime-mlp-smoke") => runtime_mlp_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
         Some("package-load-smoke") => package_load_smoke(
@@ -92,6 +95,13 @@ fn main() -> ExitCode {
             env::args().nth(3),
             env::args().nth(4),
             env::args().nth(5),
+        ),
+        Some("package-linear-attn-conv1d-smoke") => package_linear_attn_conv1d_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
         ),
         Some("package-linear-attn-aux-smoke") => package_linear_attn_aux_smoke(
             env::args().nth(2),
@@ -598,6 +608,141 @@ fn runtime_silu_mul_smoke(device_index: Option<String>) -> ExitCode {
         info.name,
         elements,
         format_f32_preview(&output)
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_depthwise_conv1d_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let channels = 3_usize;
+    let sequence_len = 5_usize;
+    let kernel_size = 3_usize;
+    let input = [
+        1.0_f32, 0.5, -1.0, 2.0, 1.0, 0.5, 3.0, -0.5, 0.5, 4.0, -1.0, 1.5, 5.0, 0.0, -2.0,
+    ];
+    let weight = [1.0_f32, -1.0, 2.0, 0.5, 1.0, -0.5, -1.0, 1.0, 1.5];
+    let expected =
+        runtime_host_depthwise_conv1d_f32(&input, &weight, channels, sequence_len, kernel_size);
+    if expected.is_empty() {
+        eprintln!("failed to build deterministic depthwise conv1d reference");
+        return ExitCode::from(1);
+    }
+
+    let input_bytes = encode_f32_to_bytes(&input);
+    let weight_bytes = encode_f32_to_bytes(&weight);
+    let output_bytes = input_bytes.len();
+
+    let mut input_buffer = match context.alloc_buffer(input_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate depthwise conv1d input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut weight_buffer = match context.alloc_buffer(weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate depthwise conv1d weight buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut output_buffer = match context.alloc_buffer(output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate depthwise conv1d output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy depthwise conv1d input data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = weight_buffer.copy_from_host(0, &weight_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy depthwise conv1d weight data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after depthwise conv1d input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    if let Err(err) = ullm_runtime_sys::depthwise_conv1d_f32(
+        &input_buffer,
+        &weight_buffer,
+        channels,
+        sequence_len,
+        kernel_size,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime depthwise_conv1d_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after depthwise conv1d: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_raw = vec![0_u8; output_bytes];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_raw, Some(&mut stream)) {
+        eprintln!("failed to copy depthwise conv1d result back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after depthwise conv1d output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let output = decode_f32_le_values(&output_raw);
+
+    let mut max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in output.iter().zip(expected.iter()) {
+        let diff = (lhs - rhs).abs();
+        if diff > 1e-5_f32 {
+            eprintln!(
+                "runtime depthwise conv1d smoke produced unexpected output: max_abs_diff={diff} output={:?} expected={:?}",
+                output, expected
+            );
+            return ExitCode::from(1);
+        }
+        if diff > max_abs_diff {
+            max_abs_diff = diff;
+        }
+    }
+    println!(
+        "runtime-depthwise-conv1d-smoke backend={} device_index={} name=\"{}\" channels={} sequence_len={} kernel_size={} output={} max_abs_diff={max_abs_diff:.9} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        channels,
+        sequence_len,
+        kernel_size,
+        format_f32_preview(&output[..8.min(output.len())])
     );
     ExitCode::SUCCESS
 }
@@ -3499,6 +3644,363 @@ fn package_linear_attn_qkv_norm_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_linear_attn_conv1d_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-conv1d-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 4, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    let qkv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
+    let conv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.conv1d.weight");
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let selector = TensorSelector::Name(conv_tensor.clone());
+    let conv_bundle =
+        match ullm_engine::package::select_passthrough_payload_bundle(&path, &selector) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("failed to select package conv1d passthrough tensor: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    if conv_bundle.shape.len() != 3 || conv_bundle.shape[1] != 1 {
+        eprintln!(
+            "conv1d tensor shape must be [channels,1,kernel], got {}",
+            format_u64_shape(&conv_bundle.shape)
+        );
+        return ExitCode::from(1);
+    }
+    let conv_channels = match usize::try_from(conv_bundle.shape[0]) {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("conv1d tensor has zero channels");
+            return ExitCode::from(1);
+        }
+        Err(_) => {
+            eprintln!("conv1d channel count is too large for this host");
+            return ExitCode::from(1);
+        }
+    };
+    let kernel_size = match usize::try_from(conv_bundle.shape[2]) {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("conv1d tensor has zero kernel size");
+            return ExitCode::from(1);
+        }
+        Err(_) => {
+            eprintln!("conv1d kernel size is too large for this host");
+            return ExitCode::from(1);
+        }
+    };
+    let dtype = match resolve_passthrough_dtype(&conv_bundle, &conv_tensor) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let conv_weight = match read_passthrough_payload_f32_bytes(&conv_bundle, chunk_bytes, dtype) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read passthrough payload for {conv_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let expected_conv_elements = match conv_channels.checked_mul(kernel_size) {
+        Some(value) => value,
+        None => {
+            eprintln!("conv1d weight element count overflows");
+            return ExitCode::from(1);
+        }
+    };
+    if conv_weight.len() != expected_conv_elements {
+        eprintln!(
+            "conv1d weight element count mismatch: expected {expected_conv_elements} got {}",
+            conv_weight.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let mut registry = WeightRegistry::new();
+    let (qkv_rows, qkv_cols, qkv_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &qkv_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {qkv_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if qkv_rows != conv_channels {
+        eprintln!(
+            "qkv rows must match conv1d channels: qkv_rows={qkv_rows}, conv_channels={conv_channels}"
+        );
+        return ExitCode::from(1);
+    }
+
+    let qkv_step_bytes = match qkv_rows.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("qkv step byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let qkv_sequence_bytes_len = match qkv_step_bytes.checked_mul(sequence_len) {
+        Some(value) => value,
+        None => {
+            eprintln!("qkv sequence byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let input_bytes_len = match qkv_cols.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("qkv input byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut input_buffer = match context.alloc_buffer(input_bytes_len) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate qkv input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut qkv_step_buffer = match context.alloc_buffer(qkv_step_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate qkv step output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let base_input = deterministic_f32_vector(qkv_cols);
+    let mut qkv_sequence_bytes = vec![0_u8; qkv_sequence_bytes_len];
+    for timestep in 0..sequence_len {
+        let step_input = base_input
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let phase = (index % 17) as f32 - 8.0_f32;
+                *value + (timestep as f32) * phase * 0.00025_f32
+            })
+            .collect::<Vec<_>>();
+        let step_input_bytes = encode_f32_to_bytes(&step_input);
+        if let Err(err) = input_buffer.copy_from_host(0, &step_input_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy qkv input timestep {timestep} into runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = ullm_runtime_sys::matvec_f32(
+            &qkv_matrix,
+            &input_buffer,
+            qkv_rows,
+            qkv_cols,
+            &mut qkv_step_buffer,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run qkv matvec for timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after qkv timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+
+        let start = timestep * qkv_step_bytes;
+        let end = start + qkv_step_bytes;
+        if let Err(err) =
+            qkv_step_buffer.copy_to_host(0, &mut qkv_sequence_bytes[start..end], Some(&mut stream))
+        {
+            eprintln!("failed to copy qkv timestep {timestep} back to host: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!(
+                "failed to synchronize runtime stream after qkv timestep {timestep} host copy: {err}"
+            );
+            return ExitCode::from(1);
+        }
+    }
+    let qkv_sequence = decode_f32_le_values(&qkv_sequence_bytes);
+    let expected = runtime_host_depthwise_conv1d_f32(
+        &qkv_sequence,
+        &conv_weight,
+        qkv_rows,
+        sequence_len,
+        kernel_size,
+    );
+    if expected.len() != qkv_sequence.len() {
+        eprintln!("failed to build package depthwise conv1d reference");
+        return ExitCode::from(1);
+    }
+
+    let mut conv_input_buffer = match context.alloc_buffer(qkv_sequence_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate conv1d input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let conv_weight_bytes = encode_f32_to_bytes(&conv_weight);
+    let mut conv_weight_buffer = match context.alloc_buffer(conv_weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate conv1d weight buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut conv_output_buffer = match context.alloc_buffer(qkv_sequence_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate conv1d output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = conv_input_buffer.copy_from_host(0, &qkv_sequence_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy conv1d input sequence into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = conv_weight_buffer.copy_from_host(0, &conv_weight_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy conv1d weight into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after conv1d input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    if let Err(err) = ullm_runtime_sys::depthwise_conv1d_f32(
+        &conv_input_buffer,
+        &conv_weight_buffer,
+        qkv_rows,
+        sequence_len,
+        kernel_size,
+        &mut conv_output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime depthwise_conv1d_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after conv1d: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut conv_output_bytes = vec![0_u8; qkv_sequence_bytes.len()];
+    if let Err(err) = conv_output_buffer.copy_to_host(0, &mut conv_output_bytes, Some(&mut stream))
+    {
+        eprintln!("failed to copy conv1d output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after conv1d output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let conv_output = decode_f32_le_values(&conv_output_bytes);
+
+    if conv_output.len() != expected.len() {
+        eprintln!(
+            "runtime depthwise conv1d output size mismatch: expected {} got {}",
+            expected.len(),
+            conv_output.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let mut max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in conv_output.iter().zip(expected.iter()) {
+        let diff = (lhs - rhs).abs();
+        if diff > 1e-4_f32 {
+            eprintln!(
+                "package-linear-attn-conv1d-smoke mismatch for layer={layer_index}: max_abs_diff={diff}"
+            );
+            return ExitCode::from(1);
+        }
+        if diff > max_abs_diff {
+            max_abs_diff = diff;
+        }
+    }
+
+    let qkv_preview = &qkv_sequence[..8.min(qkv_sequence.len())];
+    let conv_preview = &conv_output[..8.min(conv_output.len())];
+    println!(
+        "package-linear-attn-conv1d-smoke package={} layer={} qkv_tensor=\"{}\" conv_tensor=\"{}\" hidden={} channels={} sequence_len={} kernel_size={} dtype={} backend={} device_index={} name=\"{}\" qkv_preview={} conv_preview={} max_abs_diff={max_abs_diff:.9} verified=true",
+        path,
+        layer_index,
+        qkv_tensor,
+        conv_tensor,
+        qkv_cols,
+        qkv_rows,
+        sequence_len,
+        kernel_size,
+        dtype,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(qkv_preview),
+        format_f32_preview(conv_preview),
+    );
+    ExitCode::SUCCESS
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormKind {
     Input,
@@ -3825,7 +4327,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!(
@@ -4131,6 +4633,38 @@ fn runtime_host_silu_mul_f32(gate: &[f32], up: &[f32]) -> Vec<f32> {
             gate_value * (1.0_f32 / (1.0_f32 + (-gate_value).exp())) * *up_value
         })
         .collect()
+}
+
+fn runtime_host_depthwise_conv1d_f32(
+    input: &[f32],
+    weight: &[f32],
+    channels: usize,
+    sequence_len: usize,
+    kernel_size: usize,
+) -> Vec<f32> {
+    if channels == 0
+        || sequence_len == 0
+        || kernel_size == 0
+        || input.len() != channels * sequence_len
+        || weight.len() != channels * kernel_size
+    {
+        return Vec::new();
+    }
+    let mut output = vec![0.0_f32; channels * sequence_len];
+    for timestep in 0..sequence_len {
+        for channel in 0..channels {
+            let mut value = 0.0_f32;
+            for kernel in 0..kernel_size {
+                if timestep < kernel {
+                    break;
+                }
+                value += input[(timestep - kernel) * channels + channel]
+                    * weight[channel * kernel_size + kernel];
+            }
+            output[timestep * channels + channel] = value;
+        }
+    }
+    output
 }
 
 fn format_f32_preview(values: &[f32]) -> String {

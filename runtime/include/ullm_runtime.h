@@ -121,6 +121,15 @@ ullm_status ullm_runtime_silu_mul_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_depthwise_conv1d_f32(
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *weight_buffer,
+    size_t channels,
+    size_t sequence_len,
+    size_t kernel_size,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_smoke_add_f32(
     const float *lhs,
     const float *rhs,

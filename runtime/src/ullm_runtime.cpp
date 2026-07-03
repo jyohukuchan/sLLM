@@ -365,6 +365,15 @@ public:
         return compile_kernel(arch, silu_mul_kernel_source(), "ullm_silu_mul_f32.hip", code, error);
     }
 
+    bool compile_depthwise_conv1d_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(
+            arch,
+            depthwise_conv1d_kernel_source(),
+            "ullm_depthwise_conv1d_f32.hip",
+            code,
+            error);
+    }
+
 private:
     using hiprtc_create_program_fn =
         int (*)(void **, const char *, const char *, int, const char *const *, const char *const *);
@@ -560,6 +569,37 @@ extern "C" __global__ void ullm_silu_mul_f32_kernel(
     const float gate_value = gate[index];
     const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
     output[index] = gate_value * sigmoid * up[index];
+}
+)";
+    }
+
+    static const char *depthwise_conv1d_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_depthwise_conv1d_f32_kernel(
+    const float *input,
+    const float *weight,
+    unsigned long long channels,
+    unsigned long long sequence_len,
+    unsigned long long kernel_size,
+    float *output) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long elements = channels * sequence_len;
+    if (index >= elements) {
+        return;
+    }
+    const unsigned long long timestep = index / channels;
+    const unsigned long long channel = index - timestep * channels;
+    float sum = 0.0f;
+    for (unsigned long long kernel = 0; kernel < kernel_size; ++kernel) {
+        if (timestep < kernel) {
+            break;
+        }
+        const unsigned long long source_timestep = timestep - kernel;
+        sum += input[source_timestep * channels + channel] *
+               weight[channel * kernel_size + kernel];
+    }
+    output[index] = sum;
 }
 )";
     }
@@ -1683,6 +1723,232 @@ ullm_status silu_mul_f32_hip_staging(
     return ULLM_STATUS_OK;
 }
 
+void depthwise_conv1d_f32_host(
+    const float *input,
+    const float *weight,
+    size_t channels,
+    size_t sequence_len,
+    size_t kernel_size,
+    float *output) {
+    for (size_t timestep = 0; timestep < sequence_len; ++timestep) {
+        for (size_t channel = 0; channel < channels; ++channel) {
+            float sum = 0.0f;
+            for (size_t kernel = 0; kernel < kernel_size; ++kernel) {
+                if (timestep < kernel) {
+                    break;
+                }
+                const size_t source_timestep = timestep - kernel;
+                sum += input[source_timestep * channels + channel] *
+                       weight[channel * kernel_size + kernel];
+            }
+            output[timestep * channels + channel] = sum;
+        }
+    }
+}
+
+class HipDepthwiseConv1dKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_depthwise_conv1d_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_depthwise_conv1d_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build depthwise conv1d HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipDepthwiseConv1dKernelCache &hip_depthwise_conv1d_kernel_cache() {
+    static HipDepthwiseConv1dKernelCache cache;
+    return cache;
+}
+
+bool depthwise_conv1d_f32_hip_kernel(
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *weight_buffer,
+    size_t channels,
+    size_t sequence_len,
+    size_t kernel_size,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = input_buffer->hip_device_id;
+    void *function = hip_depthwise_conv1d_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    const size_t elements = channels * sequence_len;
+    const size_t grid_size = (elements + block_size - 1) / block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "depthwise conv1d element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_channels = static_cast<unsigned long long>(channels);
+    unsigned long long kernel_sequence_len = static_cast<unsigned long long>(sequence_len);
+    unsigned long long kernel_size_arg = static_cast<unsigned long long>(kernel_size);
+    void *input_ptr = input_buffer->ptr;
+    void *weight_ptr = weight_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &input_ptr,
+        &weight_ptr,
+        &kernel_channels,
+        &kernel_sequence_len,
+        &kernel_size_arg,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 depthwise conv1d";
+        }
+        return false;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        if (error != nullptr) {
+            *error = "failed to synchronize f32 depthwise conv1d HIP kernel";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status depthwise_conv1d_f32_hip_staging(
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *weight_buffer,
+    size_t channels,
+    size_t sequence_len,
+    size_t kernel_size,
+    size_t required_input_bytes,
+    size_t required_weight_bytes,
+    size_t required_output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_input(required_input_bytes / sizeof(float));
+    std::vector<float> host_weight(required_weight_bytes / sizeof(float));
+    std::vector<float> host_output(required_output_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = input_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            required_input_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_weight.data(),
+            weight_buffer->ptr,
+            required_weight_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 depthwise conv1d HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 depthwise conv1d HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    depthwise_conv1d_f32_host(
+        host_input.data(),
+        host_weight.data(),
+        channels,
+        sequence_len,
+        kernel_size,
+        host_output.data());
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            required_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 depthwise conv1d output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 depthwise conv1d HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
 } // namespace
 
 uint32_t ullm_runtime_abi_version(void) {
@@ -2380,6 +2646,113 @@ ullm_status ullm_runtime_silu_mul_f32(
         up_buffer,
         elements,
         required_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_depthwise_conv1d_f32(
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *weight_buffer,
+    size_t channels,
+    size_t sequence_len,
+    size_t kernel_size,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (input_buffer == nullptr || weight_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 depthwise conv1d received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (channels == 0 || sequence_len == 0 || kernel_size == 0) {
+        set_error("f32 depthwise conv1d channels, sequence length, and kernel size must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(input_buffer, weight_buffer) ||
+        !buffers_share_backend(input_buffer, output_buffer)) {
+        set_error("f32 depthwise conv1d buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 depthwise conv1d stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (sequence_len > max_size / channels) {
+        set_error("f32 depthwise conv1d input element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (kernel_size > max_size / channels) {
+        set_error("f32 depthwise conv1d weight element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t input_elements = channels * sequence_len;
+    const size_t weight_elements = channels * kernel_size;
+    if (input_elements > max_size / sizeof(float) ||
+        weight_elements > max_size / sizeof(float)) {
+        set_error("f32 depthwise conv1d byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_input_bytes = input_elements * sizeof(float);
+    const size_t required_weight_bytes = weight_elements * sizeof(float);
+    const size_t required_output_bytes = required_input_bytes;
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("f32 depthwise conv1d input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (weight_buffer->bytes < required_weight_bytes) {
+        set_error("f32 depthwise conv1d weight buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_output_bytes) {
+        set_error("f32 depthwise conv1d output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (input_buffer->backend == BackendKind::Cpu) {
+        const auto *input = static_cast<const float *>(input_buffer->ptr);
+        const auto *weight = static_cast<const float *>(weight_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        depthwise_conv1d_f32_host(
+            input,
+            weight,
+            channels,
+            sequence_len,
+            kernel_size,
+            output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (depthwise_conv1d_f32_hip_kernel(
+            input_buffer,
+            weight_buffer,
+            channels,
+            sequence_len,
+            kernel_size,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_DEPTHWISE_CONV1D_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "f32 depthwise conv1d HIP kernel is unavailable" :
+                                       hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return depthwise_conv1d_f32_hip_staging(
+        input_buffer,
+        weight_buffer,
+        channels,
+        sequence_len,
+        kernel_size,
+        required_input_bytes,
+        required_weight_bytes,
+        required_output_bytes,
         output_buffer,
         stream);
 }

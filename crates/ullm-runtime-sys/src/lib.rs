@@ -101,6 +101,15 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_depthwise_conv1d_f32(
+        input_buffer: *const RawRuntimeBuffer,
+        weight_buffer: *const RawRuntimeBuffer,
+        channels: usize,
+        sequence_len: usize,
+        kernel_size: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_smoke_add_f32(
         lhs: *const f32,
         rhs: *const f32,
@@ -433,6 +442,63 @@ pub fn silu_mul_f32(
     })
 }
 
+pub fn depthwise_conv1d_f32(
+    input: &RuntimeBuffer,
+    weight: &RuntimeBuffer,
+    channels: usize,
+    sequence_len: usize,
+    kernel_size: usize,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if channels == 0 {
+        return Err("depthwise conv1d channels must be greater than zero".to_string());
+    }
+    if sequence_len == 0 {
+        return Err("depthwise conv1d sequence_len must be greater than zero".to_string());
+    }
+    if kernel_size == 0 {
+        return Err("depthwise conv1d kernel_size must be greater than zero".to_string());
+    }
+
+    let input_elements = channels
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "depthwise conv1d input element count overflows".to_string())?;
+    let weight_elements = channels
+        .checked_mul(kernel_size)
+        .ok_or_else(|| "depthwise conv1d weight element count overflows".to_string())?;
+    let output_elements = channels
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "depthwise conv1d output element count overflows".to_string())?;
+
+    let input_bytes = input_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "depthwise conv1d input byte size overflows".to_string())?;
+    let weight_bytes = weight_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "depthwise conv1d weight byte size overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "depthwise conv1d output byte size overflows".to_string())?;
+
+    check_depthwise_copy_range("input", 0, input_bytes, input.size()?)?;
+    check_depthwise_copy_range("weight", 0, weight_bytes, weight.size()?)?;
+    check_depthwise_copy_range("output", 0, output_bytes, output.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_depthwise_conv1d_f32(
+            input.raw.as_ptr(),
+            weight.raw.as_ptr(),
+            channels,
+            sequence_len,
+            kernel_size,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 fn status_to_result(status: c_int) -> Result<(), String> {
     match status {
         STATUS_OK => Ok(()),
@@ -472,6 +538,21 @@ fn c_array_to_string<const N: usize>(value: &[c_char; N]) -> String {
     let nul = value.iter().position(|&ch| ch == 0).unwrap_or(N);
     let bytes: Vec<u8> = value[..nul].iter().map(|&ch| ch as u8).collect();
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn check_depthwise_copy_range(
+    kind: &str,
+    offset: usize,
+    bytes: usize,
+    total: usize,
+) -> Result<(), String> {
+    if offset <= total && bytes <= total - offset {
+        Ok(())
+    } else {
+        Err(format!(
+            "depthwise conv1d {kind} buffer is too small: offset={offset} bytes={bytes} total={total}"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -717,6 +798,79 @@ mod tests {
 
         let err = silu_mul_f32(&gate, &up, 4, &mut output, None).unwrap_err();
         assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
+    fn cpu_depthwise_conv1d_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let channels = 3_usize;
+        let sequence_len = 5_usize;
+        let kernel_size = 3_usize;
+        let input_values = [
+            1.0_f32, 0.5, -1.0, 2.0, 1.0, 0.5, 3.0, -0.5, 0.5, 4.0, -1.0, 1.5, 5.0, 0.0, -2.0,
+        ];
+        let weight_values = [1.0_f32, -1.0, 2.0, 0.5_f32, 1.0, -0.5, -1.0, 1.0, 1.5];
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut weight = context
+            .alloc_buffer(weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(sequence_len * channels * std::mem::size_of::<f32>())
+            .unwrap();
+
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        weight
+            .copy_from_host(0, &f32s_to_le_bytes(&weight_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        depthwise_conv1d_f32(
+            &input,
+            &weight,
+            channels,
+            sequence_len,
+            kernel_size,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; sequence_len * channels * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_depthwise_conv1d(
+            &input_values,
+            &weight_values,
+            channels,
+            sequence_len,
+            kernel_size,
+        );
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_depthwise_conv1d_f32_rejects_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let input = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+        let weight = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(5 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let err = depthwise_conv1d_f32(&input, &weight, 2, 3, 1, &mut output, None).unwrap_err();
+        assert!(err.contains("depthwise conv1d"));
     }
 
     #[test]
@@ -982,6 +1136,68 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_depthwise_conv1d_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let channels = 2_usize;
+        let sequence_len = 6_usize;
+        let kernel_size = 4_usize;
+        let input_values = [
+            0.5_f32, -1.0, 1.0, 2.0, -1.5, 0.75, -0.25, 3.5, 4.0, -2.0, 1.25, -0.5, 2.0, -3.0, 1.5,
+            -0.75, 0.0, 0.5, 0.25, -1.25, 3.0, 1.0, -0.5, 2.5,
+        ];
+        let weight_values = [1.0_f32, 0.5, -1.0, 0.25, -0.5_f32, 1.0, -0.25, 2.0];
+
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut weight = context
+            .alloc_buffer(weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(sequence_len * channels * std::mem::size_of::<f32>())
+            .unwrap();
+
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        weight
+            .copy_from_host(0, &f32s_to_le_bytes(&weight_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        depthwise_conv1d_f32(
+            &input,
+            &weight,
+            channels,
+            sequence_len,
+            kernel_size,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; sequence_len * channels * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let expected = expected_depthwise_conv1d(
+            &input_values,
+            &weight_values,
+            channels,
+            sequence_len,
+            kernel_size,
+        );
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
     fn first_hip_context_allocates_runtime_buffer_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -1057,6 +1273,28 @@ mod tests {
                 gate * sigmoid * *up
             })
             .collect()
+    }
+
+    fn expected_depthwise_conv1d(
+        input: &[f32],
+        weight: &[f32],
+        channels: usize,
+        sequence_len: usize,
+        kernel_size: usize,
+    ) -> Vec<f32> {
+        let mut output = vec![0.0_f32; channels * sequence_len];
+        for t in 0..sequence_len {
+            for c in 0..channels {
+                let mut value = 0.0_f32;
+                for k in 0..kernel_size {
+                    if t >= k {
+                        value += input[(t - k) * channels + c] * weight[c * kernel_size + k];
+                    }
+                }
+                output[t * channels + c] = value;
+            }
+        }
+        output
     }
 
     fn assert_f32s_close(actual: &[f32], expected: &[f32], tolerance: f32) {
