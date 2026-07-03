@@ -87,6 +87,13 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-linear-attn-aux-smoke") => package_linear_attn_aux_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+        ),
         Some("package-materialize-bench") => package_materialize_bench(
             env::args().nth(2),
             env::args().nth(3),
@@ -2987,6 +2994,205 @@ fn package_linear_attn_proj_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_linear_attn_aux_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    aux: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-aux-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let aux = match parse_linear_attn_aux(aux.as_deref()) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let requested_aux = match aux {
+        LinearAttnAux::ALog => vec![(
+            "a-log",
+            format!("model.language_model.layers.{layer_index}.linear_attn.A_log"),
+        )],
+        LinearAttnAux::DtBias => vec![(
+            "dt-bias",
+            format!("model.language_model.layers.{layer_index}.linear_attn.dt_bias"),
+        )],
+        LinearAttnAux::Conv1d => vec![(
+            "conv1d",
+            format!("model.language_model.layers.{layer_index}.linear_attn.conv1d.weight"),
+        )],
+        LinearAttnAux::Norm => vec![(
+            "norm",
+            format!("model.language_model.layers.{layer_index}.linear_attn.norm.weight"),
+        )],
+        LinearAttnAux::All => vec![
+            (
+                "a-log",
+                format!("model.language_model.layers.{layer_index}.linear_attn.A_log"),
+            ),
+            (
+                "dt-bias",
+                format!("model.language_model.layers.{layer_index}.linear_attn.dt_bias"),
+            ),
+            (
+                "conv1d",
+                format!("model.language_model.layers.{layer_index}.linear_attn.conv1d.weight"),
+            ),
+            (
+                "norm",
+                format!("model.language_model.layers.{layer_index}.linear_attn.norm.weight"),
+            ),
+        ],
+    };
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    for (aux_name, tensor_name) in requested_aux {
+        let selector = TensorSelector::Name(tensor_name.clone());
+        let bundle = match ullm_engine::package::select_passthrough_payload_bundle(&path, &selector)
+        {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("failed to select package passthrough tensor {tensor_name}: {err}");
+                return ExitCode::from(1);
+            }
+        };
+
+        if let Err(err) = validate_passthrough_shape_elements(&bundle) {
+            eprintln!("invalid passthrough shape for {tensor_name}: {err}");
+            return ExitCode::from(1);
+        }
+
+        let elements = match usize::try_from(bundle.elements) {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("passthrough tensor {tensor_name} has zero elements");
+                return ExitCode::from(1);
+            }
+            Err(_) => {
+                eprintln!(
+                    "passthrough tensor {tensor_name} element count is too large for this host"
+                );
+                return ExitCode::from(1);
+            }
+        };
+        let dtype = match resolve_passthrough_dtype(&bundle, &tensor_name) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+        let payload = match read_passthrough_payload_f32_bytes(&bundle, chunk_bytes, dtype) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("failed to read passthrough payload for {tensor_name}: {err}");
+                return ExitCode::from(1);
+            }
+        };
+        let payload_bytes = if bundle.payload_bytes == 0 {
+            bundle.payload_file.bytes
+        } else {
+            bundle.payload_bytes
+        };
+        if payload.len() != elements {
+            eprintln!(
+                "passthrough tensor element count mismatch for {tensor_name}: expected {elements} got {}",
+                payload.len()
+            );
+            return ExitCode::from(1);
+        }
+
+        let payload_f32_bytes = encode_f32_to_bytes(&payload);
+        let mut buffer = match context.alloc_buffer(payload_f32_bytes.len()) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate runtime buffer for {tensor_name}: {err}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(err) = buffer.copy_from_host(0, &payload_f32_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy payload for {tensor_name} into runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after payload copy: {err}");
+            return ExitCode::from(1);
+        }
+
+        let mut output = vec![0_u8; payload_f32_bytes.len()];
+        if let Err(err) = buffer.copy_to_host(0, &mut output, Some(&mut stream)) {
+            eprintln!("failed to copy payload back for {tensor_name}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after payload readback: {err}");
+            return ExitCode::from(1);
+        }
+        if payload_f32_bytes != output {
+            eprintln!("runtime roundtrip mismatch for {tensor_name}");
+            return ExitCode::from(1);
+        }
+
+        let preview = decode_f32_le_values(&output);
+        let preview_count = preview.len().min(8);
+        println!(
+            "package-linear-attn-aux-smoke package={} layer={} aux={} tensor=\"{}\" dtype={} elements={} shape={} payload_bytes={} backend={} device_index={} name=\"{}\" preview={} verified=true",
+            path,
+            layer_index,
+            aux_name,
+            tensor_name,
+            dtype,
+            elements,
+            format_u64_shape(&bundle.shape),
+            payload_bytes,
+            info.backend,
+            device_index,
+            info.name,
+            format_f32_preview(&preview[..preview_count])
+        );
+    }
+    ExitCode::SUCCESS
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormKind {
     Input,
@@ -3013,15 +3219,43 @@ impl NormKind {
 }
 
 fn parse_linear_attn_projection(value: Option<&str>) -> Result<LinearAttnProjection, ExitCode> {
-    match value.unwrap_or("all") {
+    let raw = value.unwrap_or("all");
+    match raw {
         "a" => Ok(LinearAttnProjection::A),
         "b" => Ok(LinearAttnProjection::B),
         "qkv" => Ok(LinearAttnProjection::Qkv),
         "z" => Ok(LinearAttnProjection::Z),
         "out" => Ok(LinearAttnProjection::Out),
         "all" => Ok(LinearAttnProjection::All),
-        value => {
-            eprintln!("invalid projection: {value}; expected a, b, qkv, z, out, or all");
+        _raw => {
+            eprintln!("invalid projection: {raw}; expected a, b, qkv, z, out, or all");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LinearAttnAux {
+    ALog,
+    DtBias,
+    Conv1d,
+    Norm,
+    All,
+}
+
+fn parse_linear_attn_aux(value: Option<&str>) -> Result<LinearAttnAux, ExitCode> {
+    let raw = value.unwrap_or("all");
+    let normalized = raw.replace(['-', '_'], "");
+    match normalized.as_str() {
+        "alog" => Ok(LinearAttnAux::ALog),
+        "dtbias" => Ok(LinearAttnAux::DtBias),
+        "conv1d" => Ok(LinearAttnAux::Conv1d),
+        "norm" => Ok(LinearAttnAux::Norm),
+        "all" => Ok(LinearAttnAux::All),
+        _value => {
+            eprintln!(
+                "invalid aux: {raw}; expected a-log, dt-bias, conv1d, norm, or all (aliases: a_log, alog, dt_bias)"
+            );
             Err(ExitCode::from(2))
         }
     }
@@ -3071,6 +3305,28 @@ fn resolve_passthrough_dtype<'a>(
             "could not infer passthrough dtype for tensor {tensor_name}; declare dtype in manifest"
         ))
     }
+}
+
+fn validate_passthrough_shape_elements(bundle: &PassthroughPayloadBundle) -> Result<(), String> {
+    if bundle.shape.is_empty() {
+        return Ok(());
+    }
+    let mut product = 1_u64;
+    for dimension in &bundle.shape {
+        if *dimension == 0 {
+            return Err("shape contains zero".to_string());
+        }
+        product = product
+            .checked_mul(*dimension)
+            .ok_or_else(|| "shape element count overflows u64".to_string())?;
+    }
+    if product != bundle.elements {
+        return Err(format!(
+            "shape product {} does not match element count {}",
+            product, bundle.elements
+        ));
+    }
+    Ok(())
 }
 
 fn read_passthrough_payload_f32_bytes(
@@ -3263,9 +3519,12 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
+    eprintln!(
+        "linear attention aux selector: a-log|dt-bias|conv1d|norm|all (aliases: a_log|alog|dt_bias)"
+    );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
     );
@@ -3347,6 +3606,15 @@ fn matrix_shape_rows_cols(shape: &[u64], elements: usize) -> Result<(usize, usiz
     let cols = usize::try_from(cols_u64)
         .map_err(|_| "selected tensor column count does not fit host usize".to_string())?;
     Ok((rows, cols))
+}
+
+fn format_u64_shape(shape: &[u64]) -> String {
+    let rendered = shape
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{rendered}]")
 }
 
 fn parse_optional_device_index(device_index: Option<String>) -> Result<u32, ExitCode> {
