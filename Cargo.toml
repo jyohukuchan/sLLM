@@ -1,4 +1,7 @@
 [workspace]
-members = ["crates/ullm-quant"]
+members = [
+    "crates/ullm-engine",
+    "crates/ullm-quant",
+    "crates/ullm-runtime-sys",
+]
 resolver = "2"
-
