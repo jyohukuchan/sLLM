@@ -12,10 +12,13 @@ codebook-scope:同じcodebookを共有するtensor集合。familyより細かい
 codebook-selector:blockごとに複数codebookのどれを使うか選ぶための追加metadata
 LUT:実装上の表参照機構。量子化仕様上の変換表はcodebookと書く
 payload:FP8やFP16など、演算器または後段処理へ渡すための実際の保存・受け渡し値
+logical payload bytes:tensorごとに参照されるpayload byte数の合計。共有payloadがある場合は重複分も数える
+resident payload bytes:runtime buffer上に実際に保持されるpayload byte数の合計。共有payloadがある場合は重複分を数えない
 payload role:.ullm.d内の参照payloadを用途別に選ぶ分類。tensor-index、tensor-scale、tensor-codebook、codebook、passthroughなど
 tensor payload bundle:1つのquantized tensorに対応するindex、scale、codebookのpayload集合
 weight registry:runtime bufferへload済みのweight payloadをtensor単位で保持し、後続kernelから参照できるようにするregistry
 resident payload:runtime buffer上に保持され、後続処理から再利用できるpayload
+codebook pool:複数tensorから参照されるcodebook payloadを一度だけloadし、runtime bufferを共有するためのregistry内管理領域
 chunked load:大きいpayloadを一定byte数ごとに読み、runtime bufferへ順番に転送するload方式
 fused dequant:GEMM/GEMVなどの演算kernel内でcodebook-indexやscaleを実効値へ変換し、そのまま演算へ使う処理
 materialize:変換後のpayloadや実効値を別bufferへ一度書き出す処理

@@ -31,6 +31,9 @@
 - `WeightRegistry::load_and_insert_many` を追加し、複数の `TensorPayloadBundle` を1回のAPI呼び出しでregistryへ登録できるようにした。
 - `package::list_tensor_payload_bundles` を追加し、`.ullm.d` manifest内のquantized tensor payload bundleをmanifest順で列挙できるようにした。
 - `package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]` を追加し、package内の先頭N個のquantized tensorをweight registryへまとめて登録できるようにした。誤ってfull packageを全量loadしないよう、CLIでは件数上限を明示的に扱う。
+- `LoadedPayload` が `Arc<RuntimeBuffer>` を保持するようにし、同一 `codebook_file` を参照する複数tensorでcodebook runtime bufferを共有できるようにした。
+- `WeightRegistry` にcodebook poolを追加し、`codebook_payloads` と `resident_payload_bytes` を取得できるようにした。
+- CLI出力では、tensorごとの参照量である `registry_payload_bytes` と、共有後の実resident量である `resident_payload_bytes` を分けて表示するようにした。
 
 ## 実測・検証
 
@@ -91,10 +94,15 @@
   - 登録tensorは `model.language_model.layers.0.linear_attn.in_proj_a.weight` と `model.language_model.layers.0.linear_attn.in_proj_b.weight` で、それぞれpayload bytes `73792`。
 - `target/debug/ullm-engine package-weight-register-many-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 2`
   - CPU fallbackでも同じ先頭2 tensorsのweight registry登録が成功した。
+- `target/debug/ullm-engine package-weight-register-many-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 16`
+  - R9700 HIPで先頭16 tensorsをweight registryへ登録できた。
+  - `registry_payload_bytes=247759872`、`resident_payload_bytes=247759360`、`codebook_payloads=8`。
+  - 先頭16 tensorsでは8種類のcodebookが2回ずつ現れるため、64B codebook 8個分、合計512Bの重複がresident payloadから除外された。
 - `cargo fmt --all --check` passed。
 - `cargo test --workspace` passed。
 - `cargo test -p ullm-engine` passed。`ullm-engine` は14 tests。
 - `cargo build -p ullm-engine` passed。
+- codebook dedup後の `cargo test -p ullm-engine` は15 tests passed。
 
 ## 作成したgit checkpoints
 
@@ -114,10 +122,11 @@
 - `7f2cba7 Add runtime weight registry smoke`
 - `746d422 Add multi tensor weight registry load`
 - `d19ecd8 Add package tensor bundle listing smoke`
+- `98bd2a6 Deduplicate registry codebook payloads`
 
 ## 次の行動
 
-- `WeightRegistry` で複数tensor分のresident payloadを保持できるようになった。次は同一codebook payloadを共有するcodebook bufferの重複排除を作る。
-- package全体を扱うruntime-side package handleを作り、manifest由来metadata、registry、codebook poolをまとめて保持する。
+- `WeightRegistry` で複数tensor分のresident payloadを保持し、同一codebook payloadを共有できるようになった。
+- 次はpackage全体を扱うruntime-side package handleを作り、manifest由来metadata、registry、codebook poolをまとめて保持する。
 - 後続kernelから参照できる形にするため、tensor名・family・candidate id・payload buffer handleをまとめてlookupできるAPIを整える。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
