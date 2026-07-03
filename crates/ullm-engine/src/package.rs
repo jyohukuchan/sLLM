@@ -32,13 +32,19 @@ pub struct ReferencedFile {
     pub owner_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TensorPayloadBundle {
     pub tensor_index: usize,
     pub tensor_name: String,
     pub dtype: Option<String>,
+    pub shape: Vec<u64>,
     pub family: Option<String>,
     pub candidate_id: Option<String>,
+    pub scale_format: Option<String>,
+    pub group_size: Option<usize>,
+    pub tensor_scale: Option<f32>,
+    pub index_encoding: Option<String>,
+    pub scale_encoding: Option<String>,
     pub elements: u64,
     pub groups: u64,
     pub index_file: ReferencedFile,
@@ -116,8 +122,15 @@ struct Manifest {
 struct QuantizedTensor {
     name: Option<String>,
     dtype: Option<String>,
+    #[serde(default)]
+    shape: Vec<u64>,
     family: Option<String>,
     candidate_id: Option<String>,
+    scale_format: Option<String>,
+    group_size: Option<usize>,
+    tensor_scale: Option<f32>,
+    index_encoding: Option<String>,
+    scale_encoding: Option<String>,
     #[serde(default)]
     elements: u64,
     #[serde(default)]
@@ -284,8 +297,14 @@ fn tensor_payload_bundle_from_manifest(
         tensor_index,
         tensor_name,
         dtype: tensor.dtype.clone(),
+        shape: tensor.shape.clone(),
         family: tensor.family.clone(),
         candidate_id: tensor.candidate_id.clone(),
+        scale_format: tensor.scale_format.clone(),
+        group_size: tensor.group_size,
+        tensor_scale: tensor.tensor_scale,
+        index_encoding: tensor.index_encoding.clone(),
+        scale_encoding: tensor.scale_encoding.clone(),
         elements: tensor.elements,
         groups: tensor.groups,
         index_file,
@@ -713,8 +732,14 @@ mod tests {
               "tensors": [{
                 "name": "layer.0.attn.q_proj.weight",
                 "dtype": "BF16",
+                "shape": [2, 4],
                 "family": "attn_q",
                 "candidate_id": "aq4_test",
+                "scale_format": "e4m3",
+                "group_size": 4,
+                "tensor_scale": 1.25,
+                "index_encoding": "idx4_low_nibble_first",
+                "scale_encoding": "u8_scale_table_index",
                 "elements": 8,
                 "groups": 2,
                 "index_file": "tensors/a.idx4",
@@ -739,8 +764,20 @@ mod tests {
         assert_eq!(first.tensor_index, 0);
         assert_eq!(first.tensor_name, "layer.0.attn.q_proj.weight");
         assert_eq!(first.dtype.as_deref(), Some("BF16"));
+        assert_eq!(first.shape, vec![2, 4]);
         assert_eq!(first.family.as_deref(), Some("attn_q"));
         assert_eq!(first.candidate_id.as_deref(), Some("aq4_test"));
+        assert_eq!(first.scale_format.as_deref(), Some("e4m3"));
+        assert_eq!(first.group_size, Some(4));
+        assert_eq!(first.tensor_scale, Some(1.25));
+        assert_eq!(
+            first.index_encoding.as_deref(),
+            Some("idx4_low_nibble_first")
+        );
+        assert_eq!(
+            first.scale_encoding.as_deref(),
+            Some("u8_scale_table_index")
+        );
         assert_eq!(first.elements, 8);
         assert_eq!(first.groups, 2);
         assert_eq!(first.index_file.relative_path, "tensors/a.idx4");
@@ -750,6 +787,10 @@ mod tests {
         let by_index = select_tensor_payload_bundle(&root, &TensorSelector::Index(1)).unwrap();
         assert_eq!(by_index.tensor_index, 1);
         assert_eq!(by_index.tensor_name, "layer.0.attn.k_proj.weight");
+        assert!(by_index.shape.is_empty());
+        assert_eq!(by_index.scale_format, None);
+        assert_eq!(by_index.group_size, None);
+        assert_eq!(by_index.tensor_scale, None);
 
         let by_exact = select_tensor_payload_bundle(
             &root,
@@ -793,8 +834,12 @@ mod tests {
             r#"{
               "tensors": [{
                 "name": "tensor-a",
+                "shape": [1, 2],
                 "family": "family-a",
                 "candidate_id": "candidate-a",
+                "scale_format": "e4m3",
+                "group_size": 2,
+                "tensor_scale": 0.5,
                 "elements": 2,
                 "groups": 1,
                 "index_file": "tensors/a.idx4",
@@ -818,8 +863,12 @@ mod tests {
         assert_eq!(bundles.len(), 2);
         assert_eq!(bundles[0].tensor_index, 0);
         assert_eq!(bundles[0].tensor_name, "tensor-a");
+        assert_eq!(bundles[0].shape, vec![1, 2]);
         assert_eq!(bundles[0].family.as_deref(), Some("family-a"));
         assert_eq!(bundles[0].candidate_id.as_deref(), Some("candidate-a"));
+        assert_eq!(bundles[0].scale_format.as_deref(), Some("e4m3"));
+        assert_eq!(bundles[0].group_size, Some(2));
+        assert_eq!(bundles[0].tensor_scale, Some(0.5));
         assert_eq!(bundles[0].index_file.relative_path, "tensors/a.idx4");
         assert_eq!(bundles[1].tensor_index, 1);
         assert_eq!(bundles[1].tensor_name, "tensor-b");
