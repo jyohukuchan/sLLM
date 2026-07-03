@@ -61,6 +61,7 @@
 - `ullm-engine package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]` を追加した。実packageの `input_layernorm.weight` または `post_attention_layernorm.weight` passthrough payloadをBF16/F32からf32へ変換し、runtime RMSNorm kernelへ接続する。
 - `ullm-engine package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]` を追加した。実packageのpassthrough RMSNorm weightを使い、RMSNorm output bufferをそのままgate/up matvecへ渡してMLPまで接続する。
 - `ullm-engine package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]` を追加した。実packageの `linear_attn` projection tensorをmaterializeし、共通の決定的inputからmatvecまで接続する。
+- `ullm-engine package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]` を追加した。実packageの `linear_attn` 補助passthrough tensorをBF16/F32からf32へ変換し、runtime bufferへの転送とreadbackを検証する。
 
 ## 実測・検証
 
@@ -250,6 +251,14 @@
 - `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 target/debug/ullm-engine package-linear-attn-proj-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 all`
   - R9700 HIP deviceでAQ4 materializeとmatvec kernelを必須指定した状態で、layer 0 `linear_attn` projection 5本すべてが成功した。
   - previewは `a=[-0.3685338,0.2622247,0.4457358,-0.4137208,-0.0914293,0.6906285,0.3372281,0.2483559]`、`b=[-0.1777917,0.4347278,-0.3674756,-0.2333566,-0.2906704,-0.0129833,0.2090756,-0.0307086]`、`qkv=[0.1187995,-0.2140314,0.5484952,0.8965267,-0.8766365,-0.5391338,-1.1162429,0.5450193]`、`z=[-0.8506677,-0.4211664,1.2555709,0.1271276,0.7821554,-0.4219491,0.0438144,0.1496184]`、`out=[0.8133049,-0.7899073,-0.1963655,0.8239504,3.5607629,0.6728899,-0.9086896,-1.5677402]`。
+- package linear attention auxiliary smoke追加後の `cargo fmt --all --check`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1` は成功した。
+- `target/debug/ullm-engine package-linear-attn-aux-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 all`
+  - CPU fallbackでlayer 0の `linear_attn.A_log`、`dt_bias`、`conv1d.weight`、`norm.weight` をBF16/F32からf32へ変換し、runtime bufferへの全量copy/readback検証が成功した。
+  - previewは `a-log=[-2.6562500,-2.5312500,-4.7187500,-4.2500000,-2.8750000,-3.9218750,-3.2812500,-3.2187500]`、`dt-bias=[-3.5312500,12.5000000,-1.4453125,-3.0312500,18.5000000,-5.5625000,5.1562500,-1.4531250]`、`conv1d=[0.0015411,-0.0002556,-0.0049133,-0.1020508,0.0007629,-0.0007439,0.0019684,0.1064453]`、`norm=[0.8847656,0.9282227,0.9091797,0.8632812,0.8906250,0.9189453,0.9008789,0.9096680]`。
+- `target/debug/ullm-engine package-linear-attn-aux-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 all`
+  - R9700 HIP deviceでも同じ4本の補助passthrough tensorの全量copy/readback検証が成功し、previewはCPU fallbackと一致した。
+- `target/debug/ullm-engine package-linear-attn-aux-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 dt_bias`
+  - alias `dt_bias` が `dt-bias` として解釈されることを確認した。
 
 ## 作成したgit checkpoints
 
@@ -286,9 +295,10 @@
 - `39cfa66 Add package RMSNorm smoke`
 - `3bf8783 Add package RMSNorm MLP smoke`
 - `3a09aaf Add package linear attention projection smoke`
+- `13f92b9 Add package linear attention auxiliary smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smokeも通った。次はlinear attentionのpassthrough補助tensor、conv1d、norm、またはattention本体の計算境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smokeも通った。次はconv1d、linear_attn norm、またはattention本体の計算境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
