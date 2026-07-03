@@ -79,6 +79,25 @@ impl WeightRegistry {
         Ok(self.insert(loaded))
     }
 
+    /// Loads and registers multiple tensor bundles in one API call.
+    ///
+    /// Keeping each bundle as a distinct registry row is intentional to keep a
+    /// future codebook-dedup step straightforward.
+    pub fn load_and_insert_many(
+        &mut self,
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        bundles: &[TensorPayloadBundle],
+        options: LoadOptions,
+    ) -> Result<Vec<usize>, String> {
+        let mut indexes = Vec::with_capacity(bundles.len());
+        for bundle in bundles {
+            let loaded = load_tensor_payload_bundle(context, stream, bundle, options)?;
+            indexes.push(self.insert(loaded));
+        }
+        Ok(indexes)
+    }
+
     pub fn len(&self) -> usize {
         self.tensors.len()
     }
@@ -278,6 +297,87 @@ mod tests {
         assert_eq!(loaded.codebook.bytes, 10);
         assert_eq!(loaded.codebook.chunks, 3);
         assert!(registry.get_by_name("layer.0.attn.q_proj.weight").is_some());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cpu_registry_loads_multiple_tensor_payload_bundles() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-multi-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("tensors/t0.idx4"), [1_u8, 2, 3]).unwrap();
+        fs::write(root.join("tensors/t0.scale_u8"), [4_u8, 5]).unwrap();
+        fs::write(root.join("codebooks/t0.f32"), [6_u8; 4]).unwrap();
+        fs::write(root.join("tensors/t1.idx4"), [7_u8, 8]).unwrap();
+        fs::write(root.join("tensors/t1.scale_u8"), [9_u8]).unwrap();
+        fs::write(root.join("codebooks/t1.f32"), [10_u8; 3]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "layer.0.attn.q_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_q",
+                "candidate_id": "aq4_test_a",
+                "elements": 10,
+                "groups": 3,
+                "index_file": "tensors/t0.idx4",
+                "scale_file": "tensors/t0.scale_u8",
+                "codebook_file": "codebooks/t0.f32"
+              }, {
+                "name": "layer.1.attn.k_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_k",
+                "candidate_id": "aq4_test_b",
+                "elements": 11,
+                "groups": 4,
+                "index_file": "tensors/t1.idx4",
+                "scale_file": "tensors/t1.scale_u8",
+                "codebook_file": "codebooks/t1.f32"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let bundle0 = select_tensor_payload_bundle(&root, &TensorSelector::Index(0)).unwrap();
+        let bundle1 = select_tensor_payload_bundle(&root, &TensorSelector::Index(1)).unwrap();
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut registry = WeightRegistry::new();
+        let indexes = registry
+            .load_and_insert_many(
+                &mut context,
+                &mut stream,
+                &[bundle0, bundle1],
+                LoadOptions {
+                    chunk_bytes: 2,
+                    verify: true,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(indexes, vec![0, 1]);
+        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.total_payload_bytes(), 15);
+        assert!(registry.get_by_name("layer.0.attn.q_proj.weight").is_some());
+        assert!(registry.get_by_name("layer.1.attn.k_proj.weight").is_some());
+
+        let loaded0 = registry.get_by_name("layer.0.attn.q_proj.weight").unwrap();
+        assert_eq!(loaded0.index.chunks, 2);
+        assert_eq!(loaded0.scale.chunks, 1);
+        assert_eq!(loaded0.codebook.chunks, 2);
+
+        let loaded1 = registry.get_by_name("layer.1.attn.k_proj.weight").unwrap();
+        assert_eq!(loaded1.index.chunks, 1);
+        assert_eq!(loaded1.scale.chunks, 1);
+        assert_eq!(loaded1.codebook.chunks, 2);
 
         fs::remove_dir_all(root).unwrap();
     }
