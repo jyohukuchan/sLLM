@@ -52,6 +52,17 @@ pub struct TensorPayloadBundle {
     pub codebook_file: ReferencedFile,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PassthroughPayloadBundle {
+    pub tensor_index: usize,
+    pub tensor_name: String,
+    pub dtype: Option<String>,
+    pub shape: Vec<u64>,
+    pub elements: u64,
+    pub payload_bytes: u64,
+    pub payload_file: ReferencedFile,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TensorSelector {
     First,
@@ -143,6 +154,9 @@ struct QuantizedTensor {
 #[derive(Debug, Deserialize)]
 struct PassthroughTensor {
     name: Option<String>,
+    dtype: Option<String>,
+    #[serde(default)]
+    shape: Vec<u64>,
     #[serde(default)]
     elements: u64,
     #[serde(default)]
@@ -258,6 +272,36 @@ pub fn list_tensor_payload_bundles(
     Ok(bundles)
 }
 
+pub fn select_passthrough_payload_bundle(
+    path: impl AsRef<Path>,
+    selector: &TensorSelector,
+) -> Result<PassthroughPayloadBundle, String> {
+    let package_dir = path.as_ref();
+    let manifest = read_manifest(package_dir)?;
+    let tensor_index = select_passthrough_index(&manifest, selector)?;
+    let tensor = manifest
+        .passthrough_tensors
+        .get(tensor_index)
+        .ok_or_else(|| format!("passthrough tensor index {tensor_index} is out of range"))?;
+    passthrough_payload_bundle_from_manifest(package_dir, tensor_index, tensor)
+}
+
+pub fn list_passthrough_payload_bundles(
+    path: impl AsRef<Path>,
+) -> Result<Vec<PassthroughPayloadBundle>, String> {
+    let package_dir = path.as_ref();
+    let manifest = read_manifest(package_dir)?;
+    let mut bundles = Vec::with_capacity(manifest.passthrough_tensors.len());
+    for (tensor_index, tensor) in manifest.passthrough_tensors.iter().enumerate() {
+        bundles.push(passthrough_payload_bundle_from_manifest(
+            package_dir,
+            tensor_index,
+            tensor,
+        )?);
+    }
+    Ok(bundles)
+}
+
 fn tensor_payload_bundle_from_manifest(
     package_dir: &Path,
     tensor_index: usize,
@@ -313,6 +357,32 @@ fn tensor_payload_bundle_from_manifest(
     })
 }
 
+fn passthrough_payload_bundle_from_manifest(
+    package_dir: &Path,
+    tensor_index: usize,
+    tensor: &PassthroughTensor,
+) -> Result<PassthroughPayloadBundle, String> {
+    let tensor_name = tensor
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("passthrough#{tensor_index}"));
+    let payload_file = required_passthrough_file(
+        package_dir,
+        tensor_index,
+        &tensor_name,
+        tensor.payload_file.as_deref(),
+    )?;
+    Ok(PassthroughPayloadBundle {
+        tensor_index,
+        tensor_name,
+        dtype: tensor.dtype.clone(),
+        shape: tensor.shape.clone(),
+        elements: tensor.elements,
+        payload_bytes: tensor.payload_bytes,
+        payload_file,
+    })
+}
+
 fn select_tensor_index(manifest: &Manifest, selector: &TensorSelector) -> Result<usize, String> {
     match selector {
         TensorSelector::First => {
@@ -333,6 +403,32 @@ fn select_tensor_index(manifest: &Manifest, selector: &TensorSelector) -> Result
             }
         }
         TensorSelector::Name(name) => select_tensor_index_by_name(manifest, name),
+    }
+}
+
+fn select_passthrough_index(
+    manifest: &Manifest,
+    selector: &TensorSelector,
+) -> Result<usize, String> {
+    match selector {
+        TensorSelector::First => {
+            if manifest.passthrough_tensors.is_empty() {
+                Err("package contains no passthrough tensors".to_string())
+            } else {
+                Ok(0)
+            }
+        }
+        TensorSelector::Index(index) => {
+            if *index < manifest.passthrough_tensors.len() {
+                Ok(*index)
+            } else {
+                Err(format!(
+                    "passthrough tensor index {index} is out of range for {} passthrough tensors",
+                    manifest.passthrough_tensors.len()
+                ))
+            }
+        }
+        TensorSelector::Name(name) => select_passthrough_index_by_name(manifest, name),
     }
 }
 
@@ -368,6 +464,38 @@ fn select_tensor_index_by_name(manifest: &Manifest, name: &str) -> Result<usize,
     }
 }
 
+fn select_passthrough_index_by_name(manifest: &Manifest, name: &str) -> Result<usize, String> {
+    if let Some((index, _)) = manifest
+        .passthrough_tensors
+        .iter()
+        .enumerate()
+        .find(|(_, tensor)| tensor.name.as_deref() == Some(name))
+    {
+        return Ok(index);
+    }
+
+    let matches: Vec<usize> = manifest
+        .passthrough_tensors
+        .iter()
+        .enumerate()
+        .filter_map(|(index, tensor)| {
+            tensor
+                .name
+                .as_ref()
+                .filter(|tensor_name| tensor_name.contains(name))
+                .map(|_| index)
+        })
+        .collect();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => Err(format!("no passthrough tensor matched selector \"{name}\"")),
+        _ => Err(format!(
+            "passthrough tensor selector \"{name}\" matched {} tensors; use an exact name or numeric index",
+            matches.len()
+        )),
+    }
+}
+
 fn required_tensor_file(
     package_dir: &Path,
     _tensor: &QuantizedTensor,
@@ -393,6 +521,29 @@ fn required_tensor_file(
         format!(
             "tensor {tensor_index} ({tensor_name}) does not reference an existing non-empty {} file",
             role.as_str()
+        )
+    })
+}
+
+fn required_passthrough_file(
+    package_dir: &Path,
+    tensor_index: usize,
+    tensor_name: &str,
+    relative: Option<&str>,
+) -> Result<ReferencedFile, String> {
+    let relative = relative.ok_or_else(|| {
+        format!("passthrough tensor {tensor_index} ({tensor_name}) does not declare payload")
+    })?;
+    referenced_file_candidate(
+        package_dir,
+        relative,
+        ReferencedFileRole::Passthrough,
+        Some(tensor_index),
+        Some(tensor_name.to_string()),
+    )
+    .ok_or_else(|| {
+        format!(
+            "passthrough tensor {tensor_index} ({tensor_name}) does not reference an existing non-empty passthrough file"
         )
     })
 }
@@ -581,6 +732,8 @@ mod tests {
               }],
               "passthrough_tensors": [{
                 "name": "tensor-b",
+                "dtype": "BF16",
+                "shape": [4],
                 "elements": 4,
                 "payload_bytes": 4,
                 "payload_file": "tensors/b.raw"
@@ -644,6 +797,19 @@ mod tests {
         assert_eq!(passthrough.relative_path, "tensors/b.raw");
         assert_eq!(passthrough.role, ReferencedFileRole::Passthrough);
         assert_eq!(passthrough.owner_name.as_deref(), Some("tensor-b"));
+
+        let passthrough_bundle =
+            select_passthrough_payload_bundle(&root, &TensorSelector::First).unwrap();
+        assert_eq!(passthrough_bundle.tensor_index, 0);
+        assert_eq!(passthrough_bundle.tensor_name, "tensor-b");
+        assert_eq!(passthrough_bundle.dtype.as_deref(), Some("BF16"));
+        assert_eq!(passthrough_bundle.shape, vec![4]);
+        assert_eq!(passthrough_bundle.elements, 4);
+        assert_eq!(passthrough_bundle.payload_bytes, 4);
+        assert_eq!(
+            passthrough_bundle.payload_file.relative_path,
+            "tensors/b.raw"
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -875,6 +1041,90 @@ mod tests {
         assert_eq!(bundles[1].family.as_deref(), Some("family-b"));
         assert_eq!(bundles[1].candidate_id.as_deref(), Some("candidate-b"));
         assert_eq!(bundles[1].index_file.relative_path, "tensors/b.idx4");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selects_passthrough_payload_bundle_by_index_and_name() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-passthrough-bundle-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("passthrough")).unwrap();
+        fs::write(root.join("passthrough/input.raw"), [1_u8, 2, 3, 4]).unwrap();
+        fs::write(root.join("passthrough/post.raw"), [5_u8, 6, 7, 8]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "passthrough_tensors": [{
+                "name": "layer.0.input_layernorm.weight",
+                "dtype": "BF16",
+                "shape": [2],
+                "elements": 2,
+                "payload_bytes": 4,
+                "payload_file": "passthrough/input.raw"
+              }, {
+                "name": "layer.0.post_attention_layernorm.weight",
+                "dtype": "F32",
+                "shape": [1],
+                "elements": 1,
+                "payload_bytes": 4,
+                "payload_file": "passthrough/post.raw"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let first = select_passthrough_payload_bundle(&root, &TensorSelector::First).unwrap();
+        assert_eq!(first.tensor_index, 0);
+        assert_eq!(first.tensor_name, "layer.0.input_layernorm.weight");
+        assert_eq!(first.dtype.as_deref(), Some("BF16"));
+        assert_eq!(first.shape, vec![2]);
+        assert_eq!(first.elements, 2);
+        assert_eq!(first.payload_bytes, 4);
+        assert_eq!(first.payload_file.relative_path, "passthrough/input.raw");
+        assert_eq!(first.payload_file.role, ReferencedFileRole::Passthrough);
+        assert_eq!(first.payload_file.owner_index, Some(0));
+        assert_eq!(
+            first.payload_file.owner_name.as_deref(),
+            Some("layer.0.input_layernorm.weight")
+        );
+
+        let by_index = select_passthrough_payload_bundle(&root, &TensorSelector::Index(1)).unwrap();
+        assert_eq!(by_index.tensor_index, 1);
+        assert_eq!(by_index.dtype.as_deref(), Some("F32"));
+        assert_eq!(by_index.payload_file.relative_path, "passthrough/post.raw");
+
+        let by_exact = select_passthrough_payload_bundle(
+            &root,
+            &TensorSelector::Name("layer.0.post_attention_layernorm.weight".to_string()),
+        )
+        .unwrap();
+        assert_eq!(by_exact.tensor_index, 1);
+
+        let by_unique_substring = select_passthrough_payload_bundle(
+            &root,
+            &TensorSelector::Name("input_layernorm".to_string()),
+        )
+        .unwrap();
+        assert_eq!(by_unique_substring.tensor_index, 0);
+
+        let ambiguous =
+            select_passthrough_payload_bundle(&root, &TensorSelector::Name("layer.0".to_string()))
+                .unwrap_err();
+        assert!(ambiguous.contains("matched 2 tensors"));
+
+        let bundles = list_passthrough_payload_bundles(&root).unwrap();
+        assert_eq!(bundles.len(), 2);
+        assert_eq!(bundles[0].tensor_name, "layer.0.input_layernorm.weight");
+        assert_eq!(
+            bundles[1].tensor_name,
+            "layer.0.post_attention_layernorm.weight"
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

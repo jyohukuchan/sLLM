@@ -9,7 +9,9 @@ use std::time::Instant;
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
 };
-use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
+use ullm_engine::package::{
+    PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole, TensorSelector,
+};
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -63,6 +65,13 @@ fn main() -> ExitCode {
             env::args().nth(3),
             env::args().nth(4),
             env::args().nth(5),
+        ),
+        Some("package-rmsnorm-smoke") => package_rmsnorm_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
         ),
         Some("package-materialize-bench") => package_materialize_bench(
             env::args().nth(2),
@@ -1870,6 +1879,229 @@ fn package_materialize_matvec_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_rmsnorm_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    norm_kind: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-rmsnorm-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let norm_kind = match normalize_norm_kind(norm_kind.as_deref()) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let tensor_name = match norm_kind {
+        NormKind::Input => {
+            format!("model.language_model.layers.{layer_index}.input_layernorm.weight")
+        }
+        NormKind::Post => {
+            format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight")
+        }
+    };
+    let selector = TensorSelector::Name(tensor_name.clone());
+    let bundle = match ullm_engine::package::select_passthrough_payload_bundle(&path, &selector) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            eprintln!("failed to select package passthrough tensor: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let elements = match usize::try_from(bundle.elements) {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("passthrough tensor has zero elements");
+            return ExitCode::from(1);
+        }
+        Err(_) => {
+            eprintln!("passthrough tensor element count is too large for this host");
+            return ExitCode::from(1);
+        }
+    };
+    let dtype = match resolve_passthrough_dtype(&bundle, &tensor_name) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let payload = match read_passthrough_payload_f32_bytes(&bundle, chunk_bytes, dtype) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read passthrough payload for {tensor_name}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if payload.len() != elements {
+        eprintln!(
+            "passthrough tensor element count mismatch for {tensor_name}: expected {} got {}",
+            elements,
+            payload.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let input = deterministic_f32_vector(elements);
+    let epsilon = 1e-5_f32;
+    let expected = runtime_host_rmsnorm_f32(&input, &payload, epsilon);
+    if expected.len() != elements {
+        eprintln!("failed to build deterministic RMSNorm reference");
+        return ExitCode::from(1);
+    }
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let input_bytes = encode_f32_to_bytes(&input);
+    let weight_bytes = encode_f32_to_bytes(&payload);
+    let mut input_buffer = match context.alloc_buffer(input_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate RMSNorm input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy deterministic input into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut weight_buffer = match context.alloc_buffer(weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate RMSNorm weight buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = weight_buffer.copy_from_host(0, &weight_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy RMSNorm weight into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after weight copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_buffer = match context.alloc_buffer(weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate RMSNorm output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::rmsnorm_f32(
+        &input_buffer,
+        &weight_buffer,
+        elements,
+        epsilon,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime rmsnorm_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after rmsnorm: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_raw = vec![0_u8; weight_bytes.len()];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_raw, Some(&mut stream)) {
+        eprintln!("failed to copy runtime RMSNorm output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let output = decode_f32_le_values(&output_raw);
+
+    if output.len() != expected.len() {
+        eprintln!(
+            "runtime RMSNorm output size mismatch: expected {} got {}",
+            expected.len(),
+            output.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let mut max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in output.iter().zip(expected.iter()) {
+        let diff = (lhs - rhs).abs();
+        if diff > 1e-4_f32 {
+            eprintln!(
+                "package-rmsnorm-smoke mismatch for tensor={tensor_name}: max_abs_diff={diff}"
+            );
+            return ExitCode::from(1);
+        }
+        if diff > max_abs_diff {
+            max_abs_diff = diff;
+        }
+    }
+
+    println!(
+        "package-rmsnorm-smoke package={} tensor_index={} tensor=\"{}\" dtype={} elements={} shape_len={} payload_bytes={} payload_path={} device_index={} name=\"{}\" epsilon={} norm_kind={} chunk_bytes={} max_abs_diff={max_abs_diff:.9} preview={} verified=true",
+        path,
+        bundle.tensor_index,
+        bundle.tensor_name,
+        dtype,
+        elements,
+        bundle.shape.len(),
+        bundle.payload_bytes,
+        bundle.payload_file.relative_path,
+        device_index,
+        info.name,
+        epsilon,
+        norm_kind.as_str(),
+        chunk_bytes,
+        format_f32_preview(&output[..output.len().min(8)])
+    );
+    ExitCode::SUCCESS
+}
+
 fn package_mlp_smoke(
     path: Option<String>,
     device_index: Option<String>,
@@ -2145,6 +2377,197 @@ fn package_mlp_smoke(
     ExitCode::SUCCESS
 }
 
+#[derive(Debug, Clone, Copy)]
+enum NormKind {
+    Input,
+    Post,
+}
+
+impl NormKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Post => "post",
+        }
+    }
+}
+
+fn normalize_norm_kind(kind: Option<&str>) -> Result<NormKind, ExitCode> {
+    match kind.unwrap_or("input") {
+        "input" => Ok(NormKind::Input),
+        "post" => Ok(NormKind::Post),
+        value => {
+            eprintln!("invalid norm kind: {value}; expected input or post");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+fn resolve_passthrough_dtype<'a>(
+    bundle: &'a PassthroughPayloadBundle,
+    tensor_name: &str,
+) -> Result<&'a str, String> {
+    if let Some(dtype) = bundle.dtype.as_deref() {
+        return match dtype {
+            "BF16" | "F32" => Ok(dtype),
+            _ => Err(format!(
+                "unsupported passthrough dtype \"{dtype}\" for tensor {tensor_name}"
+            )),
+        };
+    }
+
+    let payload_bytes = if bundle.payload_bytes == 0 {
+        bundle.payload_file.bytes
+    } else {
+        bundle.payload_bytes
+    };
+    let bf16_bytes = bundle.elements.checked_mul(2).ok_or_else(|| {
+        format!("passthrough tensor {tensor_name} element count overflow while inferring dtype")
+    })?;
+    let f32_bytes = bundle.elements.checked_mul(4).ok_or_else(|| {
+        format!("passthrough tensor {tensor_name} element count overflow while inferring dtype")
+    })?;
+    if payload_bytes == bf16_bytes {
+        Ok("BF16")
+    } else if payload_bytes == f32_bytes {
+        Ok("F32")
+    } else {
+        Err(format!(
+            "could not infer passthrough dtype for tensor {tensor_name}; declare dtype in manifest"
+        ))
+    }
+}
+
+fn read_passthrough_payload_f32_bytes(
+    bundle: &PassthroughPayloadBundle,
+    chunk_bytes: usize,
+    dtype: &str,
+) -> Result<Vec<f32>, String> {
+    let mut file = File::open(&bundle.payload_file.absolute_path).map_err(|err| {
+        format!(
+            "failed to open {}: {err}",
+            bundle.payload_file.absolute_path.display()
+        )
+    })?;
+    let payload_bytes = if bundle.payload_bytes == 0 {
+        bundle.payload_file.bytes
+    } else {
+        bundle.payload_bytes
+    };
+    if payload_bytes != bundle.payload_file.bytes {
+        return Err(format!(
+            "passthrough tensor {} payload bytes mismatch: declared {} actual {}",
+            bundle.tensor_name, payload_bytes, bundle.payload_file.bytes
+        ));
+    }
+    let element_size = match dtype {
+        "BF16" => 2_usize,
+        "F32" => 4_usize,
+        _ => {
+            return Err(format!(
+                "unsupported passthrough dtype {dtype} for tensor {}",
+                bundle.tensor_name
+            ));
+        }
+    };
+    if chunk_bytes == 0 {
+        return Err("chunk bytes must be greater than zero".to_string());
+    }
+    let expected_bytes = usize::try_from(payload_bytes)
+        .map_err(|_| "passthrough payload is too large for this host".to_string())?;
+    let expected_elements = usize::try_from(bundle.elements)
+        .map_err(|_| "payload element count too large".to_string())?;
+    if !expected_bytes.is_multiple_of(element_size) {
+        return Err(format!(
+            "passthrough tensor {} payload is not aligned to {element_size}-byte elements",
+            bundle.tensor_name
+        ));
+    }
+    if expected_bytes / element_size != expected_elements {
+        return Err(format!(
+            "passthrough tensor {} payload has {} elements, expected {}",
+            bundle.tensor_name,
+            expected_bytes / element_size,
+            expected_elements
+        ));
+    }
+
+    let mut values = Vec::with_capacity(expected_elements);
+    let mut scratch = vec![0_u8; chunk_bytes];
+    let mut read_bytes = 0_usize;
+    let mut carry = Vec::with_capacity(element_size - 1);
+    let mut merge = Vec::with_capacity(chunk_bytes + element_size);
+    loop {
+        let read = file.read(&mut scratch).map_err(|err| {
+            format!(
+                "failed to read {}: {err}",
+                bundle.payload_file.absolute_path.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        read_bytes = read_bytes.saturating_add(read);
+        if read_bytes > expected_bytes {
+            return Err(format!(
+                "passthrough tensor {} payload is larger than declared bytes {}",
+                bundle.tensor_name, expected_bytes
+            ));
+        }
+
+        merge.clear();
+        if carry.is_empty() {
+            merge.extend_from_slice(&scratch[..read]);
+        } else {
+            merge.extend_from_slice(&carry);
+            carry.clear();
+            merge.extend_from_slice(&scratch[..read]);
+        }
+
+        let decode_end = (merge.len() / element_size) * element_size;
+        for bytes in merge[..decode_end].chunks_exact(element_size) {
+            let value = match dtype {
+                "BF16" => {
+                    let raw = u16::from_le_bytes([bytes[0], bytes[1]]);
+                    f32::from_bits(u32::from(raw) << 16)
+                }
+                "F32" => {
+                    let raw = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                    raw
+                }
+                _ => unreachable!(),
+            };
+            values.push(value);
+        }
+        if decode_end < merge.len() {
+            carry.extend_from_slice(&merge[decode_end..]);
+        }
+    }
+    if read_bytes != expected_bytes {
+        return Err(format!(
+            "passthrough tensor {} payload bytes mismatch while reading file: expected {} got {}",
+            bundle.tensor_name, expected_bytes, read_bytes
+        ));
+    }
+    if values.len() != expected_elements {
+        return Err(format!(
+            "passthrough tensor {} payload elements mismatch: expected {} got {}",
+            bundle.tensor_name,
+            expected_elements,
+            values.len()
+        ));
+    }
+    Ok(values)
+}
+
+fn deterministic_f32_vector(elements: usize) -> Vec<f32> {
+    let mut values = Vec::with_capacity(elements);
+    for index in 0..elements {
+        values.push(((index as f32).sin() + 1.0_f32) / 2.0_f32);
+    }
+    values
+}
+
 fn materialize_selected_aq4_matrix(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -2205,7 +2628,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
