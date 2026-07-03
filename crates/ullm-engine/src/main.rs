@@ -73,6 +73,13 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-rmsnorm-mlp-smoke") => package_rmsnorm_mlp_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+        ),
         Some("package-materialize-bench") => package_materialize_bench(
             env::args().nth(2),
             env::args().nth(3),
@@ -2377,6 +2384,378 @@ fn package_mlp_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_rmsnorm_mlp_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    norm_kind: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-rmsnorm-mlp-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let norm_kind = match normalize_norm_kind(Some(norm_kind.as_deref().unwrap_or("post"))) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let norm_tensor = match norm_kind {
+        NormKind::Input => {
+            format!("model.language_model.layers.{layer_index}.input_layernorm.weight")
+        }
+        NormKind::Post => {
+            format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight")
+        }
+    };
+    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+    let selector = TensorSelector::Name(norm_tensor.clone());
+    let norm_bundle =
+        match ullm_engine::package::select_passthrough_payload_bundle(&path, &selector) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("failed to select package passthrough tensor: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    let norm_elements = match usize::try_from(norm_bundle.elements) {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("RMSNorm tensor has zero elements");
+            return ExitCode::from(1);
+        }
+        Err(_) => {
+            eprintln!("RMSNorm tensor element count is too large for this host");
+            return ExitCode::from(1);
+        }
+    };
+    let dtype = match resolve_passthrough_dtype(&norm_bundle, &norm_tensor) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let norm_weight = match read_passthrough_payload_f32_bytes(&norm_bundle, chunk_bytes, dtype) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read passthrough payload for {norm_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if norm_weight.len() != norm_elements {
+        eprintln!(
+            "passthrough tensor element count mismatch for {norm_tensor}: expected {} got {}",
+            norm_elements,
+            norm_weight.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut registry = WeightRegistry::new();
+    let (gate_rows, gate_cols, gate_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &gate_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize gate tensor: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (up_rows, up_cols, up_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &up_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize up tensor: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (down_rows, down_cols, down_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &down_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize down tensor: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if gate_rows != up_rows || gate_cols != up_cols {
+        eprintln!(
+            "gate and up tensor shapes must match: gate=({gate_rows}, {gate_cols}), up=({up_rows}, {up_cols})"
+        );
+        return ExitCode::from(1);
+    }
+    if down_rows != up_cols || down_cols != gate_rows {
+        eprintln!(
+            "down tensor shape mismatch: expected shape ({}, {}) from gate/up, got ({}, {})",
+            gate_cols, gate_rows, down_rows, down_cols
+        );
+        return ExitCode::from(1);
+    }
+
+    let hidden = gate_cols;
+    let intermediate = gate_rows;
+    if norm_elements != hidden {
+        eprintln!(
+            "RMSNorm element count must match MLP hidden dimension: norm={norm_elements}, hidden={hidden}"
+        );
+        return ExitCode::from(1);
+    }
+
+    let epsilon = 1e-5_f32;
+    let input = deterministic_f32_vector(hidden);
+    let input_bytes = encode_f32_to_bytes(&input);
+    let weight_bytes = encode_f32_to_bytes(&norm_weight);
+
+    let mut input_buffer = match context.alloc_buffer(input_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate RMSNorm input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy deterministic RMSNorm input into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after RMSNorm input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut weight_buffer = match context.alloc_buffer(weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate RMSNorm weight buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = weight_buffer.copy_from_host(0, &weight_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy RMSNorm weight into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after RMSNorm weight copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut normed_buffer = match context.alloc_buffer(weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate RMSNorm output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::rmsnorm_f32(
+        &input_buffer,
+        &weight_buffer,
+        hidden,
+        epsilon,
+        &mut normed_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime rmsnorm_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after rmsnorm: {err}");
+        return ExitCode::from(1);
+    }
+
+    let intermediate_bytes = match intermediate.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("intermediate byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut gate_buffer = match context.alloc_buffer(intermediate_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate gate output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &gate_matrix,
+        &normed_buffer,
+        gate_rows,
+        gate_cols,
+        &mut gate_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run gate matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gate matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut up_buffer = match context.alloc_buffer(intermediate_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate up output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &up_matrix,
+        &normed_buffer,
+        up_rows,
+        up_cols,
+        &mut up_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run up matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after up matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut activated_buffer = match context.alloc_buffer(intermediate_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate activated output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::silu_mul_f32(
+        &gate_buffer,
+        &up_buffer,
+        intermediate,
+        &mut activated_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run silu_mul: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after silu_mul: {err}");
+        return ExitCode::from(1);
+    }
+
+    let hidden_bytes = match hidden.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("output byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut output_buffer = match context.alloc_buffer(hidden_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &down_matrix,
+        &activated_buffer,
+        down_rows,
+        down_cols,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run down matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let preview_count = hidden.min(8);
+    let mut output_preview_bytes = vec![0_u8; preview_count * std::mem::size_of::<f32>()];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_preview_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy output preview to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output preview copy: {err}");
+        return ExitCode::from(1);
+    }
+    let preview = decode_f32_le_values(&output_preview_bytes);
+
+    println!(
+        "package-rmsnorm-mlp-smoke package={} layer={} norm_kind={} norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} intermediate={} backend={} device_index={} name=\"{}\" preview={} verified=true",
+        path,
+        layer_index,
+        norm_kind.as_str(),
+        norm_tensor,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        hidden,
+        intermediate,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(&preview)
+    );
+    ExitCode::SUCCESS
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormKind {
     Input,
@@ -2628,7 +3007,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
