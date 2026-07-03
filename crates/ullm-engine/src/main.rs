@@ -5,7 +5,7 @@ use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
-use ullm_engine::package::ReferencedFileRole;
+use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -16,6 +16,12 @@ fn main() -> ExitCode {
         Some("runtime-copy-smoke") => runtime_copy_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
         Some("package-load-smoke") => package_load_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+        ),
+        Some("package-tensor-load-smoke") => package_tensor_load_smoke(
             env::args().nth(2),
             env::args().nth(3),
             env::args().nth(4),
@@ -399,13 +405,117 @@ fn package_load_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_tensor_load_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    tensor_selector: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-tensor-load-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let selector = TensorSelector::parse(tensor_selector.as_deref());
+    let bundle = match ullm_engine::package::select_tensor_payload_bundle(&path, &selector) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            eprintln!("failed to select package tensor payloads: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let index_summary =
+        match roundtrip_file_chunks(&mut context, &mut stream, &bundle.index_file, chunk_bytes) {
+            Ok(summary) => summary,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+    let scale_summary =
+        match roundtrip_file_chunks(&mut context, &mut stream, &bundle.scale_file, chunk_bytes) {
+            Ok(summary) => summary,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+    let codebook_summary = match roundtrip_file_chunks(
+        &mut context,
+        &mut stream,
+        &bundle.codebook_file,
+        chunk_bytes,
+    ) {
+        Ok(summary) => summary,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    println!(
+        "package-tensor-load-smoke package={} tensor_index={} tensor=\"{}\" dtype={} family={} candidate_id={} elements={} groups={} backend={} device_index={} name=\"{}\" chunk_bytes={} verified=true",
+        path,
+        bundle.tensor_index,
+        bundle.tensor_name,
+        bundle.dtype.as_deref().unwrap_or("unknown"),
+        bundle.family.as_deref().unwrap_or("unknown"),
+        bundle.candidate_id.as_deref().unwrap_or("unknown"),
+        bundle.elements,
+        bundle.groups,
+        info.backend,
+        device_index,
+        info.name,
+        chunk_bytes
+    );
+    print_file_roundtrip_summary("tensor-index", &bundle.index_file, &index_summary);
+    print_file_roundtrip_summary("tensor-scale", &bundle.scale_file, &scale_summary);
+    print_file_roundtrip_summary("tensor-codebook", &bundle.codebook_file, &codebook_summary);
+    ExitCode::SUCCESS
+}
+
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]>"
     );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
     );
+    eprintln!("tensor selector: omitted or numeric index, exact tensor name, or unique substring");
 }
 
 fn parse_optional_device_index(device_index: Option<String>) -> Result<u32, ExitCode> {
@@ -460,4 +570,87 @@ fn read_bounded_file(path: &std::path::Path, max_bytes: usize) -> Result<Vec<u8>
         .read_to_end(&mut data)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
     Ok(data)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FileRoundtripSummary {
+    bytes: u64,
+    chunks: u64,
+}
+
+fn roundtrip_file_chunks(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    referenced: &ReferencedFile,
+    chunk_bytes: usize,
+) -> Result<FileRoundtripSummary, String> {
+    if chunk_bytes == 0 {
+        return Err("chunk bytes must be greater than zero".to_string());
+    }
+    let mut file = File::open(&referenced.absolute_path).map_err(|err| {
+        format!(
+            "failed to open {}: {err}",
+            referenced.absolute_path.display()
+        )
+    })?;
+    let capacity = usize::try_from(referenced.bytes)
+        .ok()
+        .map_or(chunk_bytes, |bytes| bytes.min(chunk_bytes));
+    if capacity == 0 {
+        return Err(format!(
+            "referenced file {} is empty",
+            referenced.absolute_path.display()
+        ));
+    }
+    let mut buffer = context.alloc_buffer(capacity)?;
+    let mut input = vec![0_u8; capacity];
+    let mut output = vec![0_u8; capacity];
+    let mut total = 0_u64;
+    let mut chunks = 0_u64;
+
+    loop {
+        let read = file.read(&mut input).map_err(|err| {
+            format!(
+                "failed to read {}: {err}",
+                referenced.absolute_path.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        buffer.copy_from_host(0, &input[..read], Some(stream))?;
+        stream.synchronize()?;
+        buffer.copy_to_host(0, &mut output[..read], Some(stream))?;
+        stream.synchronize()?;
+        if input[..read] != output[..read] {
+            return Err(format!(
+                "runtime roundtrip mismatch for {} at chunk {}",
+                referenced.relative_path, chunks
+            ));
+        }
+        total += read as u64;
+        chunks += 1;
+    }
+
+    if total != referenced.bytes {
+        return Err(format!(
+            "roundtrip byte count mismatch for {}: expected {} got {}",
+            referenced.relative_path, referenced.bytes, total
+        ));
+    }
+    Ok(FileRoundtripSummary {
+        bytes: total,
+        chunks,
+    })
+}
+
+fn print_file_roundtrip_summary(
+    role: &str,
+    referenced: &ReferencedFile,
+    summary: &FileRoundtripSummary,
+) {
+    println!(
+        "  file role={} path={} bytes={} chunks={} verified=true",
+        role, referenced.relative_path, summary.bytes, summary.chunks
+    );
 }

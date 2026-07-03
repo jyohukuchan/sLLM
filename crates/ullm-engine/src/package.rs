@@ -32,6 +32,39 @@ pub struct ReferencedFile {
     pub owner_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TensorPayloadBundle {
+    pub tensor_index: usize,
+    pub tensor_name: String,
+    pub dtype: Option<String>,
+    pub family: Option<String>,
+    pub candidate_id: Option<String>,
+    pub elements: u64,
+    pub groups: u64,
+    pub index_file: ReferencedFile,
+    pub scale_file: ReferencedFile,
+    pub codebook_file: ReferencedFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TensorSelector {
+    First,
+    Index(usize),
+    Name(String),
+}
+
+impl TensorSelector {
+    pub fn parse(value: Option<&str>) -> Self {
+        match value {
+            None | Some("") => Self::First,
+            Some(value) => value
+                .parse::<usize>()
+                .map(Self::Index)
+                .unwrap_or_else(|_| Self::Name(value.to_string())),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferencedFileRole {
     Smallest,
@@ -82,8 +115,13 @@ struct Manifest {
 #[derive(Debug, Deserialize)]
 struct QuantizedTensor {
     name: Option<String>,
+    dtype: Option<String>,
+    family: Option<String>,
+    candidate_id: Option<String>,
     #[serde(default)]
     elements: u64,
+    #[serde(default)]
+    groups: u64,
     index_file: Option<String>,
     scale_file: Option<String>,
     codebook_file: Option<String>,
@@ -175,6 +213,145 @@ pub fn select_existing_referenced_file(
                 .filter(|candidate| candidate.role == role),
         ),
     }
+}
+
+pub fn select_tensor_payload_bundle(
+    path: impl AsRef<Path>,
+    selector: &TensorSelector,
+) -> Result<TensorPayloadBundle, String> {
+    let package_dir = path.as_ref();
+    let manifest = read_manifest(package_dir)?;
+    let tensor_index = select_tensor_index(&manifest, selector)?;
+    let tensor = manifest
+        .tensors
+        .get(tensor_index)
+        .ok_or_else(|| format!("tensor index {tensor_index} is out of range"))?;
+    let tensor_name = tensor
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("tensor#{tensor_index}"));
+
+    let index_file = required_tensor_file(
+        package_dir,
+        tensor,
+        tensor_index,
+        &tensor_name,
+        ReferencedFileRole::TensorIndex,
+        tensor.index_file.as_deref(),
+    )?;
+    let scale_file = required_tensor_file(
+        package_dir,
+        tensor,
+        tensor_index,
+        &tensor_name,
+        ReferencedFileRole::TensorScale,
+        tensor.scale_file.as_deref(),
+    )?;
+    let codebook_file = required_tensor_file(
+        package_dir,
+        tensor,
+        tensor_index,
+        &tensor_name,
+        ReferencedFileRole::TensorCodebook,
+        tensor.codebook_file.as_deref(),
+    )?;
+
+    Ok(TensorPayloadBundle {
+        tensor_index,
+        tensor_name,
+        dtype: tensor.dtype.clone(),
+        family: tensor.family.clone(),
+        candidate_id: tensor.candidate_id.clone(),
+        elements: tensor.elements,
+        groups: tensor.groups,
+        index_file,
+        scale_file,
+        codebook_file,
+    })
+}
+
+fn select_tensor_index(manifest: &Manifest, selector: &TensorSelector) -> Result<usize, String> {
+    match selector {
+        TensorSelector::First => {
+            if manifest.tensors.is_empty() {
+                Err("package contains no quantized tensors".to_string())
+            } else {
+                Ok(0)
+            }
+        }
+        TensorSelector::Index(index) => {
+            if *index < manifest.tensors.len() {
+                Ok(*index)
+            } else {
+                Err(format!(
+                    "tensor index {index} is out of range for {} quantized tensors",
+                    manifest.tensors.len()
+                ))
+            }
+        }
+        TensorSelector::Name(name) => select_tensor_index_by_name(manifest, name),
+    }
+}
+
+fn select_tensor_index_by_name(manifest: &Manifest, name: &str) -> Result<usize, String> {
+    if let Some((index, _)) = manifest
+        .tensors
+        .iter()
+        .enumerate()
+        .find(|(_, tensor)| tensor.name.as_deref() == Some(name))
+    {
+        return Ok(index);
+    }
+
+    let matches: Vec<usize> = manifest
+        .tensors
+        .iter()
+        .enumerate()
+        .filter_map(|(index, tensor)| {
+            tensor
+                .name
+                .as_ref()
+                .filter(|tensor_name| tensor_name.contains(name))
+                .map(|_| index)
+        })
+        .collect();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => Err(format!("no quantized tensor matched selector \"{name}\"")),
+        _ => Err(format!(
+            "tensor selector \"{name}\" matched {} tensors; use an exact name or numeric index",
+            matches.len()
+        )),
+    }
+}
+
+fn required_tensor_file(
+    package_dir: &Path,
+    _tensor: &QuantizedTensor,
+    tensor_index: usize,
+    tensor_name: &str,
+    role: ReferencedFileRole,
+    relative: Option<&str>,
+) -> Result<ReferencedFile, String> {
+    let relative = relative.ok_or_else(|| {
+        format!(
+            "tensor {tensor_index} ({tensor_name}) does not declare {}",
+            role.as_str()
+        )
+    })?;
+    referenced_file_candidate(
+        package_dir,
+        relative,
+        role,
+        Some(tensor_index),
+        Some(tensor_name.to_string()),
+    )
+    .ok_or_else(|| {
+        format!(
+            "tensor {tensor_index} ({tensor_name}) does not reference an existing non-empty {} file",
+            role.as_str()
+        )
+    })
 }
 
 fn select_referenced_file_from_candidates(
@@ -487,5 +664,127 @@ mod tests {
             Some(ReferencedFileRole::Passthrough)
         );
         assert_eq!(ReferencedFileRole::parse("unknown"), None);
+    }
+
+    #[test]
+    fn selects_tensor_payload_bundle_by_index_and_name() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-tensor-bundle-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("tensors/a.idx4"), [1_u8, 2, 3, 4]).unwrap();
+        fs::write(root.join("tensors/a.scale_u8"), [5_u8, 6]).unwrap();
+        fs::write(root.join("codebooks/a.f32"), [7_u8; 64]).unwrap();
+        fs::write(root.join("tensors/b.idx4"), [8_u8, 9, 10, 11]).unwrap();
+        fs::write(root.join("tensors/b.scale_u8"), [12_u8, 13]).unwrap();
+        fs::write(root.join("codebooks/b.f32"), [14_u8; 64]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "layer.0.attn.q_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_q",
+                "candidate_id": "aq4_test",
+                "elements": 8,
+                "groups": 2,
+                "index_file": "tensors/a.idx4",
+                "scale_file": "tensors/a.scale_u8",
+                "codebook_file": "codebooks/a.f32"
+              }, {
+                "name": "layer.0.attn.k_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_k",
+                "candidate_id": "aq4_test",
+                "elements": 8,
+                "groups": 2,
+                "index_file": "tensors/b.idx4",
+                "scale_file": "tensors/b.scale_u8",
+                "codebook_file": "codebooks/b.f32"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let first = select_tensor_payload_bundle(&root, &TensorSelector::First).unwrap();
+        assert_eq!(first.tensor_index, 0);
+        assert_eq!(first.tensor_name, "layer.0.attn.q_proj.weight");
+        assert_eq!(first.dtype.as_deref(), Some("BF16"));
+        assert_eq!(first.family.as_deref(), Some("attn_q"));
+        assert_eq!(first.candidate_id.as_deref(), Some("aq4_test"));
+        assert_eq!(first.elements, 8);
+        assert_eq!(first.groups, 2);
+        assert_eq!(first.index_file.relative_path, "tensors/a.idx4");
+        assert_eq!(first.scale_file.relative_path, "tensors/a.scale_u8");
+        assert_eq!(first.codebook_file.relative_path, "codebooks/a.f32");
+
+        let by_index = select_tensor_payload_bundle(&root, &TensorSelector::Index(1)).unwrap();
+        assert_eq!(by_index.tensor_index, 1);
+        assert_eq!(by_index.tensor_name, "layer.0.attn.k_proj.weight");
+
+        let by_exact = select_tensor_payload_bundle(
+            &root,
+            &TensorSelector::Name("layer.0.attn.k_proj.weight".to_string()),
+        )
+        .unwrap();
+        assert_eq!(by_exact.tensor_index, 1);
+
+        let by_unique_substring =
+            select_tensor_payload_bundle(&root, &TensorSelector::Name("q_proj".to_string()))
+                .unwrap();
+        assert_eq!(by_unique_substring.tensor_index, 0);
+
+        let ambiguous =
+            select_tensor_payload_bundle(&root, &TensorSelector::Name("layer.0".to_string()))
+                .unwrap_err();
+        assert!(ambiguous.contains("matched 2 tensors"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tensor_selector_parser_accepts_index_and_name() {
+        assert_eq!(TensorSelector::parse(None), TensorSelector::First);
+        assert_eq!(TensorSelector::parse(Some("")), TensorSelector::First);
+        assert_eq!(TensorSelector::parse(Some("12")), TensorSelector::Index(12));
+        assert_eq!(
+            TensorSelector::parse(Some("layer.0.attn.q_proj.weight")),
+            TensorSelector::Name("layer.0.attn.q_proj.weight".to_string())
+        );
+    }
+
+    #[test]
+    fn tensor_payload_bundle_rejects_missing_payload_file() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-tensor-bundle-missing-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::write(root.join("tensors/a.idx4"), [1_u8, 2]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "bad",
+                "index_file": "tensors/a.idx4",
+                "scale_file": "tensors/missing.scale_u8",
+                "codebook_file": "codebooks/missing.f32"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let err = select_tensor_payload_bundle(&root, &TensorSelector::First).unwrap_err();
+        assert!(err.contains("tensor-scale"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
