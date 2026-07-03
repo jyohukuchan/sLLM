@@ -114,6 +114,13 @@ ullm_status ullm_runtime_rmsnorm_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_silu_mul_f32(
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *up_buffer,
+    size_t elements,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_smoke_add_f32(
     const float *lhs,
     const float *rhs,

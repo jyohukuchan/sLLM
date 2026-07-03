@@ -94,6 +94,13 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_silu_mul_f32(
+        gate_buffer: *const RawRuntimeBuffer,
+        up_buffer: *const RawRuntimeBuffer,
+        elements: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_smoke_add_f32(
         lhs: *const f32,
         rhs: *const f32,
@@ -398,6 +405,34 @@ pub fn rmsnorm_f32(
     })
 }
 
+pub fn silu_mul_f32(
+    gate_buffer: &RuntimeBuffer,
+    up_buffer: &RuntimeBuffer,
+    elements: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if elements == 0 {
+        return Err("f32 SiLU-mul elements must be greater than zero".to_string());
+    }
+    let required_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 SiLU-mul byte size overflows".to_string())?;
+    check_copy_range(0, required_bytes, gate_buffer.size()?)?;
+    check_copy_range(0, required_bytes, up_buffer.size()?)?;
+    check_copy_range(0, required_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_silu_mul_f32(
+            gate_buffer.raw.as_ptr(),
+            up_buffer.raw.as_ptr(),
+            elements,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 fn status_to_result(status: c_int) -> Result<(), String> {
     match status {
         STATUS_OK => Ok(()),
@@ -627,6 +662,64 @@ mod tests {
     }
 
     #[test]
+    fn cpu_silu_mul_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let gate_values = [-1.0_f32, 0.0, 1.0, 2.0];
+        let up_values = [3.0_f32, -4.0, 5.0, 6.0];
+        let mut gate = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut up = context
+            .alloc_buffer(up_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream))
+            .unwrap();
+        up.copy_from_host(0, &f32s_to_le_bytes(&up_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        silu_mul_f32(
+            &gate,
+            &up,
+            gate_values.len(),
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; gate_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_silu_mul(&gate_values, &up_values);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_silu_mul_f32_rejects_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let gate = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let up = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let err = silu_mul_f32(&gate, &up, 4, &mut output, None).unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
     fn cpu_aq4_dequant_f32_materializes_expected_values() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -845,6 +938,50 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_silu_mul_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let gate_values = [-1.0_f32, 0.0, 1.0, 2.0];
+        let up_values = [3.0_f32, -4.0, 5.0, 6.0];
+        let mut gate = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut up = context
+            .alloc_buffer(up_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream))
+            .unwrap();
+        up.copy_from_host(0, &f32s_to_le_bytes(&up_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        silu_mul_f32(
+            &gate,
+            &up,
+            gate_values.len(),
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; gate_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_silu_mul(&gate_values, &up_values);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
     fn first_hip_context_allocates_runtime_buffer_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -908,6 +1045,17 @@ mod tests {
             .iter()
             .zip(weight)
             .map(|(input, weight)| input * inv_rms * weight)
+            .collect()
+    }
+
+    fn expected_silu_mul(gate: &[f32], up: &[f32]) -> Vec<f32> {
+        gate.iter()
+            .zip(up)
+            .map(|(gate, up)| {
+                let gate = *gate;
+                let sigmoid = 1.0 / (1.0 + (-gate).exp());
+                gate * sigmoid * *up
+            })
             .collect()
     }
 

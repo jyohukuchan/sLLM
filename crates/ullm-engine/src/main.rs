@@ -19,6 +19,7 @@ fn main() -> ExitCode {
         Some("runtime-stream-smoke") => runtime_stream_smoke(env::args().nth(2)),
         Some("runtime-copy-smoke") => runtime_copy_smoke(env::args().nth(2)),
         Some("runtime-rmsnorm-smoke") => runtime_rmsnorm_smoke(env::args().nth(2)),
+        Some("runtime-silu-mul-smoke") => runtime_silu_mul_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
         Some("package-load-smoke") => package_load_smoke(
             env::args().nth(2),
@@ -414,6 +415,145 @@ fn runtime_rmsnorm_smoke(device_index: Option<String>) -> ExitCode {
         info.name,
         elements,
         epsilon,
+        format_f32_preview(&output)
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_silu_mul_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let elements = 4_usize;
+    let epsilon = 1e-5_f32;
+    let gate = [-1.0_f32, 0.0_f32, 1.0_f32, 2.0_f32];
+    let up = [3.0_f32, -4.0_f32, 5.0_f32, 6.0_f32];
+    let expected = gate
+        .iter()
+        .zip(up.iter())
+        .map(|(gate_value, up_value)| {
+            let gate_value = *gate_value;
+            gate_value * (1.0_f32 / (1.0_f32 + (-gate_value).exp())) * *up_value
+        })
+        .collect::<Vec<_>>();
+
+    let mut gate_bytes = Vec::with_capacity(elements * std::mem::size_of::<f32>());
+    let mut up_bytes = Vec::with_capacity(elements * std::mem::size_of::<f32>());
+    for value in &gate {
+        gate_bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in &up {
+        up_bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let output_bytes = elements * std::mem::size_of::<f32>();
+
+    let mut gate_buffer = match context.alloc_buffer(gate_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate gate runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = gate_buffer.copy_from_host(0, &gate_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy gate data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gate copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut up_buffer = match context.alloc_buffer(up_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate up runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = up_buffer.copy_from_host(0, &up_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy up data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after up copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_buffer = match context.alloc_buffer(output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate output runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = ullm_runtime_sys::silu_mul_f32(
+        &gate_buffer,
+        &up_buffer,
+        elements,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime silu_mul_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after silu_mul: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_raw = vec![0_u8; output_bytes];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_raw, Some(&mut stream)) {
+        eprintln!("failed to copy silu_mul result back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let output = decode_f32_le_values(&output_raw);
+
+    if output.len() != expected.len()
+        || expected
+            .iter()
+            .zip(output.iter())
+            .any(|(lhs, rhs)| (*lhs - *rhs).abs() > epsilon)
+    {
+        eprintln!(
+            "runtime silu mul smoke produced unexpected output: output={:?} expected={:?}",
+            output, expected
+        );
+        return ExitCode::from(1);
+    }
+    println!(
+        "runtime-silu-mul-smoke backend={} device_index={} name=\"{}\" elements={} output={} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        elements,
         format_f32_preview(&output)
     );
     ExitCode::SUCCESS
@@ -1404,7 +1544,7 @@ fn package_materialize_matvec_smoke(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
