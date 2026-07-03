@@ -34,6 +34,8 @@
 - `LoadedPayload` が `Arc<RuntimeBuffer>` を保持するようにし、同一 `codebook_file` を参照する複数tensorでcodebook runtime bufferを共有できるようにした。
 - `WeightRegistry` にcodebook poolを追加し、`codebook_payloads` と `resident_payload_bytes` を取得できるようにした。
 - CLI出力では、tensorごとの参照量である `registry_payload_bytes` と、共有後の実resident量である `resident_payload_bytes` を分けて表示するようにした。
+- `LoadedPackage` と `load_package_tensor_prefix` を追加し、package summary、load済みweight registry、registry index一覧をまとめて返すruntime側package handleの最小形を作った。
+- `package-weight-register-many-smoke` は `load_package_tensor_prefix` 経由で動くようにした。
 
 ## 実測・検証
 
@@ -103,6 +105,8 @@
 - `cargo test -p ullm-engine` passed。`ullm-engine` は14 tests。
 - `cargo build -p ullm-engine` passed。
 - codebook dedup後の `cargo test -p ullm-engine` は15 tests passed。
+- package handle追加後の `cargo test -p ullm-engine` は16 tests passed。
+- package handle経由でも、R9700 HIPの先頭16 tensors登録smokeは `registry_payload_bytes=247759872`、`resident_payload_bytes=247759360`、`codebook_payloads=8` で成功した。
 
 ## 作成したgit checkpoints
 
@@ -123,10 +127,10 @@
 - `746d422 Add multi tensor weight registry load`
 - `d19ecd8 Add package tensor bundle listing smoke`
 - `98bd2a6 Deduplicate registry codebook payloads`
+- `929c1aa Add loaded package handle smoke`
 
 ## 次の行動
 
 - `WeightRegistry` で複数tensor分のresident payloadを保持し、同一codebook payloadを共有できるようになった。
-- 次はpackage全体を扱うruntime-side package handleを作り、manifest由来metadata、registry、codebook poolをまとめて保持する。
-- 後続kernelから参照できる形にするため、tensor名・family・candidate id・payload buffer handleをまとめてlookupできるAPIを整える。
+- runtime側package handleの最小形ができた。次は後続kernelから参照できる形にするため、tensor名・family・candidate id・payload buffer handleをまとめてlookupできるAPIを整える。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。

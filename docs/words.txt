@@ -19,6 +19,7 @@ tensor payload bundle:1つのquantized tensorに対応するindex、scale、code
 weight registry:runtime bufferへload済みのweight payloadをtensor単位で保持し、後続kernelから参照できるようにするregistry
 resident payload:runtime buffer上に保持され、後続処理から再利用できるpayload
 codebook pool:複数tensorから参照されるcodebook payloadを一度だけloadし、runtime bufferを共有するためのregistry内管理領域
+loaded package handle:package summary、load済みweight registry、registry index一覧をまとめて保持するruntime側のpackage handle
 chunked load:大きいpayloadを一定byte数ごとに読み、runtime bufferへ順番に転送するload方式
 fused dequant:GEMM/GEMVなどの演算kernel内でcodebook-indexやscaleを実効値へ変換し、そのまま演算へ使う処理
 materialize:変換後のpayloadや実効値を別bufferへ一度書き出す処理
