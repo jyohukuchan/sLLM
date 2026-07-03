@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 use std::ptr::NonNull;
 
 const STATUS_OK: c_int = 0;
@@ -46,6 +46,20 @@ unsafe extern "C" {
     ) -> c_int;
     fn ullm_runtime_buffer_destroy(buffer: *mut RawRuntimeBuffer) -> c_int;
     fn ullm_runtime_buffer_size(buffer: *const RawRuntimeBuffer, bytes: *mut usize) -> c_int;
+    fn ullm_runtime_buffer_copy_from_host(
+        buffer: *mut RawRuntimeBuffer,
+        offset: usize,
+        src: *const c_void,
+        bytes: usize,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_buffer_copy_to_host(
+        buffer: *const RawRuntimeBuffer,
+        offset: usize,
+        dst: *mut c_void,
+        bytes: usize,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_stream_create(
         context: *mut RawRuntimeContext,
         stream: *mut *mut RawRuntimeStream,
@@ -180,6 +194,44 @@ impl RuntimeBuffer {
         status_to_result(unsafe { ullm_runtime_buffer_size(self.raw.as_ptr(), &mut bytes) })?;
         Ok(bytes)
     }
+
+    pub fn copy_from_host(
+        &mut self,
+        offset: usize,
+        src: &[u8],
+        stream: Option<&mut RuntimeStream>,
+    ) -> Result<(), String> {
+        check_copy_range(offset, src.len(), self.size()?)?;
+        let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+        status_to_result(unsafe {
+            ullm_runtime_buffer_copy_from_host(
+                self.raw.as_ptr(),
+                offset,
+                src.as_ptr().cast::<c_void>(),
+                src.len(),
+                stream,
+            )
+        })
+    }
+
+    pub fn copy_to_host(
+        &self,
+        offset: usize,
+        dst: &mut [u8],
+        stream: Option<&mut RuntimeStream>,
+    ) -> Result<(), String> {
+        check_copy_range(offset, dst.len(), self.size()?)?;
+        let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+        status_to_result(unsafe {
+            ullm_runtime_buffer_copy_to_host(
+                self.raw.as_ptr(),
+                offset,
+                dst.as_mut_ptr().cast::<c_void>(),
+                dst.len(),
+                stream,
+            )
+        })
+    }
 }
 
 impl Drop for RuntimeBuffer {
@@ -236,6 +288,16 @@ fn last_error() -> String {
         .into_owned()
 }
 
+fn check_copy_range(offset: usize, bytes: usize, total: usize) -> Result<(), String> {
+    if offset <= total && bytes <= total - offset {
+        Ok(())
+    } else {
+        Err(format!(
+            "runtime buffer copy range is out of bounds: offset={offset} bytes={bytes} total={total}"
+        ))
+    }
+}
+
 fn c_array_to_string<const N: usize>(value: &[c_char; N]) -> String {
     let nul = value.iter().position(|&ch| ch == 0).unwrap_or(N);
     let bytes: Vec<u8> = value[..nul].iter().map(|&ch| ch as u8).collect();
@@ -282,6 +344,40 @@ mod tests {
     }
 
     #[test]
+    fn cpu_buffer_roundtrips_host_data() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut buffer = context.alloc_buffer(64).unwrap();
+        let input: Vec<u8> = (0..48).map(|value| (value * 17 + 3) as u8).collect();
+        buffer.copy_from_host(8, &input, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output = vec![0_u8; input.len()];
+        buffer
+            .copy_to_host(8, &mut output, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn zero_byte_buffer_copy_accepts_end_offset() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut buffer = context.alloc_buffer(8).unwrap();
+        buffer.copy_from_host(8, &[], None).unwrap();
+        let mut output = [];
+        buffer.copy_to_host(8, &mut output, None).unwrap();
+    }
+
+    #[test]
+    fn buffer_copy_rejects_out_of_bounds_range() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut buffer = context.alloc_buffer(4).unwrap();
+        let err = buffer.copy_from_host(3, &[1_u8, 2], None).unwrap_err();
+        assert!(err.contains("out of bounds"));
+    }
+
+    #[test]
     fn first_hip_context_allocates_runtime_buffer_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -301,5 +397,25 @@ mod tests {
         let mut context = RuntimeContext::create(1).unwrap();
         let mut stream = context.create_stream().unwrap();
         stream.synchronize().unwrap();
+    }
+
+    #[test]
+    fn first_hip_buffer_roundtrips_host_data_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut buffer = context.alloc_buffer(4096).unwrap();
+        let input: Vec<u8> = (0..4096).map(|value| (value * 31 + 7) as u8).collect();
+        buffer.copy_from_host(0, &input, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output = vec![0_u8; input.len()];
+        buffer
+            .copy_to_host(0, &mut output, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(output, input);
     }
 }

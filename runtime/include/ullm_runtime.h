@@ -64,6 +64,20 @@ ullm_status ullm_runtime_buffer_size(
     const ullm_runtime_buffer *buffer,
     size_t *bytes);
 
+ullm_status ullm_runtime_buffer_copy_from_host(
+    ullm_runtime_buffer *buffer,
+    size_t offset,
+    const void *src,
+    size_t bytes,
+    ullm_runtime_stream *stream);
+
+ullm_status ullm_runtime_buffer_copy_to_host(
+    const ullm_runtime_buffer *buffer,
+    size_t offset,
+    void *dst,
+    size_t bytes,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_stream_create(
     ullm_runtime_context *context,
     ullm_runtime_stream **stream);

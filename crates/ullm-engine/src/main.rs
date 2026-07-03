@@ -10,6 +10,7 @@ fn main() -> ExitCode {
         Some("runtime-smoke") => runtime_smoke(),
         Some("runtime-memory-smoke") => runtime_memory_smoke(env::args().nth(2)),
         Some("runtime-stream-smoke") => runtime_stream_smoke(env::args().nth(2)),
+        Some("runtime-copy-smoke") => runtime_copy_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
         Some("-h") | Some("--help") | None => {
             print_help();
@@ -159,6 +160,72 @@ fn runtime_stream_smoke(device_index: Option<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn runtime_copy_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let bytes = 4096_usize;
+    let mut buffer = match context.alloc_buffer(bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let input: Vec<u8> = (0..bytes)
+        .map(|index| (index.wrapping_mul(31).wrapping_add(7) & 0xff) as u8)
+        .collect();
+    if let Err(err) = buffer.copy_from_host(0, &input, Some(&mut stream)) {
+        eprintln!("failed to copy host data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after host copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output = vec![0_u8; bytes];
+    if let Err(err) = buffer.copy_to_host(0, &mut output, Some(&mut stream)) {
+        eprintln!("failed to copy runtime buffer data back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after device copy: {err}");
+        return ExitCode::from(1);
+    }
+    if input != output {
+        eprintln!("runtime copy smoke returned mismatched bytes");
+        return ExitCode::from(1);
+    }
+    println!(
+        "runtime-copy-smoke backend={} device_index={} name=\"{}\" bytes={} verified=true",
+        info.backend, device_index, info.name, bytes
+    );
+    ExitCode::SUCCESS
+}
+
 fn inspect_package(path: Option<String>) -> ExitCode {
     let Some(path) = path else {
         eprintln!("inspect-package requires a .ullm.d path");
@@ -201,7 +268,7 @@ fn inspect_package(path: Option<String>) -> ExitCode {
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|inspect-package PATH>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH>"
     );
 }
 

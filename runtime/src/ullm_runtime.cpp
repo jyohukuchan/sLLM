@@ -167,6 +167,17 @@ public:
         return hip_stream_synchronize_(stream) == 0;
     }
 
+    bool copy_async(void *dst, const void *src, size_t bytes, int kind, void *stream, int device_id) {
+        load_once();
+        if (bytes == 0) {
+            return true;
+        }
+        if (hip_memcpy_async_ == nullptr || !set_device(device_id)) {
+            return false;
+        }
+        return hip_memcpy_async_(dst, src, bytes, kind, stream) == 0;
+    }
+
 private:
     using hip_get_device_count_fn = int (*)(int *);
     using hip_runtime_get_version_fn = int (*)(int *);
@@ -179,6 +190,7 @@ private:
     using hip_stream_create_fn = int (*)(void **);
     using hip_stream_destroy_fn = int (*)(void *);
     using hip_stream_synchronize_fn = int (*)(void *);
+    using hip_memcpy_async_fn = int (*)(void *, const void *, size_t, int, void *);
 
     void load_once() {
         std::call_once(load_flag_, [this]() {
@@ -214,6 +226,8 @@ private:
             hip_stream_destroy_ = reinterpret_cast<hip_stream_destroy_fn>(dlsym(handle_, "hipStreamDestroy"));
             hip_stream_synchronize_ = reinterpret_cast<hip_stream_synchronize_fn>(
                 dlsym(handle_, "hipStreamSynchronize"));
+            hip_memcpy_async_ =
+                reinterpret_cast<hip_memcpy_async_fn>(dlsym(handle_, "hipMemcpyAsync"));
 #endif
         });
     }
@@ -231,6 +245,7 @@ private:
     hip_stream_create_fn hip_stream_create_ = nullptr;
     hip_stream_destroy_fn hip_stream_destroy_ = nullptr;
     hip_stream_synchronize_fn hip_stream_synchronize_ = nullptr;
+    hip_memcpy_async_fn hip_memcpy_async_ = nullptr;
 };
 
 HipRuntime &hip_runtime() {
@@ -273,6 +288,9 @@ enum class BackendKind : uint32_t {
     Hip = 1,
 };
 
+constexpr int HIP_MEMCPY_HOST_TO_DEVICE = 1;
+constexpr int HIP_MEMCPY_DEVICE_TO_HOST = 2;
+
 } // namespace
 
 struct ullm_runtime_context {
@@ -293,6 +311,21 @@ struct ullm_runtime_stream {
     int hip_device_id = -1;
     void *stream = nullptr;
 };
+
+namespace {
+
+bool checked_range(size_t offset, size_t bytes, size_t total) {
+    return offset <= total && bytes <= total - offset;
+}
+
+bool stream_matches_buffer(const ullm_runtime_buffer *buffer, const ullm_runtime_stream *stream) {
+    if (stream == nullptr) {
+        return true;
+    }
+    return buffer->backend == stream->backend && buffer->hip_device_id == stream->hip_device_id;
+}
+
+} // namespace
 
 uint32_t ullm_runtime_abi_version(void) {
     return ULLM_RUNTIME_ABI_VERSION;
@@ -465,6 +498,86 @@ ullm_status ullm_runtime_buffer_size(
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
     *bytes = buffer->bytes;
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_buffer_copy_from_host(
+    ullm_runtime_buffer *buffer,
+    size_t offset,
+    const void *src,
+    size_t bytes,
+    ullm_runtime_stream *stream) {
+    if (buffer == nullptr || (bytes > 0 && src == nullptr)) {
+        set_error("copy from host received a null buffer or source pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!checked_range(offset, bytes, buffer->bytes)) {
+        set_error("copy from host range is out of bounds");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(buffer, stream)) {
+        set_error("copy from host stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (bytes == 0) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    auto *dst = static_cast<unsigned char *>(buffer->ptr) + offset;
+    if (buffer->backend == BackendKind::Cpu) {
+        std::memcpy(dst, src, bytes);
+    } else if (!hip_runtime().copy_async(
+                   dst,
+                   src,
+                   bytes,
+                   HIP_MEMCPY_HOST_TO_DEVICE,
+                   stream == nullptr ? nullptr : stream->stream,
+                   buffer->hip_device_id)) {
+        set_error("failed to copy host data to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_buffer_copy_to_host(
+    const ullm_runtime_buffer *buffer,
+    size_t offset,
+    void *dst,
+    size_t bytes,
+    ullm_runtime_stream *stream) {
+    if (buffer == nullptr || (bytes > 0 && dst == nullptr)) {
+        set_error("copy to host received a null buffer or destination pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!checked_range(offset, bytes, buffer->bytes)) {
+        set_error("copy to host range is out of bounds");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(buffer, stream)) {
+        set_error("copy to host stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (bytes == 0) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const auto *src = static_cast<const unsigned char *>(buffer->ptr) + offset;
+    if (buffer->backend == BackendKind::Cpu) {
+        std::memcpy(dst, src, bytes);
+    } else if (!hip_runtime().copy_async(
+                   dst,
+                   src,
+                   bytes,
+                   HIP_MEMCPY_DEVICE_TO_HOST,
+                   stream == nullptr ? nullptr : stream->stream,
+                   buffer->hip_device_id)) {
+        set_error("failed to copy HIP buffer data to host");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
     set_error("");
     return ULLM_STATUS_OK;
 }
