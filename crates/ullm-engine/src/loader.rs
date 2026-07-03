@@ -66,6 +66,26 @@ impl LoadedPackage {
     pub fn into_registry(self) -> WeightRegistry {
         self.registry
     }
+
+    pub fn tensor_by_name(&self, tensor_name: &str) -> Option<&LoadedTensorBundle> {
+        self.registry.tensor_by_name(tensor_name)
+    }
+
+    pub fn payload_by_name_and_role(
+        &self,
+        tensor_name: &str,
+        role: ReferencedFileRole,
+    ) -> Option<&LoadedPayload> {
+        self.registry.get_loaded_payload(tensor_name, role)
+    }
+
+    pub fn find_by_family_candidate(
+        &self,
+        family: &str,
+        candidate_id: &str,
+    ) -> Vec<&LoadedTensorBundle> {
+        self.registry.find_by_family_candidate(family, candidate_id)
+    }
 }
 
 impl LoadedTensorBundle {
@@ -199,6 +219,44 @@ impl WeightRegistry {
         self.tensors
             .iter()
             .find(|bundle| bundle.tensor_name == name)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &LoadedTensorBundle> {
+        self.tensors.iter()
+    }
+
+    pub fn find_by_family_candidate(
+        &self,
+        family: &str,
+        candidate_id: &str,
+    ) -> Vec<&LoadedTensorBundle> {
+        self.tensors
+            .iter()
+            .filter(|bundle| {
+                bundle.family.as_deref() == Some(family)
+                    && bundle.candidate_id.as_deref() == Some(candidate_id)
+            })
+            .collect()
+    }
+
+    pub fn get_loaded_payload(
+        &self,
+        tensor_name: &str,
+        role: ReferencedFileRole,
+    ) -> Option<&LoadedPayload> {
+        let bundle = self.get_by_name(tensor_name)?;
+        match role {
+            ReferencedFileRole::TensorIndex => Some(&bundle.index),
+            ReferencedFileRole::TensorScale => Some(&bundle.scale),
+            ReferencedFileRole::TensorCodebook | ReferencedFileRole::Codebook => {
+                Some(&bundle.codebook)
+            }
+            ReferencedFileRole::Smallest | ReferencedFileRole::Passthrough => None,
+        }
+    }
+
+    pub fn tensor_by_name(&self, tensor_name: &str) -> Option<&LoadedTensorBundle> {
+        self.get_by_name(tensor_name)
     }
 
     fn load_tensor_payload_bundle(
@@ -704,6 +762,224 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("chunk bytes"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_lookup_apis_expose_expected_views() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-lookup-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("tensors/t0.idx4"), [1_u8, 2, 3]).unwrap();
+        fs::write(root.join("tensors/t0.scale_u8"), [4_u8]).unwrap();
+        fs::write(root.join("codebooks/t0.f32"), [5_u8; 2]).unwrap();
+        fs::write(root.join("tensors/t1.idx4"), [6_u8, 7]).unwrap();
+        fs::write(root.join("tensors/t1.scale_u8"), [8_u8, 9]).unwrap();
+        fs::write(root.join("codebooks/t1.f32"), [10_u8; 3]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "layer.0.attn.q_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_q",
+                "candidate_id": "aq4_small",
+                "elements": 10,
+                "groups": 3,
+                "index_file": "tensors/t0.idx4",
+                "scale_file": "tensors/t0.scale_u8",
+                "codebook_file": "codebooks/t0.f32"
+              }, {
+                "name": "layer.1.attn.k_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_k",
+                "candidate_id": "ak4_small",
+                "elements": 11,
+                "groups": 4,
+                "index_file": "tensors/t1.idx4",
+                "scale_file": "tensors/t1.scale_u8",
+                "codebook_file": "codebooks/t1.f32"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let bundle0 = select_tensor_payload_bundle(&root, &TensorSelector::Index(0)).unwrap();
+        let bundle1 = select_tensor_payload_bundle(&root, &TensorSelector::Index(1)).unwrap();
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut registry = WeightRegistry::new();
+        let indexes = registry
+            .load_and_insert_many(
+                &mut context,
+                &mut stream,
+                &[bundle0, bundle1],
+                LoadOptions {
+                    chunk_bytes: 2,
+                    verify: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(indexes, vec![0, 1]);
+
+        let mut all = registry.iter();
+        assert_eq!(
+            all.next().unwrap().tensor_name,
+            "layer.0.attn.q_proj.weight"
+        );
+        assert_eq!(
+            all.next().unwrap().tensor_name,
+            "layer.1.attn.k_proj.weight"
+        );
+        assert!(all.next().is_none());
+
+        assert!(
+            registry
+                .tensor_by_name("layer.0.attn.q_proj.weight")
+                .is_some()
+        );
+        assert!(
+            registry
+                .find_by_family_candidate("attn_k", "ak4_small")
+                .iter()
+                .any(|bundle| bundle.tensor_name == "layer.1.attn.k_proj.weight")
+        );
+        assert!(
+            registry
+                .find_by_family_candidate("attn_k", "aq4_small")
+                .is_empty()
+        );
+
+        let t0_index = registry
+            .get_loaded_payload(
+                "layer.0.attn.q_proj.weight",
+                ReferencedFileRole::TensorIndex,
+            )
+            .unwrap();
+        assert_eq!(t0_index.bytes, 3);
+        let t0_scale = registry
+            .get_loaded_payload(
+                "layer.0.attn.q_proj.weight",
+                ReferencedFileRole::TensorScale,
+            )
+            .unwrap();
+        assert_eq!(t0_scale.bytes, 1);
+        let t0_codebook = registry
+            .get_loaded_payload(
+                "layer.0.attn.q_proj.weight",
+                ReferencedFileRole::TensorCodebook,
+            )
+            .unwrap();
+        assert_eq!(t0_codebook.bytes, 2);
+
+        assert!(
+            registry
+                .get_loaded_payload(
+                    "layer.0.attn.q_proj.weight",
+                    ReferencedFileRole::Passthrough
+                )
+                .is_none()
+        );
+        assert!(
+            registry
+                .get_loaded_payload("missing", ReferencedFileRole::TensorIndex)
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn loaded_package_lookups_delegate_to_registry() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-package-lookup-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("tensors/t0.idx4"), [1_u8, 2]).unwrap();
+        fs::write(root.join("tensors/t0.scale_u8"), [3_u8]).unwrap();
+        fs::write(root.join("codebooks/t0.f32"), [4_u8; 2]).unwrap();
+        fs::write(root.join("tensors/t1.idx4"), [5_u8, 6]).unwrap();
+        fs::write(root.join("tensors/t1.scale_u8"), [7_u8]).unwrap();
+        fs::write(root.join("codebooks/t1.f32"), [8_u8; 2]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "layer.0.attn.q_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_q",
+                "candidate_id": "aq4_small",
+                "elements": 10,
+                "groups": 3,
+                "index_file": "tensors/t0.idx4",
+                "scale_file": "tensors/t0.scale_u8",
+                "codebook_file": "codebooks/t0.f32"
+              }, {
+                "name": "layer.1.attn.k_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_k",
+                "candidate_id": "ak4_small",
+                "elements": 11,
+                "groups": 4,
+                "index_file": "tensors/t1.idx4",
+                "scale_file": "tensors/t1.scale_u8",
+                "codebook_file": "codebooks/t1.f32"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let loaded = load_package_tensor_prefix(
+            &mut context,
+            &mut stream,
+            &root,
+            2,
+            LoadOptions {
+                chunk_bytes: 2,
+                verify: true,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            loaded
+                .tensor_by_name("layer.0.attn.q_proj.weight")
+                .is_some()
+        );
+        assert_eq!(
+            loaded.find_by_family_candidate("attn_k", "ak4_small").len(),
+            1
+        );
+        let payload = loaded
+            .payload_by_name_and_role(
+                "layer.0.attn.q_proj.weight",
+                ReferencedFileRole::TensorScale,
+            )
+            .unwrap();
+        assert_eq!(payload.bytes, 1);
+
+        assert!(
+            loaded
+                .payload_by_name_and_role(
+                    "layer.0.attn.q_proj.weight",
+                    ReferencedFileRole::Passthrough
+                )
+                .is_none()
+        );
+        assert!(loaded.tensor_by_name("missing.tensor.weight").is_none());
 
         fs::remove_dir_all(root).unwrap();
     }
