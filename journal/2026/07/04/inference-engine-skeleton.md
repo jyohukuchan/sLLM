@@ -45,6 +45,7 @@
 - `ullm_runtime_aq4_dequant_f32` にHIP staging fallbackを追加した。HIP bufferをhostへcopyし、CPUでAQ4 dequantし、結果をHIP output bufferへ戻す一時的な正しさ確認用経路であり、性能評価用ではない。
 - `ullm_runtime_aq4_dequant_f32` のHIP pathにHIPRTC JIT kernelを追加した。通常C++ + dlopen設計を保ち、`libhiprtc.so` と `hipModuleLaunchKernel` を実行時に読み込む。
 - JIT kernelはdeviceごとにmodule/functionをcacheし、R9700では `--offload-arch=gfx1201` を優先してcompileする。JITが使えない場合はstaging fallbackへ戻るが、`ULLM_REQUIRE_HIP_AQ4_KERNEL=1` でfallbackを禁止して検証できる。
+- `ullm-engine package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]` を追加した。warmup後にAQ4 materializeを複数回実行し、mean/min/p50/p95 msとoutput GiB/sを出す。
 
 ## 実測・検証
 
@@ -137,6 +138,13 @@
   - R9700 HIP deviceでtensor `model.language_model.layers.0.linear_attn.in_proj_a.weight` をJIT kernel経由でmaterializeできた。
   - previewは `[-0.0031692,0.0031782,-0.0797526,-0.0031692,-0.0031692,-0.0342511,0.0166768,0.0096639]`。
 - HIPRTC JIT kernel追加後の `cargo test --workspace` は成功した。
+- materialize bench追加後の `cargo fmt --all --check`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo test --workspace` は成功した。
+- `target/debug/ullm-engine package-materialize-bench /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 10`
+  - CPU fallback、tensor 0、131,072 elements、output 524,288B、mean `0.739833 ms`、min `0.729465 ms`、p50 `0.741355 ms`、p95 `0.744005 ms`、output `0.659988 GiB/s`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 target/debug/ullm-engine package-materialize-bench /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 20`
+  - R9700 HIP JIT kernel、tensor 0、mean `0.099932 ms`、min `0.091262 ms`、p50 `0.100282 ms`、p95 `0.124773 ms`、output `4.886157 GiB/s`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 target/debug/ullm-engine package-materialize-bench /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 27 20`
+  - R9700 HIP JIT kernel、tensor 27 `model.language_model.layers.11.self_attn.k_proj.weight`、4,194,304 elements、output 16,777,216B、mean `0.168684 ms`、min `0.118922 ms`、p50 `0.133493 ms`、p95 `0.348037 ms`、output `92.629095 GiB/s`。
 
 ## 作成したgit checkpoints
 
@@ -164,9 +172,10 @@
 - `cb1069b Add package materialize smoke`
 - `7f5676a Add HIP AQ4 staging dequant`
 - `7170d6c Add HIPRTC AQ4 dequant kernel`
+- `eacf545 Add package materialize benchmark CLI`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路は通った。次はAQ4 materialize結果を最小linear/attention部品へ接続するか、materializeを飛ばすfused dequant GEMV/GEMM kernel境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路は通り、materialize bench入口もできた。次はAQ4 materialize結果を最小linear/attention部品へ接続するか、materializeを飛ばすfused dequant GEMV/GEMM kernel境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。

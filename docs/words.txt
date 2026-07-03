@@ -26,6 +26,7 @@ chunked load:大きいpayloadを一定byte数ごとに読み、runtime bufferへ
 fused dequant:GEMM/GEMVなどの演算kernel内でcodebook-indexやscaleを実効値へ変換し、そのまま演算へ使う処理
 materialize:変換後のpayloadや実効値を別bufferへ一度書き出す処理
 materialize smoke:runtime buffer上のquantized payloadをf32などへ展開し、後続kernel境界との接続を確認するsmoke
+materialize bench:materialize処理をwarmup後に複数回実行し、平均・最小・p50・p95時間を測るbenchmark入口
 staging fallback:backend bufferを一度host memoryへ移してCPU処理し、結果をbackend bufferへ戻す一時的な正しさ確認用fallback。性能評価用の実装とは扱わない
 block:同じlocal-scaleを共有するraw-valueのまとまり
 block-size:1つのblockに含まれるraw-valueの数
