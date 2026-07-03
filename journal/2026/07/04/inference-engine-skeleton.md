@@ -18,6 +18,9 @@
 - C++ runtime C ABIにcontext、buffer、stream handleを追加した。
 - `runtime-memory-smoke` と `runtime-stream-smoke` CLIを追加した。
 - `KvBlockAllocator` にdefault block-size `16` tokensと断片化telemetryを追加した。
+- C++ runtime C ABIにhost-device-copyを追加し、Rust側に `RuntimeBuffer::copy_from_host` / `copy_to_host` を追加した。
+- `runtime-copy-smoke` CLIを追加し、CPU fallbackとR9700 HIPでbyte payloadの往復検証をできるようにした。
+- `.ullm.d` manifestから最小の非空参照ファイルを選ぶhelperと `package-load-smoke` CLIを追加した。
 
 ## 実測・検証
 
@@ -40,6 +43,14 @@
   - CPU fallback stream synchronize smokeが成功した。
 - `cargo run -p ullm-engine -- runtime-stream-smoke 2`
   - R9700 HIP stream synchronize smokeが成功した。
+- `cargo run -p ullm-engine -- runtime-copy-smoke 0`
+  - CPU fallback runtime bufferへの4096B往復copyが成功した。
+- `cargo run -p ullm-engine -- runtime-copy-smoke 2`
+  - R9700 HIP runtime bufferへの4096B往復copyが成功した。
+- `cargo run -p ullm-engine -- package-load-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0`
+  - `.ullm.d` 内の `codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32` 64BをCPU fallback runtime bufferへloadし、readback検証が成功した。
+- `cargo run -p ullm-engine -- package-load-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2`
+  - 同じ64B payloadをR9700 HIP runtime bufferへloadし、readback検証が成功した。
 - `cargo fmt --all --check` passed。
 - `cargo test --workspace` passed。
 
@@ -54,9 +65,11 @@
 - `e654a62 Add runtime memory allocation smoke`
 - `2635b06 Add KV block allocator telemetry`
 - `f4db981 Add runtime stream smoke`
+- `ca1a97c Add runtime buffer copy smoke`
+- `192d9ae Add package payload load smoke`
 
 ## 次の行動
 
-- `inspect-package` の結果を使って `.ullm.d` のmetadataをruntimeへ渡す準備をする。
-- runtimeにhost/device copy ABIとstream指定copy smokeを追加する。
-- その後、`.ullm.d` の小さなpayloadをruntime bufferへstreaming loadする経路を作る。
+- `package-load-smoke` は現状で最小の非空参照ファイルを選ぶため、実パッケージでは64B codebookが選ばれている。次はtensor index/scale/passthrough payloadを明示選択するloader smokeへ進める。
+- `.ullm.d` manifest metadataをruntime側のweight registryへ渡す設計を具体化する。
+- Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
