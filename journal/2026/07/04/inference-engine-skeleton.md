@@ -46,6 +46,9 @@
 - `ullm_runtime_aq4_dequant_f32` のHIP pathにHIPRTC JIT kernelを追加した。通常C++ + dlopen設計を保ち、`libhiprtc.so` と `hipModuleLaunchKernel` を実行時に読み込む。
 - JIT kernelはdeviceごとにmodule/functionをcacheし、R9700では `--offload-arch=gfx1201` を優先してcompileする。JITが使えない場合はstaging fallbackへ戻るが、`ULLM_REQUIRE_HIP_AQ4_KERNEL=1` でfallbackを禁止して検証できる。
 - `ullm-engine package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]` を追加した。warmup後にAQ4 materializeを複数回実行し、mean/min/p50/p95 msとoutput GiB/sを出す。
+- C++ runtime C ABIに `ullm_runtime_matvec_f32` を追加した。CPU fallback、HIPRTC JIT kernel、HIP staging fallbackを持つ。
+- Rust wrapper `ullm_runtime_sys::matvec_f32` とCPU/HIP単体テストを追加した。
+- `ullm-engine package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]` を追加し、AQ4 materialize済みf32 matrixと決定的f32 input vectorからmatvecを実行できるようにした。
 
 ## 実測・検証
 
@@ -145,6 +148,17 @@
   - R9700 HIP JIT kernel、tensor 0、mean `0.099932 ms`、min `0.091262 ms`、p50 `0.100282 ms`、p95 `0.124773 ms`、output `4.886157 GiB/s`。
 - `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 target/debug/ullm-engine package-materialize-bench /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 27 20`
   - R9700 HIP JIT kernel、tensor 27 `model.language_model.layers.11.self_attn.k_proj.weight`、4,194,304 elements、output 16,777,216B、mean `0.168684 ms`、min `0.118922 ms`、p50 `0.133493 ms`、p95 `0.348037 ms`、output `92.629095 GiB/s`。
+- `cargo fmt --all --check` passed。
+- `cargo test -p ullm-runtime-sys -- --test-threads=1` passed。`ullm-runtime-sys` は17 tests。
+- `cargo test -p ullm-engine -- --test-threads=1` passed。`ullm-engine` は21 tests。
+- `ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 cargo test -p ullm-runtime-sys first_hip_matvec_f32_computes_expected_values_when_available -- --test-threads=1 --nocapture` passed。
+- `cargo test --workspace -- --test-threads=1` passed。
+- `target/debug/ullm-engine package-materialize-matvec-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0`
+  - CPU fallbackでtensor `model.language_model.layers.0.linear_attn.in_proj_a.weight` をmaterialize後にmatvecできた。
+  - shape `32x4096`、`elements=131072`、matvec output bytes `128`、preview `[0.0975437,0.9325269,-0.2814060,0.3502975,0.1769348,-0.0985218,-0.8139886,-0.4275179]`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 target/debug/ullm-engine package-materialize-matvec-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0`
+  - R9700 HIP deviceでAQ4 materialize kernelとf32 matvec kernelの両方を必須指定した状態で成功した。
+  - preview `[0.0975437,0.9325268,-0.2814058,0.3502977,0.1769349,-0.0985219,-0.8139887,-0.4275180]`。CPUとの差は丸め誤差程度。
 
 ## 作成したgit checkpoints
 
@@ -173,9 +187,10 @@
 - `7f5676a Add HIP AQ4 staging dequant`
 - `7170d6c Add HIPRTC AQ4 dequant kernel`
 - `eacf545 Add package materialize benchmark CLI`
+- `905ec4c Add runtime f32 matvec smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路は通り、materialize bench入口もできた。次はAQ4 materialize結果を最小linear/attention部品へ接続するか、materializeを飛ばすfused dequant GEMV/GEMM kernel境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界も通った。次はQwen3系の最小layer forwardに必要なRMSNorm、linear、attention/linear attention、MLPの境界を切り出す。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
