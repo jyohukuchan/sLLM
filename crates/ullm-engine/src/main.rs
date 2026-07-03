@@ -40,6 +40,12 @@ fn main() -> ExitCode {
             env::args().nth(4),
             env::args().nth(5),
         ),
+        Some("package-materialize-smoke") => package_materialize_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+        ),
         Some("-h") | Some("--help") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -719,9 +725,189 @@ fn package_weight_register_many_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_materialize_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    tensor_selector: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-materialize-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let selector = TensorSelector::parse(tensor_selector.as_deref());
+    let bundle = match ullm_engine::package::select_tensor_payload_bundle(&path, &selector) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            eprintln!("failed to select package tensor payloads: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut registry = WeightRegistry::new();
+    let registry_index = match registry.load_and_insert(
+        &mut context,
+        &mut stream,
+        &bundle,
+        LoadOptions {
+            chunk_bytes,
+            verify: true,
+        },
+    ) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("failed to register package tensor payloads: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let Some(loaded) = registry.get(registry_index) else {
+        eprintln!("registered tensor disappeared from weight registry");
+        return ExitCode::from(1);
+    };
+
+    let scale_format = match loaded.scale_format.as_deref() {
+        Some(value) => value,
+        None => {
+            eprintln!("selected tensor does not declare scale_format");
+            return ExitCode::from(1);
+        }
+    };
+    let scale_values = match ullm_engine::aq::scale_values(scale_format) {
+        Ok(values) => values,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let group_size = match loaded.group_size {
+        Some(value) if value > 0 => value,
+        Some(_) | None => {
+            eprintln!("selected tensor does not declare a valid group_size");
+            return ExitCode::from(1);
+        }
+    };
+    let tensor_scale = match loaded.tensor_scale {
+        Some(value) if value.is_finite() && value > 0.0 => value,
+        Some(_) | None => {
+            eprintln!("selected tensor does not declare a valid tensor_scale");
+            return ExitCode::from(1);
+        }
+    };
+    if loaded.index_encoding.as_deref() != Some("idx4_low_nibble_first") {
+        eprintln!("selected tensor uses unsupported index encoding");
+        return ExitCode::from(1);
+    }
+    if loaded.scale_encoding.as_deref() != Some("u8_scale_table_index") {
+        eprintln!("selected tensor uses unsupported scale encoding");
+        return ExitCode::from(1);
+    }
+    let elements = match usize::try_from(loaded.elements) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("selected tensor has too many elements for this host");
+            return ExitCode::from(1);
+        }
+    };
+    let output_bytes = match elements.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("materialized output byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut output = match context.alloc_buffer(output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate materialized output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::aq4_dequant_f32(
+        loaded.index.buffer.as_ref(),
+        loaded.scale.buffer.as_ref(),
+        loaded.codebook.buffer.as_ref(),
+        &scale_values,
+        group_size,
+        tensor_scale,
+        elements,
+        &mut output,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to materialize AQ4 tensor: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after materialize: {err}");
+        return ExitCode::from(1);
+    }
+
+    let preview_count = elements.min(8);
+    let mut preview_bytes = vec![0_u8; preview_count * std::mem::size_of::<f32>()];
+    if let Err(err) = output.copy_to_host(0, &mut preview_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy materialized preview back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after preview copy: {err}");
+        return ExitCode::from(1);
+    }
+    let preview = decode_f32_le_values(&preview_bytes);
+    println!(
+        "package-materialize-smoke package={} registry_index={} tensor_index={} tensor=\"{}\" elements={} output_bytes={} scale_format={} scale_count={} group_size={} tensor_scale={:.9} backend={} device_index={} name=\"{}\" preview={} verified=true",
+        path,
+        registry_index,
+        loaded.tensor_index,
+        loaded.tensor_name,
+        elements,
+        output_bytes,
+        scale_format,
+        scale_values.len(),
+        group_size,
+        tensor_scale,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(&preview)
+    );
+    ExitCode::SUCCESS
+}
+
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]>"
     );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
@@ -880,4 +1066,20 @@ fn print_loaded_payload_summary(payload: &LoadedPayload) {
         payload.chunks,
         buffer_bytes
     );
+}
+
+fn decode_f32_le_values(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("f32 chunk")))
+        .collect()
+}
+
+fn format_f32_preview(values: &[f32]) -> String {
+    let joined = values
+        .iter()
+        .map(|value| format!("{value:.7}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{joined}]")
 }
