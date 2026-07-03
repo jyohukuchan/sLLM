@@ -5,6 +5,7 @@ use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
+use ullm_engine::loader::{LoadOptions, LoadedPayload, WeightRegistry};
 use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 
 fn main() -> ExitCode {
@@ -22,6 +23,12 @@ fn main() -> ExitCode {
             env::args().nth(5),
         ),
         Some("package-tensor-load-smoke") => package_tensor_load_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+        ),
+        Some("package-weight-register-smoke") => package_weight_register_smoke(
             env::args().nth(2),
             env::args().nth(3),
             env::args().nth(4),
@@ -508,9 +515,106 @@ fn package_tensor_load_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_weight_register_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    tensor_selector: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-weight-register-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let selector = TensorSelector::parse(tensor_selector.as_deref());
+    let bundle = match ullm_engine::package::select_tensor_payload_bundle(&path, &selector) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            eprintln!("failed to select package tensor payloads: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut registry = WeightRegistry::new();
+    let registry_index = match registry.load_and_insert(
+        &mut context,
+        &mut stream,
+        &bundle,
+        LoadOptions {
+            chunk_bytes,
+            verify: true,
+        },
+    ) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("failed to register package tensor payloads: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let Some(loaded) = registry.get(registry_index) else {
+        eprintln!("registered tensor disappeared from weight registry");
+        return ExitCode::from(1);
+    };
+
+    println!(
+        "package-weight-register-smoke package={} registry_index={} registry_tensors={} registry_payload_bytes={} tensor_index={} tensor=\"{}\" dtype={} family={} candidate_id={} elements={} groups={} backend={} device_index={} name=\"{}\" chunk_bytes={} verified=true",
+        path,
+        registry_index,
+        registry.len(),
+        registry.total_payload_bytes(),
+        loaded.tensor_index,
+        loaded.tensor_name,
+        loaded.dtype.as_deref().unwrap_or("unknown"),
+        loaded.family.as_deref().unwrap_or("unknown"),
+        loaded.candidate_id.as_deref().unwrap_or("unknown"),
+        loaded.elements,
+        loaded.groups,
+        info.backend,
+        device_index,
+        info.name,
+        chunk_bytes
+    );
+    print_loaded_payload_summary(&loaded.index);
+    print_loaded_payload_summary(&loaded.scale);
+    print_loaded_payload_summary(&loaded.codebook);
+    ExitCode::SUCCESS
+}
+
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]>"
     );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
@@ -652,5 +756,21 @@ fn print_file_roundtrip_summary(
     println!(
         "  file role={} path={} bytes={} chunks={} verified=true",
         role, referenced.relative_path, summary.bytes, summary.chunks
+    );
+}
+
+fn print_loaded_payload_summary(payload: &LoadedPayload) {
+    let buffer_bytes = payload
+        .buffer
+        .size()
+        .map(|bytes| bytes.to_string())
+        .unwrap_or_else(|err| format!("error:{err}"));
+    println!(
+        "  registered role={} path={} bytes={} chunks={} buffer_bytes={} resident=true",
+        payload.role.as_str(),
+        payload.relative_path,
+        payload.bytes,
+        payload.chunks,
+        buffer_bytes
     );
 }
