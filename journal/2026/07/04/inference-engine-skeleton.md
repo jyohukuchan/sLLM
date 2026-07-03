@@ -368,6 +368,16 @@
 - `docs/words.txt` now defines `runtime add smoke` and records the planned `package linear attention block smoke` term.
 - Next useful inference-engine step: connect `input_layernorm.weight -> package-linear-attn-workflow-smoke -> runtime add` into `package-linear-attn-block-smoke`.
 
+2026-07-04 inference engine package linear attention block smoke:
+- Commit `504c582 Add package linear attention block smoke` adds `ullm-engine package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]`.
+- The smoke reuses the linear attention workflow implementation and enables block mode: deterministic residual input -> real `input_layernorm.weight` RMSNorm -> real linear-attention workflow -> runtime f32 residual add.
+- Existing `package-linear-attn-workflow-smoke` remains supported through the same impl with block mode disabled; CPU workflow regression smoke still passed.
+- Validation passed: `cargo fmt --all --check`, `cargo check -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, `cargo build -p ullm-engine`, `cargo test --workspace -- --test-threads=1`, `git diff --check`, CPU workflow smoke, CPU block smoke, and R9700 block smoke with all relevant HIP kernels required including `ULLM_REQUIRE_HIP_ADD_KERNEL=1`.
+- CPU block smoke on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d`, layer0, seq4: input norm max diff `0`, conv max diff `0`, gate/beta `0.000000003`, recurrent `0.000000004`, norm `0.000000015`, output `0`, block add `0.000000030`.
+- R9700 block smoke with kernel-required flags: input norm max diff `0.000000715`, conv `0.000000015`, gate/beta `0.000000238`, recurrent `0.000000007`, norm `0.000000238`, activation `0.000000006`, output `0.000000063`, block add `0.000000060`.
+- Block output preview on CPU/R9700 matched: `[0.5000086,0.9206614,0.9546525,0.5705631,0.1215869,0.0205140,0.3602587,0.8284775]`.
+- Next useful inference-engine step: add post-attention MLP residual composition, or start regular self-attention boundaries for non-linear-attention Qwen3 layers.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -414,9 +424,10 @@
 - `73e518b Add package linear attention post smoke`
 - `a6e47a2 Add package linear attention workflow smoke`
 - `e20a16b Add runtime f32 add smoke`
+- `504c582 Add package linear attention block smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、f32 add境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smokeも通った。次はlinear attentionをdecoder block残差へ接続するか、通常attention本体の計算境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、f32 add境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smokeも通った。次はMLP側の残差接続か、通常attention本体の計算境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
