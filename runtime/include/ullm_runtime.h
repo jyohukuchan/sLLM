@@ -35,6 +35,8 @@ typedef struct ullm_runtime_context ullm_runtime_context;
 
 typedef struct ullm_runtime_buffer ullm_runtime_buffer;
 
+typedef struct ullm_runtime_stream ullm_runtime_stream;
+
 uint32_t ullm_runtime_abi_version(void);
 
 ullm_status ullm_runtime_get_last_error(char *buffer, size_t *buffer_len);
@@ -61,6 +63,14 @@ ullm_status ullm_runtime_buffer_destroy(ullm_runtime_buffer *buffer);
 ullm_status ullm_runtime_buffer_size(
     const ullm_runtime_buffer *buffer,
     size_t *bytes);
+
+ullm_status ullm_runtime_stream_create(
+    ullm_runtime_context *context,
+    ullm_runtime_stream **stream);
+
+ullm_status ullm_runtime_stream_destroy(ullm_runtime_stream *stream);
+
+ullm_status ullm_runtime_stream_synchronize(ullm_runtime_stream *stream);
 
 ullm_status ullm_runtime_smoke_add_f32(
     const float *lhs,

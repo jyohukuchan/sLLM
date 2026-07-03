@@ -133,6 +133,40 @@ public:
         return hip_free_(ptr) == 0;
     }
 
+    void *create_stream(int device_id) {
+        load_once();
+        if (hip_stream_create_ == nullptr || !set_device(device_id)) {
+            return nullptr;
+        }
+        void *stream = nullptr;
+        if (hip_stream_create_(&stream) != 0) {
+            return nullptr;
+        }
+        return stream;
+    }
+
+    bool destroy_stream(void *stream, int device_id) {
+        load_once();
+        if (stream == nullptr) {
+            return true;
+        }
+        if (hip_stream_destroy_ == nullptr || !set_device(device_id)) {
+            return false;
+        }
+        return hip_stream_destroy_(stream) == 0;
+    }
+
+    bool synchronize_stream(void *stream, int device_id) {
+        load_once();
+        if (stream == nullptr) {
+            return true;
+        }
+        if (hip_stream_synchronize_ == nullptr || !set_device(device_id)) {
+            return false;
+        }
+        return hip_stream_synchronize_(stream) == 0;
+    }
+
 private:
     using hip_get_device_count_fn = int (*)(int *);
     using hip_runtime_get_version_fn = int (*)(int *);
@@ -142,6 +176,9 @@ private:
     using hip_set_device_fn = int (*)(int);
     using hip_malloc_fn = int (*)(void **, size_t);
     using hip_free_fn = int (*)(void *);
+    using hip_stream_create_fn = int (*)(void **);
+    using hip_stream_destroy_fn = int (*)(void *);
+    using hip_stream_synchronize_fn = int (*)(void *);
 
     void load_once() {
         std::call_once(load_flag_, [this]() {
@@ -173,6 +210,10 @@ private:
             hip_set_device_ = reinterpret_cast<hip_set_device_fn>(dlsym(handle_, "hipSetDevice"));
             hip_malloc_ = reinterpret_cast<hip_malloc_fn>(dlsym(handle_, "hipMalloc"));
             hip_free_ = reinterpret_cast<hip_free_fn>(dlsym(handle_, "hipFree"));
+            hip_stream_create_ = reinterpret_cast<hip_stream_create_fn>(dlsym(handle_, "hipStreamCreate"));
+            hip_stream_destroy_ = reinterpret_cast<hip_stream_destroy_fn>(dlsym(handle_, "hipStreamDestroy"));
+            hip_stream_synchronize_ = reinterpret_cast<hip_stream_synchronize_fn>(
+                dlsym(handle_, "hipStreamSynchronize"));
 #endif
         });
     }
@@ -187,6 +228,9 @@ private:
     hip_set_device_fn hip_set_device_ = nullptr;
     hip_malloc_fn hip_malloc_ = nullptr;
     hip_free_fn hip_free_ = nullptr;
+    hip_stream_create_fn hip_stream_create_ = nullptr;
+    hip_stream_destroy_fn hip_stream_destroy_ = nullptr;
+    hip_stream_synchronize_fn hip_stream_synchronize_ = nullptr;
 };
 
 HipRuntime &hip_runtime() {
@@ -242,6 +286,12 @@ struct ullm_runtime_buffer {
     int hip_device_id = -1;
     void *ptr = nullptr;
     size_t bytes = 0;
+};
+
+struct ullm_runtime_stream {
+    BackendKind backend = BackendKind::Cpu;
+    int hip_device_id = -1;
+    void *stream = nullptr;
 };
 
 uint32_t ullm_runtime_abi_version(void) {
@@ -415,6 +465,66 @@ ullm_status ullm_runtime_buffer_size(
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
     *bytes = buffer->bytes;
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_stream_create(
+    ullm_runtime_context *context,
+    ullm_runtime_stream **stream) {
+    if (context == nullptr || stream == nullptr) {
+        set_error("stream creation received a null context or output pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    *stream = nullptr;
+    auto *created = new (std::nothrow) ullm_runtime_stream();
+    if (created == nullptr) {
+        set_error("failed to allocate stream handle");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    created->backend = context->backend;
+    created->hip_device_id = context->hip_device_id;
+    if (context->backend == BackendKind::Hip) {
+        created->stream = hip_runtime().create_stream(context->hip_device_id);
+        if (created->stream == nullptr) {
+            delete created;
+            set_error("failed to create HIP stream");
+            return ULLM_STATUS_RUNTIME_ERROR;
+        }
+    }
+    *stream = created;
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_stream_destroy(ullm_runtime_stream *stream) {
+    if (stream == nullptr) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    bool ok = true;
+    if (stream->backend == BackendKind::Hip) {
+        ok = hip_runtime().destroy_stream(stream->stream, stream->hip_device_id);
+    }
+    delete stream;
+    if (!ok) {
+        set_error("failed to destroy runtime stream");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_stream_synchronize(ullm_runtime_stream *stream) {
+    if (stream == nullptr) {
+        set_error("stream synchronize received a null stream");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (stream->backend == BackendKind::Hip &&
+        !hip_runtime().synchronize_stream(stream->stream, stream->hip_device_id)) {
+        set_error("failed to synchronize HIP stream");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
     set_error("");
     return ULLM_STATUS_OK;
 }

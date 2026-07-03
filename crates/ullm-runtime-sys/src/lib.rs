@@ -13,6 +13,8 @@ enum RawRuntimeContext {}
 
 enum RawRuntimeBuffer {}
 
+enum RawRuntimeStream {}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct RawDeviceInfo {
@@ -44,6 +46,12 @@ unsafe extern "C" {
     ) -> c_int;
     fn ullm_runtime_buffer_destroy(buffer: *mut RawRuntimeBuffer) -> c_int;
     fn ullm_runtime_buffer_size(buffer: *const RawRuntimeBuffer, bytes: *mut usize) -> c_int;
+    fn ullm_runtime_stream_create(
+        context: *mut RawRuntimeContext,
+        stream: *mut *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_stream_destroy(stream: *mut RawRuntimeStream) -> c_int;
+    fn ullm_runtime_stream_synchronize(stream: *mut RawRuntimeStream) -> c_int;
     fn ullm_runtime_smoke_add_f32(
         lhs: *const f32,
         rhs: *const f32,
@@ -72,6 +80,11 @@ pub struct RuntimeContext {
 #[derive(Debug)]
 pub struct RuntimeBuffer {
     raw: NonNull<RawRuntimeBuffer>,
+}
+
+#[derive(Debug)]
+pub struct RuntimeStream {
+    raw: NonNull<RawRuntimeStream>,
 }
 
 pub fn abi_version() -> u32 {
@@ -146,6 +159,13 @@ impl RuntimeContext {
         let raw = NonNull::new(raw).ok_or_else(|| "runtime returned a null buffer".to_string())?;
         Ok(RuntimeBuffer { raw })
     }
+
+    pub fn create_stream(&mut self) -> Result<RuntimeStream, String> {
+        let mut raw = std::ptr::null_mut();
+        status_to_result(unsafe { ullm_runtime_stream_create(self.raw.as_ptr(), &mut raw) })?;
+        let raw = NonNull::new(raw).ok_or_else(|| "runtime returned a null stream".to_string())?;
+        Ok(RuntimeStream { raw })
+    }
 }
 
 impl Drop for RuntimeContext {
@@ -165,6 +185,18 @@ impl RuntimeBuffer {
 impl Drop for RuntimeBuffer {
     fn drop(&mut self) {
         let _ = unsafe { ullm_runtime_buffer_destroy(self.raw.as_ptr()) };
+    }
+}
+
+impl RuntimeStream {
+    pub fn synchronize(&mut self) -> Result<(), String> {
+        status_to_result(unsafe { ullm_runtime_stream_synchronize(self.raw.as_ptr()) })
+    }
+}
+
+impl Drop for RuntimeStream {
+    fn drop(&mut self) {
+        let _ = unsafe { ullm_runtime_stream_destroy(self.raw.as_ptr()) };
     }
 }
 
@@ -243,6 +275,13 @@ mod tests {
     }
 
     #[test]
+    fn cpu_context_creates_and_synchronizes_stream() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        stream.synchronize().unwrap();
+    }
+
+    #[test]
     fn first_hip_context_allocates_runtime_buffer_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -252,5 +291,15 @@ mod tests {
         assert_eq!(info.backend, "hip");
         let buffer = context.alloc_buffer(4096).unwrap();
         assert_eq!(buffer.size().unwrap(), 4096);
+    }
+
+    #[test]
+    fn first_hip_context_creates_stream_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        stream.synchronize().unwrap();
     }
 }

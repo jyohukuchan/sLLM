@@ -9,6 +9,7 @@ fn main() -> ExitCode {
         Some("inspect-devices") => inspect_devices(),
         Some("runtime-smoke") => runtime_smoke(),
         Some("runtime-memory-smoke") => runtime_memory_smoke(env::args().nth(2)),
+        Some("runtime-stream-smoke") => runtime_stream_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
         Some("-h") | Some("--help") | None => {
             print_help();
@@ -76,15 +77,9 @@ fn runtime_smoke() -> ExitCode {
 }
 
 fn runtime_memory_smoke(device_index: Option<String>) -> ExitCode {
-    let device_index = match device_index {
-        Some(value) => match value.parse::<u32>() {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("invalid device index: {err}");
-                return ExitCode::from(2);
-            }
-        },
-        None => 0,
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
     };
     let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
         Ok(context) => context,
@@ -125,6 +120,43 @@ fn runtime_memory_smoke(device_index: Option<String>) -> ExitCode {
         eprintln!("runtime memory smoke returned unexpected buffer size");
         ExitCode::from(1)
     }
+}
+
+fn runtime_stream_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream: {err}");
+        return ExitCode::from(1);
+    }
+    println!(
+        "runtime-stream-smoke backend={} device_index={} name=\"{}\" synchronized=true",
+        info.backend, device_index, info.name
+    );
+    ExitCode::SUCCESS
 }
 
 fn inspect_package(path: Option<String>) -> ExitCode {
@@ -169,6 +201,19 @@ fn inspect_package(path: Option<String>) -> ExitCode {
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|inspect-package PATH>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|inspect-package PATH>"
     );
+}
+
+fn parse_optional_device_index(device_index: Option<String>) -> Result<u32, ExitCode> {
+    match device_index {
+        Some(value) => match value.parse::<u32>() {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                eprintln!("invalid device index: {err}");
+                Err(ExitCode::from(2))
+            }
+        },
+        None => Ok(0),
+    }
 }
