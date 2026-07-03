@@ -49,6 +49,9 @@
 - C++ runtime C ABIに `ullm_runtime_matvec_f32` を追加した。CPU fallback、HIPRTC JIT kernel、HIP staging fallbackを持つ。
 - Rust wrapper `ullm_runtime_sys::matvec_f32` とCPU/HIP単体テストを追加した。
 - `ullm-engine package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]` を追加し、AQ4 materialize済みf32 matrixと決定的f32 input vectorからmatvecを実行できるようにした。
+- C++ runtime C ABIに `ullm_runtime_rmsnorm_f32` を追加した。単一f32 vector向けのCPU fallback、HIPRTC JIT kernel、HIP staging fallbackを持つ。
+- Rust wrapper `ullm_runtime_sys::rmsnorm_f32` とCPU/HIP単体テストを追加した。
+- `ullm-engine runtime-rmsnorm-smoke [DEVICE_INDEX]` を追加し、RMSNormの最小runtime境界をCPU/R9700で検証できるようにした。
 
 ## 実測・検証
 
@@ -159,6 +162,17 @@
 - `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 target/debug/ullm-engine package-materialize-matvec-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0`
   - R9700 HIP deviceでAQ4 materialize kernelとf32 matvec kernelの両方を必須指定した状態で成功した。
   - preview `[0.0975437,0.9325268,-0.2814058,0.3502977,0.1769349,-0.0985219,-0.8139887,-0.4275180]`。CPUとの差は丸め誤差程度。
+- `cargo fmt --all --check` passed。
+- `cargo test -p ullm-runtime-sys -- --test-threads=1` passed。`ullm-runtime-sys` は20 tests。
+- `cargo test -p ullm-engine -- --test-threads=1` passed。`ullm-engine` は21 tests。
+- `ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 cargo test -p ullm-runtime-sys first_hip_rmsnorm_f32_computes_expected_values_when_available -- --test-threads=1 --nocapture` passed。
+- `target/debug/ullm-engine runtime-rmsnorm-smoke 0`
+  - CPU fallbackで `input=[1.0,2.0,-3.0,4.0]`、`weight=[0.5,1.0,1.5,-2.0]`、`epsilon=1e-5` のRMSNorm smokeが成功した。
+  - output `[0.1825741,0.7302963,-1.6431667,-2.9211850]`。
+- `ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 target/debug/ullm-engine runtime-rmsnorm-smoke 2`
+  - R9700 HIP deviceでRMSNorm kernel必須指定のsmokeが成功した。
+  - output `[0.1825741,0.7302963,-1.6431667,-2.9211850]`。
+- `cargo test --workspace -- --test-threads=1` passed。
 
 ## 作成したgit checkpoints
 
@@ -188,9 +202,10 @@
 - `7170d6c Add HIPRTC AQ4 dequant kernel`
 - `eacf545 Add package materialize benchmark CLI`
 - `905ec4c Add runtime f32 matvec smoke`
+- `3a78114 Add runtime f32 RMSNorm smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界も通った。次はQwen3系の最小layer forwardに必要なRMSNorm、linear、attention/linear attention、MLPの境界を切り出す。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界とRMSNorm境界も通った。次はQwen3系の最小layer forwardに必要なactivation、attention/linear attention、MLPの境界を切り出す。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
