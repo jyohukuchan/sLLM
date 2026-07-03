@@ -80,6 +80,13 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-linear-attn-proj-smoke") => package_linear_attn_proj_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+        ),
         Some("package-materialize-bench") => package_materialize_bench(
             env::args().nth(2),
             env::args().nth(3),
@@ -2756,10 +2763,244 @@ fn package_rmsnorm_mlp_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_linear_attn_proj_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    projection: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-proj-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let projection = match parse_linear_attn_projection(projection.as_deref()) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let requested_projections = match projection {
+        LinearAttnProjection::A => {
+            vec![(
+                "a",
+                format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_a.weight"),
+            )]
+        }
+        LinearAttnProjection::B => {
+            vec![(
+                "b",
+                format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_b.weight"),
+            )]
+        }
+        LinearAttnProjection::Qkv => {
+            vec![(
+                "qkv",
+                format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight"),
+            )]
+        }
+        LinearAttnProjection::Z => {
+            vec![(
+                "z",
+                format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_z.weight"),
+            )]
+        }
+        LinearAttnProjection::Out => {
+            vec![(
+                "out",
+                format!("model.language_model.layers.{layer_index}.linear_attn.out_proj.weight"),
+            )]
+        }
+        LinearAttnProjection::All => vec![
+            (
+                "a",
+                format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_a.weight"),
+            ),
+            (
+                "b",
+                format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_b.weight"),
+            ),
+            (
+                "qkv",
+                format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight"),
+            ),
+            (
+                "z",
+                format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_z.weight"),
+            ),
+            (
+                "out",
+                format!("model.language_model.layers.{layer_index}.linear_attn.out_proj.weight"),
+            ),
+        ],
+    };
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut registry = WeightRegistry::new();
+    let mut input_buffer: Option<ullm_runtime_sys::RuntimeBuffer> = None;
+    let mut hidden = None;
+    for (projection_name, tensor_name) in requested_projections {
+        let (rows, cols, matrix) = match materialize_selected_aq4_matrix(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            &path,
+            &tensor_name,
+            chunk_bytes,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("failed to materialize projection {projection_name}: {err}");
+                return ExitCode::from(1);
+            }
+        };
+
+        match hidden {
+            Some(expected) if expected != cols => {
+                eprintln!(
+                    "projection {projection_name} tensor {tensor_name} has cols={cols}, expected hidden={expected}"
+                );
+                return ExitCode::from(1);
+            }
+            Some(_) => {}
+            None => {
+                hidden = Some(cols);
+                let input = deterministic_f32_vector(cols);
+                let input_bytes = encode_f32_to_bytes(&input);
+                let mut buffer = match context.alloc_buffer(input_bytes.len()) {
+                    Ok(buffer) => buffer,
+                    Err(err) => {
+                        eprintln!("failed to allocate shared input buffer: {err}");
+                        return ExitCode::from(1);
+                    }
+                };
+                if let Err(err) = buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+                    eprintln!(
+                        "failed to copy deterministic input data into shared runtime buffer: {err}"
+                    );
+                    return ExitCode::from(1);
+                }
+                if let Err(err) = stream.synchronize() {
+                    eprintln!("failed to synchronize runtime stream after input copy: {err}");
+                    return ExitCode::from(1);
+                }
+                input_buffer = Some(buffer);
+            }
+        }
+
+        let Some(shared_input) = input_buffer.as_mut() else {
+            eprintln!("shared runtime input buffer was not initialized");
+            return ExitCode::from(1);
+        };
+
+        let output_bytes = match rows.checked_mul(std::mem::size_of::<f32>()) {
+            Some(value) => value,
+            None => {
+                eprintln!("output byte size overflows for projection {projection_name}");
+                return ExitCode::from(1);
+            }
+        };
+        let mut output = match context.alloc_buffer(output_bytes) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate output buffer for {projection_name}: {err}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(err) = ullm_runtime_sys::matvec_f32(
+            &matrix,
+            shared_input,
+            rows,
+            cols,
+            &mut output,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run matvec for projection {projection_name}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after matvec: {err}");
+            return ExitCode::from(1);
+        }
+
+        let preview_count = rows.min(8);
+        let mut output_preview_bytes = vec![0_u8; preview_count * std::mem::size_of::<f32>()];
+        if let Err(err) = output.copy_to_host(0, &mut output_preview_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy matvec preview for {projection_name}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after preview copy: {err}");
+            return ExitCode::from(1);
+        }
+        let preview = decode_f32_le_values(&output_preview_bytes);
+        println!(
+            "package-linear-attn-proj-smoke package={} layer={} projection={} tensor=\"{}\" hidden={} rows={} backend={} device_index={} name=\"{}\" preview={} verified=true",
+            path,
+            layer_index,
+            projection_name,
+            tensor_name,
+            cols,
+            rows,
+            info.backend,
+            device_index,
+            info.name,
+            format_f32_preview(&preview)
+        );
+    }
+    ExitCode::SUCCESS
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormKind {
     Input,
     Post,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LinearAttnProjection {
+    A,
+    B,
+    Qkv,
+    Z,
+    Out,
+    All,
 }
 
 impl NormKind {
@@ -2767,6 +3008,21 @@ impl NormKind {
         match self {
             Self::Input => "input",
             Self::Post => "post",
+        }
+    }
+}
+
+fn parse_linear_attn_projection(value: Option<&str>) -> Result<LinearAttnProjection, ExitCode> {
+    match value.unwrap_or("all") {
+        "a" => Ok(LinearAttnProjection::A),
+        "b" => Ok(LinearAttnProjection::B),
+        "qkv" => Ok(LinearAttnProjection::Qkv),
+        "z" => Ok(LinearAttnProjection::Z),
+        "out" => Ok(LinearAttnProjection::Out),
+        "all" => Ok(LinearAttnProjection::All),
+        value => {
+            eprintln!("invalid projection: {value}; expected a, b, qkv, z, out, or all");
+            Err(ExitCode::from(2))
         }
     }
 }
@@ -3007,8 +3263,9 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
+    eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
     );

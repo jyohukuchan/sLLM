@@ -61,6 +61,7 @@ SiLU-mul smoke:runtime buffer上のf32 gate/upからSiLU-mulを実行し、CPU/H
 MLP smoke:RMSNorm、gate/up/down matvec、SiLU-mulを小さい固定tensorで接続し、decoder MLP相当のruntime workflowを確認するsmoke
 package MLP smoke:.ullm.d内の実際のgate/up/down quantized tensorをmaterializeし、matvecとSiLU-mulでMLP相当のruntime workflowを確認するsmoke
 package RMSNorm MLP smoke:.ullm.d内の実際のpassthrough RMSNorm weightとgate/up/down quantized tensorを使い、RMSNormからMLPまでをruntime上で接続するsmoke
+package linear attention projection smoke:.ullm.d内の実際のlinear_attn projection quantized tensorをmaterializeし、共通の決定的inputからmatvecまで接続するsmoke。linear attention全体の計算ではない
 HIPRTC:HIP runtime compilation。通常C++でbuildしたruntimeからHIP kernel sourceを実行時compileしてmodule launchする仕組み
 JIT kernel:実行時にcompileしてloadするkernel。uLLMではHIPRTC経由のAQ4 materialize kernelなどを指す
 kernel-required smoke:staging fallbackを禁止し、実kernel経路だけで成功することを確認するsmoke
