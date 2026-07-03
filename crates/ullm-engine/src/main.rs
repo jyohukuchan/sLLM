@@ -5,6 +5,7 @@ use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
+use ullm_engine::package::ReferencedFileRole;
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -14,9 +15,12 @@ fn main() -> ExitCode {
         Some("runtime-stream-smoke") => runtime_stream_smoke(env::args().nth(2)),
         Some("runtime-copy-smoke") => runtime_copy_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
-        Some("package-load-smoke") => {
-            package_load_smoke(env::args().nth(2), env::args().nth(3), env::args().nth(4))
-        }
+        Some("package-load-smoke") => package_load_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+        ),
         Some("-h") | Some("--help") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -275,6 +279,7 @@ fn package_load_smoke(
     path: Option<String>,
     device_index: Option<String>,
     max_bytes: Option<String>,
+    payload_role: Option<String>,
 ) -> ExitCode {
     let Some(path) = path else {
         eprintln!("package-load-smoke requires a .ullm.d path");
@@ -292,6 +297,10 @@ fn package_load_smoke(
         }
         Err(code) => return code,
     };
+    let payload_role = match parse_optional_payload_role(payload_role) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
     let summary = match ullm_engine::package::inspect_package(&path) {
         Ok(summary) => summary,
         Err(err) => {
@@ -299,7 +308,8 @@ fn package_load_smoke(
             return ExitCode::from(1);
         }
     };
-    let selected = match ullm_engine::package::select_smallest_existing_referenced_file(&path) {
+    let selected = match ullm_engine::package::select_existing_referenced_file(&path, payload_role)
+    {
         Ok(selected) => selected,
         Err(err) => {
             eprintln!("failed to select package payload: {err}");
@@ -368,14 +378,20 @@ fn package_load_smoke(
         return ExitCode::from(1);
     }
     println!(
-        "package-load-smoke package={} schema={} file={} file_bytes={} copied_bytes={} backend={} device_index={} name=\"{}\" verified=true",
+        "package-load-smoke package={} schema={} role={} file={} file_bytes={} copied_bytes={} owner_index={} owner_name=\"{}\" backend={} device_index={} name=\"{}\" verified=true",
         summary.package_dir.display(),
         summary
             .schema_version
             .unwrap_or_else(|| "unknown".to_string()),
+        selected.role.as_str(),
         selected.relative_path,
         selected.bytes,
         data.len(),
+        selected
+            .owner_index
+            .map(|index| index.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        selected.owner_name.unwrap_or_else(|| "none".to_string()),
         info.backend,
         device_index,
         info.name
@@ -385,7 +401,10 @@ fn package_load_smoke(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]>"
+    );
+    eprintln!(
+        "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
     );
 }
 
@@ -416,6 +435,18 @@ fn parse_optional_usize(
             }
         },
         None => Ok(default),
+    }
+}
+
+fn parse_optional_payload_role(value: Option<String>) -> Result<ReferencedFileRole, ExitCode> {
+    match value {
+        Some(value) => ReferencedFileRole::parse(&value).ok_or_else(|| {
+            eprintln!(
+                "invalid payload role: {value}; expected smallest, tensor-index, tensor-scale, tensor-codebook, codebook, or passthrough"
+            );
+            ExitCode::from(2)
+        }),
+        None => Ok(ReferencedFileRole::Smallest),
     }
 }
 
