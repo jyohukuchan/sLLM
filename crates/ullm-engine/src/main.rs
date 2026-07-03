@@ -4,8 +4,6 @@
 use std::env;
 use std::process::ExitCode;
 
-mod package;
-
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
         Some("inspect-devices") => inspect_devices(),
@@ -81,7 +79,7 @@ fn inspect_package(path: Option<String>) -> ExitCode {
         eprintln!("inspect-package requires a .ullm.d path");
         return ExitCode::from(2);
     };
-    let summary = match package::inspect_package(path) {
+    let summary = match ullm_engine::package::inspect_package(path) {
         Ok(summary) => summary,
         Err(err) => {
             eprintln!("failed to inspect package: {err}");
