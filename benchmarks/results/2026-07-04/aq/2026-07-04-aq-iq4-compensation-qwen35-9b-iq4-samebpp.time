@@ -1,0 +1,23 @@
+	Command being timed: "python3 tools/run-aq-iq4-compensation-experiment.py --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --source-rows benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b-reordered.jsonl --output benchmarks/results/2026-07-04/aq/2026-07-04-aq-iq4-compensation-qwen35-9b-iq4-samebpp.json --iterations 8 --max-elements-per-tensor 262144 --torch-threads 64 --torch-interop-threads 1"
+	User time (seconds): 670.24
+	System time (seconds): 9.25
+	Percent of CPU this job got: 4017%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:16.91
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 517092
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 788490
+	Voluntary context switches: 13448
+	Involuntary context switches: 9453
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 120
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
