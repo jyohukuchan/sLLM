@@ -58,6 +58,7 @@ RMSNorm smoke:runtime buffer上のf32 inputとweightからRMSNormを実行し、
 package RMSNorm smoke:.ullm.d内の実際のpassthrough RMSNorm weightをf32へ変換し、runtime buffer上の決定的inputと組み合わせてRMSNorm kernel境界を確認するsmoke
 SiLU-mul:MLPのgate/up中間値に使うelementwise処理。`silu(gate) * up` を計算する
 SiLU-mul smoke:runtime buffer上のf32 gate/upからSiLU-mulを実行し、CPU/HIP kernel境界を確認するsmoke
+runtime add smoke:runtime buffer上の2つのf32 tensorを要素ごとに加算し、residual addなどで使うelementwise境界をCPU/HIP kernelで確認するsmoke
 depthwise conv1d:channelごとに独立した1次元畳み込み。linear attentionのconv1d.weightでは入力系列の各channelに同じchannelのkernelだけを適用する
 runtime depthwise conv1d smoke:runtime buffer上のf32系列とf32 weightからcausal depthwise conv1dを実行し、CPU/HIP kernel境界を確認するsmoke
 MLP smoke:RMSNorm、gate/up/down matvec、SiLU-mulを小さい固定tensorで接続し、decoder MLP相当のruntime workflowを確認するsmoke
@@ -68,6 +69,7 @@ package linear attention QKV norm smoke:.ullm.d内の実際のlinear_attn.in_pro
 package linear attention conv1d smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv quantized tensorから複数timestepのQKV出力を作り、linear_attn.conv1d.weight passthrough tensorでcausal depthwise conv1dを適用するsmoke。linear attention全体の計算ではない
 package linear attention recurrent smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv / conv1d / in_proj_a,b / A_log / dt_biasを使い、q/k/v split と gate/beta を recurrent境界へ接続するsmoke。linear attention全体の計算ではない
 package linear attention post smoke:.ullm.d内の実際のlinear_attn.in_proj_z / norm / out_projを使い、post-recurrentのgated RMSNormからout projectionまでを接続するsmoke。linear attention全体の計算ではない
+package linear attention block smoke:.ullm.d内の実際のinput_layernorm.weightとlinear_attn系tensorを使い、input RMSNormからlinear attention workflow、residual addまでを接続するsmoke。MLPやdecoder block全体の計算ではない
 package linear attention workflow smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv / conv1d / in_proj_a,b / A_log / dt_bias / in_proj_z / norm / out_projを使い、recurrent境界からpost-recurrent gated RMSNormとout projectionまでを接続するsmoke。linear attention全体の計算に近いが、まだ通常decoder layer全体ではない
 package linear attention auxiliary smoke:.ullm.d内の実際のlinear_attn補助passthrough tensorをf32へ変換し、runtime bufferへの転送とreadbackを検証するsmoke。linear attention全体の計算ではない
 linear attention gate beta:linear attentionでin_proj_a/bの出力、A_log、dt_biasからgateとbetaを作る境界処理

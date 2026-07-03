@@ -359,6 +359,15 @@
   - R9700 HIP deviceでAQ4 materialize、matvec、depthwise conv1d、gate/beta、recurrent、RMSNorm、SiLU-mul kernelを必須指定した状態で同じworkflow smokeが成功した。
   - conv max diff `0.000000142`、gate/beta max diff `0.000000238`、recurrent max diff `0.000000030`、norm max diff `0.000000477`、activation max diff `0.000000119`、output max diff `0.000003338`。
 
+2026-07-04 inference engine runtime add smoke:
+- Commit `e20a16b Add runtime f32 add smoke` adds C ABI `ullm_runtime_add_f32`, Rust wrapper `ullm_runtime_sys::add_f32`, and CLI smoke `runtime-add-smoke`.
+- The boundary computes elementwise f32 addition between two runtime buffers and is intended for decoder residual add paths. It has CPU fallback, HIPRTC JIT kernel, HIP staging fallback, and `ULLM_REQUIRE_HIP_ADD_KERNEL=1`.
+- Validation passed: `cargo fmt --all --check`, `cargo test -p ullm-runtime-sys -- --test-threads=1`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, `git diff --check`, CPU runtime add smoke, and R9700 runtime add smoke with the HIP kernel required.
+- CPU smoke: `target/debug/ullm-engine runtime-add-smoke 0` returned backend `cpu`, elements `8`, output `[2.0000000,-4.0000000,6.0000000,8.0000000,8.2500000,-11.2500000,-0.3750000,0.5000000]`.
+- R9700 smoke: `ULLM_REQUIRE_HIP_ADD_KERNEL=1 target/debug/ullm-engine runtime-add-smoke 2` returned backend `hip`, device `AMD Radeon Graphics`, and the same output.
+- `docs/words.txt` now defines `runtime add smoke` and records the planned `package linear attention block smoke` term.
+- Next useful inference-engine step: connect `input_layernorm.weight -> package-linear-attn-workflow-smoke -> runtime add` into `package-linear-attn-block-smoke`.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -404,9 +413,10 @@
 - `f240634 Add package linear attention recurrent smoke`
 - `73e518b Add package linear attention post smoke`
 - `a6e47a2 Add package linear attention workflow smoke`
+- `e20a16b Add runtime f32 add smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smokeも通った。次はlinear attentionをdecoder block残差へ接続するか、通常attention本体の計算境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、f32 add境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smokeも通った。次はlinear attentionをdecoder block残差へ接続するか、通常attention本体の計算境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
