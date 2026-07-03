@@ -4,6 +4,7 @@ bpp:bit/parameter
 BF16-error:BF16のraw-valueまたは出力を基準にした誤差
 decode-tps:decode token/s
 prefill-tps:prefill token/s
+fq:推論エンジン上の実測を見て仕様を決める量子化またはformat候補の仮称。意味が確定したらこの定義を更新する
 raw-value:scale・codebookを一切考慮しない各パラメータの値
 codebook:LUTによる変換表
 codebook-index:codebookを参照するために保存されるindex値
@@ -28,3 +29,6 @@ tensor-scale:1つのtensor全体にかかるscale
 family-scale:同じfamilyに属するtensorで共有または補正に使うscale
 global-scale:local-scaleより大きい単位でのscale。tensor-scaleやfamily-scaleを含む上位概念として使う
 family:Q/K/V/OやMLPなど、性質が近いtensorをまとめる分類
+control plane:request管理、scheduler、telemetry、APIなど、kernel実行そのもの以外を制御する層
+runtime:weight、KV cache、backend、kernel呼び出しを管理してmodel executionを実行する層
+backend:HIP、CPU、CUDA、CANN、JAX/TPUなど、runtimeが実際に演算へ使う実装単位
