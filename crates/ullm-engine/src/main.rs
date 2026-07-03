@@ -595,11 +595,13 @@ fn package_weight_register_smoke(
     };
 
     println!(
-        "package-weight-register-smoke package={} registry_index={} registry_tensors={} registry_payload_bytes={} tensor_index={} tensor=\"{}\" dtype={} family={} candidate_id={} elements={} groups={} backend={} device_index={} name=\"{}\" chunk_bytes={} verified=true",
+        "package-weight-register-smoke package={} registry_index={} registry_tensors={} registry_payload_bytes={} resident_payload_bytes={} codebook_payloads={} tensor_index={} tensor=\"{}\" dtype={} family={} candidate_id={} elements={} groups={} backend={} device_index={} name=\"{}\" chunk_bytes={} verified=true",
         path,
         registry_index,
         registry.len(),
         registry.total_payload_bytes(),
+        registry.resident_payload_bytes(),
+        registry.codebook_payloads(),
         loaded.tensor_index,
         loaded.tensor_name,
         loaded.dtype.as_deref().unwrap_or("unknown"),
@@ -700,12 +702,14 @@ fn package_weight_register_many_smoke(
     };
 
     println!(
-        "package-weight-register-many-smoke package={} selected_tensors={} package_tensors={} registry_tensors={} registry_payload_bytes={} backend={} device_index={} name=\"{}\" chunk_bytes={} verified=true",
+        "package-weight-register-many-smoke package={} selected_tensors={} package_tensors={} registry_tensors={} registry_payload_bytes={} resident_payload_bytes={} codebook_payloads={} backend={} device_index={} name=\"{}\" chunk_bytes={} verified=true",
         path,
         selected_count,
         bundles.len(),
         registry.len(),
         registry.total_payload_bytes(),
+        registry.resident_payload_bytes(),
+        registry.codebook_payloads(),
         info.backend,
         device_index,
         info.name,
