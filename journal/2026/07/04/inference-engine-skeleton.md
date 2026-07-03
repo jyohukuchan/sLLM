@@ -42,6 +42,7 @@
 - `ullm-engine package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]` を追加し、`.ullm.d` packageからregistry loadしたquantized tensorをf32出力bufferへ展開する最小経路を確認できるようにした。
 - `THIRD_PARTY_NOTICES.md` を追加し、llama.cpp、ATOM、vLLM、SGLang、TensorRT-LLMをreference inputとして扱う最低限の第三者表示を追加した。
 - `NOTICE` から `THIRD_PARTY_NOTICES.md` を参照するようにした。
+- `ullm_runtime_aq4_dequant_f32` にHIP staging fallbackを追加した。HIP bufferをhostへcopyし、CPUでAQ4 dequantし、結果をHIP output bufferへ戻す一時的な正しさ確認用経路であり、性能評価用ではない。
 
 ## 実測・検証
 
@@ -122,6 +123,11 @@
   - previewは `[-0.0031692,0.0031782,-0.0797526,-0.0031692,-0.0031692,-0.0342511,0.0166768,0.0096639]`。
 - materialize smoke追加後の `cargo fmt --all --check`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo test --workspace -- --test-threads=1`、`cargo test --workspace` は成功した。
 - 前回、CLI smokeとworkspace testを同時実行した際に一度segfaultを見たが、直列実行と単独の通常workspace testでは再現しなかった。runtime testとreal package smokeは当面同時実行しない。
+- HIP staging fallback追加後の `cargo fmt --all --check` と `cargo test -p ullm-runtime-sys -- --test-threads=1` は成功した。`ullm-runtime-sys` はHIPがある場合に小さなAQ4 dequantをdevice buffer上で検証するtestを含む。
+- `target/debug/ullm-engine package-materialize-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0`
+  - R9700 HIP deviceでtensor `model.language_model.layers.0.linear_attn.in_proj_a.weight` をmaterializeできた。
+  - previewはCPU fallbackと同じ `[-0.0031692,0.0031782,-0.0797526,-0.0031692,-0.0031692,-0.0342511,0.0166768,0.0096639]`。
+- HIP staging fallback追加後の `cargo test --workspace` は成功した。`ullm-runtime-sys` は14 tests。
 
 ## 作成したgit checkpoints
 
@@ -147,9 +153,10 @@
 - `9ad030f Carry quant tensor metadata into loader`
 - `c4369d4 Add CPU AQ4 dequant runtime ABI`
 - `cb1069b Add package materialize smoke`
+- `7f5676a Add HIP AQ4 staging dequant`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallbackのmaterialize経路は通った。次はGPU側でfused dequantまたはmaterialize kernel境界を作り、最小のlinear/attention部品へ接続する。
+- CPU fallbackとHIP staging fallbackのmaterialize経路は通った。次はstaging fallbackを置き換えるHIP materialize kernelまたはfused dequant kernelを作り、最小のlinear/attention部品へ接続する。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
