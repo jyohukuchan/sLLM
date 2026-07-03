@@ -54,6 +54,8 @@ runtime stream:backend上の非同期copyやkernel実行の順序を束ねる実
 host-device-copy:host memoryとruntime bufferの間でpayloadを転送する処理
 RMSNorm:root mean square normalization。Qwen系decoder blockでlinear/attention前に使う正規化処理
 RMSNorm smoke:runtime buffer上のf32 inputとweightからRMSNormを実行し、CPU/HIP kernel境界を確認するsmoke
+SiLU-mul:MLPのgate/up中間値に使うelementwise処理。`silu(gate) * up` を計算する
+SiLU-mul smoke:runtime buffer上のf32 gate/upからSiLU-mulを実行し、CPU/HIP kernel境界を確認するsmoke
 HIPRTC:HIP runtime compilation。通常C++でbuildしたruntimeからHIP kernel sourceを実行時compileしてmodule launchする仕組み
 JIT kernel:実行時にcompileしてloadするkernel。uLLMではHIPRTC経由のAQ4 materialize kernelなどを指す
 kernel-required smoke:staging fallbackを禁止し、実kernel経路だけで成功することを確認するsmoke

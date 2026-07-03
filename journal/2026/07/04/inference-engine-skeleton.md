@@ -52,6 +52,9 @@
 - C++ runtime C ABIに `ullm_runtime_rmsnorm_f32` を追加した。単一f32 vector向けのCPU fallback、HIPRTC JIT kernel、HIP staging fallbackを持つ。
 - Rust wrapper `ullm_runtime_sys::rmsnorm_f32` とCPU/HIP単体テストを追加した。
 - `ullm-engine runtime-rmsnorm-smoke [DEVICE_INDEX]` を追加し、RMSNormの最小runtime境界をCPU/R9700で検証できるようにした。
+- C++ runtime C ABIに `ullm_runtime_silu_mul_f32` を追加した。MLPの `silu(gate) * up` 用のCPU fallback、HIPRTC JIT kernel、HIP staging fallbackを持つ。
+- Rust wrapper `ullm_runtime_sys::silu_mul_f32` とCPU/HIP単体テストを追加した。
+- `ullm-engine runtime-silu-mul-smoke [DEVICE_INDEX]` を追加し、MLP activation/gatingの最小runtime境界をCPU/R9700で検証できるようにした。
 
 ## 実測・検証
 
@@ -173,6 +176,17 @@
   - R9700 HIP deviceでRMSNorm kernel必須指定のsmokeが成功した。
   - output `[0.1825741,0.7302963,-1.6431667,-2.9211850]`。
 - `cargo test --workspace -- --test-threads=1` passed。
+- `cargo fmt --all --check` passed。
+- `cargo test -p ullm-runtime-sys -- --test-threads=1` passed。`ullm-runtime-sys` は23 tests。
+- `cargo test -p ullm-engine -- --test-threads=1` passed。`ullm-engine` は21 tests。
+- `ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 cargo test -p ullm-runtime-sys first_hip_silu_mul_f32_computes_expected_values_when_available -- --test-threads=1 --nocapture` passed。
+- `target/debug/ullm-engine runtime-silu-mul-smoke 0`
+  - CPU fallbackで `gate=[-1.0,0.0,1.0,2.0]`、`up=[3.0,-4.0,5.0,6.0]` のSiLU-mul smokeが成功した。
+  - output `[-0.8068243,-0.0000000,3.6552930,10.5695648]`。
+- `ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 target/debug/ullm-engine runtime-silu-mul-smoke 2`
+  - R9700 HIP deviceでSiLU-mul kernel必須指定のsmokeが成功した。
+  - output `[-0.8068243,-0.0000000,3.6552930,10.5695648]`。
+- `cargo test --workspace -- --test-threads=1` passed。
 
 ## 作成したgit checkpoints
 
@@ -203,9 +217,10 @@
 - `eacf545 Add package materialize benchmark CLI`
 - `905ec4c Add runtime f32 matvec smoke`
 - `3a78114 Add runtime f32 RMSNorm smoke`
+- `ba8c9ba Add runtime f32 SiLU mul smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界とRMSNorm境界も通った。次はQwen3系の最小layer forwardに必要なactivation、attention/linear attention、MLPの境界を切り出す。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界も通った。次はこれらを組み合わせた小さいMLP/decoder block smoke、またはattention/linear attention境界を切り出す。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
