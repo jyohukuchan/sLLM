@@ -28,6 +28,9 @@
 - `crates/ullm-engine/src/loader.rs` を追加し、`LoadOptions`、`LoadedPayload`、`LoadedTensorBundle`、`WeightRegistry` を実装した。
 - `WeightRegistry` はtensor bundleのindex、scale、codebookをそれぞれruntime bufferへloadし、load済みのresident payloadとして保持する。
 - `package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]` を追加し、`.ullm.d` の1 tensor分のpayloadをregistryに登録して後続処理から参照できる状態を検証できるようにした。
+- `WeightRegistry::load_and_insert_many` を追加し、複数の `TensorPayloadBundle` を1回のAPI呼び出しでregistryへ登録できるようにした。
+- `package::list_tensor_payload_bundles` を追加し、`.ullm.d` manifest内のquantized tensor payload bundleをmanifest順で列挙できるようにした。
+- `package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]` を追加し、package内の先頭N個のquantized tensorをweight registryへまとめて登録できるようにした。誤ってfull packageを全量loadしないよう、CLIでは件数上限を明示的に扱う。
 
 ## 実測・検証
 
@@ -82,8 +85,16 @@
   - `registry_payload_bytes=2621504`、index chunks `2`、scale chunks `1`、codebook chunks `1`。
 - `target/debug/ullm-engine package-weight-register-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 model.language_model.layers.11.self_attn.k_proj.weight`
   - tensor名指定でも同じtensor 27のregistry登録検証が成功した。
+- `target/debug/ullm-engine package-weight-register-many-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 2`
+  - R9700 HIPでpackage内255 quantized tensorsのうち先頭2 tensorsをweight registryへ登録できた。
+  - `registry_tensors=2`、`registry_payload_bytes=147584`。
+  - 登録tensorは `model.language_model.layers.0.linear_attn.in_proj_a.weight` と `model.language_model.layers.0.linear_attn.in_proj_b.weight` で、それぞれpayload bytes `73792`。
+- `target/debug/ullm-engine package-weight-register-many-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 2`
+  - CPU fallbackでも同じ先頭2 tensorsのweight registry登録が成功した。
 - `cargo fmt --all --check` passed。
 - `cargo test --workspace` passed。
+- `cargo test -p ullm-engine` passed。`ullm-engine` は14 tests。
+- `cargo build -p ullm-engine` passed。
 
 ## 作成したgit checkpoints
 
@@ -101,9 +112,12 @@
 - `f767287 Add package payload role selection`
 - `901aca4 Add package tensor bundle load smoke`
 - `7f2cba7 Add runtime weight registry smoke`
+- `746d422 Add multi tensor weight registry load`
+- `d19ecd8 Add package tensor bundle listing smoke`
 
 ## 次の行動
 
-- `WeightRegistry` で1 tensor分のresident payloadを保持できるようになった。次は複数tensorをpackage単位で登録するpackage handleと、codebook bufferの重複排除を作る。
+- `WeightRegistry` で複数tensor分のresident payloadを保持できるようになった。次は同一codebook payloadを共有するcodebook bufferの重複排除を作る。
+- package全体を扱うruntime-side package handleを作り、manifest由来metadata、registry、codebook poolをまとめて保持する。
 - 後続kernelから参照できる形にするため、tensor名・family・candidate id・payload buffer handleをまとめてlookupできるAPIを整える。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
