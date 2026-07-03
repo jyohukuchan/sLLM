@@ -55,6 +55,7 @@
 - C++ runtime C ABIに `ullm_runtime_silu_mul_f32` を追加した。MLPの `silu(gate) * up` 用のCPU fallback、HIPRTC JIT kernel、HIP staging fallbackを持つ。
 - Rust wrapper `ullm_runtime_sys::silu_mul_f32` とCPU/HIP単体テストを追加した。
 - `ullm-engine runtime-silu-mul-smoke [DEVICE_INDEX]` を追加し、MLP activation/gatingの最小runtime境界をCPU/R9700で検証できるようにした。
+- `ullm-engine runtime-mlp-smoke [DEVICE_INDEX]` を追加した。`RMSNorm -> gate matvec -> up matvec -> SiLU-mul -> down matvec` を小さい固定f32 tensorで接続するworkflow smoke。
 
 ## 実測・検証
 
@@ -187,6 +188,15 @@
   - R9700 HIP deviceでSiLU-mul kernel必須指定のsmokeが成功した。
   - output `[-0.8068243,-0.0000000,3.6552930,10.5695648]`。
 - `cargo test --workspace -- --test-threads=1` passed。
+- `cargo fmt --all --check` passed。
+- `cargo test -p ullm-engine -- --test-threads=1` passed。`ullm-engine` は21 tests。
+- `target/debug/ullm-engine runtime-mlp-smoke 0`
+  - CPU fallbackでhidden `4`、intermediate `6` の小型MLP workflow smokeが成功した。
+  - output `[0.2138531,-0.1106374,0.5541791,0.7455096]`。
+- `ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 target/debug/ullm-engine runtime-mlp-smoke 2`
+  - R9700 HIP deviceでRMSNorm、matvec、SiLU-mulのkernelを必須指定した状態でMLP workflow smokeが成功した。
+  - output `[0.2138532,-0.1106376,0.5541794,0.7455100]`。CPUとの差は丸め誤差程度。
+- `cargo test --workspace -- --test-threads=1` passed。
 
 ## 作成したgit checkpoints
 
@@ -218,9 +228,10 @@
 - `905ec4c Add runtime f32 matvec smoke`
 - `3a78114 Add runtime f32 RMSNorm smoke`
 - `ba8c9ba Add runtime f32 SiLU mul smoke`
+- `7795a9b Add runtime MLP smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界も通った。次はこれらを組み合わせた小さいMLP/decoder block smoke、またはattention/linear attention境界を切り出す。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、これらを組み合わせた小さいMLP workflow smokeも通った。次はattention/linear attention境界、または実packageのMLP tensorを使った小型統合smokeへ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。

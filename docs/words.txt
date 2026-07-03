@@ -56,6 +56,7 @@ RMSNorm:root mean square normalization。Qwen系decoder blockでlinear/attention
 RMSNorm smoke:runtime buffer上のf32 inputとweightからRMSNormを実行し、CPU/HIP kernel境界を確認するsmoke
 SiLU-mul:MLPのgate/up中間値に使うelementwise処理。`silu(gate) * up` を計算する
 SiLU-mul smoke:runtime buffer上のf32 gate/upからSiLU-mulを実行し、CPU/HIP kernel境界を確認するsmoke
+MLP smoke:RMSNorm、gate/up/down matvec、SiLU-mulを小さい固定tensorで接続し、decoder MLP相当のruntime workflowを確認するsmoke
 HIPRTC:HIP runtime compilation。通常C++でbuildしたruntimeからHIP kernel sourceを実行時compileしてmodule launchする仕組み
 JIT kernel:実行時にcompileしてloadするkernel。uLLMではHIPRTC経由のAQ4 materialize kernelなどを指す
 kernel-required smoke:staging fallbackを禁止し、実kernel経路だけで成功することを確認するsmoke
