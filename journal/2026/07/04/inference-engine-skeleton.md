@@ -57,6 +57,8 @@
 - `ullm-engine runtime-silu-mul-smoke [DEVICE_INDEX]` を追加し、MLP activation/gatingの最小runtime境界をCPU/R9700で検証できるようにした。
 - `ullm-engine runtime-mlp-smoke [DEVICE_INDEX]` を追加した。`RMSNorm -> gate matvec -> up matvec -> SiLU-mul -> down matvec` を小さい固定f32 tensorで接続するworkflow smoke。
 - `ullm-engine package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]` を追加した。`.ullm.d` 内の実際の `mlp.gate_proj`、`mlp.up_proj`、`mlp.down_proj` quantized tensorをmaterializeし、MLP相当のruntime workflowへ接続する。
+- `.ullm.d` manifestのpassthrough tensorについて、dtype、shape、elements、payloadをまとめて選ぶ `PassthroughPayloadBundle` APIを追加した。
+- `ullm-engine package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]` を追加した。実packageの `input_layernorm.weight` または `post_attention_layernorm.weight` passthrough payloadをBF16/F32からf32へ変換し、runtime RMSNorm kernelへ接続する。
 
 ## 実測・検証
 
@@ -210,6 +212,19 @@
   - CPU fallbackでも同じlayer 0の実package MLP workflow smokeが成功した。
   - preview `[-0.0918783,-0.0005871,-0.0953466,0.1104856,-0.0072326,-0.0075356,0.0573780,-0.0320711]`。R9700との差は丸め誤差程度。
 - `cargo test --workspace -- --test-threads=1` passed。
+- package RMSNorm smoke追加後の `cargo fmt --all --check`、`cargo check -p ullm-engine --locked`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1` は成功した。
+- `target/debug/ullm-engine package-rmsnorm-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 input`
+  - CPU fallbackでlayer 0の `model.language_model.layers.0.input_layernorm.weight` passthrough BF16 payloadをf32へ変換し、RMSNorm smokeが成功した。
+  - elements `4096`、payload bytes `8192`、preview `[0.1132150,0.1240616,-0.0078492,0.0461725,0.0057685,0.0006959,0.0502700,0.0700181]`、max abs diff `0.000000000`。
+- `target/debug/ullm-engine package-rmsnorm-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 post`
+  - CPU fallbackでlayer 0の `model.language_model.layers.0.post_attention_layernorm.weight` passthrough BF16 payloadをf32へ変換し、RMSNorm smokeが成功した。
+  - elements `4096`、payload bytes `8192`、preview `[-0.1443093,-0.2202276,-0.1035138,-0.1219135,-0.0159966,-0.0034059,-0.1166263,-0.0577980]`、max abs diff `0.000000000`。
+- `ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 target/debug/ullm-engine package-rmsnorm-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 input`
+  - R9700 HIP deviceでRMSNorm kernelを必須指定し、layer 0 input RMSNorm smokeが成功した。
+  - preview `[0.1132150,0.1240616,-0.0078492,0.0461725,0.0057685,0.0006959,0.0502700,0.0700181]`、max abs diff `0.000000089`。
+- `ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 target/debug/ullm-engine package-rmsnorm-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 post`
+  - R9700 HIP deviceでRMSNorm kernelを必須指定し、layer 0 post-attention RMSNorm smokeが成功した。
+  - preview `[-0.1443093,-0.2202277,-0.1035138,-0.1219135,-0.0159966,-0.0034059,-0.1166264,-0.0577980]`、max abs diff `0.000000119`。
 
 ## 作成したgit checkpoints
 
@@ -243,9 +258,10 @@
 - `ba8c9ba Add runtime f32 SiLU mul smoke`
 - `7795a9b Add runtime MLP smoke`
 - `7ae2afd Add package MLP smoke`
+- `39cfa66 Add package RMSNorm smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smokeも通った。次はattention/linear attention境界、または実packageのRMSNorm/MLPをよりmodel forwardに近づける統合smokeへ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smokeも通った。次はattention/linear attention境界、または実packageの `RMSNorm -> MLP` 連結smokeへ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
