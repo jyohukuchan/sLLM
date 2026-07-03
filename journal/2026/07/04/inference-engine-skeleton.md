@@ -60,6 +60,7 @@
 - `.ullm.d` manifestのpassthrough tensorについて、dtype、shape、elements、payloadをまとめて選ぶ `PassthroughPayloadBundle` APIを追加した。
 - `ullm-engine package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]` を追加した。実packageの `input_layernorm.weight` または `post_attention_layernorm.weight` passthrough payloadをBF16/F32からf32へ変換し、runtime RMSNorm kernelへ接続する。
 - `ullm-engine package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]` を追加した。実packageのpassthrough RMSNorm weightを使い、RMSNorm output bufferをそのままgate/up matvecへ渡してMLPまで接続する。
+- `ullm-engine package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]` を追加した。実packageの `linear_attn` projection tensorをmaterializeし、共通の決定的inputからmatvecまで接続する。
 
 ## 実測・検証
 
@@ -238,6 +239,17 @@
 - `target/debug/ullm-engine package-rmsnorm-mlp-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 input`
   - CPU fallbackで `input_layernorm.weight` 指定でもshape整合とworkflow接続が成功した。
   - preview `[0.0002047,-0.0006061,0.0004543,-0.0000965,0.0001474,-0.0006292,-0.0009230,0.0009255]`。
+- package linear attention projection smoke追加後の `cargo fmt --all --check`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1` は成功した。
+- 既存 `package-materialize-matvec-smoke` で `model.language_model.layers.0.linear_attn.in_proj_qkv.weight` 単体のCPU materialize+matvecが成功した。shape `8192x4096`、preview `[0.5327876,-0.5918510,-0.3317735,-0.0987973,-0.1218641,-0.0302886,0.0989244,0.3359549]`。この既存smokeは新しいprojection smokeと入力vectorの生成式が異なるため、previewは一致しない。
+- `target/debug/ullm-engine package-linear-attn-proj-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 qkv`
+  - CPU fallbackでlayer 0の `linear_attn.in_proj_qkv.weight` をmaterializeし、matvecまで接続できた。
+  - hidden `4096`、rows `8192`、preview `[0.1187991,-0.2140313,0.5484958,0.8965278,-0.8766373,-0.5391343,-1.1162450,0.5450205]`。
+- `target/debug/ullm-engine package-linear-attn-proj-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 all`
+  - CPU fallbackでlayer 0の `linear_attn` projection 5本すべてを同じhidden inputからmatvecできた。
+  - previewは `a=[-0.3685331,0.2622247,0.4457343,-0.4137209,-0.0914295,0.6906291,0.3372279,0.2483559]`、`b=[-0.1777922,0.4347278,-0.3674757,-0.2333569,-0.2906706,-0.0129837,0.2090758,-0.0307084]`、`qkv=[0.1187991,-0.2140313,0.5484958,0.8965278,-0.8766373,-0.5391343,-1.1162450,0.5450205]`、`z=[-0.8506662,-0.4211669,1.2555698,0.1271277,0.7821553,-0.4219488,0.0438144,0.1496184]`、`out=[0.8133056,-0.7899073,-0.1963658,0.8239508,3.5607591,0.6728891,-0.9086896,-1.5677388]`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 target/debug/ullm-engine package-linear-attn-proj-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 all`
+  - R9700 HIP deviceでAQ4 materializeとmatvec kernelを必須指定した状態で、layer 0 `linear_attn` projection 5本すべてが成功した。
+  - previewは `a=[-0.3685338,0.2622247,0.4457358,-0.4137208,-0.0914293,0.6906285,0.3372281,0.2483559]`、`b=[-0.1777917,0.4347278,-0.3674756,-0.2333566,-0.2906704,-0.0129833,0.2090756,-0.0307086]`、`qkv=[0.1187995,-0.2140314,0.5484952,0.8965267,-0.8766365,-0.5391338,-1.1162429,0.5450193]`、`z=[-0.8506677,-0.4211664,1.2555709,0.1271276,0.7821554,-0.4219491,0.0438144,0.1496184]`、`out=[0.8133049,-0.7899073,-0.1963655,0.8239504,3.5607629,0.6728899,-0.9086896,-1.5677402]`。
 
 ## 作成したgit checkpoints
 
@@ -273,9 +285,10 @@
 - `7ae2afd Add package MLP smoke`
 - `39cfa66 Add package RMSNorm smoke`
 - `3bf8783 Add package RMSNorm MLP smoke`
+- `3a09aaf Add package linear attention projection smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smokeも通った。次はattention/linear attention境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smokeも通った。次はlinear attentionのpassthrough補助tensor、conv1d、norm、またはattention本体の計算境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
