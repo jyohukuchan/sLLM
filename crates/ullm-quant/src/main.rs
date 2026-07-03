@@ -115,6 +115,7 @@ struct Options {
     aq_high_families: Vec<String>,
     aq_low_format: String,
     aq_high_format: String,
+    aq_codebook_max_elements: Option<usize>,
     dry_run: bool,
 }
 
@@ -144,6 +145,8 @@ struct CodebookExport {
 #[derive(Debug, Deserialize)]
 struct CodebookEntry {
     family: String,
+    #[serde(default)]
+    codebook_scope: Option<String>,
     candidate_id: String,
     values_f32: Vec<f32>,
 }
@@ -232,6 +235,8 @@ struct TensorPlan {
     action: String,
     quant_format: Option<String>,
     quant_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codebook_scope: Option<String>,
     estimated_output_bytes: usize,
     estimated_effective_bpp: f64,
 }
@@ -249,6 +254,8 @@ struct ModelPlan {
     schema_version: String,
     model_dir: String,
     aq_policy: AqPolicyPlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codebook_scope_max_elements: Option<usize>,
     tensor_count: usize,
     supported_tensor_count: usize,
     passthrough_tensor_count: usize,
@@ -289,6 +296,8 @@ struct PrototypeTensorManifest {
     dtype: String,
     shape: Vec<usize>,
     family: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codebook_scope: Option<String>,
     candidate_id: String,
     scale_format: String,
     group_size: usize,
@@ -318,6 +327,8 @@ struct PrototypeTensorMetrics {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PrototypeCodebookManifest {
     family: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codebook_scope: Option<String>,
     candidate_id: String,
     file: String,
     encoding: String,
@@ -406,6 +417,8 @@ struct PrototypeDirectPackageSummary {
 struct PrototypeConvertResult {
     tensor: String,
     family: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codebook_scope: Option<String>,
     candidate: String,
     status: String,
     returncode: i32,
@@ -538,6 +551,7 @@ fn parse_options() -> Result<Options, String> {
         aq_high_families: Vec::new(),
         aq_low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
         aq_high_format: "aq4_e4m3_g8_ts_flloyd16".to_string(),
+        aq_codebook_max_elements: None,
         dry_run: false,
     };
 
@@ -723,6 +737,13 @@ fn parse_options() -> Result<Options, String> {
                     .next()
                     .ok_or_else(|| "--aq-high-format requires a value".to_string())?;
             }
+            "--aq-codebook-max-elements" => {
+                let value = parse_usize("--aq-codebook-max-elements", args.next())?;
+                if value == 0 {
+                    return Err("--aq-codebook-max-elements must be greater than zero".to_string());
+                }
+                options.aq_codebook_max_elements = Some(value);
+            }
             "--max-working-memory-mib" => {
                 options.max_working_memory_mib =
                     parse_usize("--max-working-memory-mib", args.next())?;
@@ -802,6 +823,7 @@ fn print_help() {
     println!("  --aq-high-family <FAMILY>     high-format family for custom policy; repeatable");
     println!("  --aq-low-format <ID>          low-budget aq candidate id");
     println!("  --aq-high-format <ID>         high-budget aq candidate id");
+    println!("  --aq-codebook-max-elements <N> split plan codebook scopes at about N parameters");
     println!("  --threads <N>                 compute worker threads");
     println!("  --io-threads <N>              read/write helper threads");
     println!("  --max-working-memory-mib <N>  working-memory budget");
@@ -1119,23 +1141,42 @@ fn load_codebook_export(path: &Path) -> Result<CodebookExport, String> {
 
 fn select_codebook<'a>(
     export: &'a CodebookExport,
-    family: &str,
+    codebook_scope: &str,
     candidate_id: &str,
 ) -> Result<&'a [f32], String> {
     let entry = export
         .codebooks
         .iter()
-        .find(|entry| entry.family == family && entry.candidate_id == candidate_id)
+        .find(|entry| {
+            entry.codebook_scope.as_deref().unwrap_or(&entry.family) == codebook_scope
+                && entry.candidate_id == candidate_id
+        })
         .ok_or_else(|| {
-            format!("codebook not found for family={family}, candidate={candidate_id}")
+            format!("codebook not found for scope={codebook_scope}, candidate={candidate_id}")
         })?;
     if entry.values_f32.len() != 16 {
         return Err(format!(
-            "codebook for family={family}, candidate={candidate_id} has {} entries, expected 16",
+            "codebook for scope={codebook_scope}, candidate={candidate_id} has {} entries, expected 16",
             entry.values_f32.len()
         ));
     }
     Ok(&entry.values_f32)
+}
+
+fn tensor_codebook_scope(tensor: &TensorPlan) -> &str {
+    tensor.codebook_scope.as_deref().unwrap_or(&tensor.family)
+}
+
+fn manifest_codebook_scope(tensor: &PrototypeTensorManifest) -> &str {
+    tensor.codebook_scope.as_deref().unwrap_or(&tensor.family)
+}
+
+fn optional_scope_value(family: &str, codebook_scope: &str) -> Option<String> {
+    if codebook_scope == family {
+        None
+    } else {
+        Some(codebook_scope.to_string())
+    }
 }
 
 fn div_ceil(value: usize, divisor: usize) -> usize {
@@ -2023,6 +2064,7 @@ fn write_prototype_tensor_artifacts(
     tensor_name: &str,
     aq_format: &str,
     family: &str,
+    codebook_scope: &str,
     candidate_id: &str,
     codebook: &[f32],
     chunk_bytes: usize,
@@ -2075,7 +2117,7 @@ fn write_prototype_tensor_artifacts(
         1.0
     };
 
-    let codebook_stem = sanitize_file_stem(&format!("{family}__{candidate_id}"));
+    let codebook_stem = sanitize_file_stem(&format!("{codebook_scope}__{candidate_id}"));
     let tensors_dir = output_dir.join("tensors");
     let codebooks_dir = output_dir.join("codebooks");
     fs::create_dir_all(&tensors_dir)
@@ -2141,6 +2183,7 @@ fn write_prototype_tensor_artifacts(
         dtype: location.header.dtype,
         shape: location.header.shape,
         family: family.to_string(),
+        codebook_scope: optional_scope_value(family, codebook_scope),
         candidate_id: candidate_id.to_string(),
         scale_format: group_stats.scale_format,
         group_size,
@@ -2173,6 +2216,7 @@ fn write_prototype_tensor_artifacts(
     };
     let codebook_manifest = PrototypeCodebookManifest {
         family: family.to_string(),
+        codebook_scope: optional_scope_value(family, codebook_scope),
         candidate_id: candidate_id.to_string(),
         file: relative_path_string(&codebook_rel),
         encoding: "f32_le".to_string(),
@@ -2186,6 +2230,7 @@ fn write_prototype_tensor(
     tensor_name: &str,
     aq_format: &str,
     family: &str,
+    codebook_scope: &str,
     candidate_id: &str,
     codebook: &[f32],
     chunk_bytes: usize,
@@ -2201,6 +2246,7 @@ fn write_prototype_tensor(
         tensor_name,
         aq_format,
         family,
+        codebook_scope,
         candidate_id,
         codebook,
         chunk_bytes,
@@ -2224,11 +2270,11 @@ fn write_prototype_tensor(
     Ok(manifest)
 }
 
-fn codebook_exists(export: &CodebookExport, family: &str, candidate_id: &str) -> bool {
-    export
-        .codebooks
-        .iter()
-        .any(|entry| entry.family == family && entry.candidate_id == candidate_id)
+fn codebook_exists(export: &CodebookExport, codebook_scope: &str, candidate_id: &str) -> bool {
+    export.codebooks.iter().any(|entry| {
+        entry.codebook_scope.as_deref().unwrap_or(&entry.family) == codebook_scope
+            && entry.candidate_id == candidate_id
+    })
 }
 
 fn select_convert_tensors<'a>(
@@ -2250,7 +2296,7 @@ fn select_convert_tensors<'a>(
         let Some(candidate) = tensor.quant_format.as_deref() else {
             continue;
         };
-        if !codebook_exists(export, &tensor.family, candidate) {
+        if !codebook_exists(export, tensor_codebook_scope(tensor), candidate) {
             continue;
         }
         let count = family_counts.get(&tensor.family).copied().unwrap_or(0);
@@ -2287,6 +2333,7 @@ fn failed_convert_result(
     PrototypeConvertResult {
         tensor: tensor.name.clone(),
         family: tensor.family.clone(),
+        codebook_scope: tensor.codebook_scope.clone(),
         candidate,
         status: "failed".to_string(),
         returncode: 1,
@@ -2313,13 +2360,15 @@ fn run_one_direct_package_convert(
                 tensor.name
             ));
         }
-        let codebook = select_codebook(export, &tensor.family, candidate)?;
+        let codebook_scope = tensor_codebook_scope(tensor);
+        let codebook = select_codebook(export, codebook_scope, candidate)?;
         let tensor_stem = format!("{index:03}-{}", sanitize_file_stem(&tensor.name));
         let (tensor_manifest, _) = write_prototype_tensor_artifacts(
             Path::new(&plan.model_dir),
             &tensor.name,
             candidate,
             &tensor.family,
+            codebook_scope,
             candidate,
             codebook,
             options.chunk_bytes,
@@ -2334,6 +2383,7 @@ fn run_one_direct_package_convert(
         Ok(PrototypeConvertResult {
             tensor: tensor.name.clone(),
             family: tensor.family.clone(),
+            codebook_scope: tensor.codebook_scope.clone(),
             candidate: candidate.to_string(),
             status: "ok".to_string(),
             returncode: 0,
@@ -2375,12 +2425,14 @@ fn run_one_prototype_convert(
             fs::remove_dir_all(&output_dir)
                 .map_err(|err| format!("failed to remove {}: {err}", output_dir.display()))?;
         }
-        let codebook = select_codebook(export, &tensor.family, candidate)?;
+        let codebook_scope = tensor_codebook_scope(tensor);
+        let codebook = select_codebook(export, codebook_scope, candidate)?;
         let manifest = write_prototype_tensor(
             Path::new(&plan.model_dir),
             &tensor.name,
             candidate,
             &tensor.family,
+            codebook_scope,
             candidate,
             codebook,
             options.chunk_bytes,
@@ -2407,6 +2459,7 @@ fn run_one_prototype_convert(
         Ok(PrototypeConvertResult {
             tensor: tensor.name.clone(),
             family: tensor.family.clone(),
+            codebook_scope: tensor.codebook_scope.clone(),
             candidate: candidate.to_string(),
             status: "ok".to_string(),
             returncode: 0,
@@ -2600,12 +2653,13 @@ fn run_direct_prototype_package(
         BTreeMap::new();
     for tensor in &selected {
         let candidate = tensor.quant_format.as_deref().unwrap_or("<missing>");
-        let codebook_key = (tensor.family.clone(), candidate.to_string());
+        let codebook_scope = tensor_codebook_scope(tensor);
+        let codebook_key = (codebook_scope.to_string(), candidate.to_string());
         if !codebook_manifests.contains_key(&codebook_key) {
-            let codebook = select_codebook(&export, &tensor.family, candidate)?;
+            let codebook = select_codebook(&export, codebook_scope, candidate)?;
             let codebook_rel = PathBuf::from("codebooks").join(format!(
                 "{}.f32",
-                sanitize_file_stem(&format!("{}__{}", tensor.family, candidate))
+                sanitize_file_stem(&format!("{}__{}", codebook_scope, candidate))
             ));
             write_f32_le_file(&output_dir.join(&codebook_rel), codebook)?;
             let codebook_file = relative_path_string(&codebook_rel);
@@ -2617,6 +2671,7 @@ fn run_direct_prototype_package(
                 codebook_key,
                 PrototypeCodebookManifest {
                     family: tensor.family.clone(),
+                    codebook_scope: optional_scope_value(&tensor.family, codebook_scope),
                     candidate_id: candidate.to_string(),
                     file: codebook_file,
                     encoding: "f32_le".to_string(),
@@ -3220,7 +3275,8 @@ fn merge_prototype_dirs(
                 bytes: scale_bytes,
             });
 
-            let codebook_key = (tensor.family.clone(), tensor.candidate_id.clone());
+            let tensor_scope = manifest_codebook_scope(&tensor).to_string();
+            let codebook_key = (tensor_scope.clone(), tensor.candidate_id.clone());
             let codebook_file = if let Some(existing) = codebook_files.get(&codebook_key) {
                 existing.clone()
             } else {
@@ -3233,7 +3289,8 @@ fn merge_prototype_dirs(
                     copy_file_for_merge(&src_codebook, &output_dir.join(&codebook_rel), overwrite)?;
                 let codebook_file = relative_path_string(&codebook_rel);
                 merged_codebooks.push(PrototypeCodebookManifest {
-                    family: codebook_key.0.clone(),
+                    family: tensor.family.clone(),
+                    codebook_scope: optional_scope_value(&tensor.family, &tensor_scope),
                     candidate_id: codebook_key.1.clone(),
                     file: codebook_file.clone(),
                     encoding: "f32_le".to_string(),
@@ -3527,7 +3584,33 @@ fn safetensor_files(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn build_model_plan(model_dir: &Path, aq_policy: &AqPolicyPlan) -> Result<ModelPlan, String> {
+fn assign_codebook_scopes(tensors: &mut [TensorPlan], max_elements: usize) {
+    let mut states: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
+    for tensor in tensors {
+        if tensor.action != "quantize" {
+            tensor.codebook_scope = None;
+            continue;
+        }
+        let Some(candidate) = tensor.quant_format.as_deref() else {
+            tensor.codebook_scope = None;
+            continue;
+        };
+        let key = (tensor.family.clone(), candidate.to_string());
+        let state = states.entry(key).or_insert((0, 0));
+        if state.1 > 0 && state.1.saturating_add(tensor.n_elements) > max_elements {
+            state.0 += 1;
+            state.1 = 0;
+        }
+        tensor.codebook_scope = Some(format!("{}_s{:03}", tensor.family, state.0));
+        state.1 = state.1.saturating_add(tensor.n_elements);
+    }
+}
+
+fn build_model_plan(
+    model_dir: &Path,
+    aq_policy: &AqPolicyPlan,
+    codebook_scope_max_elements: Option<usize>,
+) -> Result<ModelPlan, String> {
     let mut tensors = Vec::new();
     for path in safetensor_files(model_dir)? {
         let headers = read_safetensors_header(&path)?;
@@ -3550,6 +3633,7 @@ fn build_model_plan(model_dir: &Path, aq_policy: &AqPolicyPlan) -> Result<ModelP
                 },
                 quant_format,
                 quant_role,
+                codebook_scope: None,
                 estimated_output_bytes,
                 estimated_effective_bpp,
                 name,
@@ -3563,6 +3647,9 @@ fn build_model_plan(model_dir: &Path, aq_policy: &AqPolicyPlan) -> Result<ModelP
         }
     }
     tensors.sort_by(|left, right| left.name.cmp(&right.name));
+    if let Some(max_elements) = codebook_scope_max_elements {
+        assign_codebook_scopes(&mut tensors, max_elements);
+    }
     let supported_tensor_count = tensors
         .iter()
         .filter(|tensor| tensor.supported_input)
@@ -3581,6 +3668,7 @@ fn build_model_plan(model_dir: &Path, aq_policy: &AqPolicyPlan) -> Result<ModelP
         schema_version: "ullm-quant-plan-v0.3".to_string(),
         model_dir: model_dir.display().to_string(),
         aq_policy: aq_policy.clone(),
+        codebook_scope_max_elements,
         tensor_count: tensors.len(),
         supported_tensor_count,
         passthrough_tensor_count: tensors.len() - supported_tensor_count,
@@ -3624,7 +3712,11 @@ fn run() -> Result<(), String> {
     let version = unsafe { ullm_aq_get_kernel_version() };
     let packed = run_pack_smoke()?;
     let plan = match options.model_dir.as_deref() {
-        Some(model_dir) => Some(build_model_plan(model_dir, &aq_policy)?),
+        Some(model_dir) => Some(build_model_plan(
+            model_dir,
+            &aq_policy,
+            options.aq_codebook_max_elements,
+        )?),
         None => None,
     };
     let selected_codebook = if let (Some(path), Some(family), Some(candidate_id)) = (
@@ -3891,6 +3983,7 @@ fn run() -> Result<(), String> {
             tensor_name,
             aq_format,
             family,
+            family,
             candidate_id,
             codebook,
             options.chunk_bytes,
@@ -4076,16 +4169,16 @@ mod tests {
         AqPolicyPlan, AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport,
         ModelPlan, Options, PrototypeManifest, TensorPlan, TensorScaleEstimator,
         TensorScaleSampleCollector, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, aq_scale_format,
-        bytes_to_lower_hex, choose_best_scale_index_for_group, decode_numeric_value,
-        default_threads, effective_bpp, empty_aq_quant_metrics, estimate_output_bytes,
-        family_for_tensor, lower_median, max_codebook_abs, merge_prototype_dirs,
-        nearest_codebook_index, new_aq_group_stats, new_numeric_stats, new_quant_dry_run_stats,
-        numeric_element_size, parse_scale_window, parse_tensor_scale_estimator, quant_assignment,
-        read_safetensors_metadata, read_tensor_payload_chunk, resolve_aq_policy,
-        run_direct_prototype_package, scale_format_dominates, scale_table_contains_all,
-        scale_values, select_codebook, select_convert_tensors, ullm_aq_quantize_chunk_v1,
-        update_aq_group_stats, update_numeric_stats, update_quant_dry_run_stats,
-        verify_passthrough_tensors,
+        assign_codebook_scopes, bytes_to_lower_hex, choose_best_scale_index_for_group,
+        decode_numeric_value, default_threads, effective_bpp, empty_aq_quant_metrics,
+        estimate_output_bytes, family_for_tensor, lower_median, max_codebook_abs,
+        merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats, new_numeric_stats,
+        new_quant_dry_run_stats, numeric_element_size, parse_scale_window,
+        parse_tensor_scale_estimator, quant_assignment, read_safetensors_metadata,
+        read_tensor_payload_chunk, resolve_aq_policy, run_direct_prototype_package,
+        scale_format_dominates, scale_table_contains_all, scale_values, select_codebook,
+        select_convert_tensors, ullm_aq_quantize_chunk_v1, update_aq_group_stats,
+        update_numeric_stats, update_quant_dry_run_stats, verify_passthrough_tensors,
     };
     use std::collections::BTreeSet;
     use std::fs;
@@ -4285,6 +4378,7 @@ mod tests {
             aq_high_families: Vec::new(),
             aq_low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
             aq_high_format: "aq4_e4m3_g8_ts_flloyd16".to_string(),
+            aq_codebook_max_elements: None,
             dry_run: true,
         }
     }
@@ -4345,6 +4439,7 @@ mod tests {
                 action: action.to_string(),
                 quant_format: quant_format.map(str::to_string),
                 quant_role: quant_format.map(|_| "low".to_string()),
+                codebook_scope: None,
                 estimated_output_bytes: 9,
                 estimated_effective_bpp: 4.5,
             }
@@ -4359,6 +4454,7 @@ mod tests {
                 high_format: "aq4_e4m3_g8_ts_flloyd16".to_string(),
                 high_families: vec!["attn_k".to_string()],
             },
+            codebook_scope_max_elements: None,
             tensor_count: 5,
             supported_tensor_count: 4,
             passthrough_tensor_count: 1,
@@ -4397,11 +4493,13 @@ mod tests {
             codebooks: vec![
                 CodebookEntry {
                     family: "mlp_up".to_string(),
+                    codebook_scope: None,
                     candidate_id: "aq4_e4m3_g16_ts_flloyd16".to_string(),
                     values_f32: vec![0.0; 16],
                 },
                 CodebookEntry {
                     family: "attn_k".to_string(),
+                    codebook_scope: None,
                     candidate_id: "aq4_e4m3_g8_ts_flloyd16".to_string(),
                     values_f32: vec![0.0; 16],
                 },
@@ -4417,6 +4515,75 @@ mod tests {
             .map(|tensor| tensor.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["layer0.mlp_up", "layer2.attn_k"]);
+    }
+
+    #[test]
+    fn codebook_scope_selection_uses_scope_when_present() {
+        let export = CodebookExport {
+            codebooks: vec![
+                CodebookEntry {
+                    family: "mlp_up".to_string(),
+                    codebook_scope: Some("mlp_up_s000".to_string()),
+                    candidate_id: "aq4_e4m3_g16_ts_flloyd16".to_string(),
+                    values_f32: vec![1.0; 16],
+                },
+                CodebookEntry {
+                    family: "mlp_up".to_string(),
+                    codebook_scope: Some("mlp_up_s001".to_string()),
+                    candidate_id: "aq4_e4m3_g16_ts_flloyd16".to_string(),
+                    values_f32: vec![2.0; 16],
+                },
+            ],
+        };
+
+        let values = select_codebook(&export, "mlp_up_s001", "aq4_e4m3_g16_ts_flloyd16")
+            .expect("scoped codebook");
+        assert_eq!(values[0], 2.0);
+        assert!(select_codebook(&export, "mlp_up", "aq4_e4m3_g16_ts_flloyd16").is_err());
+    }
+
+    #[test]
+    fn codebook_scope_assignment_splits_before_max_elements() {
+        fn tensor_plan(name: &str, elements: usize) -> TensorPlan {
+            TensorPlan {
+                name: name.to_string(),
+                source_file: "model.safetensors".to_string(),
+                dtype: "BF16".to_string(),
+                shape: vec![elements, 1],
+                family: "mlp_up".to_string(),
+                n_elements: elements,
+                n_bytes: elements * 2,
+                supported_input: true,
+                action: "quantize".to_string(),
+                quant_format: Some("aq4_e4m3_g16_ts_flloyd16".to_string()),
+                quant_role: Some("low".to_string()),
+                codebook_scope: None,
+                estimated_output_bytes: elements,
+                estimated_effective_bpp: 4.5,
+            }
+        }
+
+        let mut tensors = vec![
+            tensor_plan("layer0.mlp_up", 60),
+            tensor_plan("layer1.mlp_up", 40),
+            tensor_plan("layer2.mlp_up", 1),
+            tensor_plan("layer3.mlp_up", 99),
+        ];
+        assign_codebook_scopes(&mut tensors, 100);
+
+        let scopes = tensors
+            .iter()
+            .map(|tensor| tensor.codebook_scope.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scopes,
+            vec![
+                Some("mlp_up_s000"),
+                Some("mlp_up_s000"),
+                Some("mlp_up_s001"),
+                Some("mlp_up_s001")
+            ]
+        );
     }
 
     #[test]
@@ -5555,6 +5722,7 @@ mod tests {
         let export = CodebookExport {
             codebooks: vec![CodebookEntry {
                 family: "mlp_up".to_string(),
+                codebook_scope: None,
                 candidate_id: "aq4_e4m3_g16_ts_flloyd16".to_string(),
                 values_f32: (0..16).map(|value| value as f32).collect(),
             }],

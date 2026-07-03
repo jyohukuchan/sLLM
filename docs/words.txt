@@ -7,6 +7,7 @@ prefill-tps:prefill token/s
 raw-value:scale・codebookを一切考慮しない各パラメータの値
 codebook:LUTによる変換表
 codebook-index:codebookを参照するために保存されるindex値
+codebook-scope:同じcodebookを共有するtensor集合。familyより細かい機械的な分割にも使う
 LUT:実装上の表参照機構。量子化仕様上の変換表はcodebookと書く
 payload:FP8やFP16など、演算器または後段処理へ渡すための実際の保存・受け渡し値
 fused dequant:GEMM/GEMVなどの演算kernel内でcodebook-indexやscaleを実効値へ変換し、そのまま演算へ使う処理
