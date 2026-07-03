@@ -7,13 +7,17 @@
 
 ## Referenced Third-Party Projects
 - llama.cpp — License: MIT
-- ATOM — License: MIT
+- AMD ROCm / ATOM — License: MIT
 - AITER — License: MIT
 - vLLM — License: Apache-2.0
 - SGLang — License: Apache-2.0
-- TensorRT-LLM — License: Apache-2.0 (with MIT/BSD and possible additional third-party/subcomponent notices)
+- TensorRT-LLM — License: Apache-2.0
 
 ## Policy
-- For any imported third-party files, preserve original copyright notices and include required license text in the distribution path where required.
+- For implementation-code reuse, preserve original copyright headers in the copied files, and keep corresponding LICENSE/NOTICE texts reachable in the distribution artifact.
+- For design/reference adaptation without code import, include only an index-level record of consulted projects and avoid implying legal clearance.
 - Runtime dependencies, model weights, and benchmark datasets are separate licensing surfaces and must be audited before distribution or publication of binaries/artifacts that include them.
 - This file is intentionally concise and intended as a distribution-level index. Detailed license texts are kept in upstream repositories.
+
+### Future redistribution rule of thumb
+- If third-party code is copied/ported in the future, copyright/license notices should be kept at file or component level, and NOTICE/Third Party notices should continue to be distributed with redistributed binaries/sources.

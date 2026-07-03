@@ -116,6 +116,13 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-linear-attn-recurrent-smoke") => package_linear_attn_recurrent_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+        ),
         Some("package-linear-attn-aux-smoke") => package_linear_attn_aux_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -4879,6 +4886,873 @@ fn package_linear_attn_gate_beta_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_linear_attn_recurrent_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-recurrent-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 4, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    let key_heads = 16_usize;
+    let value_heads = 32_usize;
+    let key_dim = 128_usize;
+    let value_dim = 128_usize;
+    let q_elements_per_step = key_heads * key_dim;
+    let k_elements_per_step = key_heads * key_dim;
+    let v_elements_per_step = value_heads * value_dim;
+    let recurrent_channels = q_elements_per_step + k_elements_per_step + v_elements_per_step;
+    let q_scale = 1.0_f32 / (key_dim as f32).sqrt();
+    let qk_l2_norm = true;
+
+    let qkv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
+    let conv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.conv1d.weight");
+    let a_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_a.weight");
+    let b_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_b.weight");
+    let a_log_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.A_log");
+    let dt_bias_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.dt_bias");
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let conv_selector = TensorSelector::Name(conv_tensor.clone());
+    let conv_bundle =
+        match ullm_engine::package::select_passthrough_payload_bundle(&path, &conv_selector) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("failed to select package conv1d passthrough tensor: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    if conv_bundle.shape.len() != 3 || conv_bundle.shape[1] != 1 {
+        eprintln!(
+            "conv1d tensor shape must be [channels,1,kernel], got {}",
+            format_u64_shape(&conv_bundle.shape)
+        );
+        return ExitCode::from(1);
+    }
+    let conv_channels = match usize::try_from(conv_bundle.shape[0]) {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("conv1d tensor has zero channels");
+            return ExitCode::from(1);
+        }
+        Err(_) => {
+            eprintln!("conv1d channel count is too large for this host");
+            return ExitCode::from(1);
+        }
+    };
+    if conv_channels != recurrent_channels {
+        eprintln!(
+            "conv1d channels must match Qwen3.5 linear attention q/k/v layout: conv_channels={conv_channels}, expected={recurrent_channels}"
+        );
+        return ExitCode::from(1);
+    }
+    let kernel_size = match usize::try_from(conv_bundle.shape[2]) {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("conv1d tensor has zero kernel size");
+            return ExitCode::from(1);
+        }
+        Err(_) => {
+            eprintln!("conv1d kernel size is too large for this host");
+            return ExitCode::from(1);
+        }
+    };
+    let conv_dtype = match resolve_passthrough_dtype(&conv_bundle, &conv_tensor) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let conv_weight =
+        match read_passthrough_payload_f32_bytes(&conv_bundle, chunk_bytes, conv_dtype) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("failed to read passthrough payload for {conv_tensor}: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    if conv_weight.len() != conv_channels * kernel_size {
+        eprintln!(
+            "conv1d weight element count mismatch: expected {} got {}",
+            conv_channels * kernel_size,
+            conv_weight.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let a_log_selector = TensorSelector::Name(a_log_tensor.clone());
+    let a_log_bundle =
+        match ullm_engine::package::select_passthrough_payload_bundle(&path, &a_log_selector) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("failed to select package A_log passthrough tensor: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    if let Err(err) = validate_passthrough_shape_elements(&a_log_bundle) {
+        eprintln!("invalid A_log shape for {a_log_tensor}: {err}");
+        return ExitCode::from(1);
+    }
+    let a_log_dtype = match resolve_passthrough_dtype(&a_log_bundle, &a_log_tensor) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let a_log = match read_passthrough_payload_f32_bytes(&a_log_bundle, chunk_bytes, a_log_dtype) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read passthrough payload for {a_log_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if a_log.len() != value_heads {
+        eprintln!(
+            "A_log tensor {a_log_tensor} length must match value heads: len={} value_heads={value_heads}",
+            a_log.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let dt_bias_selector = TensorSelector::Name(dt_bias_tensor.clone());
+    let dt_bias_bundle =
+        match ullm_engine::package::select_passthrough_payload_bundle(&path, &dt_bias_selector) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("failed to select package dt_bias passthrough tensor: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    if let Err(err) = validate_passthrough_shape_elements(&dt_bias_bundle) {
+        eprintln!("invalid dt_bias shape for {dt_bias_tensor}: {err}");
+        return ExitCode::from(1);
+    }
+    let dt_bias_dtype = match resolve_passthrough_dtype(&dt_bias_bundle, &dt_bias_tensor) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let dt_bias =
+        match read_passthrough_payload_f32_bytes(&dt_bias_bundle, chunk_bytes, dt_bias_dtype) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("failed to read passthrough payload for {dt_bias_tensor}: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    if dt_bias.len() != value_heads {
+        eprintln!(
+            "dt_bias tensor {dt_bias_tensor} length must match value heads: len={} value_heads={value_heads}",
+            dt_bias.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let mut registry = WeightRegistry::new();
+    let (qkv_rows, qkv_cols, qkv_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &qkv_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {qkv_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if qkv_rows != conv_channels {
+        eprintln!(
+            "qkv rows must match conv1d channels: qkv_rows={qkv_rows}, conv_channels={conv_channels}"
+        );
+        return ExitCode::from(1);
+    }
+
+    let (a_rows, a_cols, a_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &a_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {a_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (b_rows, b_cols, b_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &b_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {b_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if a_rows != value_heads || b_rows != value_heads {
+        eprintln!(
+            "linear attention a/b rows must match value_heads={value_heads}: a_rows={a_rows}, b_rows={b_rows}"
+        );
+        return ExitCode::from(1);
+    }
+    if a_cols != qkv_cols || b_cols != qkv_cols {
+        eprintln!(
+            "linear attention a/b hidden sizes must match qkv hidden={qkv_cols}: a_cols={a_cols}, b_cols={b_cols}"
+        );
+        return ExitCode::from(1);
+    }
+
+    let qkv_step_bytes = qkv_rows * std::mem::size_of::<f32>();
+    let gate_beta_step_bytes = value_heads * std::mem::size_of::<f32>();
+    let qkv_sequence_bytes_len = match qkv_step_bytes.checked_mul(sequence_len) {
+        Some(value) => value,
+        None => {
+            eprintln!("qkv sequence byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let gate_beta_sequence_bytes_len = match gate_beta_step_bytes.checked_mul(sequence_len) {
+        Some(value) => value,
+        None => {
+            eprintln!("linear attention gate beta sequence byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let input_bytes_len = match qkv_cols.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("linear attention input byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut input_buffer = match context.alloc_buffer(input_bytes_len) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate linear attention input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut qkv_step_buffer = match context.alloc_buffer(qkv_step_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate qkv step output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut a_step_buffer = match context.alloc_buffer(gate_beta_step_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate a step output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut b_step_buffer = match context.alloc_buffer(gate_beta_step_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate b step output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let base_input = deterministic_f32_vector(qkv_cols);
+    let mut qkv_sequence_bytes = vec![0_u8; qkv_sequence_bytes_len];
+    let mut a_sequence_bytes = vec![0_u8; gate_beta_sequence_bytes_len];
+    let mut b_sequence_bytes = vec![0_u8; gate_beta_sequence_bytes_len];
+    for timestep in 0..sequence_len {
+        let step_input = linear_attn_step_input(&base_input, timestep);
+        let step_input_bytes = encode_f32_to_bytes(&step_input);
+        if let Err(err) = input_buffer.copy_from_host(0, &step_input_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy linear attention input timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = ullm_runtime_sys::matvec_f32(
+            &qkv_matrix,
+            &input_buffer,
+            qkv_rows,
+            qkv_cols,
+            &mut qkv_step_buffer,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run qkv matvec for timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = ullm_runtime_sys::matvec_f32(
+            &a_matrix,
+            &input_buffer,
+            value_heads,
+            qkv_cols,
+            &mut a_step_buffer,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run a matvec for timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = ullm_runtime_sys::matvec_f32(
+            &b_matrix,
+            &input_buffer,
+            value_heads,
+            qkv_cols,
+            &mut b_step_buffer,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run b matvec for timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!(
+                "failed to synchronize runtime stream after linear attention timestep {timestep}: {err}"
+            );
+            return ExitCode::from(1);
+        }
+
+        let qkv_start = timestep * qkv_step_bytes;
+        let qkv_end = qkv_start + qkv_step_bytes;
+        if let Err(err) = qkv_step_buffer.copy_to_host(
+            0,
+            &mut qkv_sequence_bytes[qkv_start..qkv_end],
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to copy qkv timestep {timestep} back to host: {err}");
+            return ExitCode::from(1);
+        }
+        let gate_beta_start = timestep * gate_beta_step_bytes;
+        let gate_beta_end = gate_beta_start + gate_beta_step_bytes;
+        if let Err(err) = a_step_buffer.copy_to_host(
+            0,
+            &mut a_sequence_bytes[gate_beta_start..gate_beta_end],
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to copy a timestep {timestep} back to host: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = b_step_buffer.copy_to_host(
+            0,
+            &mut b_sequence_bytes[gate_beta_start..gate_beta_end],
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to copy b timestep {timestep} back to host: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!(
+                "failed to synchronize runtime stream after timestep {timestep} host copy: {err}"
+            );
+            return ExitCode::from(1);
+        }
+    }
+
+    let qkv_sequence = decode_f32_le_values(&qkv_sequence_bytes);
+    let expected_conv = runtime_host_depthwise_conv1d_f32(
+        &qkv_sequence,
+        &conv_weight,
+        qkv_rows,
+        sequence_len,
+        kernel_size,
+    );
+    if expected_conv.is_empty() {
+        eprintln!("failed to build package depthwise conv1d reference");
+        return ExitCode::from(1);
+    }
+
+    let mut conv_input_buffer = match context.alloc_buffer(qkv_sequence_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate conv1d input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let conv_weight_bytes = encode_f32_to_bytes(&conv_weight);
+    let mut conv_weight_buffer = match context.alloc_buffer(conv_weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate conv1d weight buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut conv_output_buffer = match context.alloc_buffer(qkv_sequence_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate conv1d output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = conv_input_buffer.copy_from_host(0, &qkv_sequence_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy conv1d input sequence into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = conv_weight_buffer.copy_from_host(0, &conv_weight_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy conv1d weight into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after conv1d input copy: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = ullm_runtime_sys::depthwise_conv1d_f32(
+        &conv_input_buffer,
+        &conv_weight_buffer,
+        qkv_rows,
+        sequence_len,
+        kernel_size,
+        &mut conv_output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime depthwise_conv1d_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after conv1d: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut conv_output_bytes = vec![0_u8; qkv_sequence_bytes.len()];
+    if let Err(err) = conv_output_buffer.copy_to_host(0, &mut conv_output_bytes, Some(&mut stream))
+    {
+        eprintln!("failed to copy conv1d output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after conv1d output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let conv_output = decode_f32_le_values(&conv_output_bytes);
+    let mut conv_max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in conv_output.iter().zip(expected_conv.iter()) {
+        let diff = (lhs - rhs).abs();
+        if diff > 1e-4_f32 {
+            eprintln!(
+                "package-linear-attn-recurrent-smoke conv1d mismatch for layer={layer_index}: max_abs_diff={diff}"
+            );
+            return ExitCode::from(1);
+        }
+        if diff > conv_max_abs_diff {
+            conv_max_abs_diff = diff;
+        }
+    }
+
+    let qkv_split = match split_linear_attn_qkv_for_recurrent(
+        &conv_output,
+        sequence_len,
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        qk_l2_norm,
+        q_scale,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to split linear attention qkv: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let a_sequence = decode_f32_le_values(&a_sequence_bytes);
+    let b_sequence = decode_f32_le_values(&b_sequence_bytes);
+    let (expected_gate, expected_beta) = runtime_host_linear_attn_gate_beta_f32(
+        &a_sequence,
+        &b_sequence,
+        &a_log,
+        &dt_bias,
+        value_heads,
+        sequence_len,
+    );
+    if expected_gate.is_empty() || expected_beta.is_empty() {
+        eprintln!("failed to build package linear attention gate beta reference");
+        return ExitCode::from(1);
+    }
+
+    let a_log_bytes = encode_f32_to_bytes(&a_log);
+    let dt_bias_bytes = encode_f32_to_bytes(&dt_bias);
+    let mut a_sequence_buffer = match context.alloc_buffer(a_sequence_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate a sequence buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut b_sequence_buffer = match context.alloc_buffer(b_sequence_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate b sequence buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut a_log_buffer = match context.alloc_buffer(a_log_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate A_log buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut dt_bias_buffer = match context.alloc_buffer(dt_bias_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate dt_bias buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut gate_output_buffer = match context.alloc_buffer(gate_beta_sequence_bytes_len) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate gate output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut beta_output_buffer = match context.alloc_buffer(gate_beta_sequence_bytes_len) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate beta output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = a_sequence_buffer.copy_from_host(0, &a_sequence_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy a sequence into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = b_sequence_buffer.copy_from_host(0, &b_sequence_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy b sequence into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = a_log_buffer.copy_from_host(0, &a_log_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy A_log into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = dt_bias_buffer.copy_from_host(0, &dt_bias_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy dt_bias into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gate beta sequence copy: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = ullm_runtime_sys::linear_attn_gate_beta_f32(
+        &a_sequence_buffer,
+        &b_sequence_buffer,
+        &a_log_buffer,
+        &dt_bias_buffer,
+        value_heads,
+        sequence_len,
+        &mut gate_output_buffer,
+        &mut beta_output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime linear_attn_gate_beta_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after linear attention gate beta: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut gate_output_bytes = vec![0_u8; gate_beta_sequence_bytes_len];
+    let mut beta_output_bytes = vec![0_u8; gate_beta_sequence_bytes_len];
+    if let Err(err) = gate_output_buffer.copy_to_host(0, &mut gate_output_bytes, Some(&mut stream))
+    {
+        eprintln!("failed to copy gate output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = beta_output_buffer.copy_to_host(0, &mut beta_output_bytes, Some(&mut stream))
+    {
+        eprintln!("failed to copy beta output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gate beta output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let gate_output = decode_f32_le_values(&gate_output_bytes);
+    let beta_output = decode_f32_le_values(&beta_output_bytes);
+    let mut gate_beta_max_abs_diff = 0.0_f32;
+    for ((gate, expected_gate), (beta, expected_beta)) in gate_output
+        .iter()
+        .zip(expected_gate.iter())
+        .zip(beta_output.iter().zip(expected_beta.iter()))
+    {
+        let gate_diff = (gate - expected_gate).abs();
+        let beta_diff = (beta - expected_beta).abs();
+        let diff = gate_diff.max(beta_diff);
+        if diff > 1e-4_f32 {
+            eprintln!(
+                "package-linear-attn-recurrent-smoke gate/beta mismatch for layer={layer_index}: max_abs_diff={diff}"
+            );
+            return ExitCode::from(1);
+        }
+        if diff > gate_beta_max_abs_diff {
+            gate_beta_max_abs_diff = diff;
+        }
+    }
+
+    let state_elements = match value_heads
+        .checked_mul(key_dim)
+        .and_then(|value| value.checked_mul(value_dim))
+    {
+        Some(value) => value,
+        None => {
+            eprintln!("linear attention recurrent state element count overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let output_elements = match sequence_len.checked_mul(v_elements_per_step) {
+        Some(value) => value,
+        None => {
+            eprintln!("linear attention recurrent output element count overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let initial_state = vec![0.0_f32; state_elements];
+    let mut expected_state = initial_state.clone();
+    let expected_recurrent_output = runtime_host_linear_attn_recurrent_f32(
+        &qkv_split.q,
+        &qkv_split.k,
+        &qkv_split.v,
+        &expected_gate,
+        &expected_beta,
+        key_heads,
+        value_heads,
+        sequence_len,
+        key_dim,
+        value_dim,
+        &mut expected_state,
+    );
+    if expected_recurrent_output.len() != output_elements {
+        eprintln!("failed to build package linear attention recurrent reference");
+        return ExitCode::from(1);
+    }
+
+    let q_bytes = encode_f32_to_bytes(&qkv_split.q);
+    let k_bytes = encode_f32_to_bytes(&qkv_split.k);
+    let v_bytes = encode_f32_to_bytes(&qkv_split.v);
+    let state_bytes = encode_f32_to_bytes(&initial_state);
+    let output_bytes_len = output_elements * std::mem::size_of::<f32>();
+    let mut q_buffer = match context.alloc_buffer(q_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate q runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut k_buffer = match context.alloc_buffer(k_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate k runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut v_buffer = match context.alloc_buffer(v_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate v runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut state_buffer = match context.alloc_buffer(state_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate state runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut recurrent_output_buffer = match context.alloc_buffer(output_bytes_len) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate recurrent output runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = q_buffer.copy_from_host(0, &q_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy q data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = k_buffer.copy_from_host(0, &k_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy k data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = v_buffer.copy_from_host(0, &v_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy v data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = state_buffer.copy_from_host(0, &state_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy state data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after recurrent input copy: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = ullm_runtime_sys::linear_attn_recurrent_f32(
+        &q_buffer,
+        &k_buffer,
+        &v_buffer,
+        &gate_output_buffer,
+        &beta_output_buffer,
+        key_heads,
+        value_heads,
+        sequence_len,
+        key_dim,
+        value_dim,
+        &mut state_buffer,
+        &mut recurrent_output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime linear_attn_recurrent_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after linear attention recurrent: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut recurrent_output_bytes = vec![0_u8; output_bytes_len];
+    let mut final_state_bytes = vec![0_u8; state_bytes.len()];
+    if let Err(err) =
+        recurrent_output_buffer.copy_to_host(0, &mut recurrent_output_bytes, Some(&mut stream))
+    {
+        eprintln!("failed to copy recurrent output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = state_buffer.copy_to_host(0, &mut final_state_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy recurrent state back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after recurrent output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let recurrent_output = decode_f32_le_values(&recurrent_output_bytes);
+    let final_state = decode_f32_le_values(&final_state_bytes);
+    let mut recurrent_max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in recurrent_output
+        .iter()
+        .zip(expected_recurrent_output.iter())
+    {
+        let diff = (lhs - rhs).abs();
+        let tolerance = 1e-3_f32.max(rhs.abs() * 1e-5_f32);
+        if diff > tolerance {
+            eprintln!(
+                "package-linear-attn-recurrent-smoke output mismatch for layer={layer_index}: max_abs_diff={diff} tolerance={tolerance}"
+            );
+            return ExitCode::from(1);
+        }
+        if diff > recurrent_max_abs_diff {
+            recurrent_max_abs_diff = diff;
+        }
+    }
+    for (lhs, rhs) in final_state.iter().zip(expected_state.iter()) {
+        let diff = (lhs - rhs).abs();
+        let tolerance = 1e-3_f32.max(rhs.abs() * 1e-5_f32);
+        if diff > tolerance {
+            eprintln!(
+                "package-linear-attn-recurrent-smoke state mismatch for layer={layer_index}: max_abs_diff={diff} tolerance={tolerance}"
+            );
+            return ExitCode::from(1);
+        }
+        if diff > recurrent_max_abs_diff {
+            recurrent_max_abs_diff = diff;
+        }
+    }
+
+    println!(
+        "package-linear-attn-recurrent-smoke package={} layer={} qkv_tensor=\"{}\" conv_tensor=\"{}\" a_tensor=\"{}\" b_tensor=\"{}\" a_log_tensor=\"{}\" dt_bias_tensor=\"{}\" hidden={} key_heads={} value_heads={} key_dim={} value_dim={} sequence_len={} kernel_size={} qk_l2_norm={} q_scale={q_scale:.9} conv_dtype={} a_log_dtype={} dt_bias_dtype={} backend={} device_index={} name=\"{}\" q_preview={} k_preview={} v_preview={} gate_preview={} output_preview={} state_preview={} conv_max_abs_diff={conv_max_abs_diff:.9} gate_beta_max_abs_diff={gate_beta_max_abs_diff:.9} recurrent_max_abs_diff={recurrent_max_abs_diff:.9} verified=true",
+        path,
+        layer_index,
+        qkv_tensor,
+        conv_tensor,
+        a_tensor,
+        b_tensor,
+        a_log_tensor,
+        dt_bias_tensor,
+        qkv_cols,
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        sequence_len,
+        kernel_size,
+        qk_l2_norm,
+        conv_dtype,
+        a_log_dtype,
+        dt_bias_dtype,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(&qkv_split.q[..8.min(qkv_split.q.len())]),
+        format_f32_preview(&qkv_split.k[..8.min(qkv_split.k.len())]),
+        format_f32_preview(&qkv_split.v[..8.min(qkv_split.v.len())]),
+        format_f32_preview(&gate_output[..8.min(gate_output.len())]),
+        format_f32_preview(&recurrent_output[..8.min(recurrent_output.len())]),
+        format_f32_preview(&final_state[..8.min(final_state.len())]),
+    );
+    ExitCode::SUCCESS
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormKind {
     Input,
@@ -5145,6 +6019,112 @@ fn deterministic_f32_vector(elements: usize) -> Vec<f32> {
     values
 }
 
+fn linear_attn_step_input(base_input: &[f32], timestep: usize) -> Vec<f32> {
+    base_input
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let phase = (index % 17) as f32 - 8.0_f32;
+            *value + (timestep as f32) * phase * 0.00025_f32
+        })
+        .collect()
+}
+
+struct LinearAttnQkvSplit {
+    q: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn split_linear_attn_qkv_for_recurrent(
+    conv_output: &[f32],
+    sequence_len: usize,
+    key_heads: usize,
+    value_heads: usize,
+    key_dim: usize,
+    value_dim: usize,
+    qk_l2_norm: bool,
+    q_scale: f32,
+) -> Result<LinearAttnQkvSplit, String> {
+    if sequence_len == 0 || key_heads == 0 || value_heads == 0 || key_dim == 0 || value_dim == 0 {
+        return Err("linear attention q/k/v layout contains a zero dimension".to_string());
+    }
+    let q_elements_per_step = key_heads
+        .checked_mul(key_dim)
+        .ok_or_else(|| "q element count overflows".to_string())?;
+    let k_elements_per_step = q_elements_per_step;
+    let v_elements_per_step = value_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "v element count overflows".to_string())?;
+    let step_elements = q_elements_per_step
+        .checked_add(k_elements_per_step)
+        .and_then(|value| value.checked_add(v_elements_per_step))
+        .ok_or_else(|| "linear attention q/k/v step element count overflows".to_string())?;
+    let expected_elements = step_elements
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "linear attention q/k/v sequence element count overflows".to_string())?;
+    if conv_output.len() != expected_elements {
+        return Err(format!(
+            "conv output element count mismatch: expected {expected_elements} got {}",
+            conv_output.len()
+        ));
+    }
+
+    let mut q = vec![0.0_f32; sequence_len * q_elements_per_step];
+    let mut k = vec![0.0_f32; sequence_len * k_elements_per_step];
+    let mut v = vec![0.0_f32; sequence_len * v_elements_per_step];
+    for timestep in 0..sequence_len {
+        let step_base = timestep * step_elements;
+        let q_base = step_base;
+        let k_base = q_base + q_elements_per_step;
+        let v_base = k_base + k_elements_per_step;
+
+        for head in 0..key_heads {
+            let source_start = q_base + head * key_dim;
+            let target_start = (timestep * key_heads + head) * key_dim;
+            q[target_start..target_start + key_dim]
+                .copy_from_slice(&conv_output[source_start..source_start + key_dim]);
+            if qk_l2_norm {
+                let norm = (q[target_start..target_start + key_dim]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    + 1e-6_f32)
+                    .sqrt();
+                for value in &mut q[target_start..target_start + key_dim] {
+                    *value = (*value / norm) * q_scale;
+                }
+            } else {
+                for value in &mut q[target_start..target_start + key_dim] {
+                    *value *= q_scale;
+                }
+            }
+
+            let source_start = k_base + head * key_dim;
+            let target_start = (timestep * key_heads + head) * key_dim;
+            k[target_start..target_start + key_dim]
+                .copy_from_slice(&conv_output[source_start..source_start + key_dim]);
+            if qk_l2_norm {
+                let norm = (k[target_start..target_start + key_dim]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    + 1e-6_f32)
+                    .sqrt();
+                for value in &mut k[target_start..target_start + key_dim] {
+                    *value /= norm;
+                }
+            }
+        }
+
+        let target_v_base = timestep * v_elements_per_step;
+        v[target_v_base..target_v_base + v_elements_per_step]
+            .copy_from_slice(&conv_output[v_base..v_base + v_elements_per_step]);
+    }
+    Ok(LinearAttnQkvSplit { q, k, v })
+}
+
 fn materialize_selected_aq4_matrix(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -5205,7 +6185,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!(
