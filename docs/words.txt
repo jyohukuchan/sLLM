@@ -73,6 +73,7 @@ package linear attention post smoke:.ullm.d内の実際のlinear_attn.in_proj_z 
 package linear attention block smoke:.ullm.d内の実際のinput_layernorm.weightとlinear_attn系tensorを使い、input RMSNormからlinear attention workflow、residual addまでを接続するsmoke。MLPやdecoder block全体の計算ではない
 package linear attention workflow smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv / conv1d / in_proj_a,b / A_log / dt_bias / in_proj_z / norm / out_projを使い、recurrent境界からpost-recurrent gated RMSNormとout projectionまでを接続するsmoke。linear attention全体の計算に近いが、まだ通常decoder layer全体ではない
 package linear attention auxiliary smoke:.ullm.d内の実際のlinear_attn補助passthrough tensorをf32へ変換し、runtime bufferへの転送とreadbackを検証するsmoke。linear attention全体の計算ではない
+package linear attention MLP block smoke:.ullm.d内の実際のinput_layernorm.weight、linear_attn系tensor、post_attention_layernorm.weight、MLP tensorを使い、1 tokenのlinear attention block出力をMLP blockのresidual inputに渡すlayer-level partial decoder smoke。通常attention層やKV cache管理はまだ含まない
 linear attention gate beta:linear attentionでin_proj_a/bの出力、A_log、dt_biasからgateとbetaを作る境界処理
 runtime linear attention gate beta smoke:runtime上でa/b、A_log、dt_biasからgate/betaを計算し、決定的入力で境界動作を確認するsmoke。linear attention全体の計算ではない
 package linear attention gate beta smoke:.ullm.d内の実際のlinear_attn.in_proj_a/b quantized tensorとA_log/dt_bias passthrough tensorを使い、runtimeでgate/beta境界を検証するsmoke。linear attention全体の計算ではない
