@@ -325,6 +325,12 @@ bool stream_matches_buffer(const ullm_runtime_buffer *buffer, const ullm_runtime
     return buffer->backend == stream->backend && buffer->hip_device_id == stream->hip_device_id;
 }
 
+bool buffers_share_backend(
+    const ullm_runtime_buffer *lhs,
+    const ullm_runtime_buffer *rhs) {
+    return lhs->backend == rhs->backend && lhs->hip_device_id == rhs->hip_device_id;
+}
+
 } // namespace
 
 uint32_t ullm_runtime_abi_version(void) {
@@ -637,6 +643,94 @@ ullm_status ullm_runtime_stream_synchronize(ullm_runtime_stream *stream) {
         !hip_runtime().synchronize_stream(stream->stream, stream->hip_device_id)) {
         set_error("failed to synchronize HIP stream");
         return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_aq4_dequant_f32(
+    const ullm_runtime_buffer *index_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *codebook_buffer,
+    const float *scale_values,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    size_t elements,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (index_buffer == nullptr || scale_buffer == nullptr || codebook_buffer == nullptr ||
+        output_buffer == nullptr || (scale_count > 0 && scale_values == nullptr)) {
+        set_error("AQ4 dequant received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (group_size == 0) {
+        set_error("AQ4 dequant group size must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_count == 0) {
+        set_error("AQ4 dequant scale table is empty");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(index_buffer, scale_buffer) ||
+        !buffers_share_backend(index_buffer, codebook_buffer) ||
+        !buffers_share_backend(index_buffer, output_buffer)) {
+        set_error("AQ4 dequant buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("AQ4 dequant stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (index_buffer->backend != BackendKind::Cpu) {
+        set_error("AQ4 dequant currently supports CPU fallback buffers only");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+
+    if (elements > (static_cast<size_t>(-1) / sizeof(float))) {
+        set_error("AQ4 dequant output byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_index_bytes = elements / 2 + (elements % 2);
+    const size_t groups = elements / group_size + (elements % group_size == 0 ? 0 : 1);
+    const size_t required_output_bytes = elements * sizeof(float);
+    if (index_buffer->bytes < required_index_bytes) {
+        set_error("AQ4 dequant index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_buffer->bytes < groups) {
+        set_error("AQ4 dequant scale buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_output_bytes) {
+        set_error("AQ4 dequant output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (codebook_buffer->bytes % sizeof(float) != 0) {
+        set_error("AQ4 dequant codebook buffer size is not a multiple of f32");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t codebook_entries = codebook_buffer->bytes / sizeof(float);
+    if (codebook_entries < 16) {
+        set_error("AQ4 dequant requires at least 16 codebook entries");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const auto *indices = static_cast<const std::uint8_t *>(index_buffer->ptr);
+    const auto *scale_indices = static_cast<const std::uint8_t *>(scale_buffer->ptr);
+    const auto *codebook = static_cast<const float *>(codebook_buffer->ptr);
+    auto *output = static_cast<float *>(output_buffer->ptr);
+    for (size_t element = 0; element < elements; ++element) {
+        const std::uint8_t packed = indices[element / 2];
+        const std::uint8_t codebook_index =
+            (element % 2 == 0) ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+        const size_t group = element / group_size;
+        const size_t scale_index = static_cast<size_t>(scale_indices[group]);
+        if (scale_index >= scale_count) {
+            set_error("AQ4 dequant scale index is out of range");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        output[element] = codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
     }
     set_error("");
     return ULLM_STATUS_OK;

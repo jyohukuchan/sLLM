@@ -66,6 +66,18 @@ unsafe extern "C" {
     ) -> c_int;
     fn ullm_runtime_stream_destroy(stream: *mut RawRuntimeStream) -> c_int;
     fn ullm_runtime_stream_synchronize(stream: *mut RawRuntimeStream) -> c_int;
+    fn ullm_runtime_aq4_dequant_f32(
+        index_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        codebook_buffer: *const RawRuntimeBuffer,
+        scale_values: *const f32,
+        scale_count: usize,
+        group_size: usize,
+        tensor_scale: f32,
+        elements: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_smoke_add_f32(
         lhs: *const f32,
         rhs: *const f32,
@@ -263,6 +275,41 @@ pub fn smoke_add_f32(lhs: &[f32], rhs: &[f32]) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
+pub fn aq4_dequant_f32(
+    index_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    codebook_buffer: &RuntimeBuffer,
+    scale_values: &[f32],
+    group_size: usize,
+    tensor_scale: f32,
+    elements: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if scale_values.is_empty() {
+        return Err("AQ4 dequant scale table is empty".to_string());
+    }
+    let output_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 dequant output byte size overflows".to_string())?;
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_aq4_dequant_f32(
+            index_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            codebook_buffer.raw.as_ptr(),
+            scale_values.as_ptr(),
+            scale_values.len(),
+            group_size,
+            tensor_scale,
+            elements,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 fn status_to_result(status: c_int) -> Result<(), String> {
     match status {
         STATUS_OK => Ok(()),
@@ -378,6 +425,86 @@ mod tests {
     }
 
     #[test]
+    fn cpu_aq4_dequant_f32_materializes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut index = context.alloc_buffer(2).unwrap();
+        let mut scale = context.alloc_buffer(2).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        index
+            .copy_from_host(0, &[0x21_u8, 0x30], Some(&mut stream))
+            .unwrap();
+        scale
+            .copy_from_host(0, &[0_u8, 1], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_dequant_f32(
+            &index,
+            &scale,
+            &codebook,
+            &[0.5, 2.0],
+            2,
+            10.0,
+            4,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 4 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&output_bytes), vec![5.0, 10.0, 0.0, 60.0]);
+    }
+
+    #[test]
+    fn cpu_aq4_dequant_f32_rejects_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut index = context.alloc_buffer(2).unwrap();
+        let mut scale = context.alloc_buffer(2).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        index.copy_from_host(0, &[0x21_u8, 0x30], None).unwrap();
+        scale.copy_from_host(0, &[0_u8, 1], None).unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), None)
+            .unwrap();
+
+        let err = aq4_dequant_f32(
+            &index,
+            &scale,
+            &codebook,
+            &[0.5, 2.0],
+            2,
+            10.0,
+            4,
+            &mut output,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
     fn first_hip_context_allocates_runtime_buffer_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -417,5 +544,20 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_eq!(output, input);
+    }
+
+    fn f32s_to_le_bytes(values: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(std::mem::size_of_val(values));
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn le_bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
+        bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect()
     }
 }

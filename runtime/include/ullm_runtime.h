@@ -86,6 +86,18 @@ ullm_status ullm_runtime_stream_destroy(ullm_runtime_stream *stream);
 
 ullm_status ullm_runtime_stream_synchronize(ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_aq4_dequant_f32(
+    const ullm_runtime_buffer *index_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *codebook_buffer,
+    const float *scale_values,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    size_t elements,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_smoke_add_f32(
     const float *lhs,
     const float *rhs,
