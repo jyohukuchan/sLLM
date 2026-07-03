@@ -68,6 +68,11 @@
 - Rust wrapper `ullm_runtime_sys::depthwise_conv1d_f32` とCPU/HIP単体テストを追加した。
 - `ullm-engine runtime-depthwise-conv1d-smoke [DEVICE_INDEX]` を追加し、depthwise conv1dの最小runtime境界をCPU/R9700で検証できるようにした。
 - `ullm-engine package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]` を追加した。実packageの `linear_attn.in_proj_qkv.weight` から複数timestepのQKV出力を作り、`linear_attn.conv1d.weight` passthrough tensorでcausal depthwise conv1dを適用する。
+- C++ runtime C ABIに `ullm_runtime_linear_attn_gate_beta_f32` を追加した。layoutは `a` / `b` が `[time][head]`、`A_log` / `dt_bias` が `[head]` で、`gate = -exp(A_log) * softplus(a + dt_bias)`、`beta = sigmoid(b)` を計算する。
+- Rust wrapper `ullm_runtime_sys::linear_attn_gate_beta_f32` とCPU/HIP単体テストを追加した。
+- `ullm-engine runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]` を追加し、固定f32 tensorからgate/beta境界を検証できるようにした。
+- `ullm-engine package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]` を追加した。実packageの `linear_attn.in_proj_a/b.weight` から複数timestepのa/b出力を作り、`A_log` と `dt_bias` passthrough tensorを使ってgate/beta境界を検証する。
+- `docs/words.txt` に `linear attention gate beta`、`runtime linear attention gate beta smoke`、`package linear attention gate beta smoke` を追加した。
 
 ## 実測・検証
 
@@ -287,6 +292,22 @@
 - `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_DEPTHWISE_CONV1D_KERNEL=1 target/debug/ullm-engine package-linear-attn-conv1d-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 4`
   - R9700 HIP deviceでAQ4 materialize、matvec、depthwise conv1d kernelを必須指定した状態で同じpackage smokeが成功した。
   - qkv preview `[0.1187995,-0.2140314,0.5484952,0.8965267,-0.8766365,-0.5391338,-1.1162429,0.5450193]`、conv preview `[0.0001831,-0.0001633,-0.0003955,0.0003659,0.0000598,-0.0002653,-0.1128234,0.0003534]`、max abs diff `0.000000142`。
+- linear attention gate/beta境界追加後の `cargo fmt --all --check`、`cargo test -p ullm-runtime-sys -- --test-threads=1`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` は成功した。
+- `ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL=1 cargo test -p ullm-runtime-sys first_hip_linear_attn_gate_beta_f32_computes_expected_values_when_available -- --test-threads=1 --nocapture` は成功した。
+- `target/debug/ullm-engine inspect-devices`
+  - device index `2` がR9700相当の `backend=hip name="AMD Radeon Graphics"` として表示された。
+- `target/debug/ullm-engine runtime-linear-attn-gate-beta-smoke 0`
+  - CPU fallbackで小型f32 gate/beta smokeが成功した。
+  - gate preview `[-0.0756845,-0.3132617,-2.8051562,-0.6203408,-0.9740770,-1.1428064,-1.1101589,-0.0297504]`、beta preview `[0.0179862,0.2689414,0.5000000,0.6224594,0.7310586,0.9525741,0.1192029,0.9241418]`、max diff `0.000000030`。
+- `ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL=1 target/debug/ullm-engine runtime-linear-attn-gate-beta-smoke 2`
+  - R9700 HIP deviceでgate/beta kernelを必須指定したruntime smokeが成功した。
+  - gate preview `[-0.0756846,-0.3132617,-2.8051560,-0.6203408,-0.9740769,-1.1428064,-1.1101588,-0.0297504]`、beta preview `[0.0179862,0.2689414,0.5000000,0.6224594,0.7310586,0.9525741,0.1192029,0.9241418]`、max diff `0.000000954`。
+- `target/debug/ullm-engine package-linear-attn-gate-beta-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 4`
+  - CPU fallbackでlayer0の実package `linear_attn.in_proj_a/b.weight`、`A_log`、`dt_bias` から4 timestep分のgate/betaを作成できた。
+  - hidden `4096`、heads `32`、`A_log` dtype `F32`、`dt_bias` dtype `BF16`、gate preview `[-0.0014073,-1.0153567,-0.0027973,-0.0004480,-1.0385405,-0.0001511,-0.2066060,-0.0104885]`、beta preview `[0.4556686,0.6070020,0.4091511,0.4419241,0.4278397,0.4967542,0.5520794,0.4923235]`、max diff `0.000000003`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL=1 target/debug/ullm-engine package-linear-attn-gate-beta-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 4`
+  - R9700 HIP deviceでAQ4 materialize、matvec、gate/beta kernelを必須指定した状態で同じpackage smokeが成功した。
+  - gate preview `[-0.0014073,-1.0153565,-0.0027973,-0.0004480,-1.0385404,-0.0001511,-0.2066060,-0.0104885]`、beta preview `[0.4556688,0.6070020,0.4091511,0.4419242,0.4278398,0.4967542,0.5520793,0.4923234]`、max diff `0.000000238`。
 
 ## 作成したgit checkpoints
 
@@ -326,9 +347,11 @@
 - `13f92b9 Add package linear attention auxiliary smoke`
 - `f3bf33f Add package linear attention QKV norm smoke`
 - `737c699 Add runtime depthwise conv1d smoke`
+- `f0c4acf Journal depthwise conv1d smoke`
+- `06d577a Add linear attention gate beta smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、depthwise conv1d境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smokeも通った。次はlinear_attn recurrence、または通常attention本体の計算境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、depthwise conv1d境界、linear attention gate/beta境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smokeも通った。次はlinear_attn recurrence、または通常attention本体の計算境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
