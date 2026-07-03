@@ -123,6 +123,13 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-linear-attn-post-smoke") => package_linear_attn_post_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+        ),
         Some("package-linear-attn-aux-smoke") => package_linear_attn_aux_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -5753,6 +5760,553 @@ fn package_linear_attn_recurrent_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_linear_attn_post_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-post-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 4, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    let value_heads = 32_usize;
+    let value_dim = 128_usize;
+    let hidden = value_heads * value_dim;
+    let epsilon = 1e-6_f32;
+
+    let z_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_z.weight");
+    let norm_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.norm.weight");
+    let out_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.out_proj.weight");
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let norm_selector = TensorSelector::Name(norm_tensor.clone());
+    let norm_bundle =
+        match ullm_engine::package::select_passthrough_payload_bundle(&path, &norm_selector) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("failed to select package linear attention norm tensor: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    if let Err(err) = validate_passthrough_shape_elements(&norm_bundle) {
+        eprintln!("invalid linear attention norm shape for {norm_tensor}: {err}");
+        return ExitCode::from(1);
+    }
+    let norm_dtype = match resolve_passthrough_dtype(&norm_bundle, &norm_tensor) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let norm_weight =
+        match read_passthrough_payload_f32_bytes(&norm_bundle, chunk_bytes, norm_dtype) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("failed to read passthrough payload for {norm_tensor}: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    if norm_weight.len() != value_dim {
+        eprintln!(
+            "linear attention norm length must match value_dim={value_dim}: len={}",
+            norm_weight.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let mut registry = WeightRegistry::new();
+    let (z_rows, z_cols, z_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &z_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {z_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if z_rows != hidden {
+        eprintln!("z projection rows must match hidden={hidden}: z_rows={z_rows}");
+        return ExitCode::from(1);
+    }
+
+    let (out_rows, out_cols, out_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &out_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {out_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if out_rows != z_cols || out_cols != hidden {
+        eprintln!("out projection shape must be [{z_cols},{hidden}], got [{out_rows},{out_cols}]");
+        return ExitCode::from(1);
+    }
+
+    let hidden_bytes = hidden * std::mem::size_of::<f32>();
+    let sequence_elements = match sequence_len.checked_mul(hidden) {
+        Some(value) => value,
+        None => {
+            eprintln!("linear attention post sequence element count overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let sequence_bytes_len = match sequence_elements.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("linear attention post sequence byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let input_bytes_len = match z_cols.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("linear attention post input byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut hidden_input_buffer = match context.alloc_buffer(input_bytes_len) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate hidden input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut z_step_buffer = match context.alloc_buffer(hidden_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate z step output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let base_input = deterministic_f32_vector(z_cols);
+    let mut z_sequence_bytes = vec![0_u8; sequence_bytes_len];
+    for timestep in 0..sequence_len {
+        let step_input = linear_attn_step_input(&base_input, timestep);
+        let step_input_bytes = encode_f32_to_bytes(&step_input);
+        if let Err(err) =
+            hidden_input_buffer.copy_from_host(0, &step_input_bytes, Some(&mut stream))
+        {
+            eprintln!("failed to copy z input timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = ullm_runtime_sys::matvec_f32(
+            &z_matrix,
+            &hidden_input_buffer,
+            z_rows,
+            z_cols,
+            &mut z_step_buffer,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run z matvec for timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after z timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        let start = timestep * hidden_bytes;
+        let end = start + hidden_bytes;
+        if let Err(err) =
+            z_step_buffer.copy_to_host(0, &mut z_sequence_bytes[start..end], Some(&mut stream))
+        {
+            eprintln!("failed to copy z timestep {timestep} back to host: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!(
+                "failed to synchronize runtime stream after z timestep {timestep} host copy: {err}"
+            );
+            return ExitCode::from(1);
+        }
+    }
+    let z_sequence = decode_f32_le_values(&z_sequence_bytes);
+
+    let core_output = deterministic_linear_attn_core_output(sequence_len, value_heads, value_dim);
+    let mut expected_normed = vec![0.0_f32; sequence_elements];
+    for timestep in 0..sequence_len {
+        for value_head in 0..value_heads {
+            let start = (timestep * value_heads + value_head) * value_dim;
+            let end = start + value_dim;
+            let normed = runtime_host_rmsnorm_f32(&core_output[start..end], &norm_weight, epsilon);
+            if normed.len() != value_dim {
+                eprintln!("failed to build linear attention post RMSNorm reference");
+                return ExitCode::from(1);
+            }
+            expected_normed[start..end].copy_from_slice(&normed);
+        }
+    }
+    let expected_activated = runtime_host_silu_mul_f32(&z_sequence, &expected_normed);
+    if expected_activated.len() != sequence_elements {
+        eprintln!("failed to build linear attention gated RMSNorm reference");
+        return ExitCode::from(1);
+    }
+
+    let norm_weight_bytes = encode_f32_to_bytes(&norm_weight);
+    let mut norm_weight_buffer = match context.alloc_buffer(norm_weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate linear attention norm weight buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = norm_weight_buffer.copy_from_host(0, &norm_weight_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy linear attention norm weight into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after norm weight copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut norm_input_buffer = match context.alloc_buffer(norm_weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate linear attention norm input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut norm_output_buffer = match context.alloc_buffer(norm_weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate linear attention norm output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut normed_sequence_bytes = vec![0_u8; sequence_bytes_len];
+    for row in 0..(sequence_len * value_heads) {
+        let start = row * value_dim;
+        let end = start + value_dim;
+        let input_bytes = encode_f32_to_bytes(&core_output[start..end]);
+        if let Err(err) = norm_input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy linear attention norm row {row}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = ullm_runtime_sys::rmsnorm_f32(
+            &norm_input_buffer,
+            &norm_weight_buffer,
+            value_dim,
+            epsilon,
+            &mut norm_output_buffer,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run linear attention post rmsnorm row {row}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after norm row {row}: {err}");
+            return ExitCode::from(1);
+        }
+        let byte_start = start * std::mem::size_of::<f32>();
+        let byte_end = end * std::mem::size_of::<f32>();
+        if let Err(err) = norm_output_buffer.copy_to_host(
+            0,
+            &mut normed_sequence_bytes[byte_start..byte_end],
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to copy linear attention norm row {row} back to host: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after norm row {row} host copy: {err}");
+            return ExitCode::from(1);
+        }
+    }
+    let normed_sequence = decode_f32_le_values(&normed_sequence_bytes);
+    let mut norm_max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in normed_sequence.iter().zip(expected_normed.iter()) {
+        let diff = (lhs - rhs).abs();
+        if diff > 1e-4_f32 {
+            eprintln!("package-linear-attn-post-smoke RMSNorm mismatch: max_abs_diff={diff}");
+            return ExitCode::from(1);
+        }
+        if diff > norm_max_abs_diff {
+            norm_max_abs_diff = diff;
+        }
+    }
+
+    let mut z_sequence_buffer = match context.alloc_buffer(sequence_bytes_len) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate z sequence buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut normed_sequence_buffer = match context.alloc_buffer(sequence_bytes_len) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate normed sequence buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut activated_sequence_buffer = match context.alloc_buffer(sequence_bytes_len) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate activated sequence buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = z_sequence_buffer.copy_from_host(0, &z_sequence_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy z sequence into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) =
+        normed_sequence_buffer.copy_from_host(0, &normed_sequence_bytes, Some(&mut stream))
+    {
+        eprintln!("failed to copy normed sequence into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gated RMSNorm input copy: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = ullm_runtime_sys::silu_mul_f32(
+        &z_sequence_buffer,
+        &normed_sequence_buffer,
+        sequence_elements,
+        &mut activated_sequence_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run linear attention post silu_mul: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gated RMSNorm silu_mul: {err}");
+        return ExitCode::from(1);
+    }
+    let mut activated_sequence_bytes = vec![0_u8; sequence_bytes_len];
+    if let Err(err) =
+        activated_sequence_buffer.copy_to_host(0, &mut activated_sequence_bytes, Some(&mut stream))
+    {
+        eprintln!("failed to copy activated sequence back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after activated sequence copy: {err}");
+        return ExitCode::from(1);
+    }
+    let activated_sequence = decode_f32_le_values(&activated_sequence_bytes);
+    let mut activation_max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in activated_sequence.iter().zip(expected_activated.iter()) {
+        let diff = (lhs - rhs).abs();
+        if diff > 1e-4_f32 {
+            eprintln!("package-linear-attn-post-smoke gated RMSNorm mismatch: max_abs_diff={diff}");
+            return ExitCode::from(1);
+        }
+        if diff > activation_max_abs_diff {
+            activation_max_abs_diff = diff;
+        }
+    }
+
+    let out_matrix_bytes_len = match out_rows
+        .checked_mul(out_cols)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+    {
+        Some(value) => value,
+        None => {
+            eprintln!("out projection matrix byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut out_matrix_bytes = vec![0_u8; out_matrix_bytes_len];
+    if let Err(err) = out_matrix.copy_to_host(0, &mut out_matrix_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy out projection matrix back to host for reference: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after out matrix host copy: {err}");
+        return ExitCode::from(1);
+    }
+    let out_matrix_host = decode_f32_le_values(&out_matrix_bytes);
+    let mut expected_output = Vec::with_capacity(sequence_len * out_rows);
+    for timestep in 0..sequence_len {
+        let start = timestep * hidden;
+        let end = start + hidden;
+        let output = runtime_host_matvec_f32(
+            &out_matrix_host,
+            &expected_activated[start..end],
+            out_rows,
+            out_cols,
+        );
+        if output.len() != out_rows {
+            eprintln!("failed to build linear attention post out projection reference");
+            return ExitCode::from(1);
+        }
+        expected_output.extend_from_slice(&output);
+    }
+
+    let output_sequence_bytes_len = match sequence_len
+        .checked_mul(out_rows)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+    {
+        Some(value) => value,
+        None => {
+            eprintln!("linear attention post output byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut out_input_buffer = match context.alloc_buffer(hidden_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate out projection input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut out_step_buffer = match context.alloc_buffer(out_rows * std::mem::size_of::<f32>()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate out projection step buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut output_sequence_bytes = vec![0_u8; output_sequence_bytes_len];
+    for timestep in 0..sequence_len {
+        let start = timestep * hidden_bytes;
+        let end = start + hidden_bytes;
+        if let Err(err) = out_input_buffer.copy_from_host(
+            0,
+            &activated_sequence_bytes[start..end],
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to copy out projection input timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = ullm_runtime_sys::matvec_f32(
+            &out_matrix,
+            &out_input_buffer,
+            out_rows,
+            out_cols,
+            &mut out_step_buffer,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run out projection matvec timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!(
+                "failed to synchronize runtime stream after out projection timestep {timestep}: {err}"
+            );
+            return ExitCode::from(1);
+        }
+        let output_start = timestep * out_rows * std::mem::size_of::<f32>();
+        let output_end = output_start + out_rows * std::mem::size_of::<f32>();
+        if let Err(err) = out_step_buffer.copy_to_host(
+            0,
+            &mut output_sequence_bytes[output_start..output_end],
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to copy out projection timestep {timestep} back to host: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!(
+                "failed to synchronize runtime stream after out projection timestep {timestep} host copy: {err}"
+            );
+            return ExitCode::from(1);
+        }
+    }
+    let output_sequence = decode_f32_le_values(&output_sequence_bytes);
+    let mut output_max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in output_sequence.iter().zip(expected_output.iter()) {
+        let diff = (lhs - rhs).abs();
+        let tolerance = 2e-3_f32.max(rhs.abs() * 1e-5_f32);
+        if diff > tolerance {
+            eprintln!(
+                "package-linear-attn-post-smoke out projection mismatch: max_abs_diff={diff} tolerance={tolerance}"
+            );
+            return ExitCode::from(1);
+        }
+        if diff > output_max_abs_diff {
+            output_max_abs_diff = diff;
+        }
+    }
+
+    println!(
+        "package-linear-attn-post-smoke package={} layer={} z_tensor=\"{}\" norm_tensor=\"{}\" out_tensor=\"{}\" hidden={} value_heads={} value_dim={} sequence_len={} norm_dtype={} backend={} device_index={} name=\"{}\" core_preview={} z_preview={} normed_preview={} activated_preview={} output_preview={} norm_max_abs_diff={norm_max_abs_diff:.9} activation_max_abs_diff={activation_max_abs_diff:.9} output_max_abs_diff={output_max_abs_diff:.9} verified=true",
+        path,
+        layer_index,
+        z_tensor,
+        norm_tensor,
+        out_tensor,
+        hidden,
+        value_heads,
+        value_dim,
+        sequence_len,
+        norm_dtype,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(&core_output[..8.min(core_output.len())]),
+        format_f32_preview(&z_sequence[..8.min(z_sequence.len())]),
+        format_f32_preview(&normed_sequence[..8.min(normed_sequence.len())]),
+        format_f32_preview(&activated_sequence[..8.min(activated_sequence.len())]),
+        format_f32_preview(&output_sequence[..8.min(output_sequence.len())]),
+    );
+    ExitCode::SUCCESS
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormKind {
     Input,
@@ -6030,6 +6584,21 @@ fn linear_attn_step_input(base_input: &[f32], timestep: usize) -> Vec<f32> {
         .collect()
 }
 
+fn deterministic_linear_attn_core_output(
+    sequence_len: usize,
+    value_heads: usize,
+    value_dim: usize,
+) -> Vec<f32> {
+    let elements = sequence_len * value_heads * value_dim;
+    let mut values = Vec::with_capacity(elements);
+    for index in 0..elements {
+        let head_phase = ((index / value_dim) % value_heads) as f32 * 0.0007_f32;
+        let dim_phase = (index % value_dim) as f32 * 0.00011_f32;
+        values.push(((index as f32 * 0.013_f32).sin() * 0.05_f32) + head_phase - dim_phase);
+    }
+    values
+}
+
 struct LinearAttnQkvSplit {
     q: Vec<f32>,
     k: Vec<f32>,
@@ -6185,7 +6754,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!(
