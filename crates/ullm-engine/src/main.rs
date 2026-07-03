@@ -20,6 +20,7 @@ fn main() -> ExitCode {
         Some("runtime-copy-smoke") => runtime_copy_smoke(env::args().nth(2)),
         Some("runtime-rmsnorm-smoke") => runtime_rmsnorm_smoke(env::args().nth(2)),
         Some("runtime-silu-mul-smoke") => runtime_silu_mul_smoke(env::args().nth(2)),
+        Some("runtime-mlp-smoke") => runtime_mlp_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
         Some("package-load-smoke") => package_load_smoke(
             env::args().nth(2),
@@ -554,6 +555,327 @@ fn runtime_silu_mul_smoke(device_index: Option<String>) -> ExitCode {
         device_index,
         info.name,
         elements,
+        format_f32_preview(&output)
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_mlp_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    const HIDDEN: usize = 4;
+    const INTERMEDIATE: usize = 6;
+    let epsilon = 1e-5_f32;
+
+    let input = [0.45_f32, -1.20_f32, 0.95_f32, -0.35_f32];
+    let norm_weight = [1.10_f32, -0.75_f32, 0.90_f32, 1.25_f32];
+    let gate_matrix = [
+        0.25_f32, -0.40_f32, 0.55_f32, 0.33_f32, //
+        -0.60_f32, 0.80_f32, 0.45_f32, -0.70_f32, //
+        1.10_f32, 0.20_f32, -0.30_f32, 0.45_f32, //
+        0.65_f32, -0.55_f32, 0.85_f32, -0.10_f32, //
+        -0.20_f32, 0.33_f32, 0.77_f32, -0.91_f32, //
+        0.44_f32, -0.88_f32, 0.12_f32, 0.56_f32, //
+    ];
+    let up_matrix = [
+        -0.30_f32, 0.70_f32, 0.90_f32, -0.50_f32, //
+        1.05_f32, -0.95_f32, 0.25_f32, 0.60_f32, //
+        0.20_f32, -0.15_f32, 0.40_f32, 1.10_f32, //
+        -0.80_f32, 0.65_f32, 0.55_f32, -0.45_f32, //
+        0.30_f32, 0.30_f32, 0.30_f32, 0.30_f32, //
+        -0.25_f32, 1.20_f32, -1.10_f32, 0.45_f32, //
+    ];
+    let down_matrix = [
+        0.50_f32, -0.30_f32, 0.70_f32, -0.60_f32, 0.40_f32, 0.20_f32, //
+        0.10_f32, 0.90_f32, -0.40_f32, 0.80_f32, -0.15_f32, 0.60_f32, //
+        -0.70_f32, 0.65_f32, 0.20_f32, 0.25_f32, 1.05_f32, -0.80_f32, //
+        0.45_f32, -0.10_f32, -0.55_f32, 0.30_f32, 0.50_f32, 0.85_f32, //
+    ];
+
+    let expected_normed = runtime_host_rmsnorm_f32(&input, &norm_weight, epsilon);
+    let expected_gate =
+        runtime_host_matvec_f32(&gate_matrix, &expected_normed, INTERMEDIATE, HIDDEN);
+    let expected_up = runtime_host_matvec_f32(&up_matrix, &expected_normed, INTERMEDIATE, HIDDEN);
+    let expected_activated = runtime_host_silu_mul_f32(&expected_gate, &expected_up);
+    let expected_output =
+        runtime_host_matvec_f32(&down_matrix, &expected_activated, HIDDEN, INTERMEDIATE);
+
+    let hidden_bytes = HIDDEN * std::mem::size_of::<f32>();
+    let intermediate_bytes = INTERMEDIATE * std::mem::size_of::<f32>();
+    let gate_matrix_byte_count = gate_matrix.len().checked_mul(std::mem::size_of::<f32>());
+    if gate_matrix_byte_count.is_none() {
+        eprintln!("gate matrix byte size overflows");
+        return ExitCode::from(1);
+    }
+    let up_matrix_byte_count = up_matrix.len().checked_mul(std::mem::size_of::<f32>());
+    if up_matrix_byte_count.is_none() {
+        eprintln!("up matrix byte size overflows");
+        return ExitCode::from(1);
+    }
+    let down_matrix_byte_count = down_matrix.len().checked_mul(std::mem::size_of::<f32>());
+    if down_matrix_byte_count.is_none() {
+        eprintln!("down matrix byte size overflows");
+        return ExitCode::from(1);
+    }
+    let gate_matrix_bytes = gate_matrix_byte_count.unwrap();
+    let up_matrix_bytes = up_matrix_byte_count.unwrap();
+    let down_matrix_bytes = down_matrix_byte_count.unwrap();
+
+    let mut input_buffer = match context.alloc_buffer(input.len() * std::mem::size_of::<f32>()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let input_bytes = encode_f32_to_bytes(&input);
+    if let Err(err) = input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy input data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut norm_weight_buffer =
+        match context.alloc_buffer(norm_weight.len() * std::mem::size_of::<f32>()) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate norm weight buffer: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    let norm_weight_bytes = encode_f32_to_bytes(&norm_weight);
+    if let Err(err) = norm_weight_buffer.copy_from_host(0, &norm_weight_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy norm weight data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after norm weight copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut gate_matrix_buffer = match context.alloc_buffer(gate_matrix_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate gate matrix buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let gate_matrix_bytes = encode_f32_to_bytes(&gate_matrix);
+    if let Err(err) = gate_matrix_buffer.copy_from_host(0, &gate_matrix_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy gate matrix into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gate matrix copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut up_matrix_buffer = match context.alloc_buffer(up_matrix_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate up matrix buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let up_matrix_bytes = encode_f32_to_bytes(&up_matrix);
+    if let Err(err) = up_matrix_buffer.copy_from_host(0, &up_matrix_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy up matrix into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after up matrix copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut down_matrix_buffer = match context.alloc_buffer(down_matrix_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate down matrix buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let down_matrix_bytes = encode_f32_to_bytes(&down_matrix);
+    if let Err(err) = down_matrix_buffer.copy_from_host(0, &down_matrix_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy down matrix into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after down matrix copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut normed_buffer = match context.alloc_buffer(hidden_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate normed output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::rmsnorm_f32(
+        &input_buffer,
+        &norm_weight_buffer,
+        HIDDEN,
+        epsilon,
+        &mut normed_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime rmsnorm_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after rmsnorm: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut gate_buffer = match context.alloc_buffer(intermediate_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate gate output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &gate_matrix_buffer,
+        &normed_buffer,
+        INTERMEDIATE,
+        HIDDEN,
+        &mut gate_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime gate matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gate matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut up_buffer = match context.alloc_buffer(intermediate_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate up output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &up_matrix_buffer,
+        &normed_buffer,
+        INTERMEDIATE,
+        HIDDEN,
+        &mut up_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime up matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after up matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut activated_buffer = match context.alloc_buffer(intermediate_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate activated output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::silu_mul_f32(
+        &gate_buffer,
+        &up_buffer,
+        INTERMEDIATE,
+        &mut activated_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime silu_mul_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after silu_mul: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_buffer = match context.alloc_buffer(hidden_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &down_matrix_buffer,
+        &activated_buffer,
+        HIDDEN,
+        INTERMEDIATE,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime down matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_bytes = vec![0_u8; hidden_bytes];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy runtime output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let output = decode_f32_le_values(&output_bytes);
+
+    if output.len() != expected_output.len()
+        || expected_output
+            .iter()
+            .zip(output.iter())
+            .any(|(expected, actual)| (*expected - *actual).abs() > 1e-4_f32)
+    {
+        eprintln!(
+            "runtime mlp smoke produced unexpected output: output={:?} expected={:?}",
+            output, expected_output
+        );
+        return ExitCode::from(1);
+    }
+
+    println!(
+        "runtime-mlp-smoke backend={} device_index={} name=\"{}\" hidden={} intermediate={} output={} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        HIDDEN,
+        INTERMEDIATE,
         format_f32_preview(&output)
     );
     ExitCode::SUCCESS
@@ -1544,7 +1866,7 @@ fn package_materialize_matvec_smoke(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
@@ -1786,6 +2108,56 @@ fn decode_f32_le_values(bytes: &[u8]) -> Vec<f32> {
     bytes
         .chunks_exact(std::mem::size_of::<f32>())
         .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("f32 chunk")))
+        .collect()
+}
+
+fn encode_f32_to_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn runtime_host_rmsnorm_f32(input: &[f32], weight: &[f32], epsilon: f32) -> Vec<f32> {
+    if input.len() != weight.len() || input.is_empty() {
+        return Vec::new();
+    }
+    let mean_square = input.iter().map(|value| value * value).sum::<f32>() / input.len() as f32;
+    let inv_rms = 1.0_f32 / (mean_square + epsilon).sqrt();
+    input
+        .iter()
+        .zip(weight.iter())
+        .map(|(input_value, weight_value)| input_value * inv_rms * weight_value)
+        .collect()
+}
+
+fn runtime_host_matvec_f32(matrix: &[f32], input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    if rows == 0 || cols == 0 || matrix.len() != rows * cols || input.len() != cols {
+        return Vec::new();
+    }
+    let mut output = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let mut value = 0.0_f32;
+        let row_start = row * cols;
+        for col in 0..cols {
+            value += matrix[row_start + col] * input[col];
+        }
+        output.push(value);
+    }
+    output
+}
+
+fn runtime_host_silu_mul_f32(gate: &[f32], up: &[f32]) -> Vec<f32> {
+    if gate.len() != up.len() {
+        return Vec::new();
+    }
+    gate.iter()
+        .zip(up.iter())
+        .map(|(gate_value, up_value)| {
+            let gate_value = *gate_value;
+            gate_value * (1.0_f32 / (1.0_f32 + (-gate_value).exp())) * *up_value
+        })
         .collect()
 }
 
