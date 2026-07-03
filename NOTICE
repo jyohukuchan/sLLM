@@ -1,0 +1,9 @@
+uLLM
+Copyright 2026 uLLM contributors
+
+This product is licensed under the Apache License, Version 2.0.
+
+Reference source trees under reference-src/ are local research inputs and are
+not distributed as part of uLLM. If third-party source code is intentionally
+imported in the future, its copyright notices and license requirements must be
+recorded before distribution.
