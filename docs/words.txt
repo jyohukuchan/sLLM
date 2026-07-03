@@ -10,6 +10,8 @@ codebook:LUTによる変換表
 codebook-index:codebookを参照するために保存されるindex値
 codebook-scope:同じcodebookを共有するtensor集合。familyより細かい機械的な分割にも使う
 codebook-selector:blockごとに複数codebookのどれを使うか選ぶための追加metadata
+scale table:scale-formatから生成され、scale-indexを実scale値へ変換する表
+scale-index:scale tableを参照するために保存されるindex値
 LUT:実装上の表参照機構。量子化仕様上の変換表はcodebookと書く
 payload:FP8やFP16など、演算器または後段処理へ渡すための実際の保存・受け渡し値
 logical payload bytes:tensorごとに参照されるpayload byte数の合計。共有payloadがある場合は重複分も数える
@@ -23,6 +25,7 @@ loaded package handle:package summary、load済みweight registry、registry ind
 chunked load:大きいpayloadを一定byte数ごとに読み、runtime bufferへ順番に転送するload方式
 fused dequant:GEMM/GEMVなどの演算kernel内でcodebook-indexやscaleを実効値へ変換し、そのまま演算へ使う処理
 materialize:変換後のpayloadや実効値を別bufferへ一度書き出す処理
+materialize smoke:runtime buffer上のquantized payloadをf32などへ展開し、後続kernel境界との接続を確認するsmoke
 block:同じlocal-scaleを共有するraw-valueのまとまり
 block-size:1つのblockに含まれるraw-valueの数
 KV cache:attention decode用のkey/value cache

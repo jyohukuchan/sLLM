@@ -36,6 +36,12 @@
 - CLI出力では、tensorごとの参照量である `registry_payload_bytes` と、共有後の実resident量である `resident_payload_bytes` を分けて表示するようにした。
 - `LoadedPackage` と `load_package_tensor_prefix` を追加し、package summary、load済みweight registry、registry index一覧をまとめて返すruntime側package handleの最小形を作った。
 - `package-weight-register-many-smoke` は `load_package_tensor_prefix` 経由で動くようにした。
+- `LoadedPackage` / `WeightRegistry` にtensor名、family、candidate id、payload roleからruntime bufferを引けるlookup APIを追加した。
+- `TensorPayloadBundle` / `LoadedTensorBundle` にshape、scale format、block-size、tensor-scale、index/scale encodingを保持するmetadataを追加した。
+- C++ runtime C ABIに `ullm_runtime_aq4_dequant_f32` を追加し、CPU fallbackでidx4 + u8 scale-index + f32 codebookをf32へmaterializeできるようにした。
+- `ullm-engine package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]` を追加し、`.ullm.d` packageからregistry loadしたquantized tensorをf32出力bufferへ展開する最小経路を確認できるようにした。
+- `THIRD_PARTY_NOTICES.md` を追加し、llama.cpp、ATOM、vLLM、SGLang、TensorRT-LLMをreference inputとして扱う最低限の第三者表示を追加した。
+- `NOTICE` から `THIRD_PARTY_NOTICES.md` を参照するようにした。
 
 ## 実測・検証
 
@@ -107,6 +113,15 @@
 - codebook dedup後の `cargo test -p ullm-engine` は15 tests passed。
 - package handle追加後の `cargo test -p ullm-engine` は16 tests passed。
 - package handle経由でも、R9700 HIPの先頭16 tensors登録smokeは `registry_payload_bytes=247759872`、`resident_payload_bytes=247759360`、`codebook_payloads=8` で成功した。
+- lookup API追加後の `cargo test -p ullm-engine` と `cargo test --workspace` は成功した。
+- quant tensor metadata追加後の `cargo fmt --all --check`、`cargo test -p ullm-engine`、`cargo test --workspace` は成功した。
+- CPU AQ4 dequant ABI追加後の `cargo fmt --all --check`、`cargo test -p ullm-runtime-sys`、`cargo test --workspace` は成功した。
+- `target/debug/ullm-engine package-materialize-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0`
+  - CPU fallbackでtensor `model.language_model.layers.0.linear_attn.in_proj_a.weight` をmaterializeできた。
+  - `elements=131072`、`output_bytes=524288`、`scale_format=e4m3`、`scale_count=119`、`group_size=16`、`tensor_scale=0.032921273`。
+  - previewは `[-0.0031692,0.0031782,-0.0797526,-0.0031692,-0.0031692,-0.0342511,0.0166768,0.0096639]`。
+- materialize smoke追加後の `cargo fmt --all --check`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo test --workspace -- --test-threads=1`、`cargo test --workspace` は成功した。
+- 前回、CLI smokeとworkspace testを同時実行した際に一度segfaultを見たが、直列実行と単独の通常workspace testでは再現しなかった。runtime testとreal package smokeは当面同時実行しない。
 
 ## 作成したgit checkpoints
 
@@ -128,9 +143,13 @@
 - `d19ecd8 Add package tensor bundle listing smoke`
 - `98bd2a6 Deduplicate registry codebook payloads`
 - `929c1aa Add loaded package handle smoke`
+- `52db8ab Add loaded package lookup APIs`
+- `9ad030f Carry quant tensor metadata into loader`
+- `c4369d4 Add CPU AQ4 dequant runtime ABI`
+- `cb1069b Add package materialize smoke`
 
 ## 次の行動
 
-- `WeightRegistry` で複数tensor分のresident payloadを保持し、同一codebook payloadを共有できるようになった。
-- runtime側package handleの最小形ができた。次は後続kernelから参照できる形にするため、tensor名・family・candidate id・payload buffer handleをまとめてlookupできるAPIを整える。
+- `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
+- CPU fallbackのmaterialize経路は通った。次はGPU側でfused dequantまたはmaterialize kernel境界を作り、最小のlinear/attention部品へ接続する。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
