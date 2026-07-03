@@ -25,6 +25,9 @@
 - `package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]` に拡張し、role、owner index、owner nameをログへ出すようにした。
 - `package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]` を追加し、1つのquantized tensorのindex、scale、codebookをまとめてruntime bufferへchunked loadできるようにした。
 - tensor selectorは未指定または数値index、完全一致tensor名、または一意な部分一致を受け付けるようにした。
+- `crates/ullm-engine/src/loader.rs` を追加し、`LoadOptions`、`LoadedPayload`、`LoadedTensorBundle`、`WeightRegistry` を実装した。
+- `WeightRegistry` はtensor bundleのindex、scale、codebookをそれぞれruntime bufferへloadし、load済みのresident payloadとして保持する。
+- `package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]` を追加し、`.ullm.d` の1 tensor分のpayloadをregistryに登録して後続処理から参照できる状態を検証できるようにした。
 
 ## 実測・検証
 
@@ -71,6 +74,14 @@
   - tensor `model.language_model.layers.11.self_attn.k_proj.weight` のidx4 2,097,152Bを2 chunks、scale 524,288Bを1 chunk、codebook 64Bを1 chunkでR9700 HIP runtime bufferへchunked loadし、readback検証が成功した。
 - `target/debug/ullm-engine package-tensor-load-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 model.language_model.layers.11.self_attn.k_proj.weight`
   - tensor名指定でも同じtensor 27のbundle load検証が成功した。
+- `target/debug/ullm-engine package-weight-register-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0`
+  - tensor `model.language_model.layers.0.linear_attn.in_proj_a.weight` のidx4 65,536B、scale 8,192B、codebook 64BをR9700 HIP runtime bufferへloadし、weight registry上のresident payloadとして保持できた。
+  - `registry_payload_bytes=73792`、index chunks `1`、scale chunks `1`、codebook chunks `1`。
+- `target/debug/ullm-engine package-weight-register-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 27`
+  - tensor `model.language_model.layers.11.self_attn.k_proj.weight` のidx4 2,097,152B、scale 524,288B、codebook 64BをR9700 HIP runtime bufferへloadし、weight registry上のresident payloadとして保持できた。
+  - `registry_payload_bytes=2621504`、index chunks `2`、scale chunks `1`、codebook chunks `1`。
+- `target/debug/ullm-engine package-weight-register-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 model.language_model.layers.11.self_attn.k_proj.weight`
+  - tensor名指定でも同じtensor 27のregistry登録検証が成功した。
 - `cargo fmt --all --check` passed。
 - `cargo test --workspace` passed。
 
@@ -89,9 +100,10 @@
 - `192d9ae Add package payload load smoke`
 - `f767287 Add package payload role selection`
 - `901aca4 Add package tensor bundle load smoke`
+- `7f2cba7 Add runtime weight registry smoke`
 
 ## 次の行動
 
-- `package-tensor-load-smoke` で任意tensorのpayload bundleをruntimeへ全量転送できるようになった。次はロード済みbundleを保持するweight registryまたはruntime-side package handleを作り、後続kernelが参照できる形にする。
-- `.ullm.d` manifest metadataをruntime側のweight registryへ渡す設計を具体化する。
+- `WeightRegistry` で1 tensor分のresident payloadを保持できるようになった。次は複数tensorをpackage単位で登録するpackage handleと、codebook bufferの重複排除を作る。
+- 後続kernelから参照できる形にするため、tensor名・family・candidate id・payload buffer handleをまとめてlookupできるAPIを整える。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
