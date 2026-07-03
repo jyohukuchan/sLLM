@@ -56,6 +56,7 @@
 - Rust wrapper `ullm_runtime_sys::silu_mul_f32` とCPU/HIP単体テストを追加した。
 - `ullm-engine runtime-silu-mul-smoke [DEVICE_INDEX]` を追加し、MLP activation/gatingの最小runtime境界をCPU/R9700で検証できるようにした。
 - `ullm-engine runtime-mlp-smoke [DEVICE_INDEX]` を追加した。`RMSNorm -> gate matvec -> up matvec -> SiLU-mul -> down matvec` を小さい固定f32 tensorで接続するworkflow smoke。
+- `ullm-engine package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]` を追加した。`.ullm.d` 内の実際の `mlp.gate_proj`、`mlp.up_proj`、`mlp.down_proj` quantized tensorをmaterializeし、MLP相当のruntime workflowへ接続する。
 
 ## 実測・検証
 
@@ -197,6 +198,18 @@
   - R9700 HIP deviceでRMSNorm、matvec、SiLU-mulのkernelを必須指定した状態でMLP workflow smokeが成功した。
   - output `[0.2138532,-0.1106376,0.5541794,0.7455100]`。CPUとの差は丸め誤差程度。
 - `cargo test --workspace -- --test-threads=1` passed。
+- `cargo fmt --all --check` passed。
+- `cargo test -p ullm-engine -- --test-threads=1` passed。`ullm-engine` は21 tests。
+- `cargo build -p ullm-engine` passed。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 target/debug/ullm-engine package-mlp-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0`
+  - R9700 HIP deviceでlayer 0の実package MLP workflow smokeが成功した。
+  - 対象tensorは `model.language_model.layers.0.mlp.gate_proj.weight`、`model.language_model.layers.0.mlp.up_proj.weight`、`model.language_model.layers.0.mlp.down_proj.weight`。
+  - hidden `4096`、intermediate `12288`、preview `[-0.0918788,-0.0005871,-0.0953465,0.1104855,-0.0072325,-0.0075355,0.0573778,-0.0320713]`。
+  - このsmokeはgate/up/downのf32 materializeに約576MiBを使うため、性能評価ではなく統合境界の正しさ確認として扱う。
+- `target/debug/ullm-engine package-mlp-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0`
+  - CPU fallbackでも同じlayer 0の実package MLP workflow smokeが成功した。
+  - preview `[-0.0918783,-0.0005871,-0.0953466,0.1104856,-0.0072326,-0.0075356,0.0573780,-0.0320711]`。R9700との差は丸め誤差程度。
+- `cargo test --workspace -- --test-threads=1` passed。
 
 ## 作成したgit checkpoints
 
@@ -229,9 +242,10 @@
 - `3a78114 Add runtime f32 RMSNorm smoke`
 - `ba8c9ba Add runtime f32 SiLU mul smoke`
 - `7795a9b Add runtime MLP smoke`
+- `7ae2afd Add package MLP smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、これらを組み合わせた小さいMLP workflow smokeも通った。次はattention/linear attention境界、または実packageのMLP tensorを使った小型統合smokeへ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smokeも通った。次はattention/linear attention境界、または実packageのRMSNorm/MLPをよりmodel forwardに近づける統合smokeへ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
