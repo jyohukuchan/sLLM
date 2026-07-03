@@ -408,6 +408,23 @@
 - `docs/words.txt` now records that `package linear attention MLP block smoke` defaults to 1 token and supports optional sequence length.
 - Next useful inference-engine step: either run longer sequence smoke to expose sequence-length-dependent issues, or begin regular self-attention boundaries for non-linear-attention Qwen3 layers.
 
+2026-07-04 inference engine package self attention projection smoke:
+- Commit `4b3bf16 Add package self attention projection smoke` adds `ullm-engine package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]`.
+- The smoke starts the regular `self_attn` path for non-linear-attention Qwen3/Qwen3.5 layers. It materializes real `self_attn.q_proj/k_proj/v_proj/o_proj.weight` AQ4 tensors from `.ullm.d`, reuses one deterministic hidden input, and runs runtime `matvec_f32` for each selected projection.
+- Validation passed: `cargo fmt --all --check`, `cargo check -p ullm-engine`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, `git diff --check`, CPU layer3 all-projection smoke, and R9700 layer3 all-projection smoke with `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1`.
+- CPU layer3 previews: q `[-0.0214060,-0.1524768,-0.8627953,-0.2214897,-0.9680305,-0.8679021,0.3681038,-0.2936603]`, k `[-0.0746002,0.3032613,-0.2315967,-0.8913118,-0.1204153,-0.4438795,-0.3817092,0.4453603]`, v `[-0.0190759,-0.2710336,0.5882362,0.4593883,0.7503901,0.2943826,0.0437120,-0.2437299]`, o `[-0.5080581,-0.1775314,-0.4163352,-0.3074654,0.1319545,-0.0532381,0.8503007,0.3601567]`.
+- R9700 previews matched CPU within expected f32 tolerance. The command is a projection boundary only; q/k norm, RoPE, attention score, softmax, value mix, o projection composition, residual add, and KV cache are separate boundaries.
+
+2026-07-04 inference engine package self attention QK norm smoke:
+- Commit `1291251 Add package self attention qk norm smoke` adds `ullm-engine package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]`.
+- The smoke materializes real `self_attn.q_proj.weight` and `self_attn.k_proj.weight`, reads real passthrough `self_attn.q_norm.weight` and `self_attn.k_norm.weight`, runs q/k matvec, then applies runtime RMSNorm to every q/k head. Head dimension is inferred from the norm tensor length.
+- On Qwen3.5-9B layer3 package, q rows `8192`, k rows `1024`, q/k head dim `256`, q heads `32`, k heads `4`; both norm tensors are BF16 passthrough.
+- Validation passed: `cargo fmt --all --check`, `cargo check -p ullm-engine`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, `cargo test --workspace -- --test-threads=1`, `git diff --check`, CPU layer3 QK norm smoke, and R9700 layer3 QK norm smoke with `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1`.
+- CPU layer3 q_norm preview `[-0.0105085,-0.0928900,-0.4847961,-0.1087325,-0.1975313,-0.1976329,0.1088599,-0.1163718]`, k_norm preview `[-0.0454046,0.1911021,-0.1459422,-0.5068693,-0.0141582,-0.0856196,-0.0551474,0.1745486]`, max diffs `0`.
+- R9700 layer3 q_norm preview `[-0.0105085,-0.0928898,-0.4847966,-0.1087316,-0.1975311,-0.1976329,0.1088598,-0.1163718]`, k_norm preview `[-0.0454046,0.1911021,-0.1459426,-0.5068696,-0.0141582,-0.0856197,-0.0551473,0.1745485]`, q_norm max diff `0.000000477`, k_norm max diff `0.000000238`.
+- `docs/words.txt` now defines `package self attention projection smoke` and `package self attention QK norm smoke`.
+- Next useful inference-engine step: add RoPE application to normalized q/k, then a small causal attention score/softmax/value-mix boundary before paged KV cache.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -458,9 +475,11 @@
 - `3e52c3d Add package MLP block smoke`
 - `3e0f706 Add package linear attention MLP block smoke`
 - `74af9d5 Extend package linear attention MLP block smoke sequence`
+- `4b3bf16 Add package self attention projection smoke`
+- `1291251 Add package self attention qk norm smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、f32 add境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smoke、実packageの `post RMSNorm -> MLP -> residual add` block smoke、1 tokenおよびsequence length 2の実package `input RMSNorm -> linear_attn -> residual -> post RMSNorm -> MLP -> residual` layer-level partial decoder smokeも通った。次は長めのsequence smokeか、通常attention本体の計算境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、f32 add境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smoke、実packageの `post RMSNorm -> MLP -> residual add` block smoke、1 tokenおよびsequence length 2の実package `input RMSNorm -> linear_attn -> residual -> post RMSNorm -> MLP -> residual` layer-level partial decoder smoke、通常self-attnのq/k/v/o projection smoke、通常self-attnのq/k projection -> head-wise RMSNorm smokeまで通った。次はRoPEまたは小さいattention score/softmax/value mix境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
