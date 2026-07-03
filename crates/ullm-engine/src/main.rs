@@ -4,10 +4,13 @@
 use std::env;
 use std::process::ExitCode;
 
+mod package;
+
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
         Some("inspect-devices") => inspect_devices(),
         Some("runtime-smoke") => runtime_smoke(),
+        Some("inspect-package") => inspect_package(env::args().nth(2)),
         Some("-h") | Some("--help") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -73,6 +76,46 @@ fn runtime_smoke() -> ExitCode {
     }
 }
 
+fn inspect_package(path: Option<String>) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("inspect-package requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let summary = match package::inspect_package(path) {
+        Ok(summary) => summary,
+        Err(err) => {
+            eprintln!("failed to inspect package: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    println!("package: {}", summary.package_dir.display());
+    println!(
+        "schema: {}",
+        summary
+            .schema_version
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    if let Some(source) = summary.source_model_dir {
+        println!("source_model_dir: {source}");
+    }
+    println!("quantized_tensors: {}", summary.quantized_tensors);
+    println!("passthrough_tensors: {}", summary.passthrough_tensors);
+    println!("codebooks: {}", summary.codebooks);
+    println!("quantized_elements: {}", summary.quantized_elements);
+    println!("passthrough_elements: {}", summary.passthrough_elements);
+    println!("referenced_files: {}", summary.referenced_files);
+    println!("referenced_file_bytes: {}", summary.referenced_file_bytes);
+    println!(
+        "missing_referenced_files: {}",
+        summary.missing_referenced_files
+    );
+    println!(
+        "declared_passthrough_payload_bytes: {}",
+        summary.declared_passthrough_payload_bytes
+    );
+    ExitCode::SUCCESS
+}
+
 fn print_help() {
-    eprintln!("usage: ullm-engine <inspect-devices|runtime-smoke>");
+    eprintln!("usage: ullm-engine <inspect-devices|runtime-smoke|inspect-package PATH>");
 }
