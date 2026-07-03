@@ -43,6 +43,8 @@
 - `THIRD_PARTY_NOTICES.md` を追加し、llama.cpp、ATOM、vLLM、SGLang、TensorRT-LLMをreference inputとして扱う最低限の第三者表示を追加した。
 - `NOTICE` から `THIRD_PARTY_NOTICES.md` を参照するようにした。
 - `ullm_runtime_aq4_dequant_f32` にHIP staging fallbackを追加した。HIP bufferをhostへcopyし、CPUでAQ4 dequantし、結果をHIP output bufferへ戻す一時的な正しさ確認用経路であり、性能評価用ではない。
+- `ullm_runtime_aq4_dequant_f32` のHIP pathにHIPRTC JIT kernelを追加した。通常C++ + dlopen設計を保ち、`libhiprtc.so` と `hipModuleLaunchKernel` を実行時に読み込む。
+- JIT kernelはdeviceごとにmodule/functionをcacheし、R9700では `--offload-arch=gfx1201` を優先してcompileする。JITが使えない場合はstaging fallbackへ戻るが、`ULLM_REQUIRE_HIP_AQ4_KERNEL=1` でfallbackを禁止して検証できる。
 
 ## 実測・検証
 
@@ -128,6 +130,13 @@
   - R9700 HIP deviceでtensor `model.language_model.layers.0.linear_attn.in_proj_a.weight` をmaterializeできた。
   - previewはCPU fallbackと同じ `[-0.0031692,0.0031782,-0.0797526,-0.0031692,-0.0031692,-0.0342511,0.0166768,0.0096639]`。
 - HIP staging fallback追加後の `cargo test --workspace` は成功した。`ullm-runtime-sys` は14 tests。
+- HIPRTC JIT kernel追加後の `cargo fmt --all --check` と `cargo test -p ullm-runtime-sys -- --test-threads=1` は成功した。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 cargo test -p ullm-runtime-sys first_hip_aq4_dequant_f32_materializes_expected_values_when_available -- --test-threads=1 --nocapture`
+  - HIP staging fallbackを禁止した状態で小さなAQ4 dequant testが成功した。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 target/debug/ullm-engine package-materialize-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0`
+  - R9700 HIP deviceでtensor `model.language_model.layers.0.linear_attn.in_proj_a.weight` をJIT kernel経由でmaterializeできた。
+  - previewは `[-0.0031692,0.0031782,-0.0797526,-0.0031692,-0.0031692,-0.0342511,0.0166768,0.0096639]`。
+- HIPRTC JIT kernel追加後の `cargo test --workspace` は成功した。
 
 ## 作成したgit checkpoints
 
@@ -154,9 +163,10 @@
 - `c4369d4 Add CPU AQ4 dequant runtime ABI`
 - `cb1069b Add package materialize smoke`
 - `7f5676a Add HIP AQ4 staging dequant`
+- `7170d6c Add HIPRTC AQ4 dequant kernel`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallbackとHIP staging fallbackのmaterialize経路は通った。次はstaging fallbackを置き換えるHIP materialize kernelまたはfused dequant kernelを作り、最小のlinear/attention部品へ接続する。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路は通った。次はAQ4 materialize結果を最小linear/attention部品へ接続するか、materializeを飛ばすfused dequant GEMV/GEMM kernel境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。

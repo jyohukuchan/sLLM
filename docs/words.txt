@@ -49,6 +49,9 @@ runtime:weight、KV cache、backend、kernel呼び出しを管理してmodel exe
 runtime buffer:runtimeがbackend上またはCPU fallback上に確保するbyte buffer
 runtime stream:backend上の非同期copyやkernel実行の順序を束ねる実行stream
 host-device-copy:host memoryとruntime bufferの間でpayloadを転送する処理
+HIPRTC:HIP runtime compilation。通常C++でbuildしたruntimeからHIP kernel sourceを実行時compileしてmodule launchする仕組み
+JIT kernel:実行時にcompileしてloadするkernel。uLLMではHIPRTC経由のAQ4 materialize kernelなどを指す
+kernel-required smoke:staging fallbackを禁止し、実kernel経路だけで成功することを確認するsmoke
 backend:HIP、CPU、CUDA、CANN、JAX/TPUなど、runtimeが実際に演算へ使う実装単位
 backend capability:backendごとに異なる対応機能や推奨値。block-size、dtype、kernel variantなどを含む
 telemetry:実行中に記録する性能・メモリ・allocator状態などの測定値
