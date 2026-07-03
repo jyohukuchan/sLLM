@@ -1,10 +1,14 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::package::{ReferencedFile, ReferencedFileRole, TensorPayloadBundle};
+use crate::package::{
+    PackageSummary, ReferencedFile, ReferencedFileRole, TensorPayloadBundle,
+    list_tensor_payload_bundles,
+};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 use ullm_runtime_sys::{RuntimeBuffer, RuntimeContext, RuntimeStream};
 
@@ -46,10 +50,59 @@ pub struct LoadedTensorBundle {
     pub codebook: LoadedPayload,
 }
 
+#[derive(Debug)]
+pub struct LoadedPackage {
+    pub summary: PackageSummary,
+    pub loaded_tensor_count: usize,
+    pub registry_indices: Vec<usize>,
+    pub registry: WeightRegistry,
+}
+
+impl LoadedPackage {
+    pub fn registry(&self) -> &WeightRegistry {
+        &self.registry
+    }
+
+    pub fn into_registry(self) -> WeightRegistry {
+        self.registry
+    }
+}
+
 impl LoadedTensorBundle {
     pub fn total_payload_bytes(&self) -> u64 {
         self.index.bytes + self.scale.bytes + self.codebook.bytes
     }
+}
+
+pub fn load_package_tensor_prefix(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    package_dir: impl AsRef<Path>,
+    max_tensors: usize,
+    options: LoadOptions,
+) -> Result<LoadedPackage, String> {
+    if max_tensors == 0 {
+        return Err("max tensors must be greater than zero".to_string());
+    }
+    let package_dir = package_dir.as_ref();
+    let summary = crate::package::inspect_package(package_dir)?;
+    let bundles = list_tensor_payload_bundles(package_dir)?;
+    if bundles.is_empty() {
+        return Err(format!(
+            "package {} contains no quantized tensor payload bundles",
+            package_dir.display()
+        ));
+    }
+    let selected_count = bundles.len().min(max_tensors);
+    let mut registry = WeightRegistry::new();
+    let registry_indices =
+        registry.load_and_insert_many(context, stream, &bundles[..selected_count], options)?;
+    Ok(LoadedPackage {
+        summary,
+        loaded_tensor_count: selected_count,
+        registry_indices,
+        registry,
+    })
 }
 
 #[derive(Debug, Default)]
@@ -520,6 +573,92 @@ mod tests {
         ));
         assert_eq!(loaded0.codebook.chunks, 2);
         assert_eq!(loaded1.codebook.chunks, 2);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_package_tensor_prefix_returns_loaded_package_handle() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-package-prefix-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("tensors/t0.idx4"), [1_u8, 2]).unwrap();
+        fs::write(root.join("tensors/t0.scale_u8"), [3_u8]).unwrap();
+        fs::write(root.join("codebooks/t0.f32"), [4_u8; 4]).unwrap();
+        fs::write(root.join("tensors/t1.idx4"), [5_u8, 6]).unwrap();
+        fs::write(root.join("tensors/t1.scale_u8"), [7_u8]).unwrap();
+        fs::write(root.join("codebooks/t1.f32"), [8_u8; 4]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "schema_version": "test-package",
+              "tensors": [{
+                "name": "layer.0.attn.q_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_q",
+                "candidate_id": "aq4_a",
+                "elements": 4,
+                "groups": 1,
+                "index_file": "tensors/t0.idx4",
+                "scale_file": "tensors/t0.scale_u8",
+                "codebook_file": "codebooks/t0.f32"
+              }, {
+                "name": "layer.0.attn.k_proj.weight",
+                "dtype": "BF16",
+                "family": "attn_k",
+                "candidate_id": "aq4_b",
+                "elements": 4,
+                "groups": 1,
+                "index_file": "tensors/t1.idx4",
+                "scale_file": "tensors/t1.scale_u8",
+                "codebook_file": "codebooks/t1.f32"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let loaded = load_package_tensor_prefix(
+            &mut context,
+            &mut stream,
+            &root,
+            1,
+            LoadOptions {
+                chunk_bytes: 2,
+                verify: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            loaded.summary.schema_version.as_deref(),
+            Some("test-package")
+        );
+        assert_eq!(loaded.summary.quantized_tensors, 2);
+        assert_eq!(loaded.loaded_tensor_count, 1);
+        assert_eq!(loaded.registry_indices, vec![0]);
+        assert_eq!(loaded.registry().len(), 1);
+        assert_eq!(loaded.registry().total_payload_bytes(), 7);
+        assert_eq!(loaded.registry().resident_payload_bytes(), 7);
+        assert!(
+            loaded
+                .registry()
+                .get_by_name("layer.0.attn.q_proj.weight")
+                .is_some()
+        );
+        assert!(
+            loaded
+                .registry()
+                .get_by_name("layer.0.attn.k_proj.weight")
+                .is_none()
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

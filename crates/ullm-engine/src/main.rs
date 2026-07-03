@@ -5,7 +5,7 @@ use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
-use ullm_engine::loader::{LoadOptions, LoadedPayload, WeightRegistry};
+use ullm_engine::loader::{LoadOptions, LoadedPayload, WeightRegistry, load_package_tensor_prefix};
 use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 
 fn main() -> ExitCode {
@@ -650,19 +650,6 @@ fn package_weight_register_many_smoke(
         }
         Err(code) => return code,
     };
-    let bundles = match ullm_engine::package::list_tensor_payload_bundles(&path) {
-        Ok(bundles) => bundles,
-        Err(err) => {
-            eprintln!("failed to list package tensor payloads: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    if bundles.is_empty() {
-        eprintln!("package contains no quantized tensor payload bundles");
-        return ExitCode::from(1);
-    }
-    let selected_count = bundles.len().min(max_tensors);
-
     let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
         Ok(context) => context,
         Err(err) => {
@@ -684,28 +671,29 @@ fn package_weight_register_many_smoke(
             return ExitCode::from(1);
         }
     };
-    let mut registry = WeightRegistry::new();
-    let registry_indices = match registry.load_and_insert_many(
+    let loaded_package = match load_package_tensor_prefix(
         &mut context,
         &mut stream,
-        &bundles[..selected_count],
+        &path,
+        max_tensors,
         LoadOptions {
             chunk_bytes,
             verify: true,
         },
     ) {
-        Ok(indices) => indices,
+        Ok(loaded) => loaded,
         Err(err) => {
             eprintln!("failed to register package tensor payloads: {err}");
             return ExitCode::from(1);
         }
     };
+    let registry = loaded_package.registry();
 
     println!(
         "package-weight-register-many-smoke package={} selected_tensors={} package_tensors={} registry_tensors={} registry_payload_bytes={} resident_payload_bytes={} codebook_payloads={} backend={} device_index={} name=\"{}\" chunk_bytes={} verified=true",
         path,
-        selected_count,
-        bundles.len(),
+        loaded_package.loaded_tensor_count,
+        loaded_package.summary.quantized_tensors,
         registry.len(),
         registry.total_payload_bytes(),
         registry.resident_payload_bytes(),
@@ -715,7 +703,7 @@ fn package_weight_register_many_smoke(
         info.name,
         chunk_bytes
     );
-    for registry_index in registry_indices {
+    for &registry_index in &loaded_package.registry_indices {
         let Some(loaded) = registry.get(registry_index) else {
             eprintln!("registered tensor disappeared from weight registry");
             return ExitCode::from(1);
