@@ -21,6 +21,8 @@
 - C++ runtime C ABIにhost-device-copyを追加し、Rust側に `RuntimeBuffer::copy_from_host` / `copy_to_host` を追加した。
 - `runtime-copy-smoke` CLIを追加し、CPU fallbackとR9700 HIPでbyte payloadの往復検証をできるようにした。
 - `.ullm.d` manifestから最小の非空参照ファイルを選ぶhelperと `package-load-smoke` CLIを追加した。
+- `.ullm.d` の参照payloadを `smallest` / `tensor-index` / `tensor-scale` / `tensor-codebook` / `codebook` / `passthrough` のpayload roleで選べるようにした。
+- `package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]` に拡張し、role、owner index、owner nameをログへ出すようにした。
 
 ## 実測・検証
 
@@ -51,6 +53,16 @@
   - `.ullm.d` 内の `codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32` 64BをCPU fallback runtime bufferへloadし、readback検証が成功した。
 - `cargo run -p ullm-engine -- package-load-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2`
   - 同じ64B payloadをR9700 HIP runtime bufferへloadし、readback検証が成功した。
+- `target/debug/ullm-engine package-load-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 tensor-index`
+  - `tensors/000-model_language_model_layers_0_linear_attn_in_proj_a_weight.idx4` 65,536BをR9700 HIP runtime bufferへloadし、readback検証が成功した。
+- `target/debug/ullm-engine package-load-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 tensor-scale`
+  - `tensors/000-model_language_model_layers_0_linear_attn_in_proj_a_weight.scale_u8` 8,192BをR9700 HIP runtime bufferへloadし、readback検証が成功した。
+- `target/debug/ullm-engine package-load-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 passthrough`
+  - `passthrough/005-model_language_model_layers_0_linear_attn_dt_bias.raw` 64BをR9700 HIP runtime bufferへloadし、readback検証が成功した。
+- `target/debug/ullm-engine package-load-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 tensor-codebook`
+  - `codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32` 64Bをtensor由来codebookとしてR9700 HIP runtime bufferへloadし、readback検証が成功した。
+- `target/debug/ullm-engine package-load-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 codebook`
+  - `codebooks/attn_k__aq4_e4m3_g8_ts_flloyd16.f32` 64Bをtop-level codebookとしてR9700 HIP runtime bufferへloadし、readback検証が成功した。
 - `cargo fmt --all --check` passed。
 - `cargo test --workspace` passed。
 
@@ -67,9 +79,10 @@
 - `f4db981 Add runtime stream smoke`
 - `ca1a97c Add runtime buffer copy smoke`
 - `192d9ae Add package payload load smoke`
+- `f767287 Add package payload role selection`
 
 ## 次の行動
 
-- `package-load-smoke` は現状で最小の非空参照ファイルを選ぶため、実パッケージでは64B codebookが選ばれている。次はtensor index/scale/passthrough payloadを明示選択するloader smokeへ進める。
+- `package-load-smoke` はpayload roleを選べるようになった。次はtensor名またはowner indexを指定して、任意tensorのindex/scale/codebookをまとめてruntimeへ登録するloader smokeへ進める。
 - `.ullm.d` manifest metadataをruntime側のweight registryへ渡す設計を具体化する。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。

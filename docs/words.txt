@@ -12,6 +12,7 @@ codebook-scope:同じcodebookを共有するtensor集合。familyより細かい
 codebook-selector:blockごとに複数codebookのどれを使うか選ぶための追加metadata
 LUT:実装上の表参照機構。量子化仕様上の変換表はcodebookと書く
 payload:FP8やFP16など、演算器または後段処理へ渡すための実際の保存・受け渡し値
+payload role:.ullm.d内の参照payloadを用途別に選ぶ分類。tensor-index、tensor-scale、tensor-codebook、codebook、passthroughなど
 fused dequant:GEMM/GEMVなどの演算kernel内でcodebook-indexやscaleを実効値へ変換し、そのまま演算へ使う処理
 materialize:変換後のpayloadや実効値を別bufferへ一度書き出す処理
 block:同じlocal-scaleを共有するraw-valueのまとまり
