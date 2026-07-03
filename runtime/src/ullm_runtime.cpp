@@ -9,9 +9,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if defined(__linux__)
@@ -187,6 +189,61 @@ public:
         return hip_memcpy_async_(dst, src, bytes, kind, stream) == 0;
     }
 
+    bool module_load_data(void **module, const void *image, int device_id) {
+        load_once();
+        if (hip_module_load_data_ == nullptr || module == nullptr || image == nullptr ||
+            !set_device(device_id)) {
+            return false;
+        }
+        return hip_module_load_data_(module, image) == 0;
+    }
+
+    bool module_get_function(void **function, void *module, const char *name, int device_id) {
+        load_once();
+        if (hip_module_get_function_ == nullptr || function == nullptr || module == nullptr ||
+            name == nullptr || !set_device(device_id)) {
+            return false;
+        }
+        return hip_module_get_function_(function, module, name) == 0;
+    }
+
+    bool module_launch_kernel(
+        void *function,
+        unsigned int grid_x,
+        unsigned int block_x,
+        void **kernel_params,
+        void *stream,
+        int device_id) {
+        load_once();
+        if (hip_module_launch_kernel_ == nullptr || function == nullptr || kernel_params == nullptr ||
+            !set_device(device_id)) {
+            return false;
+        }
+        return hip_module_launch_kernel_(
+                   function,
+                   grid_x,
+                   1,
+                   1,
+                   block_x,
+                   1,
+                   1,
+                   0,
+                   stream,
+                   kernel_params,
+                   nullptr) == 0;
+    }
+
+    bool module_unload(void *module, int device_id) {
+        load_once();
+        if (module == nullptr) {
+            return true;
+        }
+        if (hip_module_unload_ == nullptr || !set_device(device_id)) {
+            return false;
+        }
+        return hip_module_unload_(module) == 0;
+    }
+
 private:
     using hip_get_device_count_fn = int (*)(int *);
     using hip_runtime_get_version_fn = int (*)(int *);
@@ -201,6 +258,21 @@ private:
     using hip_stream_synchronize_fn = int (*)(void *);
     using hip_device_synchronize_fn = int (*)();
     using hip_memcpy_async_fn = int (*)(void *, const void *, size_t, int, void *);
+    using hip_module_load_data_fn = int (*)(void **, const void *);
+    using hip_module_get_function_fn = int (*)(void **, void *, const char *);
+    using hip_module_launch_kernel_fn = int (*)(
+        void *,
+        unsigned int,
+        unsigned int,
+        unsigned int,
+        unsigned int,
+        unsigned int,
+        unsigned int,
+        unsigned int,
+        void *,
+        void **,
+        void **);
+    using hip_module_unload_fn = int (*)(void *);
 
     void load_once() {
         std::call_once(load_flag_, [this]() {
@@ -240,6 +312,14 @@ private:
                 reinterpret_cast<hip_device_synchronize_fn>(dlsym(handle_, "hipDeviceSynchronize"));
             hip_memcpy_async_ =
                 reinterpret_cast<hip_memcpy_async_fn>(dlsym(handle_, "hipMemcpyAsync"));
+            hip_module_load_data_ =
+                reinterpret_cast<hip_module_load_data_fn>(dlsym(handle_, "hipModuleLoadData"));
+            hip_module_get_function_ =
+                reinterpret_cast<hip_module_get_function_fn>(dlsym(handle_, "hipModuleGetFunction"));
+            hip_module_launch_kernel_ = reinterpret_cast<hip_module_launch_kernel_fn>(
+                dlsym(handle_, "hipModuleLaunchKernel"));
+            hip_module_unload_ =
+                reinterpret_cast<hip_module_unload_fn>(dlsym(handle_, "hipModuleUnload"));
 #endif
         });
     }
@@ -259,10 +339,227 @@ private:
     hip_stream_synchronize_fn hip_stream_synchronize_ = nullptr;
     hip_device_synchronize_fn hip_device_synchronize_ = nullptr;
     hip_memcpy_async_fn hip_memcpy_async_ = nullptr;
+    hip_module_load_data_fn hip_module_load_data_ = nullptr;
+    hip_module_get_function_fn hip_module_get_function_ = nullptr;
+    hip_module_launch_kernel_fn hip_module_launch_kernel_ = nullptr;
+    hip_module_unload_fn hip_module_unload_ = nullptr;
+};
+
+class HipRtcRuntime {
+public:
+    bool compile_aq4_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        load_once();
+        if (!available()) {
+            append_error(error, "HIPRTC is not available");
+            return false;
+        }
+        if (code == nullptr) {
+            append_error(error, "HIPRTC output code pointer is null");
+            return false;
+        }
+
+        void *program = nullptr;
+        int status = hiprtc_create_program_(
+            &program,
+            aq4_kernel_source(),
+            "ullm_aq4_dequant_f32.hip",
+            0,
+            nullptr,
+            nullptr);
+        if (status != 0 || program == nullptr) {
+            append_error(error, "hiprtcCreateProgram failed: " + error_string(status));
+            return false;
+        }
+
+        const auto destroy_program = [&]() {
+            if (program != nullptr) {
+                hiprtc_destroy_program_(&program);
+            }
+        };
+
+        const std::string arch_option = "--offload-arch=" + arch;
+        const std::array<const char *, 3> options = {
+            arch_option.c_str(),
+            "--std=c++17",
+            "-O3",
+        };
+        status = hiprtc_compile_program_(
+            program,
+            static_cast<int>(options.size()),
+            options.data());
+        if (status != 0) {
+            append_error(
+                error,
+                "hiprtcCompileProgram failed for " + arch + ": " + error_string(status) +
+                    "\n" + program_log(program));
+            destroy_program();
+            return false;
+        }
+
+        size_t code_size = 0;
+        status = hiprtc_get_code_size_(program, &code_size);
+        if (status != 0 || code_size == 0) {
+            append_error(error, "hiprtcGetCodeSize failed: " + error_string(status));
+            destroy_program();
+            return false;
+        }
+        code->assign(code_size, '\0');
+        status = hiprtc_get_code_(program, code->data());
+        if (status != 0) {
+            append_error(error, "hiprtcGetCode failed: " + error_string(status));
+            destroy_program();
+            return false;
+        }
+        destroy_program();
+        return true;
+    }
+
+private:
+    using hiprtc_create_program_fn =
+        int (*)(void **, const char *, const char *, int, const char *const *, const char *const *);
+    using hiprtc_compile_program_fn = int (*)(void *, int, const char *const *);
+    using hiprtc_get_code_size_fn = int (*)(void *, size_t *);
+    using hiprtc_get_code_fn = int (*)(void *, char *);
+    using hiprtc_get_log_size_fn = int (*)(void *, size_t *);
+    using hiprtc_get_log_fn = int (*)(void *, char *);
+    using hiprtc_destroy_program_fn = int (*)(void **);
+    using hiprtc_get_error_string_fn = const char *(*)(int);
+
+    static const char *aq4_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long elements,
+    float *output,
+    unsigned int *error_out) {
+    const unsigned long long element =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (element >= elements) {
+        return;
+    }
+    const unsigned char packed = indices[element >> 1];
+    const unsigned char codebook_index =
+        (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+    const unsigned long long group = element / group_size;
+    const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+    if (scale_index >= scale_count) {
+        atomicOr(error_out, 1u);
+        output[element] = 0.0f;
+        return;
+    }
+    output[element] = codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+}
+)";
+    }
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    bool available() const {
+        return hiprtc_create_program_ != nullptr && hiprtc_compile_program_ != nullptr &&
+               hiprtc_get_code_size_ != nullptr && hiprtc_get_code_ != nullptr &&
+               hiprtc_get_log_size_ != nullptr && hiprtc_get_log_ != nullptr &&
+               hiprtc_destroy_program_ != nullptr;
+    }
+
+    std::string error_string(int status) const {
+        if (hiprtc_get_error_string_ == nullptr) {
+            return std::to_string(status);
+        }
+        const char *message = hiprtc_get_error_string_(status);
+        if (message == nullptr) {
+            return std::to_string(status);
+        }
+        return std::string(message);
+    }
+
+    std::string program_log(void *program) const {
+        if (program == nullptr || hiprtc_get_log_size_ == nullptr || hiprtc_get_log_ == nullptr) {
+            return "";
+        }
+        size_t log_size = 0;
+        if (hiprtc_get_log_size_(program, &log_size) != 0 || log_size == 0) {
+            return "";
+        }
+        std::string log(log_size, '\0');
+        if (hiprtc_get_log_(program, log.data()) != 0) {
+            return "";
+        }
+        while (!log.empty() && log.back() == '\0') {
+            log.pop_back();
+        }
+        return log;
+    }
+
+    void load_once() {
+        std::call_once(load_flag_, [this]() {
+#if defined(__linux__)
+            constexpr std::array<const char *, 3> candidates = {
+                "libhiprtc.so",
+                "libhiprtc.so.7",
+                "libhiprtc.so.6",
+            };
+            for (const char *candidate : candidates) {
+                handle_ = dlopen(candidate, RTLD_LAZY | RTLD_LOCAL);
+                if (handle_ != nullptr) {
+                    break;
+                }
+            }
+            if (handle_ == nullptr) {
+                return;
+            }
+            hiprtc_create_program_ = reinterpret_cast<hiprtc_create_program_fn>(
+                dlsym(handle_, "hiprtcCreateProgram"));
+            hiprtc_compile_program_ = reinterpret_cast<hiprtc_compile_program_fn>(
+                dlsym(handle_, "hiprtcCompileProgram"));
+            hiprtc_get_code_size_ = reinterpret_cast<hiprtc_get_code_size_fn>(
+                dlsym(handle_, "hiprtcGetCodeSize"));
+            hiprtc_get_code_ =
+                reinterpret_cast<hiprtc_get_code_fn>(dlsym(handle_, "hiprtcGetCode"));
+            hiprtc_get_log_size_ = reinterpret_cast<hiprtc_get_log_size_fn>(
+                dlsym(handle_, "hiprtcGetProgramLogSize"));
+            hiprtc_get_log_ =
+                reinterpret_cast<hiprtc_get_log_fn>(dlsym(handle_, "hiprtcGetProgramLog"));
+            hiprtc_destroy_program_ = reinterpret_cast<hiprtc_destroy_program_fn>(
+                dlsym(handle_, "hiprtcDestroyProgram"));
+            hiprtc_get_error_string_ = reinterpret_cast<hiprtc_get_error_string_fn>(
+                dlsym(handle_, "hiprtcGetErrorString"));
+#endif
+        });
+    }
+
+    std::once_flag load_flag_;
+    void *handle_ = nullptr;
+    hiprtc_create_program_fn hiprtc_create_program_ = nullptr;
+    hiprtc_compile_program_fn hiprtc_compile_program_ = nullptr;
+    hiprtc_get_code_size_fn hiprtc_get_code_size_ = nullptr;
+    hiprtc_get_code_fn hiprtc_get_code_ = nullptr;
+    hiprtc_get_log_size_fn hiprtc_get_log_size_ = nullptr;
+    hiprtc_get_log_fn hiprtc_get_log_ = nullptr;
+    hiprtc_destroy_program_fn hiprtc_destroy_program_ = nullptr;
+    hiprtc_get_error_string_fn hiprtc_get_error_string_ = nullptr;
 };
 
 HipRuntime &hip_runtime() {
     static HipRuntime runtime;
+    return runtime;
+}
+
+HipRtcRuntime &hiprtc_runtime() {
+    static HipRtcRuntime runtime;
     return runtime;
 }
 
@@ -374,6 +671,313 @@ bool aq4_dequant_host(
         output[element] = codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
     }
     return true;
+}
+
+std::vector<std::string> hip_arch_candidates(int device_id) {
+    int major = 0;
+    int minor = 0;
+    hip_runtime().device_compute_capability(device_id, &major, &minor);
+    std::vector<std::string> candidates;
+    if (major == 12 && minor == 0) {
+        candidates.emplace_back("gfx1201");
+        candidates.emplace_back("gfx1200");
+    } else if (major == 10 && minor == 3) {
+        candidates.emplace_back("gfx1030");
+    } else if (major == 9) {
+        candidates.emplace_back("gfx9" + std::to_string(minor) + "0");
+    } else if (major > 0) {
+        candidates.emplace_back("gfx" + std::to_string(major) + std::to_string(minor) + "0");
+    }
+    return candidates;
+}
+
+class HipAq4KernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_aq4_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_aq4_dequant_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build AQ4 HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipAq4KernelCache &hip_aq4_kernel_cache() {
+    static HipAq4KernelCache cache;
+    return cache;
+}
+
+enum class HipAq4LaunchResult {
+    Ok,
+    InvalidArgument,
+    RuntimeError,
+};
+
+HipAq4LaunchResult aq4_dequant_hip_kernel(
+    const ullm_runtime_buffer *index_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *codebook_buffer,
+    const float *scale_values,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    size_t elements,
+    size_t required_output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = index_buffer->hip_device_id;
+    void *function = hip_aq4_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return HipAq4LaunchResult::RuntimeError;
+    }
+
+    const size_t scale_value_bytes = scale_count * sizeof(float);
+    void *device_scale_values = hip_runtime().malloc_device(scale_value_bytes, device_id);
+    void *device_error = hip_runtime().malloc_device(sizeof(std::uint32_t), device_id);
+    if (device_scale_values == nullptr || device_error == nullptr) {
+        if (device_scale_values != nullptr) {
+            hip_runtime().free_device(device_scale_values, device_id);
+        }
+        if (device_error != nullptr) {
+            hip_runtime().free_device(device_error, device_id);
+        }
+        if (error != nullptr) {
+            *error = "failed to allocate AQ4 HIP kernel temporary buffers";
+        }
+        return HipAq4LaunchResult::RuntimeError;
+    }
+
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const std::uint32_t zero = 0;
+    if (!hip_runtime().copy_async(
+            device_scale_values,
+            scale_values,
+            scale_value_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            device_error,
+            &zero,
+            sizeof(zero),
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        hip_runtime().free_device(device_scale_values, device_id);
+        hip_runtime().free_device(device_error, device_id);
+        if (error != nullptr) {
+            *error = "failed to upload AQ4 HIP kernel temporary buffers";
+        }
+        return HipAq4LaunchResult::RuntimeError;
+    }
+
+    constexpr unsigned int block_size = 256;
+    unsigned long long kernel_scale_count = static_cast<unsigned long long>(scale_count);
+    unsigned long long kernel_group_size = static_cast<unsigned long long>(group_size);
+    unsigned long long kernel_elements = static_cast<unsigned long long>(elements);
+    const unsigned int grid_x =
+        static_cast<unsigned int>((elements + block_size - 1) / block_size);
+    void *index_ptr = index_buffer->ptr;
+    void *scale_ptr = scale_buffer->ptr;
+    void *codebook_ptr = codebook_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &index_ptr,
+        &scale_ptr,
+        &codebook_ptr,
+        &device_scale_values,
+        &kernel_scale_count,
+        &kernel_group_size,
+        &tensor_scale,
+        &kernel_elements,
+        &output_ptr,
+        &device_error,
+    };
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            grid_x,
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        hip_runtime().free_device(device_scale_values, device_id);
+        hip_runtime().free_device(device_error, device_id);
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for AQ4 dequant";
+        }
+        return HipAq4LaunchResult::RuntimeError;
+    }
+
+    std::uint32_t host_error = 0;
+    if (!hip_runtime().copy_async(
+            &host_error,
+            device_error,
+            sizeof(host_error),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !synchronize_hip_staging(stream, device_id)) {
+        hip_runtime().free_device(device_scale_values, device_id);
+        hip_runtime().free_device(device_error, device_id);
+        if (error != nullptr) {
+            *error = "failed to read AQ4 HIP kernel status";
+        }
+        return HipAq4LaunchResult::RuntimeError;
+    }
+
+    hip_runtime().free_device(device_scale_values, device_id);
+    hip_runtime().free_device(device_error, device_id);
+    if (host_error != 0) {
+        if (error != nullptr) {
+            *error = "AQ4 dequant scale index is out of range";
+        }
+        return HipAq4LaunchResult::InvalidArgument;
+    }
+    (void)required_output_bytes;
+    return HipAq4LaunchResult::Ok;
+}
+
+ullm_status aq4_dequant_hip_staging(
+    const ullm_runtime_buffer *index_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *codebook_buffer,
+    const float *scale_values,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    size_t elements,
+    size_t required_index_bytes,
+    size_t groups,
+    size_t required_output_bytes,
+    size_t codebook_entries,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<std::uint8_t> host_indices(required_index_bytes);
+    std::vector<std::uint8_t> host_scale_indices(groups);
+    std::vector<float> host_codebook(codebook_entries);
+    std::vector<float> host_output(elements);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = index_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_indices.data(),
+            index_buffer->ptr,
+            required_index_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_scale_indices.data(),
+            scale_buffer->ptr,
+            groups,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_codebook.data(),
+            codebook_buffer->ptr,
+            codebook_buffer->bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy AQ4 HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize AQ4 HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!aq4_dequant_host(
+            host_indices.data(),
+            host_scale_indices.data(),
+            host_codebook.data(),
+            scale_values,
+            scale_count,
+            group_size,
+            tensor_scale,
+            elements,
+            host_output.data())) {
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            required_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy AQ4 materialized output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize AQ4 HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
 }
 
 } // namespace
@@ -777,71 +1381,49 @@ ullm_status ullm_runtime_aq4_dequant_f32(
         return ULLM_STATUS_OK;
     }
 
-    std::vector<std::uint8_t> host_indices(required_index_bytes);
-    std::vector<std::uint8_t> host_scale_indices(groups);
-    std::vector<float> host_codebook(codebook_entries);
-    std::vector<float> host_output(elements);
-    ullm_runtime_stream *copy_stream = stream;
-    void *hip_stream = copy_stream == nullptr ? nullptr : copy_stream->stream;
-    const int device_id = index_buffer->hip_device_id;
-
-    if (!hip_runtime().copy_async(
-            host_indices.data(),
-            index_buffer->ptr,
-            required_index_bytes,
-            HIP_MEMCPY_DEVICE_TO_HOST,
-            hip_stream,
-            device_id) ||
-        !hip_runtime().copy_async(
-            host_scale_indices.data(),
-            scale_buffer->ptr,
-            groups,
-            HIP_MEMCPY_DEVICE_TO_HOST,
-            hip_stream,
-            device_id) ||
-        !hip_runtime().copy_async(
-            host_codebook.data(),
-            codebook_buffer->ptr,
-            codebook_buffer->bytes,
-            HIP_MEMCPY_DEVICE_TO_HOST,
-            hip_stream,
-            device_id)) {
-        set_error("failed to copy AQ4 HIP inputs to host staging buffers");
-        return ULLM_STATUS_RUNTIME_ERROR;
+    std::string hip_kernel_error;
+    const HipAq4LaunchResult launch_result = aq4_dequant_hip_kernel(
+        index_buffer,
+        scale_buffer,
+        codebook_buffer,
+        scale_values,
+        scale_count,
+        group_size,
+        tensor_scale,
+        elements,
+        required_output_bytes,
+        output_buffer,
+        stream,
+        &hip_kernel_error);
+    if (launch_result == HipAq4LaunchResult::Ok) {
+        set_error("");
+        return ULLM_STATUS_OK;
     }
-    if (!synchronize_hip_staging(copy_stream, device_id)) {
-        set_error("failed to synchronize AQ4 HIP input staging copies");
-        return ULLM_STATUS_RUNTIME_ERROR;
-    }
-    if (!aq4_dequant_host(
-            host_indices.data(),
-            host_scale_indices.data(),
-            host_codebook.data(),
-            scale_values,
-            scale_count,
-            group_size,
-            tensor_scale,
-            elements,
-            host_output.data())) {
+    if (launch_result == HipAq4LaunchResult::InvalidArgument) {
+        set_error(hip_kernel_error.c_str());
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
-    if (!hip_runtime().copy_async(
-            output_buffer->ptr,
-            host_output.data(),
-            required_output_bytes,
-            HIP_MEMCPY_HOST_TO_DEVICE,
-            hip_stream,
-            device_id)) {
-        set_error("failed to copy AQ4 materialized output to HIP buffer");
-        return ULLM_STATUS_RUNTIME_ERROR;
-    }
-    if (!synchronize_hip_staging(copy_stream, device_id)) {
-        set_error("failed to synchronize AQ4 HIP output staging copy");
-        return ULLM_STATUS_RUNTIME_ERROR;
-    }
 
-    set_error("");
-    return ULLM_STATUS_OK;
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_AQ4_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty() ? "AQ4 HIP kernel is unavailable" : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return aq4_dequant_hip_staging(
+        index_buffer,
+        scale_buffer,
+        codebook_buffer,
+        scale_values,
+        scale_count,
+        group_size,
+        tensor_scale,
+        elements,
+        required_index_bytes,
+        groups,
+        required_output_bytes,
+        codebook_entries,
+        output_buffer,
+        stream);
 }
 
 ullm_status ullm_runtime_smoke_add_f32(
