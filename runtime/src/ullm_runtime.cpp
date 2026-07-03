@@ -386,6 +386,18 @@ public:
             error);
     }
 
+    bool compile_linear_attn_recurrent_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            linear_attn_recurrent_kernel_source(),
+            "ullm_linear_attn_recurrent_f32.hip",
+            code,
+            error);
+    }
+
 private:
     using hiprtc_create_program_fn =
         int (*)(void **, const char *, const char *, int, const char *const *, const char *const *);
@@ -639,6 +651,69 @@ extern "C" __global__ void ullm_linear_attn_gate_beta_f32_kernel(
     gate_output[index] = -expf(a_log[head]) * softplus;
     const float b_value = b[index];
     beta_output[index] = 1.0f / (1.0f + expf(-b_value));
+}
+)";
+    }
+
+    static const char *linear_attn_recurrent_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_linear_attn_recurrent_f32_kernel(
+    const float *q,
+    const float *k,
+    const float *v,
+    const float *gate,
+    const float *beta,
+    unsigned long long key_heads,
+    unsigned long long value_heads,
+    unsigned long long sequence_len,
+    unsigned long long key_dim,
+    unsigned long long value_dim,
+    float *state,
+    float *output) {
+    const unsigned long long value_head = blockIdx.x;
+    if (value_head >= value_heads || threadIdx.x != 0) {
+        return;
+    }
+    const unsigned long long key_head_group = value_heads / key_heads;
+    const unsigned long long key_head = value_head / key_head_group;
+    const unsigned long long state_head_offset = value_head * key_dim * value_dim;
+    for (unsigned long long timestep = 0; timestep < sequence_len; ++timestep) {
+        const unsigned long long value_head_index = timestep * value_heads + value_head;
+        const unsigned long long key_head_index = timestep * key_heads + key_head;
+        const unsigned long long qk_base = key_head_index * key_dim;
+        const unsigned long long v_base = value_head_index * value_dim;
+        const float decay = expf(gate[value_head_index]);
+        const float beta_value = beta[value_head_index];
+
+        for (unsigned long long key = 0; key < key_dim; ++key) {
+            const unsigned long long state_key_offset = state_head_offset + key * value_dim;
+            for (unsigned long long value = 0; value < value_dim; ++value) {
+                state[state_key_offset + value] *= decay;
+            }
+        }
+
+        for (unsigned long long value = 0; value < value_dim; ++value) {
+            float current = 0.0f;
+            for (unsigned long long key = 0; key < key_dim; ++key) {
+                current += state[state_head_offset + key * value_dim + value] *
+                           k[qk_base + key];
+            }
+            const float v_prime = (v[v_base + value] - current) * beta_value;
+            for (unsigned long long key = 0; key < key_dim; ++key) {
+                state[state_head_offset + key * value_dim + value] +=
+                    k[qk_base + key] * v_prime;
+            }
+        }
+
+        for (unsigned long long value = 0; value < value_dim; ++value) {
+            float sum = 0.0f;
+            for (unsigned long long key = 0; key < key_dim; ++key) {
+                sum += state[state_head_offset + key * value_dim + value] *
+                       q[qk_base + key];
+            }
+            output[v_base + value] = sum;
+        }
+    }
 }
 )";
     }
@@ -2246,6 +2321,334 @@ ullm_status linear_attn_gate_beta_f32_hip_staging(
     return ULLM_STATUS_OK;
 }
 
+void linear_attn_recurrent_f32_host(
+    const float *q,
+    const float *k,
+    const float *v,
+    const float *gate,
+    const float *beta,
+    size_t key_heads,
+    size_t value_heads,
+    size_t sequence_len,
+    size_t key_dim,
+    size_t value_dim,
+    float *state,
+    float *output) {
+    const size_t key_head_group = value_heads / key_heads;
+    for (size_t timestep = 0; timestep < sequence_len; ++timestep) {
+        for (size_t value_head = 0; value_head < value_heads; ++value_head) {
+            const size_t key_head = value_head / key_head_group;
+            const size_t value_head_index = timestep * value_heads + value_head;
+            const size_t key_head_index = timestep * key_heads + key_head;
+            const size_t qk_base = key_head_index * key_dim;
+            const size_t v_base = value_head_index * value_dim;
+            const size_t state_head_offset = value_head * key_dim * value_dim;
+            const float decay = std::exp(gate[value_head_index]);
+            const float beta_value = beta[value_head_index];
+
+            for (size_t key = 0; key < key_dim; ++key) {
+                const size_t state_key_offset = state_head_offset + key * value_dim;
+                for (size_t value = 0; value < value_dim; ++value) {
+                    state[state_key_offset + value] *= decay;
+                }
+            }
+
+            for (size_t value = 0; value < value_dim; ++value) {
+                float current = 0.0f;
+                for (size_t key = 0; key < key_dim; ++key) {
+                    current += state[state_head_offset + key * value_dim + value] *
+                               k[qk_base + key];
+                }
+                const float v_prime = (v[v_base + value] - current) * beta_value;
+                for (size_t key = 0; key < key_dim; ++key) {
+                    state[state_head_offset + key * value_dim + value] +=
+                        k[qk_base + key] * v_prime;
+                }
+            }
+
+            for (size_t value = 0; value < value_dim; ++value) {
+                float sum = 0.0f;
+                for (size_t key = 0; key < key_dim; ++key) {
+                    sum += state[state_head_offset + key * value_dim + value] *
+                           q[qk_base + key];
+                }
+                output[v_base + value] = sum;
+            }
+        }
+    }
+}
+
+class HipLinearAttnRecurrentKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_linear_attn_recurrent_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_linear_attn_recurrent_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build linear attention recurrent HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipLinearAttnRecurrentKernelCache &hip_linear_attn_recurrent_kernel_cache() {
+    static HipLinearAttnRecurrentKernelCache cache;
+    return cache;
+}
+
+bool linear_attn_recurrent_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *beta_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t sequence_len,
+    size_t key_dim,
+    size_t value_dim,
+    ullm_runtime_buffer *state_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_linear_attn_recurrent_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+    if (value_heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "linear attention recurrent value head count exceeds HIP grid limit";
+        }
+        return false;
+    }
+
+    unsigned long long kernel_key_heads = static_cast<unsigned long long>(key_heads);
+    unsigned long long kernel_value_heads = static_cast<unsigned long long>(value_heads);
+    unsigned long long kernel_sequence_len = static_cast<unsigned long long>(sequence_len);
+    unsigned long long kernel_key_dim = static_cast<unsigned long long>(key_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ptr = k_buffer->ptr;
+    void *v_ptr = v_buffer->ptr;
+    void *gate_ptr = gate_buffer->ptr;
+    void *beta_ptr = beta_buffer->ptr;
+    void *state_ptr = state_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr,
+        &k_ptr,
+        &v_ptr,
+        &gate_ptr,
+        &beta_ptr,
+        &kernel_key_heads,
+        &kernel_value_heads,
+        &kernel_sequence_len,
+        &kernel_key_dim,
+        &kernel_value_dim,
+        &state_ptr,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(value_heads),
+            1,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 linear attention recurrent";
+        }
+        return false;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        if (error != nullptr) {
+            *error = "failed to synchronize f32 linear attention recurrent HIP kernel";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status linear_attn_recurrent_f32_hip_staging(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *beta_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t sequence_len,
+    size_t key_dim,
+    size_t value_dim,
+    size_t qk_bytes,
+    size_t v_bytes,
+    size_t gate_beta_bytes,
+    size_t state_bytes,
+    ullm_runtime_buffer *state_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_q(qk_bytes / sizeof(float));
+    std::vector<float> host_k(qk_bytes / sizeof(float));
+    std::vector<float> host_v(v_bytes / sizeof(float));
+    std::vector<float> host_gate(gate_beta_bytes / sizeof(float));
+    std::vector<float> host_beta(gate_beta_bytes / sizeof(float));
+    std::vector<float> host_state(state_bytes / sizeof(float));
+    std::vector<float> host_output(v_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = q_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_q.data(),
+            q_buffer->ptr,
+            qk_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k.data(),
+            k_buffer->ptr,
+            qk_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_v.data(),
+            v_buffer->ptr,
+            v_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_gate.data(),
+            gate_buffer->ptr,
+            gate_beta_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_beta.data(),
+            beta_buffer->ptr,
+            gate_beta_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_state.data(),
+            state_buffer->ptr,
+            state_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 linear attention recurrent HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 linear attention recurrent HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    linear_attn_recurrent_f32_host(
+        host_q.data(),
+        host_k.data(),
+        host_v.data(),
+        host_gate.data(),
+        host_beta.data(),
+        key_heads,
+        value_heads,
+        sequence_len,
+        key_dim,
+        value_dim,
+        host_state.data(),
+        host_output.data());
+    if (!hip_runtime().copy_async(
+            state_buffer->ptr,
+            host_state.data(),
+            state_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            v_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 linear attention recurrent outputs to HIP buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 linear attention recurrent HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
 } // namespace
 
 uint32_t ullm_runtime_abi_version(void) {
@@ -3181,6 +3584,197 @@ ullm_status ullm_runtime_linear_attn_gate_beta_f32(
         head_bytes,
         gate_output_buffer,
         beta_output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_linear_attn_recurrent_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *beta_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t sequence_len,
+    size_t key_dim,
+    size_t value_dim,
+    ullm_runtime_buffer *state_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_buffer == nullptr || v_buffer == nullptr ||
+        gate_buffer == nullptr || beta_buffer == nullptr || state_buffer == nullptr ||
+        output_buffer == nullptr) {
+        set_error("f32 linear attention recurrent received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (key_heads == 0 || value_heads == 0 || sequence_len == 0 || key_dim == 0 ||
+        value_dim == 0) {
+        set_error(
+            "f32 linear attention recurrent key_heads, value_heads, sequence length, key_dim, and value_dim must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (value_heads % key_heads != 0) {
+        set_error("f32 linear attention recurrent value_heads must be a multiple of key_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_buffer, k_buffer) ||
+        !buffers_share_backend(q_buffer, v_buffer) ||
+        !buffers_share_backend(q_buffer, gate_buffer) ||
+        !buffers_share_backend(q_buffer, beta_buffer) ||
+        !buffers_share_backend(q_buffer, state_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error("f32 linear attention recurrent buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(state_buffer, stream) ||
+        !stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 linear attention recurrent stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (sequence_len > max_size / key_heads) {
+        set_error("f32 linear attention recurrent key head sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t key_head_sequence_elements = key_heads * sequence_len;
+    if (sequence_len > max_size / value_heads) {
+        set_error("f32 linear attention recurrent value head sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t value_head_sequence_elements = value_heads * sequence_len;
+    if (key_head_sequence_elements > max_size / key_dim) {
+        set_error("f32 linear attention recurrent q/k element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t qk_elements = key_head_sequence_elements * key_dim;
+    if (value_head_sequence_elements > max_size / value_dim) {
+        set_error("f32 linear attention recurrent v/output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t v_elements = value_head_sequence_elements * value_dim;
+    if (value_heads > max_size / key_dim) {
+        set_error("f32 linear attention recurrent state key element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t state_key_elements = value_heads * key_dim;
+    if (state_key_elements > max_size / value_dim) {
+        set_error("f32 linear attention recurrent state element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t state_elements = state_key_elements * value_dim;
+    if (qk_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float) ||
+        value_head_sequence_elements > max_size / sizeof(float) ||
+        state_elements > max_size / sizeof(float)) {
+        set_error("f32 linear attention recurrent byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t qk_bytes = qk_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t gate_beta_bytes = value_head_sequence_elements * sizeof(float);
+    const size_t state_bytes = state_elements * sizeof(float);
+
+    if (q_buffer->bytes < qk_bytes) {
+        set_error("f32 linear attention recurrent q buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_buffer->bytes < qk_bytes) {
+        set_error("f32 linear attention recurrent k buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_buffer->bytes < v_bytes) {
+        set_error("f32 linear attention recurrent v buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_buffer->bytes < gate_beta_bytes) {
+        set_error("f32 linear attention recurrent gate buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (beta_buffer->bytes < gate_beta_bytes) {
+        set_error("f32 linear attention recurrent beta buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (state_buffer->bytes < state_bytes) {
+        set_error("f32 linear attention recurrent state buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < v_bytes) {
+        set_error("f32 linear attention recurrent output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k = static_cast<const float *>(k_buffer->ptr);
+        const auto *v = static_cast<const float *>(v_buffer->ptr);
+        const auto *gate = static_cast<const float *>(gate_buffer->ptr);
+        const auto *beta = static_cast<const float *>(beta_buffer->ptr);
+        auto *state = static_cast<float *>(state_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        linear_attn_recurrent_f32_host(
+            q,
+            k,
+            v,
+            gate,
+            beta,
+            key_heads,
+            value_heads,
+            sequence_len,
+            key_dim,
+            value_dim,
+            state,
+            output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (linear_attn_recurrent_f32_hip_kernel(
+            q_buffer,
+            k_buffer,
+            v_buffer,
+            gate_buffer,
+            beta_buffer,
+            key_heads,
+            value_heads,
+            sequence_len,
+            key_dim,
+            value_dim,
+            state_buffer,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_LINEAR_ATTN_RECURRENT_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ?
+                "f32 linear attention recurrent HIP kernel is unavailable" :
+                hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return linear_attn_recurrent_f32_hip_staging(
+        q_buffer,
+        k_buffer,
+        v_buffer,
+        gate_buffer,
+        beta_buffer,
+        key_heads,
+        value_heads,
+        sequence_len,
+        key_dim,
+        value_dim,
+        qk_bytes,
+        v_bytes,
+        gate_beta_bytes,
+        state_bytes,
+        state_buffer,
+        output_buffer,
         stream);
 }
 

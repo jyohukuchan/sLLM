@@ -70,6 +70,8 @@ package linear attention auxiliary smoke:.ullm.d内の実際のlinear_attn補助
 linear attention gate beta:linear attentionでin_proj_a/bの出力、A_log、dt_biasからgateとbetaを作る境界処理
 runtime linear attention gate beta smoke:runtime上でa/b、A_log、dt_biasからgate/betaを計算し、決定的入力で境界動作を確認するsmoke。linear attention全体の計算ではない
 package linear attention gate beta smoke:.ullm.d内の実際のlinear_attn.in_proj_a/b quantized tensorとA_log/dt_bias passthrough tensorを使い、runtimeでgate/beta境界を検証するsmoke。linear attention全体の計算ではない
+linear attention recurrent:linear attentionの逐次state更新処理。uLLMではq/kをkey head layout、v/gate/beta/output/stateをvalue head layoutで扱う
+runtime linear attention recurrent smoke:runtime上で小型f32 q/k/v/gate/beta/stateからlinear attention recurrent境界を計算し、更新後stateとoutputを検証するsmoke。linear attention全体の計算ではない
 HIPRTC:HIP runtime compilation。通常C++でbuildしたruntimeからHIP kernel sourceを実行時compileしてmodule launchする仕組み
 JIT kernel:実行時にcompileしてloadするkernel。uLLMではHIPRTC経由のAQ4 materialize kernelなどを指す
 kernel-required smoke:staging fallbackを禁止し、実kernel経路だけで成功することを確認するsmoke

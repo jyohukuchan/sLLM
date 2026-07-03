@@ -28,6 +28,9 @@ fn main() -> ExitCode {
         Some("runtime-linear-attn-gate-beta-smoke") => {
             runtime_linear_attn_gate_beta_smoke(env::args().nth(2))
         }
+        Some("runtime-linear-attn-recurrent-smoke") => {
+            runtime_linear_attn_recurrent_smoke(env::args().nth(2))
+        }
         Some("runtime-mlp-smoke") => runtime_mlp_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
         Some("package-load-smoke") => package_load_smoke(
@@ -936,6 +939,237 @@ fn runtime_linear_attn_gate_beta_smoke(device_index: Option<String>) -> ExitCode
         sequence_len,
         format_f32_preview(&gate_output[..8.min(gate_output.len())]),
         format_f32_preview(&beta_output[..8.min(beta_output.len())]),
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_linear_attn_recurrent_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let key_heads = 1_usize;
+    let value_heads = 2_usize;
+    let sequence_len = 3_usize;
+    let key_dim = 3_usize;
+    let value_dim = 2_usize;
+    let q = [0.25_f32, -0.5, 0.75, 0.6, -0.2, 0.3, -0.1, 0.8, -0.35];
+    let k = [-0.3_f32, 0.4, 0.2, 0.1, 0.2, -0.6, 0.55, -0.1, 0.25];
+    let v = [
+        0.7_f32, -0.2, -0.5, 0.4, 0.25, 0.3, -0.1, -0.6, 0.9, 0.05, -0.35, 0.8,
+    ];
+    let gate = [-0.2_f32, -0.5, -0.1, -0.3, -0.7, -0.05];
+    let beta = [0.8_f32, 0.6, 0.5, 0.9, 0.7, 0.4];
+    let initial_state = [
+        0.01_f32, -0.02, 0.03, 0.04, -0.01, 0.02, -0.03, 0.05, 0.02, -0.04, 0.01, 0.03,
+    ];
+    let mut expected_state = initial_state.to_vec();
+    let expected_output = runtime_host_linear_attn_recurrent_f32(
+        &q,
+        &k,
+        &v,
+        &gate,
+        &beta,
+        key_heads,
+        value_heads,
+        sequence_len,
+        key_dim,
+        value_dim,
+        &mut expected_state,
+    );
+    if expected_output.is_empty() {
+        eprintln!("failed to build deterministic linear attention recurrent reference");
+        return ExitCode::from(1);
+    }
+
+    let q_bytes = encode_f32_to_bytes(&q);
+    let k_bytes = encode_f32_to_bytes(&k);
+    let v_bytes = encode_f32_to_bytes(&v);
+    let gate_bytes = encode_f32_to_bytes(&gate);
+    let beta_bytes = encode_f32_to_bytes(&beta);
+    let state_bytes = encode_f32_to_bytes(&initial_state);
+    let output_bytes = v_bytes.len();
+
+    let mut q_buffer = match context.alloc_buffer(q_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate q runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut k_buffer = match context.alloc_buffer(k_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate k runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut v_buffer = match context.alloc_buffer(v_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate v runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut gate_buffer = match context.alloc_buffer(gate_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate gate runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut beta_buffer = match context.alloc_buffer(beta_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate beta runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut state_buffer = match context.alloc_buffer(state_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate state runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut output_buffer = match context.alloc_buffer(output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate output runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = q_buffer.copy_from_host(0, &q_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy q data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = k_buffer.copy_from_host(0, &k_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy k data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = v_buffer.copy_from_host(0, &v_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy v data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = gate_buffer.copy_from_host(0, &gate_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy gate data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = beta_buffer.copy_from_host(0, &beta_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy beta data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = state_buffer.copy_from_host(0, &state_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy state data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after recurrent input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    if let Err(err) = ullm_runtime_sys::linear_attn_recurrent_f32(
+        &q_buffer,
+        &k_buffer,
+        &v_buffer,
+        &gate_buffer,
+        &beta_buffer,
+        key_heads,
+        value_heads,
+        sequence_len,
+        key_dim,
+        value_dim,
+        &mut state_buffer,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime linear_attn_recurrent_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after linear attention recurrent: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_raw = vec![0_u8; output_bytes];
+    let mut final_state_raw = vec![0_u8; state_bytes.len()];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_raw, Some(&mut stream)) {
+        eprintln!("failed to copy recurrent output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = state_buffer.copy_to_host(0, &mut final_state_raw, Some(&mut stream)) {
+        eprintln!("failed to copy recurrent state back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after recurrent output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let output = decode_f32_le_values(&output_raw);
+    let final_state = decode_f32_le_values(&final_state_raw);
+
+    let mut max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in output.iter().zip(expected_output.iter()) {
+        let diff = (lhs - rhs).abs();
+        if diff > 1e-5_f32 {
+            eprintln!(
+                "runtime linear attention recurrent smoke produced unexpected output: max_abs_diff={diff} output={:?} expected={:?}",
+                output, expected_output
+            );
+            return ExitCode::from(1);
+        }
+        if diff > max_abs_diff {
+            max_abs_diff = diff;
+        }
+    }
+    for (lhs, rhs) in final_state.iter().zip(expected_state.iter()) {
+        let diff = (lhs - rhs).abs();
+        if diff > 1e-5_f32 {
+            eprintln!(
+                "runtime linear attention recurrent smoke produced unexpected state: max_abs_diff={diff} state={:?} expected={:?}",
+                final_state, expected_state
+            );
+            return ExitCode::from(1);
+        }
+        if diff > max_abs_diff {
+            max_abs_diff = diff;
+        }
+    }
+    println!(
+        "runtime-linear-attn-recurrent-smoke backend={} device_index={} name=\"{}\" key_heads={} value_heads={} sequence_len={} key_dim={} value_dim={} output={} state={} max_abs_diff={max_abs_diff:.9} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        key_heads,
+        value_heads,
+        sequence_len,
+        key_dim,
+        value_dim,
+        format_f32_preview(&output[..8.min(output.len())]),
+        format_f32_preview(&final_state[..8.min(final_state.len())]),
     );
     ExitCode::SUCCESS
 }
@@ -4971,7 +5205,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!(
@@ -5342,6 +5576,103 @@ fn runtime_host_linear_attn_gate_beta_f32(
         beta[index] = 1.0_f32 / (1.0_f32 + (-b[index]).exp());
     }
     (gate, beta)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_host_linear_attn_recurrent_f32(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    gate: &[f32],
+    beta: &[f32],
+    key_heads: usize,
+    value_heads: usize,
+    sequence_len: usize,
+    key_dim: usize,
+    value_dim: usize,
+    state: &mut [f32],
+) -> Vec<f32> {
+    let key_head_sequence_elements = match key_heads.checked_mul(sequence_len) {
+        Some(value) if value > 0 => value,
+        _ => return Vec::new(),
+    };
+    let value_head_sequence_elements = match value_heads.checked_mul(sequence_len) {
+        Some(value) if value > 0 => value,
+        _ => return Vec::new(),
+    };
+    let qk_elements = match key_head_sequence_elements.checked_mul(key_dim) {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
+    let v_elements = match value_head_sequence_elements.checked_mul(value_dim) {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
+    let state_elements = match value_heads
+        .checked_mul(key_dim)
+        .and_then(|value| value.checked_mul(value_dim))
+    {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
+    if key_heads == 0
+        || value_heads == 0
+        || !value_heads.is_multiple_of(key_heads)
+        || key_dim == 0
+        || value_dim == 0
+        || q.len() != qk_elements
+        || k.len() != qk_elements
+        || v.len() != v_elements
+        || gate.len() != value_head_sequence_elements
+        || beta.len() != value_head_sequence_elements
+        || state.len() != state_elements
+    {
+        return Vec::new();
+    }
+
+    let mut output = vec![0.0_f32; v_elements];
+    let key_head_group = value_heads / key_heads;
+    for timestep in 0..sequence_len {
+        for value_head in 0..value_heads {
+            let key_head = value_head / key_head_group;
+            let value_head_index = timestep * value_heads + value_head;
+            let key_head_index = timestep * key_heads + key_head;
+            let qk_base = key_head_index * key_dim;
+            let v_base = value_head_index * value_dim;
+            let state_head_offset = value_head * key_dim * value_dim;
+            let decay = gate[value_head_index].exp();
+            let beta_value = beta[value_head_index];
+
+            for key in 0..key_dim {
+                let state_key_offset = state_head_offset + key * value_dim;
+                for value in 0..value_dim {
+                    state[state_key_offset + value] *= decay;
+                }
+            }
+
+            for value in 0..value_dim {
+                let mut current = 0.0_f32;
+                for key in 0..key_dim {
+                    current +=
+                        state[state_head_offset + key * value_dim + value] * k[qk_base + key];
+                }
+                let v_prime = (v[v_base + value] - current) * beta_value;
+                for key in 0..key_dim {
+                    state[state_head_offset + key * value_dim + value] +=
+                        k[qk_base + key] * v_prime;
+                }
+            }
+
+            for value in 0..value_dim {
+                let mut sum = 0.0_f32;
+                for key in 0..key_dim {
+                    sum += state[state_head_offset + key * value_dim + value] * q[qk_base + key];
+                }
+                output[v_base + value] = sum;
+            }
+        }
+    }
+    output
 }
 
 fn format_f32_preview(values: &[f32]) -> String {
