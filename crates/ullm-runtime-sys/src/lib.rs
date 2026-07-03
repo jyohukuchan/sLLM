@@ -101,6 +101,17 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_linear_attn_gate_beta_f32(
+        a_buffer: *const RawRuntimeBuffer,
+        b_buffer: *const RawRuntimeBuffer,
+        a_log_buffer: *const RawRuntimeBuffer,
+        dt_bias_buffer: *const RawRuntimeBuffer,
+        heads: usize,
+        sequence_len: usize,
+        gate_output_buffer: *mut RawRuntimeBuffer,
+        beta_output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_depthwise_conv1d_f32(
         input_buffer: *const RawRuntimeBuffer,
         weight_buffer: *const RawRuntimeBuffer,
@@ -442,6 +453,69 @@ pub fn silu_mul_f32(
     })
 }
 
+pub fn linear_attn_gate_beta_f32(
+    a: &RuntimeBuffer,
+    b: &RuntimeBuffer,
+    a_log: &RuntimeBuffer,
+    dt_bias: &RuntimeBuffer,
+    heads: usize,
+    sequence_len: usize,
+    gate_output: &mut RuntimeBuffer,
+    beta_output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if heads == 0 {
+        return Err("linear attention gate beta heads must be greater than zero".to_string());
+    }
+    if sequence_len == 0 {
+        return Err(
+            "linear attention gate beta sequence_len must be greater than zero".to_string(),
+        );
+    }
+
+    let output_elements = heads
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "linear attention gate beta output element count overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention gate beta output byte size overflows".to_string())?;
+    let param_bytes = heads
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention gate beta parameter byte size overflows".to_string())?;
+
+    check_linear_attention_gate_beta_copy_range("a", 0, output_bytes, a.size()?)?;
+    check_linear_attention_gate_beta_copy_range("b", 0, output_bytes, b.size()?)?;
+    check_linear_attention_gate_beta_copy_range("a_log", 0, param_bytes, a_log.size()?)?;
+    check_linear_attention_gate_beta_copy_range("dt_bias", 0, param_bytes, dt_bias.size()?)?;
+    check_linear_attention_gate_beta_copy_range(
+        "gate_output",
+        0,
+        output_bytes,
+        gate_output.size()?,
+    )?;
+    check_linear_attention_gate_beta_copy_range(
+        "beta_output",
+        0,
+        output_bytes,
+        beta_output.size()?,
+    )?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_linear_attn_gate_beta_f32(
+            a.raw.as_ptr(),
+            b.raw.as_ptr(),
+            a_log.raw.as_ptr(),
+            dt_bias.raw.as_ptr(),
+            heads,
+            sequence_len,
+            gate_output.raw.as_ptr(),
+            beta_output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 pub fn depthwise_conv1d_f32(
     input: &RuntimeBuffer,
     weight: &RuntimeBuffer,
@@ -551,6 +625,21 @@ fn check_depthwise_copy_range(
     } else {
         Err(format!(
             "depthwise conv1d {kind} buffer is too small: offset={offset} bytes={bytes} total={total}"
+        ))
+    }
+}
+
+fn check_linear_attention_gate_beta_copy_range(
+    kind: &str,
+    offset: usize,
+    bytes: usize,
+    total: usize,
+) -> Result<(), String> {
+    if offset <= total && bytes <= total - offset {
+        Ok(())
+    } else {
+        Err(format!(
+            "linear attention gate beta {kind} buffer is too small: offset={offset} bytes={bytes} total={total}"
         ))
     }
 }
@@ -798,6 +887,133 @@ mod tests {
 
         let err = silu_mul_f32(&gate, &up, 4, &mut output, None).unwrap_err();
         assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
+    fn cpu_linear_attn_gate_beta_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let heads = 3_usize;
+        let sequence_len = 4_usize;
+        let a = [
+            0.1_f32, -0.2, 1.2, 0.9, 0.8, -1.1, -0.7, 0.5, 1.4, -0.3, 0.2, -0.6,
+        ];
+        let b = [
+            1.0_f32, -1.2, 0.3, -0.8, 0.6, 1.1, -0.5, 0.9, 0.0, -0.4, 1.3, -0.7,
+        ];
+        let a_log = [-1.0_f32, 0.25, -0.5];
+        let dt_bias = [0.3_f32, -0.2, 0.4];
+        let (expected_gate, expected_beta) =
+            expected_linear_attn_gate_beta(&a, &b, &a_log, &dt_bias, heads, sequence_len);
+
+        let mut a_buffer = context
+            .alloc_buffer(a.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut b_buffer = context
+            .alloc_buffer(b.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut a_log_buffer = context
+            .alloc_buffer(a_log.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut dt_bias_buffer = context
+            .alloc_buffer(dt_bias.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate_output = context
+            .alloc_buffer(a.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut beta_output = context
+            .alloc_buffer(a.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        a_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&a), Some(&mut stream))
+            .unwrap();
+        b_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&b), Some(&mut stream))
+            .unwrap();
+        a_log_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&a_log), Some(&mut stream))
+            .unwrap();
+        dt_bias_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&dt_bias), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        linear_attn_gate_beta_f32(
+            &a_buffer,
+            &b_buffer,
+            &a_log_buffer,
+            &dt_bias_buffer,
+            heads,
+            sequence_len,
+            &mut gate_output,
+            &mut beta_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut gate_output_bytes = vec![0_u8; gate_output.size().unwrap()];
+        gate_output
+            .copy_to_host(0, &mut gate_output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let mut beta_output_bytes = vec![0_u8; beta_output.size().unwrap()];
+        beta_output
+            .copy_to_host(0, &mut beta_output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let gate_output_values = le_bytes_to_f32s(&gate_output_bytes);
+        let beta_output_values = le_bytes_to_f32s(&beta_output_bytes);
+        assert_f32s_close(&gate_output_values, &expected_gate, 1e-5);
+        assert_f32s_close(&beta_output_values, &expected_beta, 1e-5);
+    }
+
+    #[test]
+    fn cpu_linear_attn_gate_beta_f32_rejects_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let a = [
+            0.1_f32, -0.2, 1.2, 0.9, 0.8, -1.1, -0.7, 0.5, 1.4, -0.3, 0.2, -0.6,
+        ];
+        let b = [
+            1.0_f32, -1.2, 0.3, -0.8, 0.6, 1.1, -0.5, 0.9, 0.0, -0.4, 1.3, -0.7,
+        ];
+        let a_log = [-1.0_f32, 0.25, -0.5];
+        let dt_bias = [0.3_f32, -0.2, 0.4];
+        let a_buffer = context
+            .alloc_buffer(a.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let b_buffer = context
+            .alloc_buffer(b.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let a_log_buffer = context
+            .alloc_buffer(a_log.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let dt_bias_buffer = context
+            .alloc_buffer(dt_bias.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate_output = context
+            .alloc_buffer((a.len() - 1) * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut beta_output = context
+            .alloc_buffer(a.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let err = linear_attn_gate_beta_f32(
+            &a_buffer,
+            &b_buffer,
+            &a_log_buffer,
+            &dt_bias_buffer,
+            3,
+            4,
+            &mut gate_output,
+            &mut beta_output,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("linear attention gate beta"));
+        assert!(err.contains("gate_output"));
     }
 
     #[test]
@@ -1136,6 +1352,90 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_linear_attn_gate_beta_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let heads = 3_usize;
+        let sequence_len = 4_usize;
+        let a = [
+            0.1_f32, -0.2, 1.2, 0.9, 0.8, -1.1, -0.7, 0.5, 1.4, -0.3, 0.2, -0.6,
+        ];
+        let b = [
+            1.0_f32, -1.2, 0.3, -0.8, 0.6, 1.1, -0.5, 0.9, 0.0, -0.4, 1.3, -0.7,
+        ];
+        let a_log = [-1.0_f32, 0.25, -0.5];
+        let dt_bias = [0.3_f32, -0.2, 0.4];
+        let (expected_gate, expected_beta) =
+            expected_linear_attn_gate_beta(&a, &b, &a_log, &dt_bias, heads, sequence_len);
+
+        let mut a_buffer = context
+            .alloc_buffer(a.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut b_buffer = context
+            .alloc_buffer(b.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut a_log_buffer = context
+            .alloc_buffer(a_log.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut dt_bias_buffer = context
+            .alloc_buffer(dt_bias.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate_output = context
+            .alloc_buffer(a.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut beta_output = context
+            .alloc_buffer(a.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        a_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&a), Some(&mut stream))
+            .unwrap();
+        b_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&b), Some(&mut stream))
+            .unwrap();
+        a_log_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&a_log), Some(&mut stream))
+            .unwrap();
+        dt_bias_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&dt_bias), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        linear_attn_gate_beta_f32(
+            &a_buffer,
+            &b_buffer,
+            &a_log_buffer,
+            &dt_bias_buffer,
+            heads,
+            sequence_len,
+            &mut gate_output,
+            &mut beta_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut gate_output_bytes = vec![0_u8; gate_output.size().unwrap()];
+        gate_output
+            .copy_to_host(0, &mut gate_output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let mut beta_output_bytes = vec![0_u8; beta_output.size().unwrap()];
+        beta_output
+            .copy_to_host(0, &mut beta_output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let gate_output_values = le_bytes_to_f32s(&gate_output_bytes);
+        let beta_output_values = le_bytes_to_f32s(&beta_output_bytes);
+        assert_f32s_close(&gate_output_values, &expected_gate, 1e-5);
+        assert_f32s_close(&beta_output_values, &expected_beta, 1e-5);
+    }
+
+    #[test]
     fn first_hip_depthwise_conv1d_f32_computes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -1295,6 +1595,28 @@ mod tests {
             }
         }
         output
+    }
+
+    fn expected_linear_attn_gate_beta(
+        a: &[f32],
+        b: &[f32],
+        a_log: &[f32],
+        dt_bias: &[f32],
+        heads: usize,
+        sequence_len: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut gate = Vec::with_capacity(heads * sequence_len);
+        let mut beta = Vec::with_capacity(heads * sequence_len);
+        for t in 0..sequence_len {
+            for h in 0..heads {
+                let index = t * heads + h;
+                let x = a[index] + dt_bias[h];
+                let softplus = if x <= 20.0 { (1.0 + x.exp()).ln() } else { x };
+                gate.push(-a_log[h].exp() * softplus);
+                beta.push(1.0 / (1.0 + (-b[index]).exp()));
+            }
+        }
+        (gate, beta)
     }
 
     fn assert_f32s_close(actual: &[f32], expected: &[f32], tolerance: f32) {

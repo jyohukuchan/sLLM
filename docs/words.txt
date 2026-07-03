@@ -67,6 +67,9 @@ package linear attention projection smoke:.ullm.d内の実際のlinear_attn proj
 package linear attention QKV norm smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv quantized tensorとlinear_attn.norm.weight passthrough tensorを使い、QKV projection出力の先頭128要素にRMSNormを適用するsmoke。linear attention全体の計算ではない
 package linear attention conv1d smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv quantized tensorから複数timestepのQKV出力を作り、linear_attn.conv1d.weight passthrough tensorでcausal depthwise conv1dを適用するsmoke。linear attention全体の計算ではない
 package linear attention auxiliary smoke:.ullm.d内の実際のlinear_attn補助passthrough tensorをf32へ変換し、runtime bufferへの転送とreadbackを検証するsmoke。linear attention全体の計算ではない
+linear attention gate beta:linear attentionでin_proj_a/bの出力、A_log、dt_biasからgateとbetaを作る境界処理
+runtime linear attention gate beta smoke:runtime上でa/b、A_log、dt_biasからgate/betaを計算し、決定的入力で境界動作を確認するsmoke。linear attention全体の計算ではない
+package linear attention gate beta smoke:.ullm.d内の実際のlinear_attn.in_proj_a/b quantized tensorとA_log/dt_bias passthrough tensorを使い、runtimeでgate/beta境界を検証するsmoke。linear attention全体の計算ではない
 HIPRTC:HIP runtime compilation。通常C++でbuildしたruntimeからHIP kernel sourceを実行時compileしてmodule launchする仕組み
 JIT kernel:実行時にcompileしてloadするkernel。uLLMではHIPRTC経由のAQ4 materialize kernelなどを指す
 kernel-required smoke:staging fallbackを禁止し、実kernel経路だけで成功することを確認するsmoke

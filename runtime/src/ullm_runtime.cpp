@@ -374,6 +374,18 @@ public:
             error);
     }
 
+    bool compile_linear_attn_gate_beta_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            linear_attn_gate_beta_kernel_source(),
+            "ullm_linear_attn_gate_beta_f32.hip",
+            code,
+            error);
+    }
+
 private:
     using hiprtc_create_program_fn =
         int (*)(void **, const char *, const char *, int, const char *const *, const char *const *);
@@ -600,6 +612,33 @@ extern "C" __global__ void ullm_depthwise_conv1d_f32_kernel(
                weight[channel * kernel_size + kernel];
     }
     output[index] = sum;
+}
+)";
+    }
+
+    static const char *linear_attn_gate_beta_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_linear_attn_gate_beta_f32_kernel(
+    const float *a,
+    const float *b,
+    const float *a_log,
+    const float *dt_bias,
+    unsigned long long heads,
+    unsigned long long sequence_len,
+    float *gate_output,
+    float *beta_output) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long elements = heads * sequence_len;
+    if (index >= elements) {
+        return;
+    }
+    const unsigned long long head = index - (index / heads) * heads;
+    const float x = a[index] + dt_bias[head];
+    const float softplus = x <= 20.0f ? logf(1.0f + expf(x)) : x;
+    gate_output[index] = -expf(a_log[head]) * softplus;
+    const float b_value = b[index];
+    beta_output[index] = 1.0f / (1.0f + expf(-b_value));
 }
 )";
     }
@@ -1949,6 +1988,264 @@ ullm_status depthwise_conv1d_f32_hip_staging(
     return ULLM_STATUS_OK;
 }
 
+void linear_attn_gate_beta_f32_host(
+    const float *a,
+    const float *b,
+    const float *a_log,
+    const float *dt_bias,
+    size_t heads,
+    size_t sequence_len,
+    float *gate_output,
+    float *beta_output) {
+    for (size_t timestep = 0; timestep < sequence_len; ++timestep) {
+        for (size_t head = 0; head < heads; ++head) {
+            const size_t index = timestep * heads + head;
+            const float x = a[index] + dt_bias[head];
+            const float softplus = x <= 20.0f ? std::log1p(std::exp(x)) : x;
+            gate_output[index] = -std::exp(a_log[head]) * softplus;
+            const float b_value = b[index];
+            beta_output[index] = 1.0f / (1.0f + std::exp(-b_value));
+        }
+    }
+}
+
+class HipLinearAttnGateBetaKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_linear_attn_gate_beta_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_linear_attn_gate_beta_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build linear attention gate beta HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipLinearAttnGateBetaKernelCache &hip_linear_attn_gate_beta_kernel_cache() {
+    static HipLinearAttnGateBetaKernelCache cache;
+    return cache;
+}
+
+bool linear_attn_gate_beta_f32_hip_kernel(
+    const ullm_runtime_buffer *a_buffer,
+    const ullm_runtime_buffer *b_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t heads,
+    size_t sequence_len,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = a_buffer->hip_device_id;
+    void *function = hip_linear_attn_gate_beta_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    const size_t elements = heads * sequence_len;
+    const size_t grid_size = (elements + block_size - 1) / block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "linear attention gate beta element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_heads = static_cast<unsigned long long>(heads);
+    unsigned long long kernel_sequence_len = static_cast<unsigned long long>(sequence_len);
+    void *a_ptr = a_buffer->ptr;
+    void *b_ptr = b_buffer->ptr;
+    void *a_log_ptr = a_log_buffer->ptr;
+    void *dt_bias_ptr = dt_bias_buffer->ptr;
+    void *gate_output_ptr = gate_output_buffer->ptr;
+    void *beta_output_ptr = beta_output_buffer->ptr;
+    void *kernel_params[] = {
+        &a_ptr,
+        &b_ptr,
+        &a_log_ptr,
+        &dt_bias_ptr,
+        &kernel_heads,
+        &kernel_sequence_len,
+        &gate_output_ptr,
+        &beta_output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 linear attention gate beta";
+        }
+        return false;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        if (error != nullptr) {
+            *error = "failed to synchronize f32 linear attention gate beta HIP kernel";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status linear_attn_gate_beta_f32_hip_staging(
+    const ullm_runtime_buffer *a_buffer,
+    const ullm_runtime_buffer *b_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t heads,
+    size_t sequence_len,
+    size_t sequence_bytes,
+    size_t head_bytes,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_a(sequence_bytes / sizeof(float));
+    std::vector<float> host_b(sequence_bytes / sizeof(float));
+    std::vector<float> host_a_log(head_bytes / sizeof(float));
+    std::vector<float> host_dt_bias(head_bytes / sizeof(float));
+    std::vector<float> host_gate(sequence_bytes / sizeof(float));
+    std::vector<float> host_beta(sequence_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = a_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_a.data(),
+            a_buffer->ptr,
+            sequence_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_b.data(),
+            b_buffer->ptr,
+            sequence_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_a_log.data(),
+            a_log_buffer->ptr,
+            head_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_dt_bias.data(),
+            dt_bias_buffer->ptr,
+            head_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 linear attention gate beta HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 linear attention gate beta HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    linear_attn_gate_beta_f32_host(
+        host_a.data(),
+        host_b.data(),
+        host_a_log.data(),
+        host_dt_bias.data(),
+        heads,
+        sequence_len,
+        host_gate.data(),
+        host_beta.data());
+    if (!hip_runtime().copy_async(
+            gate_output_buffer->ptr,
+            host_gate.data(),
+            sequence_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            beta_output_buffer->ptr,
+            host_beta.data(),
+            sequence_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 linear attention gate beta outputs to HIP buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 linear attention gate beta HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
 } // namespace
 
 uint32_t ullm_runtime_abi_version(void) {
@@ -2754,6 +3051,136 @@ ullm_status ullm_runtime_depthwise_conv1d_f32(
         required_weight_bytes,
         required_output_bytes,
         output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_linear_attn_gate_beta_f32(
+    const ullm_runtime_buffer *a_buffer,
+    const ullm_runtime_buffer *b_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t heads,
+    size_t sequence_len,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (a_buffer == nullptr || b_buffer == nullptr || a_log_buffer == nullptr ||
+        dt_bias_buffer == nullptr || gate_output_buffer == nullptr ||
+        beta_output_buffer == nullptr) {
+        set_error("f32 linear attention gate beta received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (heads == 0 || sequence_len == 0) {
+        set_error("f32 linear attention gate beta heads and sequence length must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(a_buffer, b_buffer) ||
+        !buffers_share_backend(a_buffer, a_log_buffer) ||
+        !buffers_share_backend(a_buffer, dt_bias_buffer) ||
+        !buffers_share_backend(a_buffer, gate_output_buffer) ||
+        !buffers_share_backend(a_buffer, beta_output_buffer)) {
+        set_error("f32 linear attention gate beta buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(gate_output_buffer, stream) ||
+        !stream_matches_buffer(beta_output_buffer, stream)) {
+        set_error("f32 linear attention gate beta stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (sequence_len > max_size / heads) {
+        set_error("f32 linear attention gate beta element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t sequence_elements = heads * sequence_len;
+    if (sequence_elements > max_size / sizeof(float) ||
+        heads > max_size / sizeof(float)) {
+        set_error("f32 linear attention gate beta byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t sequence_bytes = sequence_elements * sizeof(float);
+    const size_t head_bytes = heads * sizeof(float);
+    if (a_buffer->bytes < sequence_bytes) {
+        set_error("f32 linear attention gate beta a buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (b_buffer->bytes < sequence_bytes) {
+        set_error("f32 linear attention gate beta b buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (a_log_buffer->bytes < head_bytes) {
+        set_error("f32 linear attention gate beta A_log buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (dt_bias_buffer->bytes < head_bytes) {
+        set_error("f32 linear attention gate beta dt_bias buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_output_buffer->bytes < sequence_bytes) {
+        set_error("f32 linear attention gate beta gate output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (beta_output_buffer->bytes < sequence_bytes) {
+        set_error("f32 linear attention gate beta beta output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (a_buffer->backend == BackendKind::Cpu) {
+        const auto *a = static_cast<const float *>(a_buffer->ptr);
+        const auto *b = static_cast<const float *>(b_buffer->ptr);
+        const auto *a_log = static_cast<const float *>(a_log_buffer->ptr);
+        const auto *dt_bias = static_cast<const float *>(dt_bias_buffer->ptr);
+        auto *gate = static_cast<float *>(gate_output_buffer->ptr);
+        auto *beta = static_cast<float *>(beta_output_buffer->ptr);
+        linear_attn_gate_beta_f32_host(
+            a,
+            b,
+            a_log,
+            dt_bias,
+            heads,
+            sequence_len,
+            gate,
+            beta);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (linear_attn_gate_beta_f32_hip_kernel(
+            a_buffer,
+            b_buffer,
+            a_log_buffer,
+            dt_bias_buffer,
+            heads,
+            sequence_len,
+            gate_output_buffer,
+            beta_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_LINEAR_ATTN_GATE_BETA_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ?
+                "f32 linear attention gate beta HIP kernel is unavailable" :
+                hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return linear_attn_gate_beta_f32_hip_staging(
+        a_buffer,
+        b_buffer,
+        a_log_buffer,
+        dt_bias_buffer,
+        heads,
+        sequence_len,
+        sequence_bytes,
+        head_bytes,
+        gate_output_buffer,
+        beta_output_buffer,
         stream);
 }
 

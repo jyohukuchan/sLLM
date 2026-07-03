@@ -130,6 +130,17 @@ ullm_status ullm_runtime_depthwise_conv1d_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_linear_attn_gate_beta_f32(
+    const ullm_runtime_buffer *a_buffer,
+    const ullm_runtime_buffer *b_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t heads,
+    size_t sequence_len,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_smoke_add_f32(
     const float *lhs,
     const float *rhs,
