@@ -64,6 +64,10 @@
 - `ullm-engine package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]` を追加した。実packageの `linear_attn` 補助passthrough tensorをBF16/F32からf32へ変換し、runtime bufferへの転送とreadbackを検証する。
 - `ullm-engine package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]` を追加した。実packageの `linear_attn.in_proj_qkv.weight` をmaterialize+matvecし、出力先頭128要素に `linear_attn.norm.weight` を使ってRMSNormを適用する。
 - `THIRD_PARTY_NOTICES.md` にAITERを追加し、TensorRT-LLMのMIT/BSD由来部分とruntime dependencies/model weights/benchmark datasetsの別監査を明記した。
+- C++ runtime C ABIに `ullm_runtime_depthwise_conv1d_f32` を追加した。layoutは入力 `[time][channel]`、weight `[channel][kernel]`、causal convで、CPU fallback、HIPRTC JIT kernel、HIP staging fallbackを持つ。
+- Rust wrapper `ullm_runtime_sys::depthwise_conv1d_f32` とCPU/HIP単体テストを追加した。
+- `ullm-engine runtime-depthwise-conv1d-smoke [DEVICE_INDEX]` を追加し、depthwise conv1dの最小runtime境界をCPU/R9700で検証できるようにした。
+- `ullm-engine package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]` を追加した。実packageの `linear_attn.in_proj_qkv.weight` から複数timestepのQKV出力を作り、`linear_attn.conv1d.weight` passthrough tensorでcausal depthwise conv1dを適用する。
 
 ## 実測・検証
 
@@ -269,6 +273,20 @@
   - R9700 HIP deviceでAQ4 materialize、matvec、RMSNorm kernelを必須指定した状態で同じsmokeが成功した。
   - qkv preview `[0.1187995,-0.2140314,0.5484952,0.8965267,-0.8766365,-0.5391338,-1.1162429,0.5450193]`、norm preview `[0.1675715,-0.3167286,0.7950238,1.2338805,-1.2447209,-0.7898485,-1.6031816,0.7904099]`、max abs diff `0.000000000`。
 - ライセンス確認: ローカル `reference-src/` とGitHub側表示では、llama.cppはMIT、vLLM/SGLangはApache-2.0、ATOM/AITERはMIT、TensorRT-LLMはApache-2.0本体にMIT/BSD由来表示を含む。いずれも基本的にpermissive系だが、意図的にコードを取り込む場合は著作権表示・LICENSE/NOTICE保持が必要で、runtime dependency、model weight、benchmark datasetは別監査とする。
+- depthwise conv1d runtime/package smoke追加後の `cargo fmt --all --check`、`cargo test -p ullm-runtime-sys -- --test-threads=1`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1` は成功した。
+- `ULLM_REQUIRE_HIP_DEPTHWISE_CONV1D_KERNEL=1 cargo test -p ullm-runtime-sys first_hip_depthwise_conv1d_f32_computes_expected_values_when_available -- --test-threads=1 --nocapture` は成功した。
+- `target/debug/ullm-engine runtime-depthwise-conv1d-smoke 0`
+  - CPU fallbackで小型f32 depthwise conv1d smokeが成功した。
+  - channels `3`、sequence len `5`、kernel size `3`、output preview `[1.0000000,0.2500000,1.0000000,1.0000000,1.0000000,-1.5000000,3.0000000,0.5000000]`、max abs diff `0.000000000`。
+- `ULLM_REQUIRE_HIP_DEPTHWISE_CONV1D_KERNEL=1 target/debug/ullm-engine runtime-depthwise-conv1d-smoke 2`
+  - R9700 HIP deviceでdepthwise conv1d kernelを必須指定したruntime smokeが成功した。
+  - output preview `[1.0000000,0.2500000,1.0000000,1.0000000,1.0000000,-1.5000000,3.0000000,0.5000000]`、max abs diff `0.000000000`。
+- `target/debug/ullm-engine package-linear-attn-conv1d-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 0 4`
+  - CPU fallbackでlayer 0の `linear_attn.in_proj_qkv.weight` から4 timestep分のQKV出力を作り、`linear_attn.conv1d.weight` BF16 passthroughを使うcausal depthwise conv1dを適用できた。
+  - hidden `4096`、channels `8192`、kernel size `4`、qkv preview `[0.1187991,-0.2140313,0.5484958,0.8965278,-0.8766373,-0.5391343,-1.1162450,0.5450205]`、conv preview `[0.0001831,-0.0001633,-0.0003955,0.0003659,0.0000598,-0.0002653,-0.1128236,0.0003534]`、max abs diff `0.000000000`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_DEPTHWISE_CONV1D_KERNEL=1 target/debug/ullm-engine package-linear-attn-conv1d-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 0 4`
+  - R9700 HIP deviceでAQ4 materialize、matvec、depthwise conv1d kernelを必須指定した状態で同じpackage smokeが成功した。
+  - qkv preview `[0.1187995,-0.2140314,0.5484952,0.8965267,-0.8766365,-0.5391338,-1.1162429,0.5450193]`、conv preview `[0.0001831,-0.0001633,-0.0003955,0.0003659,0.0000598,-0.0002653,-0.1128234,0.0003534]`、max abs diff `0.000000142`。
 
 ## 作成したgit checkpoints
 
@@ -307,9 +325,10 @@
 - `3a09aaf Add package linear attention projection smoke`
 - `13f92b9 Add package linear attention auxiliary smoke`
 - `f3bf33f Add package linear attention QKV norm smoke`
+- `737c699 Add runtime depthwise conv1d smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smokeも通った。次はconv1d、linear_attn recurrence、またはattention本体の計算境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、depthwise conv1d境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smokeも通った。次はlinear_attn recurrence、または通常attention本体の計算境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
