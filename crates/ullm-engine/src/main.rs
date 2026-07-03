@@ -90,6 +90,13 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-mlp-block-smoke") => package_mlp_block_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+        ),
         Some("package-linear-attn-proj-smoke") => package_linear_attn_proj_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -3131,8 +3138,46 @@ fn package_rmsnorm_mlp_smoke(
     layer_index: Option<String>,
     norm_kind: Option<String>,
 ) -> ExitCode {
+    package_rmsnorm_mlp_smoke_impl(
+        "package-rmsnorm-mlp-smoke",
+        false,
+        path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        norm_kind,
+    )
+}
+
+fn package_mlp_block_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    norm_kind: Option<String>,
+) -> ExitCode {
+    package_rmsnorm_mlp_smoke_impl(
+        "package-mlp-block-smoke",
+        true,
+        path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        norm_kind,
+    )
+}
+
+fn package_rmsnorm_mlp_smoke_impl(
+    command_name: &str,
+    include_block: bool,
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    norm_kind: Option<String>,
+) -> ExitCode {
     let Some(path) = path else {
-        eprintln!("package-rmsnorm-mlp-smoke requires a .ullm.d path");
+        eprintln!("{command_name} requires a .ullm.d path");
         return ExitCode::from(2);
     };
     let device_index = match parse_optional_device_index(device_index) {
@@ -3465,34 +3510,113 @@ fn package_rmsnorm_mlp_smoke(
         return ExitCode::from(1);
     }
 
-    let preview_count = hidden.min(8);
-    let mut output_preview_bytes = vec![0_u8; preview_count * std::mem::size_of::<f32>()];
-    if let Err(err) = output_buffer.copy_to_host(0, &mut output_preview_bytes, Some(&mut stream)) {
-        eprintln!("failed to copy output preview to host: {err}");
+    let mut output_bytes = vec![0_u8; hidden_bytes];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy MLP output to host: {err}");
         return ExitCode::from(1);
     }
     if let Err(err) = stream.synchronize() {
-        eprintln!("failed to synchronize runtime stream after output preview copy: {err}");
+        eprintln!("failed to synchronize runtime stream after MLP output copy: {err}");
         return ExitCode::from(1);
     }
-    let preview = decode_f32_le_values(&output_preview_bytes);
+    let output = decode_f32_le_values(&output_bytes);
 
-    println!(
-        "package-rmsnorm-mlp-smoke package={} layer={} norm_kind={} norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} intermediate={} backend={} device_index={} name=\"{}\" preview={} verified=true",
-        path,
-        layer_index,
-        norm_kind.as_str(),
-        norm_tensor,
-        gate_tensor,
-        up_tensor,
-        down_tensor,
-        hidden,
-        intermediate,
-        info.backend,
-        device_index,
-        info.name,
-        format_f32_preview(&preview)
-    );
+    if include_block {
+        let mut block_output_buffer = match context.alloc_buffer(hidden_bytes) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate MLP block output buffer: {err}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(err) = ullm_runtime_sys::add_f32(
+            &input_buffer,
+            &output_buffer,
+            hidden,
+            &mut block_output_buffer,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run MLP residual add: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after MLP residual add: {err}");
+            return ExitCode::from(1);
+        }
+
+        let mut block_output_bytes = vec![0_u8; hidden_bytes];
+        if let Err(err) =
+            block_output_buffer.copy_to_host(0, &mut block_output_bytes, Some(&mut stream))
+        {
+            eprintln!("failed to copy MLP block output to host: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after MLP block output copy: {err}");
+            return ExitCode::from(1);
+        }
+        let block_output = decode_f32_le_values(&block_output_bytes);
+        let expected_block_output = runtime_host_add_f32(&input, &output);
+        if expected_block_output.len() != block_output.len() {
+            eprintln!(
+                "{command_name} output size mismatch: expected {} got {}",
+                expected_block_output.len(),
+                block_output.len()
+            );
+            return ExitCode::from(1);
+        }
+
+        let mut block_max_abs_diff = 0.0_f32;
+        for (lhs, rhs) in block_output.iter().zip(expected_block_output.iter()) {
+            let diff = (lhs - rhs).abs();
+            let tolerance = 1e-6_f32.max(rhs.abs() * 1e-6_f32);
+            if diff > tolerance {
+                eprintln!(
+                    "{command_name} residual output mismatch: max_abs_diff={diff} tolerance={tolerance}"
+                );
+                return ExitCode::from(1);
+            }
+            if diff > block_max_abs_diff {
+                block_max_abs_diff = diff;
+            }
+        }
+
+        println!(
+            "{command_name} package={} layer={} norm_kind={} norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} intermediate={} backend={} device_index={} name=\"{}\" residual_preview={} mlp_output_preview={} block_output_preview={} block_max_abs_diff={block_max_abs_diff:.9} verified=true",
+            path,
+            layer_index,
+            norm_kind.as_str(),
+            norm_tensor,
+            gate_tensor,
+            up_tensor,
+            down_tensor,
+            hidden,
+            intermediate,
+            info.backend,
+            device_index,
+            info.name,
+            format_f32_preview(&input[..8.min(input.len())]),
+            format_f32_preview(&output[..8.min(output.len())]),
+            format_f32_preview(&block_output[..8.min(block_output.len())])
+        );
+    } else {
+        println!(
+            "{command_name} package={} layer={} norm_kind={} norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} intermediate={} backend={} device_index={} name=\"{}\" preview={} verified=true",
+            path,
+            layer_index,
+            norm_kind.as_str(),
+            norm_tensor,
+            gate_tensor,
+            up_tensor,
+            down_tensor,
+            hidden,
+            intermediate,
+            info.backend,
+            device_index,
+            info.name,
+            format_f32_preview(&output[..8.min(output.len())])
+        );
+    }
     ExitCode::SUCCESS
 }
 
@@ -8559,7 +8683,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!(

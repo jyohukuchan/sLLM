@@ -64,6 +64,7 @@ runtime depthwise conv1d smoke:runtime buffer上のf32系列とf32 weightからc
 MLP smoke:RMSNorm、gate/up/down matvec、SiLU-mulを小さい固定tensorで接続し、decoder MLP相当のruntime workflowを確認するsmoke
 package MLP smoke:.ullm.d内の実際のgate/up/down quantized tensorをmaterializeし、matvecとSiLU-mulでMLP相当のruntime workflowを確認するsmoke
 package RMSNorm MLP smoke:.ullm.d内の実際のpassthrough RMSNorm weightとgate/up/down quantized tensorを使い、RMSNormからMLPまでをruntime上で接続するsmoke
+package MLP block smoke:.ullm.d内の実際のpost_attention_layernorm.weightとMLP quantized tensorを使い、RMSNormからMLP workflow、residual addまでを接続するsmoke。attentionやdecoder block全体の計算ではない
 package linear attention projection smoke:.ullm.d内の実際のlinear_attn projection quantized tensorをmaterializeし、共通の決定的inputからmatvecまで接続するsmoke。linear attention全体の計算ではない
 package linear attention QKV norm smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv quantized tensorとlinear_attn.norm.weight passthrough tensorを使い、QKV projection出力の先頭128要素にRMSNormを適用するsmoke。linear attention全体の計算ではない
 package linear attention conv1d smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv quantized tensorから複数timestepのQKV出力を作り、linear_attn.conv1d.weight passthrough tensorでcausal depthwise conv1dを適用するsmoke。linear attention全体の計算ではない
