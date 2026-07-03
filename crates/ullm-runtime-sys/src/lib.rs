@@ -78,6 +78,14 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_matvec_f32(
+        matrix_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_smoke_add_f32(
         lhs: *const f32,
         rhs: *const f32,
@@ -310,6 +318,45 @@ pub fn aq4_dequant_f32(
     })
 }
 
+pub fn matvec_f32(
+    matrix_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if rows == 0 || cols == 0 {
+        return Err("f32 matvec rows and cols must be greater than zero".to_string());
+    }
+    let matrix_elements = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "f32 matvec matrix element count overflows".to_string())?;
+    let matrix_bytes = matrix_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 matvec matrix byte size overflows".to_string())?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 matvec input byte size overflows".to_string())?;
+    let output_bytes = rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 matvec output byte size overflows".to_string())?;
+    check_copy_range(0, matrix_bytes, matrix_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_matvec_f32(
+            matrix_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            rows,
+            cols,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 fn status_to_result(status: c_int) -> Result<(), String> {
     match status {
         STATUS_OK => Ok(()),
@@ -422,6 +469,58 @@ mod tests {
         let mut buffer = context.alloc_buffer(4).unwrap();
         let err = buffer.copy_from_host(3, &[1_u8, 2], None).unwrap_err();
         assert!(err.contains("out of bounds"));
+    }
+
+    #[test]
+    fn cpu_matvec_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut matrix = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        matrix
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        matvec_f32(&matrix, &input, 2, 3, &mut output, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&output_bytes), vec![4.5, 9.0]);
+    }
+
+    #[test]
+    fn cpu_matvec_f32_rejects_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let matrix = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+        let input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+
+        let err = matvec_f32(&matrix, &input, 2, 3, &mut output, None).unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("output"));
     }
 
     #[test]
@@ -552,6 +651,46 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_eq!(le_bytes_to_f32s(&output_bytes), vec![5.0, 10.0, 0.0, 60.0]);
+    }
+
+    #[test]
+    fn first_hip_matvec_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut matrix = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        matrix
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        matvec_f32(&matrix, &input, 2, 3, &mut output, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&output_bytes), vec![4.5, 9.0]);
     }
 
     #[test]

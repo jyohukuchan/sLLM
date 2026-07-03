@@ -98,6 +98,14 @@ ullm_status ullm_runtime_aq4_dequant_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_matvec_f32(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_smoke_add_f32(
     const float *lhs,
     const float *rhs,

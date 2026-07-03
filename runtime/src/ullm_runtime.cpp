@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -348,6 +349,30 @@ private:
 class HipRtcRuntime {
 public:
     bool compile_aq4_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(arch, aq4_kernel_source(), "ullm_aq4_dequant_f32.hip", code, error);
+    }
+
+    bool compile_matvec_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(arch, matvec_kernel_source(), "ullm_matvec_f32.hip", code, error);
+    }
+
+private:
+    using hiprtc_create_program_fn =
+        int (*)(void **, const char *, const char *, int, const char *const *, const char *const *);
+    using hiprtc_compile_program_fn = int (*)(void *, int, const char *const *);
+    using hiprtc_get_code_size_fn = int (*)(void *, size_t *);
+    using hiprtc_get_code_fn = int (*)(void *, char *);
+    using hiprtc_get_log_size_fn = int (*)(void *, size_t *);
+    using hiprtc_get_log_fn = int (*)(void *, char *);
+    using hiprtc_destroy_program_fn = int (*)(void **);
+    using hiprtc_get_error_string_fn = const char *(*)(int);
+
+    bool compile_kernel(
+        const std::string &arch,
+        const char *source,
+        const char *name,
+        std::vector<char> *code,
+        std::string *error) {
         load_once();
         if (!available()) {
             append_error(error, "HIPRTC is not available");
@@ -361,8 +386,8 @@ public:
         void *program = nullptr;
         int status = hiprtc_create_program_(
             &program,
-            aq4_kernel_source(),
-            "ullm_aq4_dequant_f32.hip",
+            source,
+            name,
             0,
             nullptr,
             nullptr);
@@ -414,17 +439,6 @@ public:
         return true;
     }
 
-private:
-    using hiprtc_create_program_fn =
-        int (*)(void **, const char *, const char *, int, const char *const *, const char *const *);
-    using hiprtc_compile_program_fn = int (*)(void *, int, const char *const *);
-    using hiprtc_get_code_size_fn = int (*)(void *, size_t *);
-    using hiprtc_get_code_fn = int (*)(void *, char *);
-    using hiprtc_get_log_size_fn = int (*)(void *, size_t *);
-    using hiprtc_get_log_fn = int (*)(void *, char *);
-    using hiprtc_destroy_program_fn = int (*)(void **);
-    using hiprtc_get_error_string_fn = const char *(*)(int);
-
     static const char *aq4_kernel_source() {
         return R"(
 extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
@@ -454,6 +468,39 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
         return;
     }
     output[element] = codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+}
+)";
+    }
+
+    static const char *matvec_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_matvec_f32_kernel(
+    const float *matrix,
+    const float *input,
+    unsigned long long rows,
+    unsigned long long cols,
+    float *output) {
+    const unsigned int row = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[256];
+    float sum = 0.0f;
+    if (row < rows) {
+        const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
+        for (unsigned long long col = tid; col < cols; col += blockDim.x) {
+            sum += matrix[row_offset + col] * input[col];
+        }
+    }
+    partial[tid] = sum;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            partial[tid] += partial[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (tid == 0 && row < rows) {
+        output[row] = partial[0];
+    }
 }
 )";
     }
@@ -980,6 +1027,211 @@ ullm_status aq4_dequant_hip_staging(
     return ULLM_STATUS_OK;
 }
 
+void matvec_f32_host(
+    const float *matrix,
+    const float *input,
+    size_t rows,
+    size_t cols,
+    float *output) {
+    for (size_t row = 0; row < rows; ++row) {
+        const float *row_values = matrix + row * cols;
+        float sum = 0.0f;
+        for (size_t col = 0; col < cols; ++col) {
+            sum += row_values[col] * input[col];
+        }
+        output[row] = sum;
+    }
+}
+
+class HipMatvecKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_matvec_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_matvec_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build matvec HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipMatvecKernelCache &hip_matvec_kernel_cache() {
+    static HipMatvecKernelCache cache;
+    return cache;
+}
+
+bool matvec_f32_hip_kernel(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = matrix_buffer->hip_device_id;
+    void *function = hip_matvec_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "matvec row count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    void *matrix_ptr = matrix_buffer->ptr;
+    void *input_ptr = input_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &matrix_ptr,
+        &input_ptr,
+        &kernel_rows,
+        &kernel_cols,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(rows),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 matvec";
+        }
+        return false;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        if (error != nullptr) {
+            *error = "failed to synchronize f32 matvec HIP kernel";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status matvec_f32_hip_staging(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t required_matrix_bytes,
+    size_t required_input_bytes,
+    size_t required_output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_matrix(required_matrix_bytes / sizeof(float));
+    std::vector<float> host_input(cols);
+    std::vector<float> host_output(rows);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = matrix_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_matrix.data(),
+            matrix_buffer->ptr,
+            required_matrix_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            required_input_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 matvec HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 matvec HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    matvec_f32_host(host_matrix.data(), host_input.data(), rows, cols, host_output.data());
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            required_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 matvec output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 matvec HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
 } // namespace
 
 uint32_t ullm_runtime_abi_version(void) {
@@ -1422,6 +1674,98 @@ ullm_status ullm_runtime_aq4_dequant_f32(
         groups,
         required_output_bytes,
         codebook_entries,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_matvec_f32(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (matrix_buffer == nullptr || input_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 matvec received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rows == 0 || cols == 0) {
+        set_error("f32 matvec rows and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(matrix_buffer, input_buffer) ||
+        !buffers_share_backend(matrix_buffer, output_buffer)) {
+        set_error("f32 matvec buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 matvec stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / rows) {
+        set_error("f32 matvec matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t matrix_elements = rows * cols;
+    if (matrix_elements > max_size / sizeof(float) ||
+        cols > max_size / sizeof(float) ||
+        rows > max_size / sizeof(float)) {
+        set_error("f32 matvec byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_matrix_bytes = matrix_elements * sizeof(float);
+    const size_t required_input_bytes = cols * sizeof(float);
+    const size_t required_output_bytes = rows * sizeof(float);
+    if (matrix_buffer->bytes < required_matrix_bytes) {
+        set_error("f32 matvec matrix buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("f32 matvec input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_output_bytes) {
+        set_error("f32 matvec output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (matrix_buffer->backend == BackendKind::Cpu) {
+        const auto *matrix = static_cast<const float *>(matrix_buffer->ptr);
+        const auto *input = static_cast<const float *>(input_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        matvec_f32_host(matrix, input, rows, cols, output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (matvec_f32_hip_kernel(
+            matrix_buffer,
+            input_buffer,
+            rows,
+            cols,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_MATVEC_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty() ? "f32 matvec HIP kernel is unavailable" : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return matvec_f32_hip_staging(
+        matrix_buffer,
+        input_buffer,
+        rows,
+        cols,
+        required_matrix_bytes,
+        required_input_bytes,
+        required_output_bytes,
         output_buffer,
         stream);
 }
