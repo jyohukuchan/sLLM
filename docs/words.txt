@@ -66,6 +66,7 @@ package MLP smoke:.ullm.d内の実際のgate/up/down quantized tensorをmaterial
 package RMSNorm MLP smoke:.ullm.d内の実際のpassthrough RMSNorm weightとgate/up/down quantized tensorを使い、RMSNormからMLPまでをruntime上で接続するsmoke
 package MLP block smoke:.ullm.d内の実際のpost_attention_layernorm.weightとMLP quantized tensorを使い、RMSNormからMLP workflow、residual addまでを接続するsmoke。attentionやdecoder block全体の計算ではない
 package linear attention projection smoke:.ullm.d内の実際のlinear_attn projection quantized tensorをmaterializeし、共通の決定的inputからmatvecまで接続するsmoke。linear attention全体の計算ではない
+package self attention projection smoke:.ullm.d内の実際のself_attn q/k/v/o projection quantized tensorをmaterializeし、共通の決定的inputからmatvecまで接続するsmoke。通常self-attention全体の計算ではない
 package linear attention QKV norm smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv quantized tensorとlinear_attn.norm.weight passthrough tensorを使い、QKV projection出力の先頭128要素にRMSNormを適用するsmoke。linear attention全体の計算ではない
 package linear attention conv1d smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv quantized tensorから複数timestepのQKV出力を作り、linear_attn.conv1d.weight passthrough tensorでcausal depthwise conv1dを適用するsmoke。linear attention全体の計算ではない
 package linear attention recurrent smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv / conv1d / in_proj_a,b / A_log / dt_biasを使い、q/k/v split と gate/beta を recurrent境界へ接続するsmoke。linear attention全体の計算ではない
