@@ -1,0 +1,23 @@
+	Command being timed: "python3 tools/run-aq-local-scale-format-comparison.py --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --source-rows benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b-reordered.jsonl --output benchmarks/results/2026-07-03/aq/2026-07-03-aq-local-scale-e3m4-ue3m5-e4m3-g32-it8-iq4.json --format e3m4 --format ue3m5 --format e4m3 --group-size 32 --ggml-type IQ4_XS --max-elements-per-tensor 262144 --iterations 8 --scale-window 4 --global-scale-dtype fp16 --seed 2501 --torch-threads 64 --torch-interop-threads 1"
+	User time (seconds): 323.29
+	System time (seconds): 9.44
+	Percent of CPU this job got: 3960%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:08.40
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 496320
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 907022
+	Voluntary context switches: 6326
+	Involuntary context switches: 4158
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 80
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

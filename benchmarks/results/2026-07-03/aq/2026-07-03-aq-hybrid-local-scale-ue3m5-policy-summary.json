@@ -1,0 +1,2321 @@
+{
+  "description": "Hybrid UD replacement summary using E3M4/UE3M5/E4M3 g16 results and IQ4 g32 results.",
+  "policies": [
+    {
+      "arithmetic_bpp": 5.522569444444445,
+      "arithmetic_relative_mse": 0.0028574673827615267,
+      "element_weighted_relative_mse_estimate": 0.003330448580405519,
+      "parameter_weighted_bpp": 5.255106209150327,
+      "policy": "original_ud_mixed",
+      "replaced_rows": 0,
+      "rows": [
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013546230096210185,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013546230096210185
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013457437907501665,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013457437907501665
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003312815380371682,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003312815380371682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005345742697959077,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005345742697959077
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005288427797066388,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005288427797066388
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.096138323996385e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.096138323996385e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001353589089115999,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001353589089115999
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013530832824190998,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013530832824190998
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013319212506025444,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.down_proj.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013319212506025444
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.25,
+          "hybrid_relative_mse": 0.005895709933920995,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.gate_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005895709933920995
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.25,
+          "hybrid_relative_mse": 0.005887334779614531,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.up_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005887334779614531
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.0158605841962205e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.0158605841962205e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001335691607630601,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001335691607630601
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013393611469410733,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013393611469410733
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003250637856880892,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003250637856880892
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005171930459334988,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005171930459334988
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005195931102408447,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005195931102408447
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.015118753861681e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.015118753861681e-05
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005592235815188147,
+          "hybrid_source": "ud",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.k_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005592235815188147
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005794176217455263,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.3.self_attn.o_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005794176217455263
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005474738046462908,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.3.self_attn.q_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005474738046462908
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003678362685195566,
+          "hybrid_source": "ud",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.v_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003678362685195566
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00031720160525644845,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00031720160525644845
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005190027201540555,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005190027201540555
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005226282007225258,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005226282007225258
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013258828013069349,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013258828013069349
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013322811789448217,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013322811789448217
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00032003896712510626,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00032003896712510626
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005242208760724943,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005242208760724943
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.00522536374593705,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.00522536374593705
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 2.9634935689827538e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 2.9634935689827538e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001332711720040487,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001332711720040487
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013565941465470482,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013565941465470482
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0052911603922304465,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.down_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052911603922304465
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005212504929951682,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005212504929951682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0052912405915377415,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052912405915377415
+        }
+      ]
+    },
+    {
+      "arithmetic_bpp": 5.522569444444445,
+      "arithmetic_relative_mse": 0.002625940382209238,
+      "element_weighted_relative_mse_estimate": 0.0030669749737375312,
+      "parameter_weighted_bpp": 5.255106209150327,
+      "policy": "replace_q4_only_ue3m5_g16",
+      "replaced_rows": 14,
+      "rows": [
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013546230096210185,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013546230096210185
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013457437907501665,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013457437907501665
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003312815380371682,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003312815380371682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004733355095053168,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005345742697959077
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004702047930068396,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005288427797066388
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.096138323996385e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.096138323996385e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001353589089115999,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001353589089115999
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013530832824190998,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013530832824190998
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013319212506025444,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.down_proj.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013319212506025444
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.25,
+          "hybrid_relative_mse": 0.005895709933920995,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.gate_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005895709933920995
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.25,
+          "hybrid_relative_mse": 0.005887334779614531,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.up_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005887334779614531
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.0158605841962205e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.0158605841962205e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001335691607630601,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001335691607630601
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013393611469410733,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013393611469410733
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003250637856880892,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003250637856880892
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004694338424836554,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005171930459334988
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004706971776669862,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005195931102408447
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.015118753861681e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.015118753861681e-05
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004797023183622725,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.k_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005592235815188147
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004836981870553061,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.3.self_attn.o_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005794176217455263
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004726776327526125,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.3.self_attn.q_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005474738046462908
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003678362685195566,
+          "hybrid_source": "ud",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.v_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003678362685195566
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00031720160525644845,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00031720160525644845
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004688333692407427,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005190027201540555
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004719414168936416,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005226282007225258
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013258828013069349,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013258828013069349
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013322811789448217,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013322811789448217
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00032003896712510626,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00032003896712510626
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004712857139760293,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005242208760724943
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0047155108703235225,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.00522536374593705
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 2.9634935689827538e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 2.9634935689827538e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001332711720040487,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001332711720040487
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013565941465470482,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013565941465470482
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004746944542519662,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.down_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052911603922304465
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004707564112073198,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005212504929951682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0047188786107900905,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052912405915377415
+        }
+      ]
+    },
+    {
+      "arithmetic_bpp": 5.522569444444445,
+      "arithmetic_relative_mse": 0.0026304658823410646,
+      "element_weighted_relative_mse_estimate": 0.0030733639151001102,
+      "parameter_weighted_bpp": 5.255106209150327,
+      "policy": "replace_iq4_g32_q4_g16_ue3m5_same_bpp",
+      "replaced_rows": 16,
+      "rows": [
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013546230096210185,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013546230096210185
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013457437907501665,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013457437907501665
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003312815380371682,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003312815380371682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004733355095053168,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005345742697959077
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004702047930068396,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005288427797066388
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.096138323996385e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.096138323996385e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001353589089115999,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001353589089115999
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013530832824190998,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013530832824190998
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013319212506025444,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.down_proj.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013319212506025444
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.25,
+          "hybrid_relative_mse": 0.005970091014413395,
+          "hybrid_source": "aq4_ue3m5_g32",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.gate_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005895709933920995
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.25,
+          "hybrid_relative_mse": 0.005975871703867891,
+          "hybrid_source": "aq4_ue3m5_g32",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.up_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005887334779614531
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.0158605841962205e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.0158605841962205e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001335691607630601,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001335691607630601
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013393611469410733,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013393611469410733
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003250637856880892,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003250637856880892
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004694338424836554,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005171930459334988
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004706971776669862,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005195931102408447
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.015118753861681e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.015118753861681e-05
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004797023183622725,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.k_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005592235815188147
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004836981870553061,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.3.self_attn.o_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005794176217455263
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004726776327526125,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.3.self_attn.q_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005474738046462908
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003678362685195566,
+          "hybrid_source": "ud",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.v_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003678362685195566
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00031720160525644845,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00031720160525644845
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004688333692407427,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005190027201540555
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004719414168936416,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005226282007225258
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013258828013069349,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013258828013069349
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013322811789448217,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013322811789448217
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00032003896712510626,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00032003896712510626
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004712857139760293,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005242208760724943
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0047155108703235225,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.00522536374593705
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 2.9634935689827538e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 2.9634935689827538e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001332711720040487,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001332711720040487
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013565941465470482,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013565941465470482
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004746944542519662,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.down_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052911603922304465
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004707564112073198,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005212504929951682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0047188786107900905,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052912405915377415
+        }
+      ]
+    },
+    {
+      "arithmetic_bpp": 5.536458333333333,
+      "arithmetic_relative_mse": 0.0027072349536486403,
+      "element_weighted_relative_mse_estimate": 0.0031570618342957523,
+      "parameter_weighted_bpp": 5.274714052287582,
+      "policy": "replace_iq4_q4_e4m3_g16",
+      "replaced_rows": 16,
+      "rows": [
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013546230096210185,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013546230096210185
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013457437907501665,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013457437907501665
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003312815380371682,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003312815380371682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005054336837835173,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005345742697959077
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005036758106470537,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005288427797066388
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.096138323996385e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.096138323996385e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001353589089115999,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001353589089115999
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013530832824190998,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013530832824190998
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013319212506025444,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.down_proj.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013319212506025444
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005042683189507123,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.gate_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005895709933920995
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005019602403206767,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.up_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005887334779614531
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.0158605841962205e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.0158605841962205e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001335691607630601,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001335691607630601
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013393611469410733,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013393611469410733
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003250637856880892,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003250637856880892
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005034885285680613,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005171930459334988
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005044886838774653,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005195931102408447
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.015118753861681e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.015118753861681e-05
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0051409786067871934,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.k_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005592235815188147
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005130778623920807,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.3.self_attn.o_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005794176217455263
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005081474289839859,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.3.self_attn.q_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005474738046462908
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003678362685195566,
+          "hybrid_source": "ud",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.v_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003678362685195566
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00031720160525644845,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00031720160525644845
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005003096664884038,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005190027201540555
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.00503929023062309,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005226282007225258
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013258828013069349,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013258828013069349
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013322811789448217,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013322811789448217
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00032003896712510626,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00032003896712510626
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005048374849980457,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005242208760724943
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0050450028658301695,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.00522536374593705
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 2.9634935689827538e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 2.9634935689827538e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001332711720040487,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001332711720040487
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013565941465470482,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013565941465470482
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005091386836533701,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.down_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052911603922304465
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0050408303129085025,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005212504929951682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.005062281087711832,
+          "hybrid_source": "aq4_e4m3_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052912405915377415
+        }
+      ]
+    },
+    {
+      "arithmetic_bpp": 5.536458333333333,
+      "arithmetic_relative_mse": 0.002584784792487976,
+      "element_weighted_relative_mse_estimate": 0.003003940575204007,
+      "parameter_weighted_bpp": 5.274714052287582,
+      "policy": "replace_iq4_q4_e3m4_g16",
+      "replaced_rows": 16,
+      "rows": [
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013546230096210185,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013546230096210185
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013457437907501665,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013457437907501665
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003312815380371682,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003312815380371682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004774374666458395,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005345742697959077
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004745777529033923,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005288427797066388
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.096138323996385e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.096138323996385e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001353589089115999,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001353589089115999
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013530832824190998,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013530832824190998
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013319212506025444,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.down_proj.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013319212506025444
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004773907559496215,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.gate_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005895709933920995
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004743351118443351,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.up_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005887334779614531
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.0158605841962205e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.0158605841962205e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001335691607630601,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001335691607630601
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013393611469410733,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013393611469410733
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003250637856880892,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003250637856880892
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004753282835055471,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005171930459334988
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004759431289950766,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005195931102408447
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.015118753861681e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.015118753861681e-05
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004857823856284683,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.k_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005592235815188147
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0049080436153823535,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.3.self_attn.o_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005794176217455263
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004794778785965504,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.3.self_attn.q_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005474738046462908
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003678362685195566,
+          "hybrid_source": "ud",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.v_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003678362685195566
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00031720160525644845,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00031720160525644845
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0047318428079087885,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005190027201540555
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004762891554141198,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005226282007225258
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013258828013069349,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013258828013069349
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013322811789448217,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013322811789448217
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00032003896712510626,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00032003896712510626
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.00476799494006397,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005242208760724943
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0047743100619143915,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.00522536374593705
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 2.9634935689827538e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 2.9634935689827538e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001332711720040487,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001332711720040487
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013565941465470482,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013565941465470482
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004809265042617141,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.down_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052911603922304465
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004766083184670022,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005212504929951682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004785282381324435,
+          "hybrid_source": "aq4_e3m4_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052912405915377415
+        }
+      ]
+    },
+    {
+      "arithmetic_bpp": 5.536458333333333,
+      "arithmetic_relative_mse": 0.0025599549762588577,
+      "element_weighted_relative_mse_estimate": 0.0029738191065134655,
+      "parameter_weighted_bpp": 5.274714052287582,
+      "policy": "replace_iq4_q4_ue3m5_g16",
+      "replaced_rows": 16,
+      "rows": [
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013546230096210185,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013546230096210185
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013457437907501665,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013457437907501665
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003312815380371682,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003312815380371682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004733355095053168,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005345742697959077
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004702047930068396,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.0.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005288427797066388
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.096138323996385e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.0.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.096138323996385e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001353589089115999,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001353589089115999
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013530832824190998,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013530832824190998
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013319212506025444,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.down_proj.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013319212506025444
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.00470990737262765,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.gate_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005895709933920995
+        },
+        {
+          "ggml_type": "IQ4_XS",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004697662726694198,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.1.mlp.up_proj.weight",
+          "ud_bpp": 4.25,
+          "ud_relative_mse": 0.005887334779614531
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.0158605841962205e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.1.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.0158605841962205e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001335691607630601,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001335691607630601
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013393611469410733,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013393611469410733
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003250637856880892,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003250637856880892
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004694338424836554,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005171930459334988
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004706971776669862,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.2.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005195931102408447
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 3.015118753861681e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.2.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 3.015118753861681e-05
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004797023183622725,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.k_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005592235815188147
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004836981870553061,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.3.self_attn.o_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005794176217455263
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004726776327526125,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.3.self_attn.q_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005474738046462908
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.0003678362685195566,
+          "hybrid_source": "ud",
+          "n_elements": 4194304,
+          "tensor_name": "model.language_model.layers.3.self_attn.v_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.0003678362685195566
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00031720160525644845,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00031720160525644845
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004688333692407427,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005190027201540555
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004719414168936416,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.3.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005226282007225258
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013258828013069349,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013258828013069349
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013322811789448217,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013322811789448217
+        },
+        {
+          "ggml_type": "Q6_K",
+          "hybrid_bpp": 6.5625,
+          "hybrid_relative_mse": 0.00032003896712510626,
+          "hybrid_source": "ud",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.down_proj.weight",
+          "ud_bpp": 6.5625,
+          "ud_relative_mse": 0.00032003896712510626
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004712857139760293,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005242208760724943
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0047155108703235225,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.4.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.00522536374593705
+        },
+        {
+          "ggml_type": "Q8_0",
+          "hybrid_bpp": 8.5,
+          "hybrid_relative_mse": 2.9634935689827538e-05,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.4.linear_attn.out_proj.weight",
+          "ud_bpp": 8.5,
+          "ud_relative_mse": 2.9634935689827538e-05
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.001332711720040487,
+          "hybrid_source": "ud",
+          "n_elements": 16777216,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_z.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.001332711720040487
+        },
+        {
+          "ggml_type": "Q5_K",
+          "hybrid_bpp": 5.5,
+          "hybrid_relative_mse": 0.0013565941465470482,
+          "hybrid_source": "ud",
+          "n_elements": 33554432,
+          "tensor_name": "model.language_model.layers.5.linear_attn.in_proj_qkv.weight",
+          "ud_bpp": 5.5,
+          "ud_relative_mse": 0.0013565941465470482
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004746944542519662,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.down_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052911603922304465
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.004707564112073198,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.gate_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.005212504929951682
+        },
+        {
+          "ggml_type": "Q4_K",
+          "hybrid_bpp": 4.5,
+          "hybrid_relative_mse": 0.0047188786107900905,
+          "hybrid_source": "aq4_ue3m5_g16",
+          "n_elements": 50331648,
+          "tensor_name": "model.language_model.layers.5.mlp.up_proj.weight",
+          "ud_bpp": 4.5,
+          "ud_relative_mse": 0.0052912405915377415
+        }
+      ]
+    }
+  ],
+  "schema_version": "aq-hybrid-local-scale-policy-summary-v0.1",
+  "sources": {
+    "g16_local_scale": {
+      "codebook_token": "flloyd16",
+      "formats": [
+        "e3m4",
+        "ue3m5",
+        "e4m3"
+      ],
+      "ggml_type_filter": null,
+      "global_scale_dtype": "fp16",
+      "group_size": 16,
+      "iterations": 8,
+      "max_elements_per_tensor": 262144,
+      "max_rows": null,
+      "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+      "scale_window": 4,
+      "seed": 2501,
+      "source_rows": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b-reordered.jsonl",
+      "torch_interop_threads": 1,
+      "torch_threads": 64
+    },
+    "g32_iq4": {
+      "codebook_token": "flloyd16",
+      "formats": [
+        "e3m4",
+        "ue3m5",
+        "e4m3"
+      ],
+      "ggml_type_filter": [
+        "IQ4_XS"
+      ],
+      "global_scale_dtype": "fp16",
+      "group_size": 32,
+      "iterations": 8,
+      "max_elements_per_tensor": 262144,
+      "max_rows": null,
+      "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+      "scale_window": 4,
+      "seed": 2501,
+      "source_rows": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b-reordered.jsonl",
+      "torch_interop_threads": 1,
+      "torch_threads": 64
+    },
+    "ud_rows": "benchmarks/results/2026-07-01/aq/2026-07-01-udq4kxl-error-qwen35-9b-reordered.jsonl"
+  },
+  "summary": {
+    "original_ud_mixed": {
+      "arithmetic_bpp": 5.522569444444445,
+      "arithmetic_relative_mse": 0.0028574673827615267,
+      "element_weighted_relative_mse_estimate": 0.003330448580405519,
+      "parameter_weighted_bpp": 5.255106209150327,
+      "policy": "original_ud_mixed",
+      "replaced_rows": 0
+    },
+    "replace_iq4_g32_q4_g16_ue3m5_same_bpp": {
+      "arithmetic_bpp": 5.522569444444445,
+      "arithmetic_relative_mse": 0.0026304658823410646,
+      "element_weighted_relative_mse_estimate": 0.0030733639151001102,
+      "parameter_weighted_bpp": 5.255106209150327,
+      "policy": "replace_iq4_g32_q4_g16_ue3m5_same_bpp",
+      "replaced_rows": 16
+    },
+    "replace_iq4_q4_e3m4_g16": {
+      "arithmetic_bpp": 5.536458333333333,
+      "arithmetic_relative_mse": 0.002584784792487976,
+      "element_weighted_relative_mse_estimate": 0.003003940575204007,
+      "parameter_weighted_bpp": 5.274714052287582,
+      "policy": "replace_iq4_q4_e3m4_g16",
+      "replaced_rows": 16
+    },
+    "replace_iq4_q4_e4m3_g16": {
+      "arithmetic_bpp": 5.536458333333333,
+      "arithmetic_relative_mse": 0.0027072349536486403,
+      "element_weighted_relative_mse_estimate": 0.0031570618342957523,
+      "parameter_weighted_bpp": 5.274714052287582,
+      "policy": "replace_iq4_q4_e4m3_g16",
+      "replaced_rows": 16
+    },
+    "replace_iq4_q4_ue3m5_g16": {
+      "arithmetic_bpp": 5.536458333333333,
+      "arithmetic_relative_mse": 0.0025599549762588577,
+      "element_weighted_relative_mse_estimate": 0.0029738191065134655,
+      "parameter_weighted_bpp": 5.274714052287582,
+      "policy": "replace_iq4_q4_ue3m5_g16",
+      "replaced_rows": 16
+    },
+    "replace_q4_only_ue3m5_g16": {
+      "arithmetic_bpp": 5.522569444444445,
+      "arithmetic_relative_mse": 0.002625940382209238,
+      "element_weighted_relative_mse_estimate": 0.0030669749737375312,
+      "parameter_weighted_bpp": 5.255106209150327,
+      "policy": "replace_q4_only_ue3m5_g16",
+      "replaced_rows": 14
+    }
+  }
+}
