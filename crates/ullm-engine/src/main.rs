@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -12,6 +14,9 @@ fn main() -> ExitCode {
         Some("runtime-stream-smoke") => runtime_stream_smoke(env::args().nth(2)),
         Some("runtime-copy-smoke") => runtime_copy_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
+        Some("package-load-smoke") => {
+            package_load_smoke(env::args().nth(2), env::args().nth(3), env::args().nth(4))
+        }
         Some("-h") | Some("--help") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -266,9 +271,121 @@ fn inspect_package(path: Option<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn package_load_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    max_bytes: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-load-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let max_bytes = match parse_optional_usize(max_bytes, 1024 * 1024, "max bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("max bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let summary = match ullm_engine::package::inspect_package(&path) {
+        Ok(summary) => summary,
+        Err(err) => {
+            eprintln!("failed to inspect package: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let selected = match ullm_engine::package::select_smallest_existing_referenced_file(&path) {
+        Ok(selected) => selected,
+        Err(err) => {
+            eprintln!("failed to select package payload: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let data = match read_bounded_file(&selected.absolute_path, max_bytes) {
+        Ok(data) => data,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    if data.is_empty() {
+        eprintln!("selected payload produced zero bytes after applying max-bytes");
+        return ExitCode::from(1);
+    }
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut buffer = match context.alloc_buffer(data.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = buffer.copy_from_host(0, &data, Some(&mut stream)) {
+        eprintln!("failed to copy package payload into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after package payload load: {err}");
+        return ExitCode::from(1);
+    }
+    let mut output = vec![0_u8; data.len()];
+    if let Err(err) = buffer.copy_to_host(0, &mut output, Some(&mut stream)) {
+        eprintln!("failed to copy package payload back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after package payload readback: {err}");
+        return ExitCode::from(1);
+    }
+    if data != output {
+        eprintln!("package payload roundtrip produced mismatched bytes");
+        return ExitCode::from(1);
+    }
+    println!(
+        "package-load-smoke package={} schema={} file={} file_bytes={} copied_bytes={} backend={} device_index={} name=\"{}\" verified=true",
+        summary.package_dir.display(),
+        summary
+            .schema_version
+            .unwrap_or_else(|| "unknown".to_string()),
+        selected.relative_path,
+        selected.bytes,
+        data.len(),
+        info.backend,
+        device_index,
+        info.name
+    );
+    ExitCode::SUCCESS
+}
+
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES]>"
     );
 }
 
@@ -283,4 +400,33 @@ fn parse_optional_device_index(device_index: Option<String>) -> Result<u32, Exit
         },
         None => Ok(0),
     }
+}
+
+fn parse_optional_usize(
+    value: Option<String>,
+    default: usize,
+    label: &str,
+) -> Result<usize, ExitCode> {
+    match value {
+        Some(value) => match value.parse::<usize>() {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                eprintln!("invalid {label}: {err}");
+                Err(ExitCode::from(2))
+            }
+        },
+        None => Ok(default),
+    }
+}
+
+fn read_bounded_file(path: &std::path::Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let file =
+        File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
+    let limit = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    let mut reader = file.take(limit);
+    let mut data = Vec::with_capacity(max_bytes.min(1024 * 1024));
+    reader
+        .read_to_end(&mut data)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    Ok(data)
 }
