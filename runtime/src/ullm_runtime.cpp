@@ -12,6 +12,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <vector>
 
 #if defined(__linux__)
 #include <dlfcn.h>
@@ -167,6 +168,14 @@ public:
         return hip_stream_synchronize_(stream) == 0;
     }
 
+    bool synchronize_device(int device_id) {
+        load_once();
+        if (hip_device_synchronize_ == nullptr || !set_device(device_id)) {
+            return false;
+        }
+        return hip_device_synchronize_() == 0;
+    }
+
     bool copy_async(void *dst, const void *src, size_t bytes, int kind, void *stream, int device_id) {
         load_once();
         if (bytes == 0) {
@@ -190,6 +199,7 @@ private:
     using hip_stream_create_fn = int (*)(void **);
     using hip_stream_destroy_fn = int (*)(void *);
     using hip_stream_synchronize_fn = int (*)(void *);
+    using hip_device_synchronize_fn = int (*)();
     using hip_memcpy_async_fn = int (*)(void *, const void *, size_t, int, void *);
 
     void load_once() {
@@ -226,6 +236,8 @@ private:
             hip_stream_destroy_ = reinterpret_cast<hip_stream_destroy_fn>(dlsym(handle_, "hipStreamDestroy"));
             hip_stream_synchronize_ = reinterpret_cast<hip_stream_synchronize_fn>(
                 dlsym(handle_, "hipStreamSynchronize"));
+            hip_device_synchronize_ =
+                reinterpret_cast<hip_device_synchronize_fn>(dlsym(handle_, "hipDeviceSynchronize"));
             hip_memcpy_async_ =
                 reinterpret_cast<hip_memcpy_async_fn>(dlsym(handle_, "hipMemcpyAsync"));
 #endif
@@ -245,6 +257,7 @@ private:
     hip_stream_create_fn hip_stream_create_ = nullptr;
     hip_stream_destroy_fn hip_stream_destroy_ = nullptr;
     hip_stream_synchronize_fn hip_stream_synchronize_ = nullptr;
+    hip_device_synchronize_fn hip_device_synchronize_ = nullptr;
     hip_memcpy_async_fn hip_memcpy_async_ = nullptr;
 };
 
@@ -329,6 +342,38 @@ bool buffers_share_backend(
     const ullm_runtime_buffer *lhs,
     const ullm_runtime_buffer *rhs) {
     return lhs->backend == rhs->backend && lhs->hip_device_id == rhs->hip_device_id;
+}
+
+bool synchronize_hip_staging(const ullm_runtime_stream *stream, int device_id) {
+    if (stream != nullptr) {
+        return hip_runtime().synchronize_stream(stream->stream, device_id);
+    }
+    return hip_runtime().synchronize_device(device_id);
+}
+
+bool aq4_dequant_host(
+    const std::uint8_t *indices,
+    const std::uint8_t *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    size_t elements,
+    float *output) {
+    for (size_t element = 0; element < elements; ++element) {
+        const std::uint8_t packed = indices[element / 2];
+        const std::uint8_t codebook_index =
+            (element % 2 == 0) ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+        const size_t group = element / group_size;
+        const size_t scale_index = static_cast<size_t>(scale_indices[group]);
+        if (scale_index >= scale_count) {
+            set_error("AQ4 dequant scale index is out of range");
+            return false;
+        }
+        output[element] = codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+    }
+    return true;
 }
 
 } // namespace
@@ -682,11 +727,6 @@ ullm_status ullm_runtime_aq4_dequant_f32(
         set_error("AQ4 dequant stream belongs to a different backend or device");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
-    if (index_buffer->backend != BackendKind::Cpu) {
-        set_error("AQ4 dequant currently supports CPU fallback buffers only");
-        return ULLM_STATUS_RUNTIME_ERROR;
-    }
-
     if (elements > (static_cast<size_t>(-1) / sizeof(float))) {
         set_error("AQ4 dequant output byte size overflows");
         return ULLM_STATUS_INVALID_ARGUMENT;
@@ -716,22 +756,90 @@ ullm_status ullm_runtime_aq4_dequant_f32(
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
 
-    const auto *indices = static_cast<const std::uint8_t *>(index_buffer->ptr);
-    const auto *scale_indices = static_cast<const std::uint8_t *>(scale_buffer->ptr);
-    const auto *codebook = static_cast<const float *>(codebook_buffer->ptr);
-    auto *output = static_cast<float *>(output_buffer->ptr);
-    for (size_t element = 0; element < elements; ++element) {
-        const std::uint8_t packed = indices[element / 2];
-        const std::uint8_t codebook_index =
-            (element % 2 == 0) ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
-        const size_t group = element / group_size;
-        const size_t scale_index = static_cast<size_t>(scale_indices[group]);
-        if (scale_index >= scale_count) {
-            set_error("AQ4 dequant scale index is out of range");
+    if (index_buffer->backend == BackendKind::Cpu) {
+        const auto *indices = static_cast<const std::uint8_t *>(index_buffer->ptr);
+        const auto *scale_indices = static_cast<const std::uint8_t *>(scale_buffer->ptr);
+        const auto *codebook = static_cast<const float *>(codebook_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        if (!aq4_dequant_host(
+                indices,
+                scale_indices,
+                codebook,
+                scale_values,
+                scale_count,
+                group_size,
+                tensor_scale,
+                elements,
+                output)) {
             return ULLM_STATUS_INVALID_ARGUMENT;
         }
-        output[element] = codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+        set_error("");
+        return ULLM_STATUS_OK;
     }
+
+    std::vector<std::uint8_t> host_indices(required_index_bytes);
+    std::vector<std::uint8_t> host_scale_indices(groups);
+    std::vector<float> host_codebook(codebook_entries);
+    std::vector<float> host_output(elements);
+    ullm_runtime_stream *copy_stream = stream;
+    void *hip_stream = copy_stream == nullptr ? nullptr : copy_stream->stream;
+    const int device_id = index_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_indices.data(),
+            index_buffer->ptr,
+            required_index_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_scale_indices.data(),
+            scale_buffer->ptr,
+            groups,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_codebook.data(),
+            codebook_buffer->ptr,
+            codebook_buffer->bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy AQ4 HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(copy_stream, device_id)) {
+        set_error("failed to synchronize AQ4 HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!aq4_dequant_host(
+            host_indices.data(),
+            host_scale_indices.data(),
+            host_codebook.data(),
+            scale_values,
+            scale_count,
+            group_size,
+            tensor_scale,
+            elements,
+            host_output.data())) {
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            required_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy AQ4 materialized output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(copy_stream, device_id)) {
+        set_error("failed to synchronize AQ4 HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+
     set_error("");
     return ULLM_STATUS_OK;
 }

@@ -505,6 +505,56 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_aq4_dequant_f32_materializes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut index = context.alloc_buffer(2).unwrap();
+        let mut scale = context.alloc_buffer(2).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        index
+            .copy_from_host(0, &[0x21_u8, 0x30], Some(&mut stream))
+            .unwrap();
+        scale
+            .copy_from_host(0, &[0_u8, 1], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_dequant_f32(
+            &index,
+            &scale,
+            &codebook,
+            &[0.5, 2.0],
+            2,
+            10.0,
+            4,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 4 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&output_bytes), vec![5.0, 10.0, 0.0, 60.0]);
+    }
+
+    #[test]
     fn first_hip_context_allocates_runtime_buffer_when_available() {
         if device_count().unwrap() < 2 {
             return;
