@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <string>
 
 #if defined(__linux__)
@@ -100,12 +102,46 @@ public:
         }
     }
 
+    bool set_device(int device_id) {
+        load_once();
+        if (hip_set_device_ == nullptr) {
+            return false;
+        }
+        return hip_set_device_(device_id) == 0;
+    }
+
+    void *malloc_device(size_t bytes, int device_id) {
+        load_once();
+        if (hip_malloc_ == nullptr || !set_device(device_id)) {
+            return nullptr;
+        }
+        void *ptr = nullptr;
+        if (hip_malloc_(&ptr, bytes) != 0) {
+            return nullptr;
+        }
+        return ptr;
+    }
+
+    bool free_device(void *ptr, int device_id) {
+        load_once();
+        if (ptr == nullptr) {
+            return true;
+        }
+        if (hip_free_ == nullptr || !set_device(device_id)) {
+            return false;
+        }
+        return hip_free_(ptr) == 0;
+    }
+
 private:
     using hip_get_device_count_fn = int (*)(int *);
     using hip_runtime_get_version_fn = int (*)(int *);
     using hip_device_get_name_fn = int (*)(char *, int, int);
     using hip_device_total_mem_fn = int (*)(size_t *, int);
     using hip_device_compute_capability_fn = int (*)(int *, int *, int);
+    using hip_set_device_fn = int (*)(int);
+    using hip_malloc_fn = int (*)(void **, size_t);
+    using hip_free_fn = int (*)(void *);
 
     void load_once() {
         std::call_once(load_flag_, [this]() {
@@ -134,6 +170,9 @@ private:
                 reinterpret_cast<hip_device_total_mem_fn>(dlsym(handle_, "hipDeviceTotalMem"));
             hip_device_compute_capability_ = reinterpret_cast<hip_device_compute_capability_fn>(
                 dlsym(handle_, "hipDeviceComputeCapability"));
+            hip_set_device_ = reinterpret_cast<hip_set_device_fn>(dlsym(handle_, "hipSetDevice"));
+            hip_malloc_ = reinterpret_cast<hip_malloc_fn>(dlsym(handle_, "hipMalloc"));
+            hip_free_ = reinterpret_cast<hip_free_fn>(dlsym(handle_, "hipFree"));
 #endif
         });
     }
@@ -145,6 +184,9 @@ private:
     hip_device_get_name_fn hip_device_get_name_ = nullptr;
     hip_device_total_mem_fn hip_device_total_mem_ = nullptr;
     hip_device_compute_capability_fn hip_device_compute_capability_ = nullptr;
+    hip_set_device_fn hip_set_device_ = nullptr;
+    hip_malloc_fn hip_malloc_ = nullptr;
+    hip_free_fn hip_free_ = nullptr;
 };
 
 HipRuntime &hip_runtime() {
@@ -182,7 +224,25 @@ void fill_hip_device(uint32_t index, ullm_device_info *info) {
     info->flags = static_cast<uint32_t>(hip_runtime().runtime_version());
 }
 
+enum class BackendKind : uint32_t {
+    Cpu = 0,
+    Hip = 1,
+};
+
 } // namespace
+
+struct ullm_runtime_context {
+    uint32_t device_index = 0;
+    BackendKind backend = BackendKind::Cpu;
+    int hip_device_id = -1;
+};
+
+struct ullm_runtime_buffer {
+    BackendKind backend = BackendKind::Cpu;
+    int hip_device_id = -1;
+    void *ptr = nullptr;
+    size_t bytes = 0;
+};
 
 uint32_t ullm_runtime_abi_version(void) {
     return ULLM_RUNTIME_ABI_VERSION;
@@ -228,6 +288,133 @@ ullm_status ullm_runtime_get_device_info(uint32_t index, ullm_device_info *info)
     } else {
         fill_hip_device(index, info);
     }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_context_create(uint32_t device_index, ullm_runtime_context **context) {
+    if (context == nullptr) {
+        set_error("context output pointer is null");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    *context = nullptr;
+    if (device_index >= total_device_count()) {
+        set_error("context device index is out of range");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    auto *created = new (std::nothrow) ullm_runtime_context();
+    if (created == nullptr) {
+        set_error("failed to allocate runtime context");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    created->device_index = device_index;
+    if (device_index == 0) {
+        created->backend = BackendKind::Cpu;
+        created->hip_device_id = -1;
+    } else {
+        created->backend = BackendKind::Hip;
+        created->hip_device_id = static_cast<int>(device_index - 1);
+        if (!hip_runtime().set_device(created->hip_device_id)) {
+            delete created;
+            set_error("failed to select HIP device");
+            return ULLM_STATUS_RUNTIME_ERROR;
+        }
+    }
+    *context = created;
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_context_destroy(ullm_runtime_context *context) {
+    delete context;
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_context_device_info(
+    const ullm_runtime_context *context,
+    ullm_device_info *info) {
+    if (context == nullptr || info == nullptr) {
+        set_error("context or device info output pointer is null");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    return ullm_runtime_get_device_info(context->device_index, info);
+}
+
+ullm_status ullm_runtime_buffer_alloc(
+    ullm_runtime_context *context,
+    size_t bytes,
+    ullm_runtime_buffer **buffer) {
+    if (context == nullptr || buffer == nullptr) {
+        set_error("buffer allocation received a null context or output pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    *buffer = nullptr;
+    auto *created = new (std::nothrow) ullm_runtime_buffer();
+    if (created == nullptr) {
+        set_error("failed to allocate buffer handle");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    created->backend = context->backend;
+    created->hip_device_id = context->hip_device_id;
+    created->bytes = bytes;
+
+    if (bytes == 0) {
+        *buffer = created;
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    if (context->backend == BackendKind::Cpu) {
+        created->ptr = std::malloc(bytes);
+        if (created->ptr == nullptr) {
+            delete created;
+            set_error("failed to allocate CPU buffer");
+            return ULLM_STATUS_RUNTIME_ERROR;
+        }
+    } else {
+        created->ptr = hip_runtime().malloc_device(bytes, context->hip_device_id);
+        if (created->ptr == nullptr) {
+            delete created;
+            set_error("failed to allocate HIP buffer");
+            return ULLM_STATUS_RUNTIME_ERROR;
+        }
+    }
+
+    *buffer = created;
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_buffer_destroy(ullm_runtime_buffer *buffer) {
+    if (buffer == nullptr) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+    bool ok = true;
+    if (buffer->backend == BackendKind::Cpu) {
+        std::free(buffer->ptr);
+    } else {
+        ok = hip_runtime().free_device(buffer->ptr, buffer->hip_device_id);
+    }
+    delete buffer;
+    if (!ok) {
+        set_error("failed to destroy runtime buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_buffer_size(
+    const ullm_runtime_buffer *buffer,
+    size_t *bytes) {
+    if (buffer == nullptr || bytes == nullptr) {
+        set_error("buffer size received a null buffer or output pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    *bytes = buffer->bytes;
     set_error("");
     return ULLM_STATUS_OK;
 }

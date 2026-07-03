@@ -8,6 +8,7 @@ fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
         Some("inspect-devices") => inspect_devices(),
         Some("runtime-smoke") => runtime_smoke(),
+        Some("runtime-memory-smoke") => runtime_memory_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
         Some("-h") | Some("--help") | None => {
             print_help();
@@ -74,6 +75,58 @@ fn runtime_smoke() -> ExitCode {
     }
 }
 
+fn runtime_memory_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match device_index {
+        Some(value) => match value.parse::<u32>() {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("invalid device index: {err}");
+                return ExitCode::from(2);
+            }
+        },
+        None => 0,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let bytes = 4 * 1024 * 1024;
+    let buffer = match context.alloc_buffer(bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let actual = match buffer.size() {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("failed to query runtime buffer size: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    println!(
+        "runtime-memory-smoke backend={} device_index={} name=\"{}\" bytes={}",
+        info.backend, device_index, info.name, actual
+    );
+    if actual == bytes {
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("runtime memory smoke returned unexpected buffer size");
+        ExitCode::from(1)
+    }
+}
+
 fn inspect_package(path: Option<String>) -> ExitCode {
     let Some(path) = path else {
         eprintln!("inspect-package requires a .ullm.d path");
@@ -115,5 +168,7 @@ fn inspect_package(path: Option<String>) -> ExitCode {
 }
 
 fn print_help() {
-    eprintln!("usage: ullm-engine <inspect-devices|runtime-smoke|inspect-package PATH>");
+    eprintln!(
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|inspect-package PATH>"
+    );
 }
