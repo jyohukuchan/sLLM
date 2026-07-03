@@ -101,6 +101,13 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_add_f32(
+        lhs_buffer: *const RawRuntimeBuffer,
+        rhs_buffer: *const RawRuntimeBuffer,
+        elements: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_linear_attn_gate_beta_f32(
         a_buffer: *const RawRuntimeBuffer,
         b_buffer: *const RawRuntimeBuffer,
@@ -461,6 +468,34 @@ pub fn silu_mul_f32(
         ullm_runtime_silu_mul_f32(
             gate_buffer.raw.as_ptr(),
             up_buffer.raw.as_ptr(),
+            elements,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn add_f32(
+    lhs_buffer: &RuntimeBuffer,
+    rhs_buffer: &RuntimeBuffer,
+    elements: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if elements == 0 {
+        return Err("f32 add elements must be greater than zero".to_string());
+    }
+    let required_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 add byte size overflows".to_string())?;
+    check_copy_range(0, required_bytes, lhs_buffer.size()?)?;
+    check_copy_range(0, required_bytes, rhs_buffer.size()?)?;
+    check_copy_range(0, required_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_add_f32(
+            lhs_buffer.raw.as_ptr(),
+            rhs_buffer.raw.as_ptr(),
             elements,
             output_buffer.raw.as_ptr(),
             stream,
@@ -1014,6 +1049,61 @@ mod tests {
             .unwrap();
 
         let err = silu_mul_f32(&gate, &up, 4, &mut output, None).unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
+    fn cpu_add_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let lhs_values = [-1.0_f32, 0.0, 1.0, 2.0, 8.5];
+        let rhs_values = [3.0_f32, -4.0, 5.0, 6.0, -0.25];
+        let mut lhs = context
+            .alloc_buffer(lhs_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut rhs = context
+            .alloc_buffer(rhs_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(lhs_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        lhs.copy_from_host(0, &f32s_to_le_bytes(&lhs_values), Some(&mut stream))
+            .unwrap();
+        rhs.copy_from_host(0, &f32s_to_le_bytes(&rhs_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        add_f32(&lhs, &rhs, lhs_values.len(), &mut output, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; lhs_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = lhs_values
+            .iter()
+            .zip(rhs_values.iter())
+            .map(|(lhs, rhs)| lhs + rhs)
+            .collect::<Vec<_>>();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-6);
+    }
+
+    #[test]
+    fn cpu_add_f32_rejects_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let lhs = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let rhs = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let err = add_f32(&lhs, &rhs, 4, &mut output, None).unwrap_err();
         assert!(err.contains("out of bounds") || err.contains("output"));
     }
 
@@ -1656,6 +1746,47 @@ mod tests {
         stream.synchronize().unwrap();
         let expected = expected_silu_mul(&gate_values, &up_values);
         assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn first_hip_add_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let lhs_values = [-1.0_f32, 0.0, 1.0, 2.0, 8.5];
+        let rhs_values = [3.0_f32, -4.0, 5.0, 6.0, -0.25];
+        let mut lhs = context
+            .alloc_buffer(lhs_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut rhs = context
+            .alloc_buffer(rhs_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(lhs_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        lhs.copy_from_host(0, &f32s_to_le_bytes(&lhs_values), Some(&mut stream))
+            .unwrap();
+        rhs.copy_from_host(0, &f32s_to_le_bytes(&rhs_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        add_f32(&lhs, &rhs, lhs_values.len(), &mut output, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; lhs_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = lhs_values
+            .iter()
+            .zip(rhs_values.iter())
+            .map(|(lhs, rhs)| lhs + rhs)
+            .collect::<Vec<_>>();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-6);
     }
 
     #[test]

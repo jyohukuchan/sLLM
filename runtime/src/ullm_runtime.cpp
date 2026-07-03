@@ -365,6 +365,10 @@ public:
         return compile_kernel(arch, silu_mul_kernel_source(), "ullm_silu_mul_f32.hip", code, error);
     }
 
+    bool compile_add_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(arch, add_kernel_source(), "ullm_add_f32.hip", code, error);
+    }
+
     bool compile_depthwise_conv1d_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -593,6 +597,23 @@ extern "C" __global__ void ullm_silu_mul_f32_kernel(
     const float gate_value = gate[index];
     const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
     output[index] = gate_value * sigmoid * up[index];
+}
+)";
+    }
+
+    static const char *add_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_add_f32_kernel(
+    const float *lhs,
+    const float *rhs,
+    unsigned long long elements,
+    float *output) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= elements) {
+        return;
+    }
+    output[index] = lhs[index] + rhs[index];
 }
 )";
     }
@@ -1653,6 +1674,16 @@ void silu_mul_f32_host(
     }
 }
 
+void add_f32_host(
+    const float *lhs,
+    const float *rhs,
+    size_t elements,
+    float *output) {
+    for (size_t index = 0; index < elements; ++index) {
+        output[index] = lhs[index] + rhs[index];
+    }
+}
+
 class HipSiluMulKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -1831,6 +1862,190 @@ ullm_status silu_mul_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 SiLU-mul HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipAddKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_add_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_add_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build f32 add HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipAddKernelCache &hip_add_kernel_cache() {
+    static HipAddKernelCache cache;
+    return cache;
+}
+
+bool add_f32_hip_kernel(
+    const ullm_runtime_buffer *lhs_buffer,
+    const ullm_runtime_buffer *rhs_buffer,
+    size_t elements,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = lhs_buffer->hip_device_id;
+    void *function = hip_add_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    const size_t grid_size = (elements + block_size - 1) / block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "f32 add element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_elements = static_cast<unsigned long long>(elements);
+    void *lhs_ptr = lhs_buffer->ptr;
+    void *rhs_ptr = rhs_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &lhs_ptr,
+        &rhs_ptr,
+        &kernel_elements,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 add";
+        }
+        return false;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        if (error != nullptr) {
+            *error = "failed to synchronize f32 add HIP kernel";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status add_f32_hip_staging(
+    const ullm_runtime_buffer *lhs_buffer,
+    const ullm_runtime_buffer *rhs_buffer,
+    size_t elements,
+    size_t required_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_lhs(elements);
+    std::vector<float> host_rhs(elements);
+    std::vector<float> host_output(elements);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = lhs_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_lhs.data(),
+            lhs_buffer->ptr,
+            required_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_rhs.data(),
+            rhs_buffer->ptr,
+            required_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 add HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 add HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    add_f32_host(host_lhs.data(), host_rhs.data(), elements, host_output.data());
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            required_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 add output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 add HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -3344,6 +3559,84 @@ ullm_status ullm_runtime_silu_mul_f32(
     return silu_mul_f32_hip_staging(
         gate_buffer,
         up_buffer,
+        elements,
+        required_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_add_f32(
+    const ullm_runtime_buffer *lhs_buffer,
+    const ullm_runtime_buffer *rhs_buffer,
+    size_t elements,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (lhs_buffer == nullptr || rhs_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 add received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (elements == 0) {
+        set_error("f32 add elements must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(lhs_buffer, rhs_buffer) ||
+        !buffers_share_backend(lhs_buffer, output_buffer)) {
+        set_error("f32 add buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 add stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (elements > max_size / sizeof(float)) {
+        set_error("f32 add byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_bytes = elements * sizeof(float);
+    if (lhs_buffer->bytes < required_bytes) {
+        set_error("f32 add lhs buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rhs_buffer->bytes < required_bytes) {
+        set_error("f32 add rhs buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_bytes) {
+        set_error("f32 add output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (lhs_buffer->backend == BackendKind::Cpu) {
+        const auto *lhs = static_cast<const float *>(lhs_buffer->ptr);
+        const auto *rhs = static_cast<const float *>(rhs_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        add_f32_host(lhs, rhs, elements, output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (add_f32_hip_kernel(
+            lhs_buffer,
+            rhs_buffer,
+            elements,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_ADD_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty() ? "f32 add HIP kernel is unavailable" : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return add_f32_hip_staging(
+        lhs_buffer,
+        rhs_buffer,
         elements,
         required_bytes,
         output_buffer,

@@ -121,6 +121,13 @@ ullm_status ullm_runtime_silu_mul_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_add_f32(
+    const ullm_runtime_buffer *lhs_buffer,
+    const ullm_runtime_buffer *rhs_buffer,
+    size_t elements,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_depthwise_conv1d_f32(
     const ullm_runtime_buffer *input_buffer,
     const ullm_runtime_buffer *weight_buffer,
