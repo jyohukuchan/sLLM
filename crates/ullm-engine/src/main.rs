@@ -138,6 +138,13 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-linear-attn-block-smoke") => package_linear_attn_block_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+        ),
         Some("package-linear-attn-aux-smoke") => package_linear_attn_aux_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -6441,8 +6448,46 @@ fn package_linear_attn_workflow_smoke(
     layer_index: Option<String>,
     sequence_len: Option<String>,
 ) -> ExitCode {
+    package_linear_attn_workflow_smoke_impl(
+        "package-linear-attn-workflow-smoke",
+        false,
+        path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        sequence_len,
+    )
+}
+
+fn package_linear_attn_block_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+) -> ExitCode {
+    package_linear_attn_workflow_smoke_impl(
+        "package-linear-attn-block-smoke",
+        true,
+        path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        sequence_len,
+    )
+}
+
+fn package_linear_attn_workflow_smoke_impl(
+    command_name: &str,
+    include_block: bool,
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+) -> ExitCode {
     let Some(path) = path else {
-        eprintln!("package-linear-attn-workflow-smoke requires a .ullm.d path");
+        eprintln!("{command_name} requires a .ullm.d path");
         return ExitCode::from(2);
     };
     let device_index = match parse_optional_device_index(device_index) {
@@ -6483,6 +6528,8 @@ fn package_linear_attn_workflow_smoke(
     let qk_l2_norm = true;
     let epsilon = 1e-6_f32;
 
+    let input_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
     let qkv_tensor =
         format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
     let conv_tensor =
@@ -6498,6 +6545,51 @@ fn package_linear_attn_workflow_smoke(
     let norm_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.norm.weight");
     let out_tensor =
         format!("model.language_model.layers.{layer_index}.linear_attn.out_proj.weight");
+
+    let mut input_norm_dtype = String::new();
+    let mut input_norm_weight = Vec::new();
+    if include_block {
+        let input_norm_selector = TensorSelector::Name(input_norm_tensor.clone());
+        let input_norm_bundle = match ullm_engine::package::select_passthrough_payload_bundle(
+            &path,
+            &input_norm_selector,
+        ) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("failed to select package input RMSNorm tensor: {err}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(err) = validate_passthrough_shape_elements(&input_norm_bundle) {
+            eprintln!("invalid input RMSNorm shape for {input_norm_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+        input_norm_dtype = match resolve_passthrough_dtype(&input_norm_bundle, &input_norm_tensor) {
+            Ok(value) => value.to_string(),
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+        input_norm_weight = match read_passthrough_payload_f32_bytes(
+            &input_norm_bundle,
+            chunk_bytes,
+            &input_norm_dtype,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("failed to read passthrough payload for {input_norm_tensor}: {err}");
+                return ExitCode::from(1);
+            }
+        };
+        if input_norm_weight.len() != hidden_size {
+            eprintln!(
+                "input RMSNorm length must match hidden_size={hidden_size}: len={}",
+                input_norm_weight.len()
+            );
+            return ExitCode::from(1);
+        }
+    }
 
     let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
         Ok(context) => context,
@@ -6835,6 +6927,45 @@ fn package_linear_attn_workflow_smoke(
             return ExitCode::from(1);
         }
     };
+    let input_norm_weight_bytes = if include_block {
+        encode_f32_to_bytes(&input_norm_weight)
+    } else {
+        Vec::new()
+    };
+    let mut input_norm_weight_buffer = if include_block {
+        Some(match context.alloc_buffer(input_norm_weight_bytes.len()) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate input RMSNorm weight buffer: {err}");
+                return ExitCode::from(1);
+            }
+        })
+    } else {
+        None
+    };
+    if let Some(buffer) = input_norm_weight_buffer.as_mut() {
+        if let Err(err) = buffer.copy_from_host(0, &input_norm_weight_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy input RMSNorm weight into runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!(
+                "failed to synchronize runtime stream after input RMSNorm weight copy: {err}"
+            );
+            return ExitCode::from(1);
+        }
+    }
+    let mut input_norm_output_buffer = if include_block {
+        Some(match context.alloc_buffer(hidden_bytes) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate input RMSNorm output buffer: {err}");
+                return ExitCode::from(1);
+            }
+        })
+    } else {
+        None
+    };
     let mut qkv_step_buffer = match context.alloc_buffer(qkv_step_bytes) {
         Ok(buffer) => buffer,
         Err(err) => {
@@ -6865,6 +6996,21 @@ fn package_linear_attn_workflow_smoke(
     };
 
     let base_input = deterministic_f32_vector(hidden_size);
+    let mut residual_sequence_bytes = if include_block {
+        vec![0_u8; hidden_sequence_bytes_len]
+    } else {
+        Vec::new()
+    };
+    let mut input_norm_sequence_bytes = if include_block {
+        vec![0_u8; hidden_sequence_bytes_len]
+    } else {
+        Vec::new()
+    };
+    let mut expected_input_norm = if include_block {
+        Vec::with_capacity(sequence_len * hidden_size)
+    } else {
+        Vec::new()
+    };
     let mut qkv_sequence_bytes = vec![0_u8; qkv_sequence_bytes_len];
     let mut a_sequence_bytes = vec![0_u8; gate_beta_sequence_bytes_len];
     let mut b_sequence_bytes = vec![0_u8; gate_beta_sequence_bytes_len];
@@ -6872,13 +7018,74 @@ fn package_linear_attn_workflow_smoke(
     for timestep in 0..sequence_len {
         let step_input = linear_attn_step_input(&base_input, timestep);
         let step_input_bytes = encode_f32_to_bytes(&step_input);
+        if include_block {
+            let residual_start = timestep * hidden_bytes;
+            let residual_end = residual_start + hidden_bytes;
+            residual_sequence_bytes[residual_start..residual_end]
+                .copy_from_slice(&step_input_bytes);
+            let expected_normed =
+                runtime_host_rmsnorm_f32(&step_input, &input_norm_weight, epsilon);
+            if expected_normed.len() != hidden_size {
+                eprintln!("failed to build input RMSNorm reference for timestep {timestep}");
+                return ExitCode::from(1);
+            }
+            expected_input_norm.extend_from_slice(&expected_normed);
+        }
         if let Err(err) = input_buffer.copy_from_host(0, &step_input_bytes, Some(&mut stream)) {
             eprintln!("failed to copy linear attention input timestep {timestep}: {err}");
             return ExitCode::from(1);
         }
+        if include_block {
+            let input_norm_weight_buffer = input_norm_weight_buffer
+                .as_ref()
+                .expect("input RMSNorm weight buffer exists in block mode");
+            let input_norm_output_buffer = input_norm_output_buffer
+                .as_mut()
+                .expect("input RMSNorm output buffer exists in block mode");
+            if let Err(err) = ullm_runtime_sys::rmsnorm_f32(
+                &input_buffer,
+                input_norm_weight_buffer,
+                hidden_size,
+                epsilon,
+                input_norm_output_buffer,
+                Some(&mut stream),
+            ) {
+                eprintln!("failed to run input RMSNorm timestep {timestep}: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = stream.synchronize() {
+                eprintln!(
+                    "failed to synchronize runtime stream after input RMSNorm timestep {timestep}: {err}"
+                );
+                return ExitCode::from(1);
+            }
+            let norm_start = timestep * hidden_bytes;
+            let norm_end = norm_start + hidden_bytes;
+            if let Err(err) = input_norm_output_buffer.copy_to_host(
+                0,
+                &mut input_norm_sequence_bytes[norm_start..norm_end],
+                Some(&mut stream),
+            ) {
+                eprintln!("failed to copy input RMSNorm timestep {timestep} back to host: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = stream.synchronize() {
+                eprintln!(
+                    "failed to synchronize runtime stream after input RMSNorm timestep {timestep} host copy: {err}"
+                );
+                return ExitCode::from(1);
+            }
+        }
+        let projection_input_buffer = if include_block {
+            input_norm_output_buffer
+                .as_ref()
+                .expect("input RMSNorm output buffer exists in block mode")
+        } else {
+            &input_buffer
+        };
         if let Err(err) = ullm_runtime_sys::matvec_f32(
             &qkv_matrix,
-            &input_buffer,
+            projection_input_buffer,
             qkv_rows,
             qkv_cols,
             &mut qkv_step_buffer,
@@ -6889,7 +7096,7 @@ fn package_linear_attn_workflow_smoke(
         }
         if let Err(err) = ullm_runtime_sys::matvec_f32(
             &a_matrix,
-            &input_buffer,
+            projection_input_buffer,
             value_heads,
             hidden_size,
             &mut a_step_buffer,
@@ -6900,7 +7107,7 @@ fn package_linear_attn_workflow_smoke(
         }
         if let Err(err) = ullm_runtime_sys::matvec_f32(
             &b_matrix,
-            &input_buffer,
+            projection_input_buffer,
             value_heads,
             hidden_size,
             &mut b_step_buffer,
@@ -6911,7 +7118,7 @@ fn package_linear_attn_workflow_smoke(
         }
         if let Err(err) = ullm_runtime_sys::matvec_f32(
             &z_matrix,
-            &input_buffer,
+            projection_input_buffer,
             hidden_size,
             hidden_size,
             &mut z_step_buffer,
@@ -6968,6 +7175,36 @@ fn package_linear_attn_workflow_smoke(
                 "failed to synchronize runtime stream after timestep {timestep} host copy: {err}"
             );
             return ExitCode::from(1);
+        }
+    }
+
+    let input_norm_sequence = if include_block {
+        decode_f32_le_values(&input_norm_sequence_bytes)
+    } else {
+        Vec::new()
+    };
+    let mut input_norm_max_abs_diff = 0.0_f32;
+    if include_block {
+        if input_norm_sequence.len() != expected_input_norm.len() {
+            eprintln!(
+                "{command_name} input RMSNorm output size mismatch: expected {} got {}",
+                expected_input_norm.len(),
+                input_norm_sequence.len()
+            );
+            return ExitCode::from(1);
+        }
+        for (lhs, rhs) in input_norm_sequence.iter().zip(expected_input_norm.iter()) {
+            let diff = (lhs - rhs).abs();
+            let tolerance = 1e-4_f32.max(rhs.abs() * 1e-5_f32);
+            if diff > tolerance {
+                eprintln!(
+                    "{command_name} input RMSNorm mismatch for layer={layer_index}: max_abs_diff={diff} tolerance={tolerance}"
+                );
+                return ExitCode::from(1);
+            }
+            if diff > input_norm_max_abs_diff {
+                input_norm_max_abs_diff = diff;
+            }
         }
     }
 
@@ -7607,6 +7844,21 @@ fn package_linear_attn_workflow_smoke(
         }
         expected_output.extend_from_slice(&output);
     }
+    let residual_sequence = if include_block {
+        decode_f32_le_values(&residual_sequence_bytes)
+    } else {
+        Vec::new()
+    };
+    let expected_block_output = if include_block {
+        let output = runtime_host_add_f32(&residual_sequence, &expected_output);
+        if output.len() != expected_output.len() {
+            eprintln!("failed to build {command_name} residual add reference");
+            return ExitCode::from(1);
+        }
+        output
+    } else {
+        Vec::new()
+    };
 
     let mut out_input_buffer = match context.alloc_buffer(hidden_bytes) {
         Ok(buffer) => buffer,
@@ -7622,7 +7874,34 @@ fn package_linear_attn_workflow_smoke(
             return ExitCode::from(1);
         }
     };
+    let mut residual_step_buffer = if include_block {
+        Some(match context.alloc_buffer(hidden_bytes) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate residual step buffer: {err}");
+                return ExitCode::from(1);
+            }
+        })
+    } else {
+        None
+    };
+    let mut block_step_buffer = if include_block {
+        Some(match context.alloc_buffer(hidden_bytes) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate block step output buffer: {err}");
+                return ExitCode::from(1);
+            }
+        })
+    } else {
+        None
+    };
     let mut output_sequence_bytes = vec![0_u8; hidden_sequence_bytes_len];
+    let mut block_sequence_bytes = if include_block {
+        vec![0_u8; hidden_sequence_bytes_len]
+    } else {
+        Vec::new()
+    };
     for timestep in 0..sequence_len {
         let start = timestep * hidden_bytes;
         let end = start + hidden_bytes;
@@ -7665,6 +7944,52 @@ fn package_linear_attn_workflow_smoke(
             );
             return ExitCode::from(1);
         }
+        if include_block {
+            let residual_step_buffer = residual_step_buffer
+                .as_mut()
+                .expect("residual step buffer exists in block mode");
+            let block_step_buffer = block_step_buffer
+                .as_mut()
+                .expect("block step output buffer exists in block mode");
+            if let Err(err) = residual_step_buffer.copy_from_host(
+                0,
+                &residual_sequence_bytes[start..end],
+                Some(&mut stream),
+            ) {
+                eprintln!("failed to copy residual timestep {timestep} into runtime buffer: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = ullm_runtime_sys::add_f32(
+                residual_step_buffer,
+                &out_step_buffer,
+                hidden_size,
+                block_step_buffer,
+                Some(&mut stream),
+            ) {
+                eprintln!("failed to run runtime residual add timestep {timestep}: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = stream.synchronize() {
+                eprintln!(
+                    "failed to synchronize runtime stream after residual add timestep {timestep}: {err}"
+                );
+                return ExitCode::from(1);
+            }
+            if let Err(err) = block_step_buffer.copy_to_host(
+                0,
+                &mut block_sequence_bytes[start..end],
+                Some(&mut stream),
+            ) {
+                eprintln!("failed to copy block output timestep {timestep} back to host: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = stream.synchronize() {
+                eprintln!(
+                    "failed to synchronize runtime stream after block output timestep {timestep} host copy: {err}"
+                );
+                return ExitCode::from(1);
+            }
+        }
     }
     let output_sequence = decode_f32_le_values(&output_sequence_bytes);
     let mut output_max_abs_diff = 0.0_f32;
@@ -7680,6 +8005,75 @@ fn package_linear_attn_workflow_smoke(
         if diff > output_max_abs_diff {
             output_max_abs_diff = diff;
         }
+    }
+
+    let block_output = if include_block {
+        decode_f32_le_values(&block_sequence_bytes)
+    } else {
+        Vec::new()
+    };
+    let mut block_max_abs_diff = 0.0_f32;
+    if include_block {
+        if block_output.len() != expected_block_output.len() {
+            eprintln!(
+                "{command_name} output size mismatch: expected {} got {}",
+                expected_block_output.len(),
+                block_output.len()
+            );
+            return ExitCode::from(1);
+        }
+        for (lhs, rhs) in block_output.iter().zip(expected_block_output.iter()) {
+            let diff = (lhs - rhs).abs();
+            let tolerance = 3e-3_f32.max(rhs.abs() * 2e-5_f32);
+            if diff > tolerance {
+                eprintln!(
+                    "{command_name} residual output mismatch: max_abs_diff={diff} tolerance={tolerance}"
+                );
+                return ExitCode::from(1);
+            }
+            if diff > block_max_abs_diff {
+                block_max_abs_diff = diff;
+            }
+        }
+    }
+
+    if include_block {
+        println!(
+            "package-linear-attn-block-smoke package={} layer={} input_norm_tensor=\"{}\" qkv_tensor=\"{}\" conv_tensor=\"{}\" a_tensor=\"{}\" b_tensor=\"{}\" a_log_tensor=\"{}\" dt_bias_tensor=\"{}\" z_tensor=\"{}\" norm_tensor=\"{}\" out_tensor=\"{}\" hidden={} key_heads={} value_heads={} key_dim={} value_dim={} sequence_len={} kernel_size={} qk_l2_norm={} q_scale={q_scale:.9} input_norm_dtype={} conv_dtype={} a_log_dtype={} dt_bias_dtype={} norm_dtype={} backend={} device_index={} name=\"{}\" residual_preview={} input_norm_preview={} workflow_output_preview={} block_output_preview={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} conv_max_abs_diff={conv_max_abs_diff:.9} gate_beta_max_abs_diff={gate_beta_max_abs_diff:.9} recurrent_max_abs_diff={recurrent_max_abs_diff:.9} norm_max_abs_diff={norm_max_abs_diff:.9} activation_max_abs_diff={activation_max_abs_diff:.9} output_max_abs_diff={output_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} verified=true",
+            path,
+            layer_index,
+            input_norm_tensor,
+            qkv_tensor,
+            conv_tensor,
+            a_tensor,
+            b_tensor,
+            a_log_tensor,
+            dt_bias_tensor,
+            z_tensor,
+            norm_tensor,
+            out_tensor,
+            hidden_size,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            sequence_len,
+            kernel_size,
+            qk_l2_norm,
+            input_norm_dtype,
+            conv_dtype,
+            a_log_dtype,
+            dt_bias_dtype,
+            norm_dtype,
+            info.backend,
+            device_index,
+            info.name,
+            format_f32_preview(&residual_sequence[..8.min(residual_sequence.len())]),
+            format_f32_preview(&input_norm_sequence[..8.min(input_norm_sequence.len())]),
+            format_f32_preview(&output_sequence[..8.min(output_sequence.len())]),
+            format_f32_preview(&block_output[..8.min(block_output.len())]),
+        );
+        return ExitCode::SUCCESS;
     }
 
     println!(
@@ -8165,7 +8559,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!(
