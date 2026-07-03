@@ -87,6 +87,12 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+        ),
         Some("package-linear-attn-aux-smoke") => package_linear_attn_aux_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -3193,6 +3199,306 @@ fn package_linear_attn_aux_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_linear_attn_qkv_norm_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-qkv-norm-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let qkv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
+    let norm_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.norm.weight");
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let selector = TensorSelector::Name(norm_tensor.clone());
+    let norm_bundle =
+        match ullm_engine::package::select_passthrough_payload_bundle(&path, &selector) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("failed to select package passthrough tensor: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    let norm_elements = match usize::try_from(norm_bundle.elements) {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("RMSNorm tensor has zero elements");
+            return ExitCode::from(1);
+        }
+        Err(_) => {
+            eprintln!("RMSNorm tensor element count is too large for this host");
+            return ExitCode::from(1);
+        }
+    };
+    if norm_elements != 128 {
+        eprintln!("RMSNorm tensor must have 128 elements, got {norm_elements}");
+        return ExitCode::from(1);
+    }
+    let dtype = match resolve_passthrough_dtype(&norm_bundle, &norm_tensor) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let norm_weight = match read_passthrough_payload_f32_bytes(&norm_bundle, chunk_bytes, dtype) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read passthrough payload for {norm_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if norm_weight.len() != norm_elements {
+        eprintln!(
+            "passthrough tensor element count mismatch for {norm_tensor}: expected {norm_elements} got {}",
+            norm_weight.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let mut registry = WeightRegistry::new();
+    let (qkv_rows, qkv_cols, qkv_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &qkv_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {qkv_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if qkv_rows < 128 {
+        eprintln!(
+            "qkv tensor {qkv_tensor} has too few rows for preview validation: rows={qkv_rows}, expected at least 128"
+        );
+        return ExitCode::from(1);
+    }
+
+    let input = deterministic_f32_vector(qkv_cols);
+    let input_bytes = encode_f32_to_bytes(&input);
+    let mut input_buffer = match context.alloc_buffer(input_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate qkv input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy deterministic qkv input into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let qkv_output_bytes = match qkv_rows.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("qkv output byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut qkv_output = match context.alloc_buffer(qkv_output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate qkv output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &qkv_matrix,
+        &input_buffer,
+        qkv_rows,
+        qkv_cols,
+        &mut qkv_output,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run qkv matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after qkv matvec: {err}");
+        return ExitCode::from(1);
+    }
+
+    let qkv_preview_count = 128_usize;
+    let mut qkv_preview_bytes = vec![0_u8; qkv_preview_count * std::mem::size_of::<f32>()];
+    if let Err(err) = qkv_output.copy_to_host(0, &mut qkv_preview_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy qkv preview output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after qkv preview copy: {err}");
+        return ExitCode::from(1);
+    }
+    let qkv_output_preview = decode_f32_le_values(&qkv_preview_bytes);
+    let norm_input = qkv_output_preview;
+
+    let epsilon = 1e-5_f32;
+    let expected = runtime_host_rmsnorm_f32(&norm_input, &norm_weight, epsilon);
+    if expected.len() != norm_elements {
+        eprintln!("failed to build deterministic RMSNorm reference");
+        return ExitCode::from(1);
+    }
+
+    let norm_input_bytes = encode_f32_to_bytes(&norm_input);
+    let norm_weight_bytes = encode_f32_to_bytes(&norm_weight);
+    let mut norm_input_buffer = match context.alloc_buffer(norm_input_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate qkv-rmsnorm input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = norm_input_buffer.copy_from_host(0, &norm_input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy qkv output preview to qkv-rmsnorm input: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after qkv-rmsnorm input copy: {err}");
+        return ExitCode::from(1);
+    }
+    let mut norm_weight_buffer = match context.alloc_buffer(norm_weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate norm weight buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = norm_weight_buffer.copy_from_host(0, &norm_weight_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy norm weight into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after norm weight copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut norm_output_buffer = match context.alloc_buffer(norm_weight_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate qkv-rmsnorm output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::rmsnorm_f32(
+        &norm_input_buffer,
+        &norm_weight_buffer,
+        norm_elements,
+        epsilon,
+        &mut norm_output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime rmsnorm_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after rmsnorm: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut norm_output_bytes = vec![0_u8; norm_weight_bytes.len()];
+    if let Err(err) = norm_output_buffer.copy_to_host(0, &mut norm_output_bytes, Some(&mut stream))
+    {
+        eprintln!("failed to copy qkv-rmsnorm output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after qkv-rmsnorm output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let norm_output = decode_f32_le_values(&norm_output_bytes);
+
+    if norm_output.len() != expected.len() {
+        eprintln!(
+            "runtime RMSNorm output size mismatch: expected {} got {}",
+            expected.len(),
+            norm_output.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let mut max_abs_diff = 0.0_f32;
+    for (lhs, rhs) in norm_output.iter().zip(expected.iter()) {
+        let diff = (lhs - rhs).abs();
+        if diff > 1e-4_f32 {
+            eprintln!(
+                "package-linear-attn-qkv-norm-smoke mismatch for layer={layer_index}: max_abs_diff={diff}"
+            );
+            return ExitCode::from(1);
+        }
+        if diff > max_abs_diff {
+            max_abs_diff = diff;
+        }
+    }
+
+    let qkv_preview = &norm_input[..8.min(norm_input.len())];
+    let norm_preview = &norm_output[..8.min(norm_output.len())];
+    println!(
+        "package-linear-attn-qkv-norm-smoke package={} layer={} qkv_tensor=\"{}\" norm_tensor=\"{}\" hidden={} qkv_rows={} norm_elements={} backend={} device_index={} name=\"{}\" qkv_preview={} norm_preview={} max_abs_diff={max_abs_diff:.9} verified=true",
+        path,
+        layer_index,
+        qkv_tensor,
+        norm_tensor,
+        qkv_cols,
+        qkv_rows,
+        norm_elements,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(qkv_preview),
+        format_f32_preview(norm_preview),
+    );
+    ExitCode::SUCCESS
+}
+
 #[derive(Debug, Clone, Copy)]
 enum NormKind {
     Input,
@@ -3519,7 +3825,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!(

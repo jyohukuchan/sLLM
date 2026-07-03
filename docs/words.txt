@@ -62,6 +62,7 @@ MLP smoke:RMSNorm、gate/up/down matvec、SiLU-mulを小さい固定tensorで接
 package MLP smoke:.ullm.d内の実際のgate/up/down quantized tensorをmaterializeし、matvecとSiLU-mulでMLP相当のruntime workflowを確認するsmoke
 package RMSNorm MLP smoke:.ullm.d内の実際のpassthrough RMSNorm weightとgate/up/down quantized tensorを使い、RMSNormからMLPまでをruntime上で接続するsmoke
 package linear attention projection smoke:.ullm.d内の実際のlinear_attn projection quantized tensorをmaterializeし、共通の決定的inputからmatvecまで接続するsmoke。linear attention全体の計算ではない
+package linear attention QKV norm smoke:.ullm.d内の実際のlinear_attn.in_proj_qkv quantized tensorとlinear_attn.norm.weight passthrough tensorを使い、QKV projection出力の先頭128要素にRMSNormを適用するsmoke。linear attention全体の計算ではない
 package linear attention auxiliary smoke:.ullm.d内の実際のlinear_attn補助passthrough tensorをf32へ変換し、runtime bufferへの転送とreadbackを検証するsmoke。linear attention全体の計算ではない
 HIPRTC:HIP runtime compilation。通常C++でbuildしたruntimeからHIP kernel sourceを実行時compileしてmodule launchする仕組み
 JIT kernel:実行時にcompileしてloadするkernel。uLLMではHIPRTC経由のAQ4 materialize kernelなどを指す
