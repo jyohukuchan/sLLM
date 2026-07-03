@@ -5,7 +5,10 @@ use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
-use ullm_engine::loader::{LoadOptions, LoadedPayload, WeightRegistry, load_package_tensor_prefix};
+use std::time::Instant;
+use ullm_engine::loader::{
+    LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
+};
 use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 
 fn main() -> ExitCode {
@@ -45,6 +48,13 @@ fn main() -> ExitCode {
             env::args().nth(3),
             env::args().nth(4),
             env::args().nth(5),
+        ),
+        Some("package-materialize-bench") => package_materialize_bench(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
         ),
         Some("-h") | Some("--help") | None => {
             print_help();
@@ -798,57 +808,14 @@ fn package_materialize_smoke(
         return ExitCode::from(1);
     };
 
-    let scale_format = match loaded.scale_format.as_deref() {
-        Some(value) => value,
-        None => {
-            eprintln!("selected tensor does not declare scale_format");
-            return ExitCode::from(1);
-        }
-    };
-    let scale_values = match ullm_engine::aq::scale_values(scale_format) {
-        Ok(values) => values,
+    let materialize = match materialize_config(loaded) {
+        Ok(value) => value,
         Err(err) => {
             eprintln!("{err}");
             return ExitCode::from(1);
         }
     };
-    let group_size = match loaded.group_size {
-        Some(value) if value > 0 => value,
-        Some(_) | None => {
-            eprintln!("selected tensor does not declare a valid group_size");
-            return ExitCode::from(1);
-        }
-    };
-    let tensor_scale = match loaded.tensor_scale {
-        Some(value) if value.is_finite() && value > 0.0 => value,
-        Some(_) | None => {
-            eprintln!("selected tensor does not declare a valid tensor_scale");
-            return ExitCode::from(1);
-        }
-    };
-    if loaded.index_encoding.as_deref() != Some("idx4_low_nibble_first") {
-        eprintln!("selected tensor uses unsupported index encoding");
-        return ExitCode::from(1);
-    }
-    if loaded.scale_encoding.as_deref() != Some("u8_scale_table_index") {
-        eprintln!("selected tensor uses unsupported scale encoding");
-        return ExitCode::from(1);
-    }
-    let elements = match usize::try_from(loaded.elements) {
-        Ok(value) => value,
-        Err(_) => {
-            eprintln!("selected tensor has too many elements for this host");
-            return ExitCode::from(1);
-        }
-    };
-    let output_bytes = match elements.checked_mul(std::mem::size_of::<f32>()) {
-        Some(value) => value,
-        None => {
-            eprintln!("materialized output byte size overflows");
-            return ExitCode::from(1);
-        }
-    };
-    let mut output = match context.alloc_buffer(output_bytes) {
+    let mut output = match context.alloc_buffer(materialize.output_bytes) {
         Ok(buffer) => buffer,
         Err(err) => {
             eprintln!("failed to allocate materialized output buffer: {err}");
@@ -859,10 +826,10 @@ fn package_materialize_smoke(
         loaded.index.buffer.as_ref(),
         loaded.scale.buffer.as_ref(),
         loaded.codebook.buffer.as_ref(),
-        &scale_values,
-        group_size,
-        tensor_scale,
-        elements,
+        &materialize.scale_values,
+        materialize.group_size,
+        materialize.tensor_scale,
+        materialize.elements,
         &mut output,
         Some(&mut stream),
     ) {
@@ -874,7 +841,7 @@ fn package_materialize_smoke(
         return ExitCode::from(1);
     }
 
-    let preview_count = elements.min(8);
+    let preview_count = materialize.elements.min(8);
     let mut preview_bytes = vec![0_u8; preview_count * std::mem::size_of::<f32>()];
     if let Err(err) = output.copy_to_host(0, &mut preview_bytes, Some(&mut stream)) {
         eprintln!("failed to copy materialized preview back to host: {err}");
@@ -891,12 +858,12 @@ fn package_materialize_smoke(
         registry_index,
         loaded.tensor_index,
         loaded.tensor_name,
-        elements,
-        output_bytes,
-        scale_format,
-        scale_values.len(),
-        group_size,
-        tensor_scale,
+        materialize.elements,
+        materialize.output_bytes,
+        materialize.scale_format,
+        materialize.scale_values.len(),
+        materialize.group_size,
+        materialize.tensor_scale,
         info.backend,
         device_index,
         info.name,
@@ -905,14 +872,238 @@ fn package_materialize_smoke(
     ExitCode::SUCCESS
 }
 
+fn package_materialize_bench(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    tensor_selector: Option<String>,
+    repeats: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-materialize-bench requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let repeats = match parse_optional_usize(repeats, 20, "repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let selector = TensorSelector::parse(tensor_selector.as_deref());
+    let bundle = match ullm_engine::package::select_tensor_payload_bundle(&path, &selector) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            eprintln!("failed to select package tensor payloads: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut registry = WeightRegistry::new();
+    let registry_index = match registry.load_and_insert(
+        &mut context,
+        &mut stream,
+        &bundle,
+        LoadOptions {
+            chunk_bytes,
+            verify: true,
+        },
+    ) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("failed to register package tensor payloads: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let Some(loaded) = registry.get(registry_index) else {
+        eprintln!("registered tensor disappeared from weight registry");
+        return ExitCode::from(1);
+    };
+    let materialize = match materialize_config(loaded) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut output = match context.alloc_buffer(materialize.output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate materialized output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = ullm_runtime_sys::aq4_dequant_f32(
+        loaded.index.buffer.as_ref(),
+        loaded.scale.buffer.as_ref(),
+        loaded.codebook.buffer.as_ref(),
+        &materialize.scale_values,
+        materialize.group_size,
+        materialize.tensor_scale,
+        materialize.elements,
+        &mut output,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to warm up AQ4 materialize: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize warmup materialize: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut elapsed_ms = Vec::with_capacity(repeats);
+    for _ in 0..repeats {
+        let start = Instant::now();
+        if let Err(err) = ullm_runtime_sys::aq4_dequant_f32(
+            loaded.index.buffer.as_ref(),
+            loaded.scale.buffer.as_ref(),
+            loaded.codebook.buffer.as_ref(),
+            &materialize.scale_values,
+            materialize.group_size,
+            materialize.tensor_scale,
+            materialize.elements,
+            &mut output,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to materialize AQ4 tensor during benchmark: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize materialize benchmark: {err}");
+            return ExitCode::from(1);
+        }
+        elapsed_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    elapsed_ms.sort_by(|left, right| left.total_cmp(right));
+    let mean_ms = elapsed_ms.iter().sum::<f64>() / elapsed_ms.len() as f64;
+    let min_ms = elapsed_ms[0];
+    let p50_ms = elapsed_ms[elapsed_ms.len() / 2];
+    let p95_index = ((elapsed_ms.len() - 1) * 95) / 100;
+    let p95_ms = elapsed_ms[p95_index];
+    let output_gib = materialize.output_bytes as f64 / 1024.0 / 1024.0 / 1024.0;
+    let output_gib_per_s = if mean_ms > 0.0 {
+        output_gib / (mean_ms / 1000.0)
+    } else {
+        0.0
+    };
+    println!(
+        "package-materialize-bench package={} registry_index={} tensor_index={} tensor=\"{}\" elements={} output_bytes={} scale_format={} scale_count={} group_size={} tensor_scale={:.9} backend={} device_index={} name=\"{}\" repeats={} mean_ms={:.6} min_ms={:.6} p50_ms={:.6} p95_ms={:.6} output_gib_per_s={:.6} verified=true",
+        path,
+        registry_index,
+        loaded.tensor_index,
+        loaded.tensor_name,
+        materialize.elements,
+        materialize.output_bytes,
+        materialize.scale_format,
+        materialize.scale_values.len(),
+        materialize.group_size,
+        materialize.tensor_scale,
+        info.backend,
+        device_index,
+        info.name,
+        repeats,
+        mean_ms,
+        min_ms,
+        p50_ms,
+        p95_ms,
+        output_gib_per_s
+    );
+    ExitCode::SUCCESS
+}
+
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!(
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
     );
     eprintln!("tensor selector: omitted or numeric index, exact tensor name, or unique substring");
+}
+
+#[derive(Debug)]
+struct MaterializeConfig {
+    scale_format: String,
+    scale_values: Vec<f32>,
+    group_size: usize,
+    tensor_scale: f32,
+    elements: usize,
+    output_bytes: usize,
+}
+
+fn materialize_config(loaded: &LoadedTensorBundle) -> Result<MaterializeConfig, String> {
+    let scale_format = loaded
+        .scale_format
+        .as_deref()
+        .ok_or_else(|| "selected tensor does not declare scale_format".to_string())?;
+    let scale_values = ullm_engine::aq::scale_values(scale_format)?;
+    let group_size = match loaded.group_size {
+        Some(value) if value > 0 => value,
+        Some(_) | None => {
+            return Err("selected tensor does not declare a valid group_size".to_string());
+        }
+    };
+    let tensor_scale = match loaded.tensor_scale {
+        Some(value) if value.is_finite() && value > 0.0 => value,
+        Some(_) | None => {
+            return Err("selected tensor does not declare a valid tensor_scale".to_string());
+        }
+    };
+    if loaded.index_encoding.as_deref() != Some("idx4_low_nibble_first") {
+        return Err("selected tensor uses unsupported index encoding".to_string());
+    }
+    if loaded.scale_encoding.as_deref() != Some("u8_scale_table_index") {
+        return Err("selected tensor uses unsupported scale encoding".to_string());
+    }
+    let elements = usize::try_from(loaded.elements)
+        .map_err(|_| "selected tensor has too many elements for this host".to_string())?;
+    let output_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "materialized output byte size overflows".to_string())?;
+    Ok(MaterializeConfig {
+        scale_format: scale_format.to_string(),
+        scale_values,
+        group_size,
+        tensor_scale,
+        elements,
+        output_bytes,
+    })
 }
 
 fn parse_optional_device_index(device_index: Option<String>) -> Result<u32, ExitCode> {
