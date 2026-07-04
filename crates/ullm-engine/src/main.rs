@@ -2005,7 +2005,7 @@ struct SyntheticSchedulerPagedDecodeRun {
     v_cache_max_abs_diff: f32,
 }
 
-struct SchedulerLayerDecodeRun {
+struct SchedulerLayerDecodeState {
     request_id: RequestId,
     prompt_tokens: usize,
     max_new_tokens: usize,
@@ -2016,8 +2016,26 @@ struct SchedulerLayerDecodeRun {
     v_sequence: Vec<f32>,
     output_gate_sequence: Option<Vec<f32>>,
     residual_sequence: Vec<f32>,
-    checks: SchedulerLayerDecodeSmokeChecks,
     decode_steps: usize,
+}
+
+struct SchedulerLayerDecodeRun {
+    state: SchedulerLayerDecodeState,
+    checks: SchedulerLayerDecodeSmokeChecks,
+}
+
+impl std::ops::Deref for SchedulerLayerDecodeRun {
+    type Target = SchedulerLayerDecodeState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for SchedulerLayerDecodeRun {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
 }
 
 struct SchedulerLayerDecodeSmokeChecks {
@@ -3360,18 +3378,20 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
             mlp_epsilon,
         )?;
         let mut run = SchedulerLayerDecodeRun {
-            request_id: request.id,
-            prompt_tokens: request.prompt_tokens,
-            max_new_tokens: request.max_new_tokens,
-            total_tokens,
-            block_table,
-            q_sequence,
-            k_sequence,
-            v_sequence,
-            output_gate_sequence: Some(gate_sequence),
-            residual_sequence,
+            state: SchedulerLayerDecodeState {
+                request_id: request.id,
+                prompt_tokens: request.prompt_tokens,
+                max_new_tokens: request.max_new_tokens,
+                total_tokens,
+                block_table,
+                q_sequence,
+                k_sequence,
+                v_sequence,
+                output_gate_sequence: Some(gate_sequence),
+                residual_sequence,
+                decode_steps: 0,
+            },
             checks: SchedulerLayerDecodeSmokeChecks::new(expected),
-            decode_steps: 0,
         };
         for timestep in 0..run.prompt_tokens {
             run_scheduler_layer_prefill_step(
@@ -10743,18 +10763,20 @@ fn package_self_attn_mlp_block_scheduler_smoke_impl(
             mlp_epsilon,
         )?;
         let mut run = SchedulerLayerDecodeRun {
-            request_id: request.id,
-            prompt_tokens: request.prompt_tokens,
-            max_new_tokens: request.max_new_tokens,
-            total_tokens,
-            block_table,
-            q_sequence: prepared.q_rope,
-            k_sequence: prepared.k_rope,
-            v_sequence: prepared.v_projected,
-            output_gate_sequence: prepared.q_gate,
-            residual_sequence: prepared.residual_sequence,
+            state: SchedulerLayerDecodeState {
+                request_id: request.id,
+                prompt_tokens: request.prompt_tokens,
+                max_new_tokens: request.max_new_tokens,
+                total_tokens,
+                block_table,
+                q_sequence: prepared.q_rope,
+                k_sequence: prepared.k_rope,
+                v_sequence: prepared.v_projected,
+                output_gate_sequence: prepared.q_gate,
+                residual_sequence: prepared.residual_sequence,
+                decode_steps: 0,
+            },
             checks: SchedulerLayerDecodeSmokeChecks::new(expected),
-            decode_steps: 0,
         };
         for timestep in 0..run.prompt_tokens {
             run_scheduler_layer_prefill_step(
@@ -11319,18 +11341,20 @@ impl PackageModelLoopLayerRunPlan {
                     request_plan.total_tokens[request_index],
                 )?;
                 runs.push(SchedulerLayerDecodeRun {
-                    request_id: request.id,
-                    prompt_tokens: request.prompt_tokens,
-                    max_new_tokens: request.max_new_tokens,
-                    total_tokens: request_plan.total_tokens[request_index],
-                    block_table: request_plan.block_tables[request_index].clone(),
-                    q_sequence: prepared.q_rope,
-                    k_sequence: prepared.k_rope,
-                    v_sequence: prepared.v_projected,
-                    output_gate_sequence: prepared.q_gate,
-                    residual_sequence: prepared.residual_sequence,
+                    state: SchedulerLayerDecodeState {
+                        request_id: request.id,
+                        prompt_tokens: request.prompt_tokens,
+                        max_new_tokens: request.max_new_tokens,
+                        total_tokens: request_plan.total_tokens[request_index],
+                        block_table: request_plan.block_tables[request_index].clone(),
+                        q_sequence: prepared.q_rope,
+                        k_sequence: prepared.k_rope,
+                        v_sequence: prepared.v_projected,
+                        output_gate_sequence: prepared.q_gate,
+                        residual_sequence: prepared.residual_sequence,
+                        decode_steps: 0,
+                    },
                     checks: SchedulerLayerDecodeSmokeChecks::new(expected),
-                    decode_steps: 0,
                 });
             }
             q_gate_elements_by_layer.push(q_gate_elements);

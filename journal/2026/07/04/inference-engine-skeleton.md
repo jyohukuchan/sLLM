@@ -1640,3 +1640,34 @@
 ### 次の行動
 
 - 次は `PackageModelLoopLayerRunPlan` 側の入力・進行状態を、実runner向け状態とsmoke期待値生成状態へさらに分けるか、またはcache verifyをsmoke-only checksの集計APIとして小さくする。
+
+## SchedulerLayerDecodeRun state/checks ラッパー化
+
+### 前回の要点
+
+- `PackageModelLoopExecutionPlan::execute` をrunner構築、prefill、decode、final ready確認、cache verifyへ分割し、model-loop smokeのcontrol-plane手順を見えやすくした。
+- 次の候補は、`SchedulerLayerDecodeRun` に残る入力・進行状態とsmoke期待値・diff状態の境界をさらに明確にすることだった。
+
+### 今回の変更点
+
+- `SchedulerLayerDecodeState` を追加し、request id、prompt/decode token数、total token数、block table、q/k/v/output gate/residual sequence、`decode_steps` をまとめた。
+- `SchedulerLayerDecodeRun` は `state: SchedulerLayerDecodeState` と `checks: SchedulerLayerDecodeSmokeChecks` を持つ薄いラッパーにした。
+- 既存の検証経路を大きく動かさないため、`SchedulerLayerDecodeRun` には一時的に `Deref/DerefMut` を実装し、既存のfield参照は保った。次の段階で明示的な `state` 参照へ寄せられる。
+- runtime scheduler layer smoke、package scheduler layer smoke、package model-loop smokeの3つの初期化箇所を `state + checks` に更新した。
+- `docs/words.txt` に `Qwen3 scheduler layer decode state` を追加した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo test -p ullm-engine decode_runner -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `package-self-attn-mlp-block-model-loop-smoke` with layers `3,7,11`, sequence len `3`, passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; all reported `decode_batch_ready_counts=[2, 1]`, `final_ready=0`, `decode_steps_by_layer=[[2, 1, 0], [2, 1, 0], [2, 1, 0]]`, `verified=true`。
+
+### 次の行動
+
+- 次は `Deref/DerefMut` に頼るfield参照を、実runner寄りの箇所から順に `run.state` / `run.checks` の明示参照へ置き換える。特に `run_scheduler_layer_stack_ready_batch` と `PackageModelLoopLayerRunPlan::stack_requests` は優先度が高い。
