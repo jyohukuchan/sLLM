@@ -269,6 +269,7 @@ fn main() -> ExitCode {
             env::args().nth(11),
             env::args().nth(12),
             env::args().nth(13),
+            env::args().nth(14),
         ),
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
@@ -11929,6 +11930,7 @@ fn package_golden_prefix_smoke(
     report_path: Option<String>,
     run_mode: Option<String>,
     row_scale_overrides_path: Option<String>,
+    input_dump_dir: Option<String>,
 ) -> ExitCode {
     let Some(path) = path else {
         eprintln!("package-golden-prefix-smoke requires a .ullm.d path");
@@ -12030,6 +12032,7 @@ fn package_golden_prefix_smoke(
         report_path.as_deref(),
         run_mode,
         row_scale_overrides.as_ref(),
+        input_dump_dir.as_deref(),
     ) {
         Ok(line) => {
             println!("{line}");
@@ -12057,6 +12060,7 @@ fn package_golden_prefix_smoke_impl(
     report_path: Option<&str>,
     run_mode: PackageGoldenPrefixRunMode,
     row_scale_overrides: Option<&PackageRowScaleOverrides>,
+    input_dump_dir: Option<&str>,
 ) -> Result<String, String> {
     let manifest_row_scale_override_count = list_tensor_payload_bundles(path)?
         .iter()
@@ -12165,6 +12169,17 @@ fn package_golden_prefix_smoke_impl(
             PackageGoldenPrefixRunMode::GoldenBeforeEachLayer => expected_before.clone(),
         };
         let layer_input_for_delta = layer_input.clone();
+        let input_dump_file = match input_dump_dir {
+            Some(dump_dir) => Some(write_package_prefix_input_dump(
+                dump_dir,
+                layer_index,
+                run_mode,
+                sequence_len,
+                hidden,
+                &layer_input_for_delta,
+            )?),
+            None => None,
+        };
 
         let layer_kind = package_decoder_layer_kind(path, layer_index)?;
         let (actual, details) = match layer_kind {
@@ -12591,6 +12606,9 @@ fn package_golden_prefix_smoke_impl(
             .collect::<Vec<_>>();
         let failure_class = package_golden_prefix_failure_class(&metrics);
         let mut details = details;
+        if let Some(input_dump_file) = input_dump_file.as_ref() {
+            insert_json_detail(&mut details, "input_dump_file", input_dump_file);
+        }
         insert_json_detail(
             &mut details,
             "manifest_row_scale_override_count",
@@ -12637,7 +12655,7 @@ fn package_golden_prefix_smoke_impl(
     }
 
     Ok(format!(
-        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} run_mode={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} row_scale_overrides={} manifest_row_scale_overrides={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
+        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} run_mode={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} row_scale_overrides={} manifest_row_scale_overrides={} input_dump_dir={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
         path,
         fixture_path,
         layer_start,
@@ -12658,6 +12676,7 @@ fn package_golden_prefix_smoke_impl(
             .map(|overrides| overrides.source_path.as_str())
             .unwrap_or("none"),
         manifest_row_scale_override_count,
+        input_dump_dir.unwrap_or("none"),
         info.backend,
         device_index,
         info.name,
@@ -13654,6 +13673,76 @@ fn write_jsonl_report(path: &str, entries: &[serde_json::Value]) -> Result<(), S
             .map_err(|err| format!("failed to write report {}: {err}", path.display()))?;
     }
     Ok(())
+}
+
+fn write_package_prefix_input_dump(
+    dump_dir: &str,
+    layer_index: usize,
+    run_mode: PackageGoldenPrefixRunMode,
+    sequence_len: usize,
+    hidden: usize,
+    values: &[f32],
+) -> Result<String, String> {
+    let expected_elements = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "prefix input dump element count overflows".to_string())?;
+    if values.len() != expected_elements {
+        return Err(format!(
+            "prefix input dump layer {layer_index} length mismatch: got {} expected {expected_elements}",
+            values.len()
+        ));
+    }
+
+    let dir = std::path::Path::new(dump_dir);
+    fs::create_dir_all(dir).map_err(|err| {
+        format!(
+            "failed to create input dump directory {}: {err}",
+            dir.display()
+        )
+    })?;
+    let file_name = format!("layer-{layer_index:04}-input.f32");
+    let path = dir.join(&file_name);
+    let mut file = File::create(&path)
+        .map_err(|err| format!("failed to create input dump {}: {err}", path.display()))?;
+    for chunk in values.chunks(4096) {
+        let mut bytes = Vec::with_capacity(chunk.len() * std::mem::size_of::<f32>());
+        for value in chunk {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        file.write_all(&bytes)
+            .map_err(|err| format!("failed to write input dump {}: {err}", path.display()))?;
+    }
+
+    let metadata_name = format!("layer-{layer_index:04}-input.json");
+    let metadata_path = dir.join(metadata_name);
+    let metadata = serde_json::json!({
+        "schema_version": "package-golden-prefix-input-dump-v0.1",
+        "layer_index": layer_index,
+        "run_mode": run_mode.as_str(),
+        "dtype": "float32",
+        "shape": [1, sequence_len, hidden],
+        "file": file_name,
+    });
+    let mut metadata_file = File::create(&metadata_path).map_err(|err| {
+        format!(
+            "failed to create input dump metadata {}: {err}",
+            metadata_path.display()
+        )
+    })?;
+    serde_json::to_writer_pretty(&mut metadata_file, &metadata).map_err(|err| {
+        format!(
+            "failed to write input dump metadata {}: {err}",
+            metadata_path.display()
+        )
+    })?;
+    metadata_file.write_all(b"\n").map_err(|err| {
+        format!(
+            "failed to finish input dump metadata {}: {err}",
+            metadata_path.display()
+        )
+    })?;
+
+    Ok(path.to_string_lossy().into_owned())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -22272,7 +22361,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");

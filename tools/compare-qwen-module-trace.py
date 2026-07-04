@@ -297,6 +297,8 @@ def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[st
         }
 
         attention_row_dot = row_dot_by_token(fullref, "attention_out_proj", token)
+        if attention_row_dot is None:
+            attention_row_dot = row_dot_by_token(fullref, "self_attention_o_proj", token)
         if attention_row_dot is not None:
             comparison.update(
                 {

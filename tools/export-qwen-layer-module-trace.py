@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional uLLM package directory for AQ4 row-dot comparison.",
     )
+    parser.add_argument(
+        "--input-override-dir",
+        type=Path,
+        help="Optional directory containing layer-XXXX-input.f32 files to use instead of fixture before tensors.",
+    )
     parser.add_argument("--layers", required=True, help="Comma-separated layer indices.")
     parser.add_argument("--hidden-index", type=int, default=3994)
     parser.add_argument("--device", default="cpu")
@@ -111,6 +116,31 @@ def read_f32_tensor(path: Path, shape: list[int]) -> np.ndarray:
     if data.size != expected:
         raise ValueError(f"{path} has {data.size} values, expected {expected}")
     return data.reshape(shape)
+
+
+def read_layer_input_tensor(
+    fixture: Path,
+    entry: dict[str, Any],
+    layer_index: int,
+    input_override_dir: Path | None,
+) -> tuple[np.ndarray, str]:
+    before_shape = [int(value) for value in entry["before_shape"]]
+    if input_override_dir is not None:
+        override_path = input_override_dir / f"layer-{layer_index:04d}-input.f32"
+        if override_path.exists():
+            metadata_path = input_override_dir / f"layer-{layer_index:04d}-input.json"
+            if metadata_path.exists():
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if int(metadata.get("layer_index", -1)) != layer_index:
+                    raise ValueError(f"{metadata_path} layer_index does not match {layer_index}")
+                if metadata.get("dtype") != "float32":
+                    raise ValueError(f"{metadata_path} dtype is {metadata.get('dtype')}, expected float32")
+                metadata_shape = [int(value) for value in metadata.get("shape", [])]
+                if metadata_shape != before_shape:
+                    raise ValueError(f"{metadata_path} shape {metadata_shape} does not match fixture {before_shape}")
+            return read_f32_tensor(override_path, before_shape), str(override_path)
+    fixture_path = fixture / str(entry["before_file"])
+    return read_f32_tensor(fixture_path, before_shape), str(fixture_path)
 
 
 def build_weight_file_map(model_dir: Path) -> dict[str, Path]:
@@ -788,6 +818,7 @@ def run_linear_attention_layer_trace(
     weight_files: dict[str, Path],
     package_dir: Path | None,
     package_tensors: dict[str, dict[str, Any]] | None,
+    input_override_dir: Path | None,
     layer: torch.nn.Module,
     layer_index: int,
     hidden_index: int,
@@ -799,9 +830,8 @@ def run_linear_attention_layer_trace(
         raise ValueError(f"layer {layer_index} is {layer_type}; this trace currently supports linear_attention only")
 
     entry = fixture_layer_entry(metadata, layer_index)
-    before_shape = [int(value) for value in entry["before_shape"]]
     after_shape = [int(value) for value in entry["after_shape"]]
-    before = read_f32_tensor(fixture / str(entry["before_file"]), before_shape)
+    before, input_source = read_layer_input_tensor(fixture, entry, layer_index, input_override_dir)
     expected_after = read_f32_tensor(fixture / str(entry["after_file"]), after_shape)
     if before.ndim != 3:
         raise ValueError(f"expected [batch,seq,hidden] fixture shape, got {before.shape}")
@@ -1112,6 +1142,8 @@ def run_linear_attention_layer_trace(
         "command": "export-qwen-layer-module-trace",
         "model_dir": str(model_dir),
         "fixture": str(fixture),
+        "input_source": input_source,
+        "input_override_dir": None if input_override_dir is None else str(input_override_dir),
         "package_dir": None if package_dir is None else str(package_dir),
         "layer_index": layer_index,
         "layer_type": layer_type,
@@ -1138,6 +1170,7 @@ def run_self_attention_layer_trace(
     weight_files: dict[str, Path],
     package_dir: Path | None,
     package_tensors: dict[str, dict[str, Any]] | None,
+    input_override_dir: Path | None,
     layer: torch.nn.Module,
     layer_index: int,
     hidden_index: int,
@@ -1152,9 +1185,8 @@ def run_self_attention_layer_trace(
         raise ValueError("full_attention trace requires a model rotary embedding module")
 
     entry = fixture_layer_entry(metadata, layer_index)
-    before_shape = [int(value) for value in entry["before_shape"]]
     after_shape = [int(value) for value in entry["after_shape"]]
-    before = read_f32_tensor(fixture / str(entry["before_file"]), before_shape)
+    before, input_source = read_layer_input_tensor(fixture, entry, layer_index, input_override_dir)
     expected_after = read_f32_tensor(fixture / str(entry["after_file"]), after_shape)
     if before.ndim != 3:
         raise ValueError(f"expected [batch,seq,hidden] fixture shape, got {before.shape}")
@@ -1417,6 +1449,8 @@ def run_self_attention_layer_trace(
         "command": "export-qwen-layer-module-trace",
         "model_dir": str(model_dir),
         "fixture": str(fixture),
+        "input_source": input_source,
+        "input_override_dir": None if input_override_dir is None else str(input_override_dir),
         "package_dir": None if package_dir is None else str(package_dir),
         "layer_index": layer_index,
         "layer_type": layer_type,
@@ -1443,6 +1477,7 @@ def run_layer_trace(
     weight_files: dict[str, Path],
     package_dir: Path | None,
     package_tensors: dict[str, dict[str, Any]] | None,
+    input_override_dir: Path | None,
     layer: torch.nn.Module,
     layer_index: int,
     hidden_index: int,
@@ -1459,6 +1494,7 @@ def run_layer_trace(
             weight_files,
             package_dir,
             package_tensors,
+            input_override_dir,
             layer,
             layer_index,
             hidden_index,
@@ -1473,6 +1509,7 @@ def run_layer_trace(
             weight_files,
             package_dir,
             package_tensors,
+            input_override_dir,
             layer,
             layer_index,
             hidden_index,
@@ -1530,6 +1567,7 @@ def main() -> int:
     model_dir = args.model_dir.expanduser().resolve()
     fixture = args.fixture.expanduser().resolve()
     package_dir = args.package_dir.expanduser().resolve() if args.package_dir else None
+    input_override_dir = args.input_override_dir.expanduser().resolve() if args.input_override_dir else None
     layers = parse_layers(args.layers)
     device = torch.device(args.device)
     dtype = torch_dtype(args.dtype)
@@ -1561,6 +1599,7 @@ def main() -> int:
                 weight_files,
                 package_dir,
                 package_tensors,
+                input_override_dir,
                 model_layers[layer_index],
                 layer_index,
                 args.hidden_index,
