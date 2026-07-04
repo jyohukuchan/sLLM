@@ -150,6 +150,16 @@ fn main() -> ExitCode {
             env::args().nth(8),
             env::args().nth(9),
         ),
+        Some("package-self-attn-mlp-block-smoke") => package_self_attn_mlp_block_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+        ),
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -6168,6 +6178,921 @@ fn package_self_attn_block_smoke(
         format_f32_preview(&block_output[..8.min(block_output.len())]),
     );
     ExitCode::SUCCESS
+}
+
+struct SelfAttnBlockSmokeRun {
+    residual_sequence: Vec<f32>,
+    attention_output: Vec<f32>,
+    attention_projection_input: Vec<f32>,
+    attn_projected: Vec<f32>,
+    block_output: Vec<f32>,
+    hidden: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    q_projection_layout: &'static str,
+    q_gate_elements: usize,
+    output_gate_layout: &'static str,
+    q_norm_max_abs_diff: f32,
+    k_norm_max_abs_diff: f32,
+    q_rope_max_abs_diff: f32,
+    k_rope_max_abs_diff: f32,
+    attention_max_abs_diff: f32,
+    output_gate_max_abs_diff: f32,
+    o_proj_max_abs_diff: f32,
+    block_max_abs_diff: f32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_self_attn_block_sequence_smoke(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    sequence_len: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    position_offset: usize,
+    q_tensor: &str,
+    k_tensor: &str,
+    v_tensor: &str,
+    o_tensor: &str,
+    q_norm: &PassthroughF32Data,
+    k_norm: &PassthroughF32Data,
+    label: &str,
+) -> Result<SelfAttnBlockSmokeRun, String> {
+    let head_dim = q_norm.values.len();
+    if head_dim == 0 || k_norm.values.len() != head_dim {
+        return Err(format!(
+            "self-attn q/k norm head dims must be nonzero and equal: q_head_dim={} k_head_dim={}",
+            head_dim,
+            k_norm.values.len()
+        ));
+    }
+
+    let (q_rows, q_cols, k_rows, v_rows, o_rows, o_cols, q_matrix, k_matrix, v_matrix, o_matrix) = {
+        let mut registry = WeightRegistry::new();
+        let (q_rows, q_cols, q_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            q_tensor,
+            chunk_bytes,
+        )?;
+        let (k_rows, k_cols, k_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            k_tensor,
+            chunk_bytes,
+        )?;
+        let (v_rows, v_cols, v_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            v_tensor,
+            chunk_bytes,
+        )?;
+        let (o_rows, o_cols, o_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            o_tensor,
+            chunk_bytes,
+        )?;
+        if q_cols != k_cols || q_cols != v_cols {
+            return Err(format!(
+                "self-attn q/k/v projection hidden sizes differ: q_cols={q_cols}, k_cols={k_cols}, v_cols={v_cols}"
+            ));
+        }
+        (
+            q_rows, q_cols, k_rows, v_rows, o_rows, o_cols, q_matrix, k_matrix, v_matrix, o_matrix,
+        )
+    };
+
+    if k_rows % head_dim != 0 {
+        return Err(format!(
+            "k rows must be a multiple of head_dim: k_rows={k_rows}, head_dim={head_dim}"
+        ));
+    }
+    let kv_heads = k_rows / head_dim;
+    if kv_heads == 0 {
+        return Err("kv_heads must be greater than zero".to_string());
+    }
+    if v_rows % kv_heads != 0 {
+        return Err(format!(
+            "v rows must be a multiple of kv_heads: v_rows={v_rows}, kv_heads={kv_heads}"
+        ));
+    }
+    let value_dim = v_rows / kv_heads;
+
+    let hidden_bytes = q_cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "hidden input byte size overflows".to_string())?;
+
+    let base_input = deterministic_f32_vector(q_cols);
+    let mut residual_sequence = Vec::with_capacity(sequence_len * q_cols);
+    let mut input_buffer = context
+        .alloc_buffer(hidden_bytes)
+        .map_err(|err| format!("failed to allocate {label} input buffer: {err}"))?;
+    let mut q_projected = Vec::with_capacity(sequence_len * q_rows);
+    let mut k_projected = Vec::with_capacity(sequence_len * k_rows);
+    let mut v_projected = Vec::with_capacity(sequence_len * v_rows);
+    for timestep in 0..sequence_len {
+        let step_input = linear_attn_step_input(&base_input, timestep);
+        residual_sequence.extend_from_slice(&step_input);
+        let step_input_bytes = encode_f32_to_bytes(&step_input);
+        input_buffer
+            .copy_from_host(0, &step_input_bytes, Some(stream))
+            .map_err(|err| format!("failed to copy {label} timestep {timestep} input: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize after {label} timestep {timestep} input copy: {err}")
+        })?;
+        let q_step = runtime_matvec_to_host_f32(
+            context,
+            stream,
+            &q_matrix,
+            &input_buffer,
+            q_rows,
+            q_cols,
+            &format!("{label} q projection"),
+        )?;
+        let k_step = runtime_matvec_to_host_f32(
+            context,
+            stream,
+            &k_matrix,
+            &input_buffer,
+            k_rows,
+            q_cols,
+            &format!("{label} k projection"),
+        )?;
+        let v_step = runtime_matvec_to_host_f32(
+            context,
+            stream,
+            &v_matrix,
+            &input_buffer,
+            v_rows,
+            q_cols,
+            &format!("{label} v projection"),
+        )?;
+        q_projected.extend(q_step);
+        k_projected.extend(k_step);
+        v_projected.extend(v_step);
+    }
+
+    let q_projection_split =
+        split_self_attn_q_projection(&q_projected, sequence_len, q_rows, q_cols, head_dim)?;
+    let q_heads = q_projection_split.q_heads;
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err(format!(
+            "q_heads must be a multiple of kv_heads: q_heads={q_heads}, kv_heads={kv_heads}"
+        ));
+    }
+    if o_cols != q_heads * value_dim || o_rows != q_cols {
+        return Err(format!(
+            "o projection shape mismatch: o_rows={o_rows}, o_cols={o_cols}, hidden={q_cols}, attention_width={}",
+            q_heads * value_dim
+        ));
+    }
+    let q_projection_layout = q_projection_split.layout;
+    let q_gate = q_projection_split.gate;
+    let q_gate_elements = q_gate.as_ref().map_or(0, Vec::len);
+    let q_projected = q_projection_split.query;
+
+    let epsilon = 1e-5_f32;
+    let (q_normed, q_norm_max_abs_diff) = runtime_headwise_rmsnorm_verify(
+        context,
+        stream,
+        &q_projected,
+        &q_norm.values,
+        epsilon,
+        &format!("{label} q_norm"),
+    )?;
+    let (k_normed, k_norm_max_abs_diff) = runtime_headwise_rmsnorm_verify(
+        context,
+        stream,
+        &k_projected,
+        &k_norm.values,
+        epsilon,
+        &format!("{label} k_norm"),
+    )?;
+    let (q_rope, q_rope_max_abs_diff) = runtime_rope_verify(
+        context,
+        stream,
+        &q_normed,
+        sequence_len,
+        q_heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        &format!("{label} q_rope"),
+    )?;
+    let (k_rope, k_rope_max_abs_diff) = runtime_rope_verify(
+        context,
+        stream,
+        &k_normed,
+        sequence_len,
+        kv_heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        &format!("{label} k_rope"),
+    )?;
+    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let (attention_output, attention_max_abs_diff) = runtime_causal_attn_verify(
+        context,
+        stream,
+        &q_rope,
+        &k_rope,
+        &v_projected,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        &format!("{label} attention"),
+    )?;
+
+    let (attention_projection_input, output_gate_layout, output_gate_max_abs_diff) = match q_gate {
+        Some(gate) => {
+            let expected_gated_attention = runtime_host_sigmoid_mul_f32(&gate, &attention_output);
+            if expected_gated_attention.is_empty() {
+                return Err(format!(
+                    "failed to apply Qwen3.5 self-attn output gate: gate_elements={} attention_elements={}",
+                    gate.len(),
+                    attention_output.len()
+                ));
+            }
+            let gate_bytes = encode_f32_to_bytes(&gate);
+            let attention_bytes = encode_f32_to_bytes(&attention_output);
+            let output_gate_bytes_len = attention_bytes.len();
+            let mut gate_buffer = context
+                .alloc_buffer(gate_bytes.len())
+                .map_err(|err| format!("failed to allocate {label} output gate buffer: {err}"))?;
+            let mut attention_buffer =
+                context.alloc_buffer(output_gate_bytes_len).map_err(|err| {
+                    format!("failed to allocate {label} output gate input buffer: {err}")
+                })?;
+            let mut gated_attention_buffer =
+                context.alloc_buffer(output_gate_bytes_len).map_err(|err| {
+                    format!("failed to allocate {label} gated attention buffer: {err}")
+                })?;
+            gate_buffer
+                .copy_from_host(0, &gate_bytes, Some(stream))
+                .map_err(|err| format!("failed to copy {label} output gate: {err}"))?;
+            attention_buffer
+                .copy_from_host(0, &attention_bytes, Some(stream))
+                .map_err(|err| {
+                    format!("failed to copy {label} attention into gate input: {err}")
+                })?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize after {label} output gate input copy: {err}")
+            })?;
+            ullm_runtime_sys::sigmoid_mul_f32(
+                &gate_buffer,
+                &attention_buffer,
+                attention_output.len(),
+                &mut gated_attention_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run {label} output gate sigmoid_mul_f32: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize after {label} output gate sigmoid_mul: {err}")
+            })?;
+            let mut gated_attention_raw = vec![0_u8; output_gate_bytes_len];
+            gated_attention_buffer
+                .copy_to_host(0, &mut gated_attention_raw, Some(stream))
+                .map_err(|err| format!("failed to copy {label} gated attention output: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize after {label} gated attention copy: {err}")
+            })?;
+            let gated_attention = decode_f32_le_values(&gated_attention_raw);
+            let output_gate_max_abs_diff = verify_f32_close(
+                &format!("{label} output gate"),
+                &gated_attention,
+                &expected_gated_attention,
+                1e-5,
+                1e-6,
+            )?;
+            (gated_attention, "runtime-sigmoid", output_gate_max_abs_diff)
+        }
+        None => (attention_output.clone(), "none", 0.0_f32),
+    };
+
+    let o_matrix_bytes = o_rows
+        .checked_mul(o_cols)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "o projection matrix byte size overflows".to_string())?;
+    let mut o_matrix_raw = vec![0_u8; o_matrix_bytes];
+    o_matrix
+        .copy_to_host(0, &mut o_matrix_raw, Some(stream))
+        .map_err(|err| format!("failed to copy materialized o projection to host: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after o projection host copy: {err}"))?;
+    let o_matrix_host = decode_f32_le_values(&o_matrix_raw);
+    let (attn_projected, o_proj_max_abs_diff) = runtime_matvec_sequence_to_host_f32(
+        context,
+        stream,
+        &o_matrix,
+        &o_matrix_host,
+        &attention_projection_input,
+        sequence_len,
+        o_rows,
+        o_cols,
+        &format!("{label} o projection"),
+    )?;
+
+    let residual_bytes = encode_f32_to_bytes(&residual_sequence);
+    let attn_projected_bytes = encode_f32_to_bytes(&attn_projected);
+    let block_bytes_len = residual_bytes.len();
+    let mut residual_buffer = context
+        .alloc_buffer(block_bytes_len)
+        .map_err(|err| format!("failed to allocate {label} residual buffer: {err}"))?;
+    let mut attn_projected_buffer = context
+        .alloc_buffer(block_bytes_len)
+        .map_err(|err| format!("failed to allocate {label} projected buffer: {err}"))?;
+    let mut block_buffer = context
+        .alloc_buffer(block_bytes_len)
+        .map_err(|err| format!("failed to allocate {label} block output buffer: {err}"))?;
+    residual_buffer
+        .copy_from_host(0, &residual_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} residual sequence: {err}"))?;
+    attn_projected_buffer
+        .copy_from_host(0, &attn_projected_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} attention projection: {err}"))?;
+    ullm_runtime_sys::add_f32(
+        &residual_buffer,
+        &attn_projected_buffer,
+        residual_sequence.len(),
+        &mut block_buffer,
+        Some(stream),
+    )
+    .map_err(|err| format!("failed to run {label} residual add: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} residual add: {err}"))?;
+    let mut block_raw = vec![0_u8; block_bytes_len];
+    block_buffer
+        .copy_to_host(0, &mut block_raw, Some(stream))
+        .map_err(|err| format!("failed to copy {label} block output: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} block output copy: {err}"))?;
+    let block_output = decode_f32_le_values(&block_raw);
+    let expected_block_output = runtime_host_add_f32(&residual_sequence, &attn_projected);
+    let block_max_abs_diff = verify_f32_close(
+        &format!("{label} residual add"),
+        &block_output,
+        &expected_block_output,
+        1e-5,
+        1e-6,
+    )?;
+
+    Ok(SelfAttnBlockSmokeRun {
+        residual_sequence,
+        attention_output,
+        attention_projection_input,
+        attn_projected,
+        block_output,
+        hidden: q_cols,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_projection_layout,
+        q_gate_elements,
+        output_gate_layout,
+        q_norm_max_abs_diff,
+        k_norm_max_abs_diff,
+        q_rope_max_abs_diff,
+        k_rope_max_abs_diff,
+        attention_max_abs_diff,
+        output_gate_max_abs_diff,
+        o_proj_max_abs_diff,
+        block_max_abs_diff,
+    })
+}
+
+fn package_self_attn_mlp_block_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-self-attn-mlp-block-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 3, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 2, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 3, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+    let post_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+
+    let q_norm = match read_named_passthrough_f32(&path, &q_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let k_norm = match read_named_passthrough_f32(&path, &k_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let post_norm = match read_named_passthrough_f32(&path, &post_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let head_dim = q_norm.values.len();
+    if head_dim == 0 || k_norm.values.len() != head_dim {
+        eprintln!(
+            "self-attn q/k norm head dims must be nonzero and equal: q_head_dim={} k_head_dim={}",
+            head_dim,
+            k_norm.values.len()
+        );
+        return ExitCode::from(1);
+    }
+    let default_rotary_dim = {
+        let candidate = if head_dim >= 4 {
+            head_dim / 4
+        } else {
+            head_dim
+        };
+        candidate - (candidate % 2)
+    };
+    if default_rotary_dim == 0 {
+        eprintln!("default rotary_dim is zero for head_dim={head_dim}");
+        return ExitCode::from(1);
+    }
+    let rotary_dim = match parse_optional_usize(rotary_dim, default_rotary_dim, "rotary dim") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        eprintln!(
+            "rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim}, head_dim={head_dim}"
+        );
+        return ExitCode::from(2);
+    }
+
+    let result = package_self_attn_mlp_block_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        sequence_len,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        q_norm,
+        k_norm,
+        post_norm,
+    );
+
+    match result {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_self_attn_mlp_block_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    sequence_len: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    position_offset: usize,
+    q_norm: PassthroughF32Data,
+    k_norm: PassthroughF32Data,
+    post_norm: PassthroughF32Data,
+) -> Result<String, String> {
+    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
+    let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
+    let o_tensor = format!("model.language_model.layers.{layer_index}.self_attn.o_proj.weight");
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+    let post_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let self_attn = run_self_attn_block_sequence_smoke(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        sequence_len,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        &q_tensor,
+        &k_tensor,
+        &v_tensor,
+        &o_tensor,
+        &q_norm,
+        &k_norm,
+        "package-self-attn-mlp-block-smoke",
+    )?;
+
+    let hidden = self_attn.hidden;
+    if post_norm.values.len() != hidden {
+        return Err(format!(
+            "post RMSNorm length must match hidden={hidden}: len={}",
+            post_norm.values.len()
+        ));
+    }
+    let hidden_bytes = hidden
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "hidden byte size overflows".to_string())?;
+    let hidden_sequence_bytes = hidden_bytes
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "hidden sequence byte size overflows".to_string())?;
+    let mlp_epsilon = 1e-5_f32;
+    let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm.values);
+    let attention_block_bytes = encode_f32_to_bytes(&self_attn.block_output);
+
+    let mut post_normed_expected = Vec::with_capacity(sequence_len * hidden);
+    for timestep in 0..sequence_len {
+        let start = timestep * hidden;
+        let end = start + hidden;
+        let expected = runtime_host_rmsnorm_f32(
+            &self_attn.block_output[start..end],
+            &post_norm.values,
+            mlp_epsilon,
+        );
+        post_normed_expected.extend_from_slice(&expected);
+    }
+
+    let mut attn_block_step_buffer = context
+        .alloc_buffer(hidden_bytes)
+        .map_err(|err| format!("failed to allocate attention block step buffer: {err}"))?;
+    let mut post_norm_weight_buffer = context
+        .alloc_buffer(post_norm_weight_bytes.len())
+        .map_err(|err| format!("failed to allocate post RMSNorm weight buffer: {err}"))?;
+    let mut post_normed_buffer = context
+        .alloc_buffer(hidden_bytes)
+        .map_err(|err| format!("failed to allocate post RMSNorm output buffer: {err}"))?;
+    post_norm_weight_buffer
+        .copy_from_host(0, &post_norm_weight_bytes, Some(&mut stream))
+        .map_err(|err| format!("failed to copy post RMSNorm weight into runtime buffer: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after post RMSNorm weight copy: {err}"))?;
+
+    let mut post_normed_bytes = vec![0_u8; hidden_sequence_bytes];
+    for timestep in 0..sequence_len {
+        let byte_start = timestep * hidden_bytes;
+        let byte_end = byte_start + hidden_bytes;
+        attn_block_step_buffer
+            .copy_from_host(
+                0,
+                &attention_block_bytes[byte_start..byte_end],
+                Some(&mut stream),
+            )
+            .map_err(|err| {
+                format!("failed to copy attention block timestep {timestep} for post norm: {err}")
+            })?;
+        ullm_runtime_sys::rmsnorm_f32(
+            &attn_block_step_buffer,
+            &post_norm_weight_buffer,
+            hidden,
+            mlp_epsilon,
+            &mut post_normed_buffer,
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to run post RMSNorm timestep {timestep}: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize after post RMSNorm timestep {timestep}: {err}")
+        })?;
+        post_normed_buffer
+            .copy_to_host(
+                0,
+                &mut post_normed_bytes[byte_start..byte_end],
+                Some(&mut stream),
+            )
+            .map_err(|err| {
+                format!("failed to copy post RMSNorm timestep {timestep} to host: {err}")
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize after post RMSNorm host copy {timestep}: {err}")
+        })?;
+    }
+    let post_normed = decode_f32_le_values(&post_normed_bytes);
+    let post_norm_max_abs_diff = verify_f32_close(
+        "package-self-attn-mlp-block-smoke post RMSNorm",
+        &post_normed,
+        &post_normed_expected,
+        1e-4,
+        1e-5,
+    )?;
+
+    let (mlp_output, layer_output, layer_block_max_abs_diff) = {
+        let mut registry = WeightRegistry::new();
+        let (gate_rows, gate_cols, gate_matrix) = materialize_selected_aq4_matrix(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            path,
+            &gate_tensor,
+            chunk_bytes,
+        )?;
+        let (up_rows, up_cols, up_matrix) = materialize_selected_aq4_matrix(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            path,
+            &up_tensor,
+            chunk_bytes,
+        )?;
+        let (down_rows, down_cols, down_matrix) = materialize_selected_aq4_matrix(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            path,
+            &down_tensor,
+            chunk_bytes,
+        )?;
+        if gate_rows != up_rows || gate_cols != up_cols || gate_cols != hidden {
+            return Err(format!(
+                "MLP gate/up shape mismatch: gate=[{gate_rows},{gate_cols}] up=[{up_rows},{up_cols}] hidden={hidden}"
+            ));
+        }
+        if down_rows != hidden || down_cols != gate_rows {
+            return Err(format!(
+                "MLP down shape mismatch: expected [{hidden},{gate_rows}], got [{down_rows},{down_cols}]"
+            ));
+        }
+        let intermediate = gate_rows;
+        let intermediate_bytes = intermediate
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "MLP intermediate byte size overflows".to_string())?;
+        let mut post_normed_step_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate post normed step buffer: {err}"))?;
+        let mut gate_buffer = context
+            .alloc_buffer(intermediate_bytes)
+            .map_err(|err| format!("failed to allocate MLP gate buffer: {err}"))?;
+        let mut up_buffer = context
+            .alloc_buffer(intermediate_bytes)
+            .map_err(|err| format!("failed to allocate MLP up buffer: {err}"))?;
+        let mut mlp_activated_buffer = context
+            .alloc_buffer(intermediate_bytes)
+            .map_err(|err| format!("failed to allocate MLP activated buffer: {err}"))?;
+        let mut mlp_output_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate MLP output buffer: {err}"))?;
+        let mut layer_output_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate layer output buffer: {err}"))?;
+        let mut mlp_output_bytes = vec![0_u8; hidden_sequence_bytes];
+        let mut layer_output_bytes = vec![0_u8; hidden_sequence_bytes];
+        for timestep in 0..sequence_len {
+            let byte_start = timestep * hidden_bytes;
+            let byte_end = byte_start + hidden_bytes;
+            post_normed_step_buffer
+                .copy_from_host(
+                    0,
+                    &post_normed_bytes[byte_start..byte_end],
+                    Some(&mut stream),
+                )
+                .map_err(|err| format!("failed to copy post normed timestep {timestep}: {err}"))?;
+            ullm_runtime_sys::matvec_f32(
+                &gate_matrix,
+                &post_normed_step_buffer,
+                gate_rows,
+                gate_cols,
+                &mut gate_buffer,
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to run MLP gate matvec timestep {timestep}: {err}"))?;
+            ullm_runtime_sys::matvec_f32(
+                &up_matrix,
+                &post_normed_step_buffer,
+                up_rows,
+                up_cols,
+                &mut up_buffer,
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to run MLP up matvec timestep {timestep}: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize after MLP gate/up timestep {timestep}: {err}")
+            })?;
+            ullm_runtime_sys::silu_mul_f32(
+                &gate_buffer,
+                &up_buffer,
+                intermediate,
+                &mut mlp_activated_buffer,
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to run MLP SiLU-mul timestep {timestep}: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize after MLP SiLU-mul timestep {timestep}: {err}")
+            })?;
+            ullm_runtime_sys::matvec_f32(
+                &down_matrix,
+                &mlp_activated_buffer,
+                down_rows,
+                down_cols,
+                &mut mlp_output_buffer,
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to run MLP down matvec timestep {timestep}: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize after MLP down timestep {timestep}: {err}")
+            })?;
+            mlp_output_buffer
+                .copy_to_host(
+                    0,
+                    &mut mlp_output_bytes[byte_start..byte_end],
+                    Some(&mut stream),
+                )
+                .map_err(|err| format!("failed to copy MLP output timestep {timestep}: {err}"))?;
+            attn_block_step_buffer
+                .copy_from_host(
+                    0,
+                    &attention_block_bytes[byte_start..byte_end],
+                    Some(&mut stream),
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to copy attention block timestep {timestep} for MLP residual: {err}"
+                    )
+                })?;
+            ullm_runtime_sys::add_f32(
+                &attn_block_step_buffer,
+                &mlp_output_buffer,
+                hidden,
+                &mut layer_output_buffer,
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to run MLP residual add timestep {timestep}: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize after MLP residual timestep {timestep}: {err}")
+            })?;
+            layer_output_buffer
+                .copy_to_host(
+                    0,
+                    &mut layer_output_bytes[byte_start..byte_end],
+                    Some(&mut stream),
+                )
+                .map_err(|err| format!("failed to copy layer output timestep {timestep}: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize after layer output copy timestep {timestep}: {err}")
+            })?;
+        }
+        let mlp_output = decode_f32_le_values(&mlp_output_bytes);
+        let layer_output = decode_f32_le_values(&layer_output_bytes);
+        let expected_layer_output = runtime_host_add_f32(&self_attn.block_output, &mlp_output);
+        let layer_block_max_abs_diff = verify_f32_close(
+            "package-self-attn-mlp-block-smoke layer residual",
+            &layer_output,
+            &expected_layer_output,
+            1e-5,
+            1e-6,
+        )?;
+        (mlp_output, layer_output, layer_block_max_abs_diff)
+    };
+
+    Ok(format!(
+        "package-self-attn-mlp-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} sequence_len={} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} q_norm_dtype={} k_norm_dtype={} post_norm_dtype={} backend={} device_index={} name=\"{}\" residual_preview={} attention_preview={} gated_attention_preview={} projected_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} q_norm_max_abs_diff={:.9} k_norm_max_abs_diff={:.9} q_rope_max_abs_diff={:.9} k_rope_max_abs_diff={:.9} attention_max_abs_diff={:.9} output_gate_max_abs_diff={:.9} o_proj_max_abs_diff={:.9} block_max_abs_diff={:.9} post_norm_max_abs_diff={:.9} layer_block_max_abs_diff={:.9} verified=true",
+        path,
+        layer_index,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        o_tensor,
+        q_norm_tensor,
+        k_norm_tensor,
+        post_norm_tensor,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        hidden,
+        sequence_len,
+        self_attn.q_projection_layout,
+        self_attn.q_gate_elements,
+        self_attn.output_gate_layout,
+        self_attn.q_heads,
+        self_attn.kv_heads,
+        self_attn.head_dim,
+        self_attn.value_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        self_attn.softmax_scale,
+        q_norm.dtype,
+        k_norm.dtype,
+        post_norm.dtype,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(
+            &self_attn.residual_sequence[..8.min(self_attn.residual_sequence.len())]
+        ),
+        format_f32_preview(&self_attn.attention_output[..8.min(self_attn.attention_output.len())]),
+        format_f32_preview(
+            &self_attn.attention_projection_input
+                [..8.min(self_attn.attention_projection_input.len())],
+        ),
+        format_f32_preview(&self_attn.attn_projected[..8.min(self_attn.attn_projected.len())]),
+        format_f32_preview(&self_attn.block_output[..8.min(self_attn.block_output.len())]),
+        format_f32_preview(&post_normed[..8.min(post_normed.len())]),
+        format_f32_preview(&mlp_output[..8.min(mlp_output.len())]),
+        format_f32_preview(&layer_output[..8.min(layer_output.len())]),
+        self_attn.q_norm_max_abs_diff,
+        self_attn.k_norm_max_abs_diff,
+        self_attn.q_rope_max_abs_diff,
+        self_attn.k_rope_max_abs_diff,
+        self_attn.attention_max_abs_diff,
+        self_attn.output_gate_max_abs_diff,
+        self_attn.o_proj_max_abs_diff,
+        self_attn.block_max_abs_diff,
+        post_norm_max_abs_diff,
+        layer_block_max_abs_diff,
+    ))
 }
 
 fn package_linear_attn_aux_smoke(
@@ -13661,7 +14586,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
