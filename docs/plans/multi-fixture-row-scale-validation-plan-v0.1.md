@@ -70,6 +70,9 @@ Implemented:
   - Generated `benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-multi-fixture-summary.md`
 - `tools/extract-qwen-row-scale-candidates.py`
   - Generated candidate, manifest-schema, smoke-schema, and markdown outputs from available v0.10 traces.
+- `tools/run-qwen-prefix-smoke-matrix.py`
+  - Runs fixture/condition matrices sequentially to keep memory bounded.
+  - Dry-run verified with two fixtures and baseline/layer6 conditions.
 - `tools/evaluate-qwen-prefix-candidate-gates.py`
   - Generated `benchmarks/results/2026-07-05/engine/qwen-prefix-candidate-gates.json`
   - Generated `benchmarks/results/2026-07-05/engine/qwen-prefix-candidate-gates.md`
@@ -87,6 +90,7 @@ Interpretation: layer6 hidden3994 remains a real local compensation candidate, b
 
 - `tools/summarize-qwen-prefix-smokes.py`
 - `tools/extract-qwen-row-scale-candidates.py`
+- `tools/run-qwen-prefix-smoke-matrix.py`
 - `tools/evaluate-qwen-prefix-candidate-gates.py`
 - `benchmarks/results/2026-07-05/engine/qwen-row-scale-multi-fixture-summary.md`
 - Updated manifest row-scale candidate JSON files.
