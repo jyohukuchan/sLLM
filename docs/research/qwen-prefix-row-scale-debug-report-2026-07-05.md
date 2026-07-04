@@ -37,12 +37,14 @@ Gate settings:
 | --- | --- | ---: | ---: | ---: | --- |
 | `layer6` | reject | 3 | 0.0081653595 | 0.00455665588 | tokens201 regression exceeds `0.001` |
 | `combined` | needs_more_fixtures | 1 | 0.0343608856 | 0 | only one paired fixture |
+| `extracted` | reject | 3 | -0.0312900543 | 0.0727806091 | tokens1 and tokens201 regress |
 
 Interpretation:
 
 - Layer6 hidden3994 row-scale is a real local compensation candidate.
 - It should not be promoted unconditionally under the initial multi-fixture gate.
 - Layer8 QKV V845 cell remains smoke-only because current paired fixture coverage is insufficient.
+- The automatically extracted candidate set is worse than layer6-only, so candidate extraction must feed a gated search loop rather than direct promotion.
 
 ## Key Evidence
 
@@ -63,6 +65,12 @@ Layer6 `mlp.down_proj.weight[3994]` row-dot scale is stable across the two avail
 - token ids `1..16`: scale `1.026471714`, RMSE `0.117735388 -> 0.063680278`
 - token ids `101..116`: scale `1.023383096`, RMSE `0.131756300 -> 0.061972585`
 
+The extracted three-row candidate set was tested across all three fixtures:
+
+- token ids `1..16`: `0.645338058 -> 0.676628113`
+- token ids `101..116`: `1.080525398 -> 1.039905548`
+- token ids `201..216`: `1.140727997 -> 1.213508606`
+
 This means the local correction is real, but it changes later propagation in a way that the current policy cannot accept.
 
 ## Verification
@@ -73,6 +81,7 @@ This means the local correction is real, but it changes later propagation in a w
 - `python3 -m py_compile tools/run-qwen-prefix-smoke-matrix.py`
 - JSON parse checks for generated summary/candidate/gate artifacts.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
+- `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - Regenerated tokens1 layer6 hidden3994 trace with `qwen-layer-module-trace-v0.10`.
 
 ## Next Action

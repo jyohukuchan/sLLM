@@ -83,8 +83,10 @@ Current gate result:
 | --- | --- | ---: | ---: | ---: | --- |
 | `layer6` | reject | 3 | 0.0081653595 | 0.00455665588 | tokens201 regression exceeds `0.001` |
 | `combined` | needs_more_fixtures | 1 | 0.0343608856 | 0 | only one paired fixture |
+| `extracted` | reject | 3 | -0.0312900543 | 0.0727806091 | tokens1 and tokens201 regress |
 
 Interpretation: layer6 hidden3994 remains a real local compensation candidate, but it should not be promoted unconditionally under the initial multi-fixture gate.
+The three-row extracted candidate bundle confirms the same rule: row-dot candidates should feed a gated search loop, not direct bundle promotion.
 
 ## Deliverables
 
