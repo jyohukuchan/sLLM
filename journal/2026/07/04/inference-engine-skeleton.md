@@ -8,6 +8,11 @@
 ## 今回の変更点
 
 - goal再開後の当面scopeを、手元で検証できるRDNA2/V620とRDNA4/R9700に限定した。モデルアーキテクチャ対応も、まずはQwen3.5/Qwen3系の一部decoder経路だけで進める。
+- Commit `6a99672 Add Qwen3 decoder layer step state` で `Qwen3DecoderLayerStepState` と `Qwen3DecoderLayerStepOutput` を追加した。
+- `Qwen3DecoderLayerStepState` は `Qwen3SelfAttnBlockStepState` を内部に持ち、paged decode attention、Qwen3.5 output gate、o projection、residual add、post RMSNorm、MLP gate/up/down、SiLU-mul、final residual addまでを1 token分ずつ接続する。
+- `package-self-attn-mlp-block-smoke` はpost RMSNorm、MLP、final residual addの手動runtime loopをやめ、`Qwen3DecoderLayerStepState::step` の逐次出力を使うようにした。
+- 既存のfull causal attention参照、paged cache readback、self-attn block出力diff、post RMSNorm diff、final residual diff検証は維持した。
+- `docs/words.txt` に `Qwen3 decoder layer step state` を追加し、`package self attention MLP block smoke` の定義を更新した。
 - Commit `cd87b05 Add Qwen3 self attention block step state` で `Qwen3SelfAttnDecodeState` と `Qwen3SelfAttnBlockStepState` を追加した。
 - `Qwen3SelfAttnDecodeState` は `PagedDecodeState` を薄く包み、softmax scaleを保持して1 token分のq/k/vからattention outputを返す。
 - `Qwen3SelfAttnBlockStepState` はruntime paged KV write、paged decode attention、Qwen3.5 output gate、o projection、residual addを1 token分ずつ接続する。post RMSNormとMLPはまだ上位smoke側で処理する。
@@ -142,6 +147,12 @@
 
 ## 実測・検証
 
+- `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine --lib -- --test-threads=1`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
+- `target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 2`
+  - CPU fallbackで、`Qwen3DecoderLayerStepState` 経由のpaged decode attention、output gate、o projection、residual add、post RMSNorm、MLP、final residual addまで通った。新規paged/decode/block diffはすべて `0`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 3 2`
+  - R9700/RDNA4で成功した。`paged_kv_write_k_max_abs_diff=0`、`paged_kv_write_v_max_abs_diff=0`、`paged_step_attention_max_abs_diff=0.000000119`、`causal_paged_step_attention_max_abs_diff=0`、`output_gate_max_abs_diff=0.000000119`、`o_proj_max_abs_diff=0.000005722`、`post_norm_max_abs_diff=0.000001907`、`layer_block_max_abs_diff=0`。
+- 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でも成功した。diffはR9700/RDNA4と同じ範囲だった。
 - `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine --lib -- --test-threads=1`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
 - `target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 2`
   - CPU fallbackで、`Qwen3SelfAttnBlockStepState` 経由のpaged decode attention、output gate、o projection、residual add、post RMSNorm、MLP、final residual addまで通った。新規paged/decode/block diffはすべて `0`。
@@ -687,13 +698,14 @@
 - `a42f2a1 Add paged decode step API`
 - `f570e74 Use paged decode steps in self attention MLP smoke`
 - `cd87b05 Add Qwen3 self attention block step state`
+- `6a99672 Add Qwen3 decoder layer step state`
 
 ## 次の行動
 
 - 当面はRDNA2/V620とRDNA4/R9700のCI相当smokeを優先し、広いhardware対応やfull model architecture対応は後回しにする。
-- `Qwen3SelfAttnBlockStepState` でpaged decode attention、output gate、o projection、residual addまでのnarrow step APIを作り、CPU、R9700/RDNA4、V620/RDNA2で通した。次はpost RMSNorm、MLP、final residual addも同じlayer-step境界へ近づける。
+- `Qwen3DecoderLayerStepState` でpaged decode attention、output gate、o projection、residual add、post RMSNorm、MLP、final residual addまでのnarrow layer step APIを作り、CPU、R9700/RDNA4、V620/RDNA2で通した。次はweight registryからlayer step stateへ渡すweight setを整理し、smoke専用のhost vector受け渡しを減らす。
 - Runtime paged KV writeはCPU、R9700/RDNA4、V620/RDNA2で通り、package self-attn decode smokeとpackage self-attn MLP block smokeでも `decode_step` 経由に置き換え済み。
 - Paged decode attentionのruntime境界はCPU、R9700/RDNA4、V620/RDNA2で通っており、package self-attn decode smokeからも呼べる状態になった。
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、paged decode state/step、Qwen3 self-attn block step state、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。Qwen3.5 self-attn MLP block smokeではpaged decode step出力をlayer-level partial decoder経路へ渡せるようになった。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、paged decode state/step、Qwen3 self-attn block step state、Qwen3 decoder layer step state、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。Qwen3.5 self-attn MLP block smokeではpaged decode step出力をlayer-level partial decoder経路へ渡せるようになった。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
