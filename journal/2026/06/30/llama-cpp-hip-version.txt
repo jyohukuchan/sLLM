@@ -1,2 +1,0 @@
-version: 1 (86b9470)
-built with GNU 13.3.0 for Linux x86_64
