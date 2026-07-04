@@ -3,7 +3,9 @@
 Artifacts:
 
 - `package-cell-delta-overrides-layer8-qkv-v845-col3994-p4p46-inproj.json`
+- `package-cell-delta-overrides-layer8-qkv-v845-col3994-lsfit-p4p46-inproj.json`
 - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-cell-delta-layer8qkv-v845col3994-p4p46-inproj.jsonl`
+- `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-cell-delta-layer8qkv-v845col3994-lsfit-p4p46-inproj.jsonl`
 
 ## Target
 
@@ -30,6 +32,10 @@ For `linear_attn.in_proj_qkv.weight[4941,3994]`:
 At token `7`, this one cell contributes `-0.097302380` to the row-dot error,
 while the full row package-vs-source dot error is `-0.065318765`.
 
+The all-token row-dot least-squares delta for the same cell is
+`0.001503075294`. It improves row-dot RMSE from `0.082291864` to
+`0.057757336`, but is weaker than source restoration.
+
 ## Full Prefix Result
 
 Run settings:
@@ -45,6 +51,7 @@ Run settings:
 | --- | ---: | ---: | --- | ---: | --- |
 | baseline layer6/layer10 row-scale | 0.645338058 | 11 | token 7 / hidden 3994 | 0.645338058 | token 7 / hidden 3994 |
 | qkv V845 cell source-restore | 0.627647400 | 7 | token 0 / hidden 3994 | 0.619235992 | token 7 / hidden 3994 |
+| qkv V845 cell LS fit | 0.628797531 | 11 | token 7 / hidden 3994 | 0.628797531 | token 7 / hidden 3994 |
 
 Layer detail:
 
@@ -52,8 +59,10 @@ Layer detail:
 | --- | ---: | ---: | ---: | ---: | --- |
 | baseline | 8 | 0.578010559 | 0.032954554 | 0.001845195 | token 3 / hidden 3994 |
 | qkv V845 cell | 8 | 0.588329315 | 0.032803790 | 0.001830218 | token 3 / hidden 3994 |
+| qkv V845 cell LS fit | 8 | 0.584562302 | 0.032855703 | 0.001835375 | token 3 / hidden 3994 |
 | baseline | 11 | 0.645338058 | 0.043868927 | 0.003148948 | token 7 / hidden 3994 |
 | qkv V845 cell | 11 | 0.619235992 | 0.043696373 | 0.003124643 | token 7 / hidden 3994 |
+| qkv V845 cell LS fit | 11 | 0.628797531 | 0.043756262 | 0.003133063 | token 7 / hidden 3994 |
 
 Layer `8`, hidden `3994` token detail:
 
@@ -76,6 +85,10 @@ Layer `8`, hidden `3994` token detail:
   finished correction. It is a strong localization result: the most useful next
   target is the attention-side `linear_attn.in_proj_qkv` V row around
   `row=4941`, especially column/group `3994`.
+- The LS-fit delta is more conservative and reduces the layer `8` local
+  worsening, but it leaves a larger layer `11` max than source restoration.
+  For the current full-prefix objective, source restoration is the better
+  single-cell probe.
 - A promotion candidate should not be a single smoke-only cell override. The
   next step is a controlled row/group compensation or quantizer policy experiment
   for this qkv V row, evaluated against full-prefix hidden error.
