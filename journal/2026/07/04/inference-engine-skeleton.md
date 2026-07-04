@@ -971,6 +971,16 @@
 - 5.3-codex-spark reviewer Chandrasekhar flagged an earlier draft where layer position changed RoPE offset and a residual capacity multiplication lacked checked arithmetic; both were fixed before commit.
 - Next useful step: turn this smoke-local model loop shape into a reusable narrow package/model decode-loop owner, still scoped to locally testable RDNA2/RDNA4 and a small Qwen3.5/Qwen3 partial decoder path.
 
+2026-07-04 decoder layer stack runner:
+- Commit `18defff Add decoder layer stack runner` adds `Qwen3DecoderLayerStackRequestDecodeRunner` in `crates/ullm-engine/src/decode_runner.rs`.
+- The stack runner owns multiple `Qwen3DecoderLayerRequestDecodeRunner` instances, preserves the existing `&Qwen3DecoderLayerRuntimeWeights` lifetime model, pre-validates every layer's ready-batch inputs, runs each layer through `run_ready_batch_without_advance`, and calls `SchedulerState::advance_decode_batch` once after all layers succeed.
+- Added decode runner unit tests for the positive path (`qwen3_decoder_layer_stack_runner_advances_ready_batch_once_cpu`) and the failure path where a bad second-layer input is rejected before either layer mutates decode state (`qwen3_decoder_layer_stack_runner_rejects_bad_layer_input_before_mutation_cpu`).
+- `package-self-attn-mlp-block-model-loop-smoke` now uses the stack runner for prefill, batched decode, scheduler advance, and per-layer cache readback. Smoke-only expected sequence creation and diff aggregation remain in `main.rs`.
+- Validation passed: `cargo fmt --all --check`, `cargo check -p ullm-engine`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine decode_runner -- --test-threads=1`, `cargo test --workspace -- --test-threads=1`, `git diff --check`, and `package-self-attn-mlp-block-model-loop-smoke` on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`.
+- Model-loop smoke result remained stable: CPU all diffs `0`; R9700/V620 prepared-path diffs q/k norm `0.000000954`, q RoPE `0.000000238`, k RoPE `0.000000477`, causal attention `0.000000477`, with layer output and K/V cache diffs `0`.
+- 5.3-codex-spark reviewer Goodall confirmed that keeping weights borrowed, leaving expected/diff logic in `main.rs`, and making scheduler advancement explicit after all layers is the right narrow boundary.
+- Next useful step: introduce a reusable package-loaded model runner/config object that owns layer metadata and stack-runner setup, then shrink `package_self_attn_mlp_block_model_loop_smoke_impl` further.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -1080,6 +1090,7 @@
 - `d5a175d Add layer decode batch no-advance API`
 - `dc7df79 Add scheduler decode batch advance`
 - `0be4510 Add package model loop smoke`
+- `18defff Add decoder layer stack runner`
 
 ## 次の行動
 
