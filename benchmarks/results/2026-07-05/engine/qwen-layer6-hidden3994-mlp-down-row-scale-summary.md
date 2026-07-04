@@ -115,6 +115,29 @@ This recheck uses a newly exported fixture with different token ids:
 | layer8 QKV V845 cell | 1.080525398 | 7 | token 12 / hidden 3994 | 0.969970703 |
 | combined | 1.043153763 | 7 | token 12 / hidden 3994 | 0.939382553 |
 
+## Manifest Metadata Prototype
+
+A hardlink package copy was created outside the repository:
+
+- package: `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6h3994-layer6-layer10.ullm.d`
+- source package: `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d`
+- added manifest row-scale entry:
+  - tensor: `model.language_model.layers.6.mlp.down_proj.weight`
+  - row: `3994`
+  - scale: `1.02647171355`
+  - source: `golden-prefix-row-dot-sensitivity-layer6-hidden3994`
+
+Manifest-only reports:
+
+- layer6 row-scale only:
+  - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6h3994-layer6-layer10-p4p46-inproj.jsonl`
+  - max abs: `0.637172699`
+  - matches the CLI row-scale report exactly for layers `6`, `7`, `8`, and `11`
+- manifest layer6 row-scale + layer8 QKV V845 cell:
+  - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6h3994-layer6-layer10-cell-delta-layer8qkv-v845col3994-p4p46-inproj.jsonl`
+  - max abs: `0.610977173`
+  - matches the current best CLI row-scale + QKV cell result
+
 ## Interpretation
 
 - The layer `6` row-scale directly reduces the inherited layer `7` floor from
@@ -127,6 +150,8 @@ This recheck uses a newly exported fixture with different token ids:
   hidden `3994` chain.
 - On the `tokens101-116` fixture, the layer `8` qkv V845 cell does not improve
   the overall max and worsens layer `11` versus layer6 row-scale alone.
+- The layer6 hidden3994 row-scale can be represented as package manifest
+  metadata, not only as a smoke-only CLI override.
 - The two interventions are complementary: combined max improves to
   `0.610977173`, the best result in this batch.
 - This is still smoke-only. A durable fix should be expressed as quantizer or
