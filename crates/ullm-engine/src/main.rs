@@ -1,6 +1,7 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -11306,6 +11307,17 @@ struct PackageModelLoopLayerSmoke {
     runtime_shape: Qwen3SelfAttnRuntimeShape,
 }
 
+struct PackageModelLoopSmokeModel {
+    layers: Vec<PackageModelLoopLayerSmoke>,
+    hidden: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    mlp_epsilon: f32,
+}
+
 fn load_package_model_loop_layer_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -11371,6 +11383,213 @@ fn load_package_model_loop_layer_smoke(
         weights,
         runtime_shape,
     })
+}
+
+impl PackageModelLoopSmokeModel {
+    fn load(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        layer_indices: &[usize],
+    ) -> Result<Self, String> {
+        if layer_indices.is_empty() {
+            return Err("model-loop smoke requires at least one layer index".to_string());
+        }
+        let mut unique_layers = BTreeSet::new();
+        for &layer_index in layer_indices {
+            if !unique_layers.insert(layer_index) {
+                return Err(format!(
+                    "model-loop smoke layer index {layer_index} is duplicated"
+                ));
+            }
+        }
+
+        let mut layers = Vec::with_capacity(layer_indices.len());
+        for &layer_index in layer_indices {
+            layers.push(load_package_model_loop_layer_smoke(
+                context,
+                stream,
+                path,
+                chunk_bytes,
+                layer_index,
+            )?);
+        }
+
+        let first = layers
+            .first()
+            .ok_or_else(|| "model-loop smoke loaded no layers".to_string())?;
+        let hidden = first.runtime_shape.hidden;
+        let q_heads = first.runtime_shape.q_heads;
+        let kv_heads = first.runtime_shape.kv_heads;
+        let head_dim = first.runtime_shape.head_dim;
+        let value_dim = first.runtime_shape.value_dim;
+        for layer in &layers {
+            if layer.runtime_shape.hidden != hidden
+                || layer.runtime_shape.q_heads != q_heads
+                || layer.runtime_shape.kv_heads != kv_heads
+                || layer.runtime_shape.head_dim != head_dim
+                || layer.runtime_shape.value_dim != value_dim
+            {
+                return Err(format!(
+                    "model-loop smoke layer {} shape mismatch: hidden={} q_heads={} kv_heads={} head_dim={} value_dim={}",
+                    layer.layer_index,
+                    layer.runtime_shape.hidden,
+                    layer.runtime_shape.q_heads,
+                    layer.runtime_shape.kv_heads,
+                    layer.runtime_shape.head_dim,
+                    layer.runtime_shape.value_dim
+                ));
+            }
+            if layer.q_norm.values.len() != head_dim || layer.k_norm.values.len() != head_dim {
+                return Err(format!(
+                    "model-loop smoke layer {} q/k norm length mismatch: q={} k={} head_dim={head_dim}",
+                    layer.layer_index,
+                    layer.q_norm.values.len(),
+                    layer.k_norm.values.len()
+                ));
+            }
+        }
+
+        Ok(Self {
+            layers,
+            hidden,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale: 1.0_f32 / (head_dim as f32).sqrt(),
+            mlp_epsilon: 1e-5_f32,
+        })
+    }
+
+    fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    fn layer_indices(&self) -> Vec<usize> {
+        self.layers.iter().map(|layer| layer.layer_index).collect()
+    }
+
+    fn default_rotary_dim(&self) -> Result<usize, String> {
+        let candidate = if self.head_dim >= 4 {
+            self.head_dim / 4
+        } else {
+            self.head_dim
+        };
+        let rotary_dim = candidate - (candidate % 2);
+        if rotary_dim == 0 {
+            return Err(format!(
+                "default rotary_dim is zero for head_dim={}",
+                self.head_dim
+            ));
+        }
+        Ok(rotary_dim)
+    }
+
+    fn parse_rotary_dim(&self, rotary_dim: Option<String>) -> Result<usize, String> {
+        let rotary_dim = match rotary_dim {
+            Some(raw) => raw
+                .parse::<usize>()
+                .map_err(|err| format!("invalid rotary dim {raw:?}: {err}"))?,
+            None => self.default_rotary_dim()?,
+        };
+        if rotary_dim == 0 || rotary_dim > self.head_dim || !rotary_dim.is_multiple_of(2) {
+            return Err(format!(
+                "rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim}, head_dim={}",
+                self.head_dim
+            ));
+        }
+        Ok(rotary_dim)
+    }
+
+    fn decode_shape(&self, block_size: usize, cache_blocks: usize) -> PagedDecodeShape {
+        PagedDecodeShape {
+            block_size,
+            cache_blocks,
+            q_heads: self.q_heads,
+            kv_heads: self.kv_heads,
+            head_dim: self.head_dim,
+            value_dim: self.value_dim,
+        }
+    }
+
+    fn build_stack_runner<'weights>(
+        &'weights self,
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        layer_runs: &[Vec<SchedulerLayerDecodeRun>],
+        decode_shape: PagedDecodeShape,
+    ) -> Result<Qwen3DecoderLayerStackRequestDecodeRunner<'weights>, String> {
+        if layer_runs.len() != self.layers.len() {
+            return Err(format!(
+                "model-loop stack setup has {} layers but {} layer run sets",
+                self.layers.len(),
+                layer_runs.len()
+            ));
+        }
+        let mut layer_runner = Qwen3DecoderLayerStackRequestDecodeRunner::new();
+        for (layer_position, layer) in self.layers.iter().enumerate() {
+            let stack_layer_index = layer_runner.push_layer();
+            if stack_layer_index != layer_position {
+                return Err(format!(
+                    "model-loop stack layer index {stack_layer_index} did not match layer position {layer_position}"
+                ));
+            }
+            for run in &layer_runs[layer_position] {
+                layer_runner.insert_request(
+                    stack_layer_index,
+                    context,
+                    stream,
+                    run.request_id,
+                    &layer.weights,
+                    decode_shape,
+                    run.block_table.clone(),
+                    self.softmax_scale,
+                    self.mlp_epsilon,
+                )?;
+            }
+        }
+        Ok(layer_runner)
+    }
+
+    fn tensor_names_by_layer<F>(&self, mut select: F) -> Vec<String>
+    where
+        F: FnMut(&PackageModelLoopLayerSmoke) -> &str,
+    {
+        self.layers
+            .iter()
+            .map(|layer| select(layer).to_string())
+            .collect()
+    }
+
+    fn q_norm_dtypes(&self) -> Vec<String> {
+        self.layers
+            .iter()
+            .map(|layer| layer.q_norm.dtype.clone())
+            .collect()
+    }
+
+    fn k_norm_dtypes(&self) -> Vec<String> {
+        self.layers
+            .iter()
+            .map(|layer| layer.k_norm.dtype.clone())
+            .collect()
+    }
+
+    fn post_norm_dtypes(&self) -> Vec<String> {
+        self.layers
+            .iter()
+            .map(|layer| layer.post_norm.dtype.clone())
+            .collect()
+    }
+
+    fn intermediates(&self) -> Vec<usize> {
+        self.layers
+            .iter()
+            .map(|layer| layer.weights.post_attention.intermediate)
+            .collect()
+    }
 }
 
 fn package_self_attn_mlp_block_model_loop_smoke(
@@ -11462,10 +11681,6 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     rope_base: f32,
     position_offset: usize,
 ) -> Result<String, String> {
-    if layer_indices[0] == layer_indices[1] {
-        return Err("model-loop smoke requires two distinct layer indices".to_string());
-    }
-
     let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
         .map_err(|err| format!("failed to create runtime context: {err}"))?;
     let info = context
@@ -11475,73 +11690,21 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
 
-    let mut layers = Vec::with_capacity(layer_indices.len());
-    for layer_index in layer_indices {
-        layers.push(load_package_model_loop_layer_smoke(
-            &mut context,
-            &mut stream,
-            path,
-            chunk_bytes,
-            layer_index,
-        )?);
-    }
-
-    let hidden = layers[0].runtime_shape.hidden;
-    let q_heads = layers[0].runtime_shape.q_heads;
-    let kv_heads = layers[0].runtime_shape.kv_heads;
-    let head_dim = layers[0].runtime_shape.head_dim;
-    let value_dim = layers[0].runtime_shape.value_dim;
-    for layer in &layers {
-        if layer.runtime_shape.hidden != hidden
-            || layer.runtime_shape.q_heads != q_heads
-            || layer.runtime_shape.kv_heads != kv_heads
-            || layer.runtime_shape.head_dim != head_dim
-            || layer.runtime_shape.value_dim != value_dim
-        {
-            return Err(format!(
-                "model-loop smoke layer {} shape mismatch: hidden={} q_heads={} kv_heads={} head_dim={} value_dim={}",
-                layer.layer_index,
-                layer.runtime_shape.hidden,
-                layer.runtime_shape.q_heads,
-                layer.runtime_shape.kv_heads,
-                layer.runtime_shape.head_dim,
-                layer.runtime_shape.value_dim
-            ));
-        }
-        if layer.q_norm.values.len() != head_dim || layer.k_norm.values.len() != head_dim {
-            return Err(format!(
-                "model-loop smoke layer {} q/k norm length mismatch: q={} k={} head_dim={head_dim}",
-                layer.layer_index,
-                layer.q_norm.values.len(),
-                layer.k_norm.values.len()
-            ));
-        }
-    }
-
-    let default_rotary_dim = {
-        let candidate = if head_dim >= 4 {
-            head_dim / 4
-        } else {
-            head_dim
-        };
-        candidate - (candidate % 2)
-    };
-    if default_rotary_dim == 0 {
-        return Err(format!(
-            "default rotary_dim is zero for head_dim={head_dim}"
-        ));
-    }
-    let rotary_dim = match rotary_dim {
-        Some(raw) => raw
-            .parse::<usize>()
-            .map_err(|err| format!("invalid rotary dim {raw:?}: {err}"))?,
-        None => default_rotary_dim,
-    };
-    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
-        return Err(format!(
-            "rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim}, head_dim={head_dim}"
-        ));
-    }
+    let model = PackageModelLoopSmokeModel::load(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        &layer_indices,
+    )?;
+    let hidden = model.hidden;
+    let q_heads = model.q_heads;
+    let kv_heads = model.kv_heads;
+    let head_dim = model.head_dim;
+    let value_dim = model.value_dim;
+    let softmax_scale = model.softmax_scale;
+    let mlp_epsilon = model.mlp_epsilon;
+    let rotary_dim = model.parse_rotary_dim(rotary_dim)?;
 
     let block_size = 2_usize;
     let requests = vec![
@@ -11568,20 +11731,11 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
             "model-loop block layout exceeds u32 range: cache_blocks={cache_blocks} block_size={block_size}"
         ));
     }
-    let decode_shape = PagedDecodeShape {
-        block_size,
-        cache_blocks,
-        q_heads,
-        kv_heads,
-        head_dim,
-        value_dim,
-    };
+    let decode_shape = model.decode_shape(block_size, cache_blocks);
     let q_token_elements = decode_shape.q_elements()?;
     let k_token_elements = decode_shape.k_token_elements()?;
     let v_token_elements = decode_shape.v_token_elements()?;
     let attention_elements = decode_shape.output_elements()?;
-    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
-    let mlp_epsilon = 1e-5_f32;
 
     let mut scheduler = SchedulerState::with_block_size(cache_blocks as u32, block_size as u32);
     for request in &requests {
@@ -11631,17 +11785,17 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         initial_residuals.push(residual);
     }
 
-    let mut layer_runs: Vec<Vec<SchedulerLayerDecodeRun>> = Vec::with_capacity(layers.len());
-    let mut q_projection_layouts = Vec::with_capacity(layers.len());
-    let mut output_gate_layouts = Vec::with_capacity(layers.len());
-    let mut q_gate_elements_by_layer = Vec::with_capacity(layers.len());
+    let mut layer_runs: Vec<Vec<SchedulerLayerDecodeRun>> = Vec::with_capacity(model.layer_count());
+    let mut q_projection_layouts = Vec::with_capacity(model.layer_count());
+    let mut output_gate_layouts = Vec::with_capacity(model.layer_count());
+    let mut q_gate_elements_by_layer = Vec::with_capacity(model.layer_count());
     let mut q_norm_max_abs_diff = 0.0_f32;
     let mut k_norm_max_abs_diff = 0.0_f32;
     let mut q_rope_max_abs_diff = 0.0_f32;
     let mut k_rope_max_abs_diff = 0.0_f32;
     let mut causal_attention_max_abs_diff = 0.0_f32;
 
-    for (layer_position, layer) in layers.iter().enumerate() {
+    for (layer_position, layer) in model.layers.iter().enumerate() {
         let mut runs = Vec::with_capacity(requests.len());
         let mut q_gate_elements = Vec::with_capacity(requests.len());
         for (request_index, request) in requests.iter().enumerate() {
@@ -11745,28 +11899,8 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         layer_runs.push(runs);
     }
 
-    let mut layer_runner = Qwen3DecoderLayerStackRequestDecodeRunner::new();
-    for (layer_position, layer) in layers.iter().enumerate() {
-        let stack_layer_index = layer_runner.push_layer();
-        if stack_layer_index != layer_position {
-            return Err(format!(
-                "model-loop stack layer index {stack_layer_index} did not match layer position {layer_position}"
-            ));
-        }
-        for run in &layer_runs[layer_position] {
-            layer_runner.insert_request(
-                stack_layer_index,
-                &mut context,
-                &mut stream,
-                run.request_id,
-                &layer.weights,
-                decode_shape,
-                run.block_table.clone(),
-                softmax_scale,
-                mlp_epsilon,
-            )?;
-        }
-    }
+    let mut layer_runner =
+        model.build_stack_runner(&mut context, &mut stream, &layer_runs, decode_shape)?;
 
     for layer_position in 0..layer_runner.layer_count() {
         for run in &mut layer_runs[layer_position] {
@@ -11784,7 +11918,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
                     hidden,
                     &format!(
                         "package model-loop layer {} prefill",
-                        layers[layer_position].layer_index
+                        model.layers[layer_position].layer_index
                     ),
                 )?;
             }
@@ -11847,13 +11981,13 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
                 .map_err(|err| {
                     format!(
                         "failed to read package model-loop layer {} cache for {:?}: {err}",
-                        layers[layer_position].layer_index, run.request_id
+                        model.layers[layer_position].layer_index, run.request_id
                     )
                 })?;
             run.k_cache_max_abs_diff = verify_f32_close(
                 &format!(
                     "package model-loop layer {} request {:?} k cache",
-                    layers[layer_position].layer_index, run.request_id
+                    model.layers[layer_position].layer_index, run.request_id
                 ),
                 &cache.k,
                 &run.expected.paged_cache.k,
@@ -11863,7 +11997,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
             run.v_cache_max_abs_diff = verify_f32_close(
                 &format!(
                     "package model-loop layer {} request {:?} v cache",
-                    layers[layer_position].layer_index, run.request_id
+                    model.layers[layer_position].layer_index, run.request_id
                 ),
                 &cache.v,
                 &run.expected.paged_cache.v,
@@ -11896,62 +12030,20 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         .iter()
         .map(|runs| runs.iter().map(|run| run.decode_steps).collect::<Vec<_>>())
         .collect::<Vec<_>>();
-    let layer_indices = layers
-        .iter()
-        .map(|layer| layer.layer_index)
-        .collect::<Vec<_>>();
-    let q_tensors = layers
-        .iter()
-        .map(|layer| layer.q_tensor.clone())
-        .collect::<Vec<_>>();
-    let k_tensors = layers
-        .iter()
-        .map(|layer| layer.k_tensor.clone())
-        .collect::<Vec<_>>();
-    let v_tensors = layers
-        .iter()
-        .map(|layer| layer.v_tensor.clone())
-        .collect::<Vec<_>>();
-    let o_tensors = layers
-        .iter()
-        .map(|layer| layer.o_tensor.clone())
-        .collect::<Vec<_>>();
-    let q_norm_tensors = layers
-        .iter()
-        .map(|layer| layer.q_norm_tensor.clone())
-        .collect::<Vec<_>>();
-    let k_norm_tensors = layers
-        .iter()
-        .map(|layer| layer.k_norm_tensor.clone())
-        .collect::<Vec<_>>();
-    let post_norm_tensors = layers
-        .iter()
-        .map(|layer| layer.post_norm_tensor.clone())
-        .collect::<Vec<_>>();
-    let gate_tensors = layers
-        .iter()
-        .map(|layer| layer.gate_tensor.clone())
-        .collect::<Vec<_>>();
-    let up_tensors = layers
-        .iter()
-        .map(|layer| layer.up_tensor.clone())
-        .collect::<Vec<_>>();
-    let down_tensors = layers
-        .iter()
-        .map(|layer| layer.down_tensor.clone())
-        .collect::<Vec<_>>();
-    let q_norm_dtypes = layers
-        .iter()
-        .map(|layer| layer.q_norm.dtype.clone())
-        .collect::<Vec<_>>();
-    let k_norm_dtypes = layers
-        .iter()
-        .map(|layer| layer.k_norm.dtype.clone())
-        .collect::<Vec<_>>();
-    let post_norm_dtypes = layers
-        .iter()
-        .map(|layer| layer.post_norm.dtype.clone())
-        .collect::<Vec<_>>();
+    let layer_indices = model.layer_indices();
+    let q_tensors = model.tensor_names_by_layer(|layer| &layer.q_tensor);
+    let k_tensors = model.tensor_names_by_layer(|layer| &layer.k_tensor);
+    let v_tensors = model.tensor_names_by_layer(|layer| &layer.v_tensor);
+    let o_tensors = model.tensor_names_by_layer(|layer| &layer.o_tensor);
+    let q_norm_tensors = model.tensor_names_by_layer(|layer| &layer.q_norm_tensor);
+    let k_norm_tensors = model.tensor_names_by_layer(|layer| &layer.k_norm_tensor);
+    let post_norm_tensors = model.tensor_names_by_layer(|layer| &layer.post_norm_tensor);
+    let gate_tensors = model.tensor_names_by_layer(|layer| &layer.gate_tensor);
+    let up_tensors = model.tensor_names_by_layer(|layer| &layer.up_tensor);
+    let down_tensors = model.tensor_names_by_layer(|layer| &layer.down_tensor);
+    let q_norm_dtypes = model.q_norm_dtypes();
+    let k_norm_dtypes = model.k_norm_dtypes();
+    let post_norm_dtypes = model.post_norm_dtypes();
 
     let attention_max_abs_diff = layer_runs
         .iter()
@@ -12034,10 +12126,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         stats.free_runs,
         stats.largest_free_run,
         hidden,
-        layers
-            .iter()
-            .map(|layer| layer.weights.post_attention.intermediate)
-            .collect::<Vec<_>>(),
+        model.intermediates(),
         q_projection_layouts,
         q_gate_elements_by_layer,
         output_gate_layouts,
