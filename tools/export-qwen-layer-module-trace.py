@@ -478,6 +478,71 @@ def row_dot_trace(
     }
 
 
+def projection_row_dot_trace(
+    name: str,
+    input_values: np.ndarray,
+    module_output: np.ndarray,
+    source_weight: torch.Tensor,
+    package_dir: Path | None,
+    package_tensor: dict[str, Any] | None,
+    token_index: int,
+) -> dict[str, Any]:
+    if input_values.ndim != 3:
+        raise ValueError(f"{name} input must be [batch,seq,features], got {input_values.shape}")
+    if module_output.ndim != 3:
+        raise ValueError(f"{name} output must be [batch,seq,features], got {module_output.shape}")
+    if source_weight.ndim != 2:
+        raise ValueError(f"{name} source weight must be 2D, got {tuple(source_weight.shape)}")
+
+    output_summary = vector_summary(module_output[0, token_index], token_index)
+    selected_features = [
+        int(item["feature_index"])
+        for item in output_summary["top_abs_features"]
+        if isinstance(item, dict) and "feature_index" in item
+    ]
+    vector = input_values[0, token_index].astype(np.float64)
+    traces = []
+    for feature_index in selected_features:
+        source_row = tensor_to_numpy_f32(source_weight[feature_index])
+        source_dot = float(np.dot(vector, source_row.astype(np.float64)))
+        output_value = float(module_output[0, token_index, feature_index])
+        trace: dict[str, Any] = {
+            "token_index": token_index,
+            "feature_index": feature_index,
+            "source_row_dot": source_dot,
+            "module_output": output_value,
+            "source_row_dot_error": source_dot - output_value,
+        }
+        if package_dir is not None and package_tensor is not None:
+            package_row = dequantize_package_row(package_dir, package_tensor, feature_index)
+            package_dot = float(np.dot(vector, package_row.astype(np.float64)))
+            trace.update(
+                {
+                    "package_row_dot": package_dot,
+                    "package_row_dot_error_vs_source_row": package_dot - source_dot,
+                    "package_row_dot_error_vs_module": package_dot - output_value,
+                }
+            )
+        traces.append(trace)
+
+    worst_package = None
+    if traces and package_dir is not None and package_tensor is not None:
+        worst_package = max(
+            traces,
+            key=lambda item: abs(float(item["package_row_dot_error_vs_source_row"])),
+        )
+    return {
+        "name": name,
+        "input_shape": list(input_values.shape),
+        "output_shape": list(module_output.shape),
+        "token_index": token_index,
+        "selected_feature_count": len(selected_features),
+        "selected_features": selected_features,
+        "per_feature": traces,
+        "worst_package_row_error": worst_package,
+    }
+
+
 def run_layer_trace(
     model_dir: Path,
     fixture: Path,
@@ -599,11 +664,23 @@ def run_layer_trace(
     ]
     out_tensor_name = f"model.language_model.layers.{layer_index}.linear_attn.out_proj.weight"
     down_tensor_name = f"model.language_model.layers.{layer_index}.mlp.down_proj.weight"
+    qkv_tensor_name = f"model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight"
+    z_tensor_name = f"model.language_model.layers.{layer_index}.linear_attn.in_proj_z.weight"
+    a_tensor_name = f"model.language_model.layers.{layer_index}.linear_attn.in_proj_a.weight"
+    b_tensor_name = f"model.language_model.layers.{layer_index}.linear_attn.in_proj_b.weight"
     package_out_row = None
     package_down_row = None
+    package_qkv_tensor = None
+    package_z_tensor = None
+    package_a_tensor = None
+    package_b_tensor = None
     if package_dir is not None and package_tensors is not None:
         package_out_tensor = package_tensors.get(out_tensor_name)
         package_down_tensor = package_tensors.get(down_tensor_name)
+        package_qkv_tensor = package_tensors.get(qkv_tensor_name)
+        package_z_tensor = package_tensors.get(z_tensor_name)
+        package_a_tensor = package_tensors.get(a_tensor_name)
+        package_b_tensor = package_tensors.get(b_tensor_name)
         if package_out_tensor is not None:
             package_out_row = dequantize_package_row(package_dir, package_out_tensor, hidden_index)
         if package_down_tensor is not None:
@@ -625,6 +702,44 @@ def run_layer_trace(
             tensor_to_numpy_f32(state["mlp.down_proj.weight"][hidden_index]),
             package_down_row,
             hidden_index,
+        ),
+    }
+    projection_row_dot = {
+        "attention_qkv_projection": projection_row_dot_trace(
+            "attention_qkv_projection",
+            attention_input_normed,
+            attention_qkv_projection,
+            state["linear_attn.in_proj_qkv.weight"],
+            package_dir,
+            package_qkv_tensor,
+            token_index,
+        ),
+        "attention_z_projection": projection_row_dot_trace(
+            "attention_z_projection",
+            attention_input_normed,
+            attention_z_projection,
+            state["linear_attn.in_proj_z.weight"],
+            package_dir,
+            package_z_tensor,
+            token_index,
+        ),
+        "attention_a_projection": projection_row_dot_trace(
+            "attention_a_projection",
+            attention_input_normed,
+            attention_a_projection,
+            state["linear_attn.in_proj_a.weight"],
+            package_dir,
+            package_a_tensor,
+            token_index,
+        ),
+        "attention_b_projection": projection_row_dot_trace(
+            "attention_b_projection",
+            attention_input_normed,
+            attention_b_projection,
+            state["linear_attn.in_proj_b.weight"],
+            package_dir,
+            package_b_tensor,
+            token_index,
         ),
     }
     hot_input_vectors = hot_input_vector_summaries(
@@ -694,6 +809,7 @@ def run_layer_trace(
             "per_token_hot_input_vectors": per_token_hot_input_vectors,
         },
         "row_dot": row_dot,
+        "projection_row_dot": projection_row_dot,
     }
 
 
