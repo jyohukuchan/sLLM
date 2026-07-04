@@ -1014,6 +1014,18 @@
 - 5.3-codex-spark explorer Bacon confirmed the existing model/load/stack runner path already accepted arbitrary layer slices and the CLI argument parsing was the only narrow blocker.
 - Next useful step: move layer-run expected preparation into a small plan object, or start extracting a narrow reusable model-loop runner from the smoke now that layer count is no longer fixed at two.
 
+2026-07-04 package model loop layer run plan:
+- Commit `4dd2f9c Add package model loop layer run plan` adds `PackageModelLoopLayerRunPlan`, `PackageModelLoopPreparedDiffs`, and `PackageModelLoopRuntimeDiffs` in `crates/ullm-engine/src/main.rs`.
+- The layer run plan owns per-layer `SchedulerLayerDecodeRun` lists, Qwen3 self-attention prepared sequence creation, Qwen3 decoder layer expected sequence creation, projection/output-gate layout metadata, q-gate element metadata, prepared-path diff aggregation, decode-step reporting, and runtime/cache diff aggregation.
+- `package_self_attn_mlp_block_model_loop_smoke_impl` now keeps orchestration work: package/model loading, request plan setup, stack runner construction, prefill/decode batch execution, cache readback, and final output formatting.
+- The change stays smoke-local in `main.rs`; `decode_runner.rs` remains an execution boundary and does not receive package/expected/diff logic.
+- `docs/words.txt` adds `package model loop layer run plan`.
+- Validation passed: `cargo fmt --all --check`, `git diff --check`, `cargo check -p ullm-engine`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, and `cargo test --workspace -- --test-threads=1`.
+- 3-layer smoke validation passed on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with `3,7,11 3`: CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1` with HIP-required kernel flags for the HIP runs.
+- CPU result had all diffs `0`; R9700/V620 had q norm `0.000000954`, k norm `0.000001192`, q RoPE `0.000000313`, k RoPE `0.000000477`, causal attention `0.000000477`, while attention/projection/block/post_norm/MLP/layer/K/V cache diffs stayed `0`.
+- 5.3-codex-spark explorer Darwin confirmed this is the safe next boundary and that expected/diff logic should remain smoke-local instead of moving to `decode_runner.rs`.
+- Next useful step: extract the prefill/decode/cache-readback orchestration into a narrow `PackageModelLoopExecutionPlan` or runner-like smoke-local object, then decide whether any stable subset belongs in a reusable model runner API.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -1127,6 +1139,7 @@
 - `ecf75a0 Add package model loop bundle`
 - `71e1766 Add package model loop request plan`
 - `0c30193 Allow model loop layer lists`
+- `4dd2f9c Add package model loop layer run plan`
 
 ## 次の行動
 
