@@ -373,6 +373,15 @@ public:
         return compile_kernel(arch, rope_kernel_source(), "ullm_rope_f32.hip", code, error);
     }
 
+    bool compile_causal_attn_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(
+            arch,
+            causal_attn_kernel_source(),
+            "ullm_causal_attn_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_depthwise_conv1d_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -661,6 +670,63 @@ extern "C" __global__ void ullm_rope_f32_kernel(
     const float second = input[base + half + pair_dim];
     output[base + pair_dim] = first * c - second * s;
     output[base + half + pair_dim] = second * c + first * s;
+}
+)";
+    }
+
+    static const char *causal_attn_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_causal_attn_f32_kernel(
+    const float *q,
+    const float *k,
+    const float *v,
+    unsigned long long sequence_len,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long elements = sequence_len * q_heads * value_dim;
+    if (index >= elements) {
+        return;
+    }
+    const unsigned long long value = index % value_dim;
+    const unsigned long long q_head_index = index / value_dim;
+    const unsigned long long q_head = q_head_index % q_heads;
+    const unsigned long long timestep = q_head_index / q_heads;
+    const unsigned long long q_per_kv = q_heads / kv_heads;
+    const unsigned long long kv_head = q_head / q_per_kv;
+    const unsigned long long q_base = (timestep * q_heads + q_head) * head_dim;
+
+    float max_score = -3.4028234663852886e38f;
+    for (unsigned long long source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
+        const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+        float score = 0.0f;
+        for (unsigned long long dim = 0; dim < head_dim; ++dim) {
+            score += q[q_base + dim] * k[k_base + dim];
+        }
+        score *= softmax_scale;
+        max_score = score > max_score ? score : max_score;
+    }
+
+    float denominator = 0.0f;
+    float weighted = 0.0f;
+    for (unsigned long long source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
+        const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+        float score = 0.0f;
+        for (unsigned long long dim = 0; dim < head_dim; ++dim) {
+            score += q[q_base + dim] * k[k_base + dim];
+        }
+        const float weight = expf(score * softmax_scale - max_score);
+        denominator += weight;
+        const unsigned long long v_index =
+            (source_timestep * kv_heads + kv_head) * value_dim + value;
+        weighted += weight * v[v_index];
+    }
+    output[index] = weighted / denominator;
 }
 )";
     }
@@ -1763,6 +1829,63 @@ void rope_f32_host(
     }
 }
 
+void causal_attn_f32_host(
+    const float *q,
+    const float *k,
+    const float *v,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    float *output) {
+    const size_t q_per_kv = q_heads / kv_heads;
+    for (size_t timestep = 0; timestep < sequence_len; ++timestep) {
+        for (size_t q_head = 0; q_head < q_heads; ++q_head) {
+            const size_t kv_head = q_head / q_per_kv;
+            const size_t q_base = (timestep * q_heads + q_head) * head_dim;
+            float max_score = -std::numeric_limits<float>::infinity();
+            for (size_t source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
+                const size_t k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                float score = 0.0f;
+                for (size_t dim = 0; dim < head_dim; ++dim) {
+                    score += q[q_base + dim] * k[k_base + dim];
+                }
+                score *= softmax_scale;
+                max_score = std::max(max_score, score);
+            }
+
+            float denominator = 0.0f;
+            for (size_t source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
+                const size_t k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                float score = 0.0f;
+                for (size_t dim = 0; dim < head_dim; ++dim) {
+                    score += q[q_base + dim] * k[k_base + dim];
+                }
+                denominator += std::exp(score * softmax_scale - max_score);
+            }
+
+            const size_t output_base = (timestep * q_heads + q_head) * value_dim;
+            for (size_t value = 0; value < value_dim; ++value) {
+                float weighted = 0.0f;
+                for (size_t source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
+                    const size_t k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                    float score = 0.0f;
+                    for (size_t dim = 0; dim < head_dim; ++dim) {
+                        score += q[q_base + dim] * k[k_base + dim];
+                    }
+                    const float weight = std::exp(score * softmax_scale - max_score);
+                    const size_t v_index =
+                        (source_timestep * kv_heads + kv_head) * value_dim + value;
+                    weighted += weight * v[v_index];
+                }
+                output[output_base + value] = weighted / denominator;
+            }
+        }
+    }
+}
+
 class HipSiluMulKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -2326,6 +2449,238 @@ ullm_status rope_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 RoPE HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipCausalAttnKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_causal_attn_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_causal_attn_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build causal attention HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipCausalAttnKernelCache &hip_causal_attn_kernel_cache() {
+    static HipCausalAttnKernelCache cache;
+    return cache;
+}
+
+bool causal_attn_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_causal_attn_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    const size_t output_elements = sequence_len * q_heads * value_dim;
+    const size_t grid_size = (output_elements + block_size - 1) / block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "causal attention output element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+
+    unsigned long long kernel_sequence_len = static_cast<unsigned long long>(sequence_len);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ptr = k_buffer->ptr;
+    void *v_ptr = v_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr,
+        &k_ptr,
+        &v_ptr,
+        &kernel_sequence_len,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &softmax_scale,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 causal attention";
+        }
+        return false;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        if (error != nullptr) {
+            *error = "failed to synchronize f32 causal attention HIP kernel";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status causal_attn_f32_hip_staging(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t q_bytes,
+    size_t k_bytes,
+    size_t v_bytes,
+    size_t output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_q(q_bytes / sizeof(float));
+    std::vector<float> host_k(k_bytes / sizeof(float));
+    std::vector<float> host_v(v_bytes / sizeof(float));
+    std::vector<float> host_output(output_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = q_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_q.data(),
+            q_buffer->ptr,
+            q_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k.data(),
+            k_buffer->ptr,
+            k_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_v.data(),
+            v_buffer->ptr,
+            v_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 causal attention HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 causal attention HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    causal_attn_f32_host(
+        host_q.data(),
+        host_k.data(),
+        host_v.data(),
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        host_output.data());
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 causal attention output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 causal attention HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -4136,6 +4491,163 @@ ullm_status ullm_runtime_depthwise_conv1d_f32(
         required_input_bytes,
         required_weight_bytes,
         required_output_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_causal_attn_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_buffer == nullptr || v_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 causal attention received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (sequence_len == 0 || q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0) {
+        set_error("f32 causal attention dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((q_heads % kv_heads) != 0) {
+        set_error("f32 causal attention q_heads must be a multiple of kv_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error("f32 causal attention softmax scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_buffer, k_buffer) ||
+        !buffers_share_backend(q_buffer, v_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error("f32 causal attention buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 causal attention stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (q_heads > max_size / sequence_len) {
+        set_error("f32 causal attention q head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_head_sequence = sequence_len * q_heads;
+    if (head_dim > max_size / q_head_sequence) {
+        set_error("f32 causal attention q element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = q_head_sequence * head_dim;
+
+    if (kv_heads > max_size / sequence_len) {
+        set_error("f32 causal attention kv head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_sequence = sequence_len * kv_heads;
+    if (head_dim > max_size / kv_head_sequence ||
+        value_dim > max_size / kv_head_sequence) {
+        set_error("f32 causal attention kv element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements = kv_head_sequence * head_dim;
+    const size_t v_elements = kv_head_sequence * value_dim;
+    if (value_dim > max_size / q_head_sequence) {
+        set_error("f32 causal attention output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t output_elements = q_head_sequence * value_dim;
+    if (q_elements > max_size / sizeof(float) ||
+        k_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float) ||
+        output_elements > max_size / sizeof(float)) {
+        set_error("f32 causal attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    if (q_buffer->bytes < q_bytes) {
+        set_error("f32 causal attention q buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_buffer->bytes < k_bytes) {
+        set_error("f32 causal attention k buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_buffer->bytes < v_bytes) {
+        set_error("f32 causal attention v buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < output_bytes) {
+        set_error("f32 causal attention output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k = static_cast<const float *>(k_buffer->ptr);
+        const auto *v = static_cast<const float *>(v_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        causal_attn_f32_host(
+            q,
+            k,
+            v,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (causal_attn_f32_hip_kernel(
+            q_buffer,
+            k_buffer,
+            v_buffer,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty() ? "f32 causal attention HIP kernel is unavailable" : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return causal_attn_f32_hip_staging(
+        q_buffer,
+        k_buffer,
+        v_buffer,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_bytes,
+        k_bytes,
+        v_bytes,
+        output_bytes,
         output_buffer,
         stream);
 }
