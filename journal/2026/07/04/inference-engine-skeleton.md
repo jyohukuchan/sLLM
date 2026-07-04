@@ -116,6 +116,9 @@
 - `SchedulerState::pop_prefill_batch_with_allocation` はprefill token budgetでrequest batchをpopし、当面のreservation量として `prompt_tokens + max_new_tokens` からKV blockを割り当てる。途中でtoken数overflowまたはblock不足が起きた場合は、この呼び出し内で確保済みのblockをfreeし、pop済みrequestを元の順序でqueue先頭へ戻す。
 - 実装は5.3-codex-spark worker Nashに `scheduler.rs` 限定で委譲し、親側で差分reviewとrollback test補強を行った。`docs/words.txt` には `scheduler run state` を追加した。
 - 追加testは、成功path、block不足時rollback、overflow時rollback、部分allocation後overflow時rollback、releaseでのfreeを確認する。検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine scheduler::tests -- --test-threads=1`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` を通した。`cargo test -p ullm-engine` は53件成功し、scheduler filtered runは10件成功した。
+- Commit `9a6b191 Use scheduler state for package paged blocks` で、package self-attention系smokeが共有する `allocate_fragmented_paged_decode_blocks` を `SchedulerState` 経由へ変更した。fragment用requestを一度 `pop_prefill_batch_with_allocation` で割り当ててreleaseし、その後decode requestを同じscheduler run stateへenqueueしてblock tableを得る。
+- これにより、`package-self-attn-decode-smoke`、`package-self-attn-block-smoke`、`package-self-attn-mlp-block-smoke` のpaged block table生成がscheduler run state由来になった。低レベルruntime KV paged decode smokeは、allocator/kernel境界確認用として `KvBlockAllocator` 直呼びを残している。
+- 検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` を通した。package smokeはCPU `0` でdecode/block/MLP blockが全diff `0`、R9700/RDNA4 `2` のdecode smokeとV620/RDNA2 `1` のblock smokeが既知範囲で成功した。block tableは従来どおり `paged_block_table=[2]` だった。
 - Commit `b9a1988 Add Qwen3 self attention prepared sequence` で `Qwen3SelfAttnPreparedSequence` と `qwen3_self_attn_prepare_sequence_smoke` を追加した。
 - projection、Qwen3.5 q/gate split、q/k RMSNorm、RoPE、causal attention参照、expected paged K/V cache packまでをprepared sequence helperに切り出し、`run_self_attn_block_sequence_smoke` はprepared sequenceを使ってpaged decode step、output gate、o projection、residual add、cache readback検証に集中する形へ整理した。
 - `SelfAttnBlockSmokeRun` の返却内容、CLI出力、既存diff名、許容誤差は維持した。中間Vecは新structへmoveしており、大きな追加コピーは入れていない。
@@ -981,6 +984,7 @@
 - `e38830c Reuse self-attn block sequence in package smoke`
 - `6a155a9 Allocate KV blocks from token counts`
 - `93c8356 Add scheduler run state allocation`
+- `9a6b191 Use scheduler state for package paged blocks`
 
 ## 次の行動
 
@@ -988,7 +992,7 @@
 - `Qwen3DecoderLayerStepState` でpaged decode attention、output gate、o projection、residual add、post RMSNorm、MLP、final residual addまでのnarrow layer step APIを作り、CPU、R9700/RDNA4、V620/RDNA2で通した。layer-level resident weights、thin runtime runner、Qwen3 q projection split、Qwen3 self attention runtime shape、Qwen3 self attention projection sequence、Qwen3 self attention runtime prepared sequence、Qwen3 self attention paged decode prepared sequence、Qwen3 self attention block sequence、Qwen3 decoder layer sequence、Qwen3 headwise RMSNorm、Qwen3 RoPE、Qwen3 causal attention、paged K/V cache packは `decoder.rs` へ移したので、次はdeterministic input生成、package materialization境界、またはhost期待値diff集計のどれをlibrary側へ移すか選ぶ。
 - Runtime paged KV writeはCPU、R9700/RDNA4、V620/RDNA2で通り、package self-attn decode smokeとpackage self-attn MLP block smokeでも `decode_step` 経由に置き換え済み。
 - Paged decode attentionのruntime境界はCPU、R9700/RDNA4、V620/RDNA2で通っており、package self-attn decode smokeからも呼べる状態になった。
-- `package-self-attn-block-smoke` と `package-self-attn-mlp-block-smoke` は、どちらもprepared/sequence系の境界からself-attention側diffを集計できるようになった。`SchedulerState` はprefill batch選択とKV block allocationを同じ操作で扱えるようになったので、次はこのrun stateをCLI smokeまたはdecoder layer sequence smokeへ接続し、scheduler由来block tableをpackage経路へ渡す。
+- `package-self-attn-block-smoke` と `package-self-attn-mlp-block-smoke` は、どちらもprepared/sequence系の境界からself-attention側diffを集計できるようになった。package self-attention系smokeのpaged block tableは `SchedulerState` 由来になったので、次はactive decode request管理、cache_len進行、またはprefill/decode分離を扱う最小scheduler APIへ進む。
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
 - CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、paged decode state/step、paged K/V cache pack、Qwen3 self attention runtime shape、Qwen3 self attention projection sequence、Qwen3 self attention runtime prepared sequence、Qwen3 self attention paged decode prepared sequence、Qwen3 self attention block sequence、Qwen3 decoder layer sequence、Qwen3 self attention q projection split、Qwen3 headwise RMSNorm、Qwen3 RoPE、Qwen3 causal attention、Qwen3 self attention runtime weights、Qwen3 self attention prepared sequence、Qwen3 self-attn block step state、Qwen3 decoder layer step state、Qwen3 post attention runtime weights、Qwen3 decoder layer runtime weights、Qwen3 decoder layer runtime、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。Qwen3.5 self-attn MLP block smokeではpaged decode step出力をlayer-level partial decoder経路へ渡せるようになった。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
