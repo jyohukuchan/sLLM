@@ -1036,6 +1036,19 @@
 - CPU result had all diffs `0`; R9700/V620 had q norm `0.000000954`, k norm `0.000001192`, q RoPE `0.000000313`, k RoPE `0.000000477`, causal attention `0.000000477`, while attention/projection/block/post_norm/MLP/layer/K/V cache diffs stayed `0`.
 - Next useful step: collapse the remaining model-loop smoke-local bundles behind a single narrow `PackageModelLoopSmokeRun` object, or start moving only the stable non-smoke execution pieces toward a reusable package model runner API.
 
+2026-07-04 package model loop smoke run:
+- Commit `73faec0 Add package model loop smoke run` adds `PackageModelLoopSmokeRun` in `crates/ullm-engine/src/main.rs`.
+- The smoke run bundles `PackageModelLoopSmokeModel`, `PackageModelLoopRequestPlan`, `PackageModelLoopLayerRunPlan`, `PackageModelLoopExecutionPlan`, optional execution summary, and output settings.
+- `PackageModelLoopSmokeRun::new` loads/prepares the smoke, `execute` advances scheduler/layer state and stores `PackageModelLoopExecutionSummary`, and `format_output` emits the existing `verified=true` line only after execution.
+- Runtime context, runtime stream, and `Qwen3DecoderLayerStackRequestDecodeRunner` remain local to preparation/execution and are not stored in the run object, avoiding lifetime coupling to borrowed layer weights.
+- `package_self_attn_mlp_block_model_loop_smoke_impl` now only creates runtime context/stream, builds a smoke run, executes it, and formats output.
+- `docs/words.txt` adds `package model loop smoke run`.
+- Validation passed: `cargo fmt --all --check`, `git diff --check`, `cargo check -p ullm-engine`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, and `cargo test --workspace -- --test-threads=1`.
+- 3-layer smoke validation passed on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with `3,7,11 3`: CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1` with HIP-required kernel flags for the HIP runs.
+- CPU result had all diffs `0`; R9700/V620 had q norm `0.000000954`, k norm `0.000001192`, q RoPE `0.000000313`, k RoPE `0.000000477`, causal attention `0.000000477`, while attention/projection/block/post_norm/MLP/layer/K/V cache diffs stayed `0`.
+- 5.3-codex-spark explorer Bohr recommended this object boundary and specifically warned against storing the stack runner or runtime context/stream inside the smoke run.
+- Next useful step: review which parts of `PackageModelLoopExecutionPlan` are stable enough to move toward a reusable package model runner API, while keeping expected/diff/output formatting in the smoke.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -1151,6 +1164,7 @@
 - `0c30193 Allow model loop layer lists`
 - `4dd2f9c Add package model loop layer run plan`
 - `9c77e7d Add package model loop execution plan`
+- `73faec0 Add package model loop smoke run`
 
 ## 次の行動
 
