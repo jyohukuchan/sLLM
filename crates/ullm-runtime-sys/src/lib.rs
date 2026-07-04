@@ -139,6 +139,19 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_decode_attn_f32(
+        q_buffer: *const RawRuntimeBuffer,
+        k_buffer: *const RawRuntimeBuffer,
+        v_buffer: *const RawRuntimeBuffer,
+        cache_len: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_linear_attn_gate_beta_f32(
         a_buffer: *const RawRuntimeBuffer,
         b_buffer: *const RawRuntimeBuffer,
@@ -696,6 +709,95 @@ pub fn causal_attn_f32(
             k.raw.as_ptr(),
             v.raw.as_ptr(),
             sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn decode_attn_f32(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    cache_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if cache_len == 0 {
+        return Err("f32 decode attention cache_len must be greater than zero".to_string());
+    }
+    if q_heads == 0 {
+        return Err("f32 decode attention q_heads must be greater than zero".to_string());
+    }
+    if kv_heads == 0 {
+        return Err("f32 decode attention kv_heads must be greater than zero".to_string());
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err("f32 decode attention q_heads must be a multiple of kv_heads".to_string());
+    }
+    if head_dim == 0 {
+        return Err("f32 decode attention head_dim must be greater than zero".to_string());
+    }
+    if value_dim == 0 {
+        return Err("f32 decode attention value_dim must be greater than zero".to_string());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "f32 decode attention softmax scale must be finite and greater than zero".to_string(),
+        );
+    }
+
+    let q_elements = q_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 decode attention q element count overflows".to_string())?;
+    let kv_head_sequence = cache_len
+        .checked_mul(kv_heads)
+        .ok_or_else(|| "f32 decode attention kv head-cache count overflows".to_string())?;
+    let k_elements = kv_head_sequence
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 decode attention k element count overflows".to_string())?;
+    let v_elements = kv_head_sequence
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 decode attention v element count overflows".to_string())?;
+    let output_elements = q_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 decode attention output element count overflows".to_string())?;
+
+    let q_bytes = q_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 decode attention q byte size overflows".to_string())?;
+    let k_bytes = k_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 decode attention k byte size overflows".to_string())?;
+    let v_bytes = v_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 decode attention v byte size overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 decode attention output byte size overflows".to_string())?;
+
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, k_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_bytes, v_cache.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_decode_attn_f32(
+            q.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            cache_len,
             q_heads,
             kv_heads,
             head_dim,
@@ -1546,6 +1648,109 @@ mod tests {
             .unwrap();
         let err =
             causal_attn_f32(&q, &k, &v, 1, 4, 2, 1, 1, 1.0, &mut short_output, None).unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
+    fn cpu_decode_attn_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cache_len = 3_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..cache_len * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..cache_len * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let expected = expected_decode_attn(
+            &q_values,
+            &k_values,
+            &v_values,
+            cache_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k = context
+            .alloc_buffer(k_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v = context
+            .alloc_buffer(v_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream))
+            .unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        decode_attn_f32(
+            &q,
+            &k,
+            &v,
+            cache_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_decode_attn_f32_rejects_invalid_shape_or_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let q = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let k = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+        let v = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(8 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let err = decode_attn_f32(&q, &k, &v, 3, 3, 2, 1, 2, 1.0, &mut output, None).unwrap_err();
+        assert!(err.contains("q_heads"));
+
+        let mut short_output = context
+            .alloc_buffer(7 * std::mem::size_of::<f32>())
+            .unwrap();
+        let err =
+            decode_attn_f32(&q, &k, &v, 3, 4, 2, 1, 2, 1.0, &mut short_output, None).unwrap_err();
         assert!(err.contains("out of bounds") || err.contains("output"));
     }
 
@@ -2415,6 +2620,85 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_decode_attn_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cache_len = 3_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..cache_len * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..cache_len * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let expected = expected_decode_attn(
+            &q_values,
+            &k_values,
+            &v_values,
+            cache_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k = context
+            .alloc_buffer(k_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v = context
+            .alloc_buffer(v_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream))
+            .unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        decode_attn_f32(
+            &q,
+            &k,
+            &v,
+            cache_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-4);
+    }
+
+    #[test]
     fn first_hip_linear_attn_gate_beta_f32_computes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -2832,6 +3116,53 @@ mod tests {
                     }
                     output[output_base + value] = weighted / denominator;
                 }
+            }
+        }
+        output
+    }
+
+    fn expected_decode_attn(
+        q: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        cache_len: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+    ) -> Vec<f32> {
+        let mut output = vec![0.0_f32; q_heads * value_dim];
+        let q_per_kv = q_heads / kv_heads;
+        for q_head in 0..q_heads {
+            let kv_head = q_head / q_per_kv;
+            let q_base = q_head * head_dim;
+            let mut scores = Vec::with_capacity(cache_len);
+            for cache_t in 0..cache_len {
+                let k_base = (cache_t * kv_heads + kv_head) * head_dim;
+                let score = (0..head_dim)
+                    .map(|dim| q[q_base + dim] * k_cache[k_base + dim])
+                    .sum::<f32>()
+                    * softmax_scale;
+                scores.push(score);
+            }
+            let max_score = scores
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, |max, score| max.max(score));
+            let weights = scores
+                .iter()
+                .map(|score| (*score - max_score).exp())
+                .collect::<Vec<_>>();
+            let denominator = weights.iter().sum::<f32>();
+            let output_base = q_head * value_dim;
+            for value in 0..value_dim {
+                let mut weighted = 0.0_f32;
+                for (cache_t, weight) in weights.iter().enumerate() {
+                    let v_index = (cache_t * kv_heads + kv_head) * value_dim + value;
+                    weighted += *weight * v_cache[v_index];
+                }
+                output[output_base + value] = weighted / denominator;
             }
         }
         output
