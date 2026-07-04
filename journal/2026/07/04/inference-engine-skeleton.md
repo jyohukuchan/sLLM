@@ -7,6 +7,13 @@
 
 ## 今回の変更点
 
+- Commit `05c9784 Move passthrough f32 loading into loader` で、`main.rs` に閉じていた `PassthroughF32Data`、`read_named_passthrough_f32`、`resolve_passthrough_dtype`、`validate_passthrough_shape_elements`、`read_passthrough_payload_f32_bytes` を `crates/ullm-engine/src/loader.rs` へ移した。
+- これは `PackageModelLoopSmokeModel` / `load_package_model_loop_layer_smoke` を後で `package_model_loop.rs` へ移す前段で、package passthrough tensorのBF16/F32読み込みをCLI smoke固有処理ではなくloader APIとして扱えるようにする変更である。`main.rs` はloaderからimportして既存package smokeの挙動を維持している。
+- `loader::tests::read_named_passthrough_f32_decodes_bf16_and_f32_payloads` を追加し、dtype未指定BF16の推定、明示F32、shape保持、3 byte chunkによる要素境界跨ぎ読み込みを確認した。
+- `docs/words.txt` には `passthrough f32 data` を追加した。
+- 検証は `cargo fmt --all --check`、`cargo test -p ullm-engine loader -- --test-threads=1` (`8 passed`)、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1` (`73 + 5 passed`)、`cargo test --workspace -- --test-threads=1`、`cargo build -p ullm-engine`、`git diff --check` を通した。
+- 3-layer smoke `package-self-attn-mlp-block-model-loop-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d DEVICE 1048576 3,7,11 3` はCPU `0`、R9700/RDNA4 `2`、V620/RDNA2 `1` で成功した。全deviceで `decode_batch_ready_counts=[2, 1]`、`final_ready=0`、`cached_tokens=[3, 3, 1]`、`generated_tokens=[2, 1, 0]`。CPUは全diff `0`、R9700/V620はprepared側が既知範囲でruntime/cache diffはすべて `0`。
+- 5.3-codex-spark explorer Banachの調査でも、model-loop model読み込みを外へ出す前に `PassthroughF32Data` と `read_named_passthrough_f32` 系を公開する必要があると確認した。次は `qwen3_decoder_layer_runtime_weights_from_package` 系の依存整理、または `PackageModelLoopLayerSmoke` / `PackageModelLoopSmokeModel::load` の小さいmodule移設を検討する。
 - Commit `e36174e Document layer stack batch advance contract` で、`Qwen3DecoderLayerStackRequestDecodeRunner::run_ready_batch_across_layers` のpublic APIコメントを追加した。
 - コメントでは、`layer_inputs` がlayer順の入力sliceであり、各sliceはready batch内の全requestに対応すること、全layerを事前検証してからschedulerを進めずに実行し、全layer成功後にscheduler batchを1回だけadvanceすることを明記した。既存テスト `qwen3_decoder_layer_stack_runner_advances_ready_batch_once_cpu` と `qwen3_decoder_layer_stack_runner_rejects_bad_layer_input_before_mutation_cpu` がこの契約を確認している。
 - 検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine decode_runner -- --test-threads=1` (`7 passed`)、`git diff --check` を通した。
