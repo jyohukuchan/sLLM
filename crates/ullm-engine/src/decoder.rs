@@ -159,6 +159,17 @@ pub struct Qwen3SelfAttnRuntimePreparedSequence {
     pub output_gate_layout: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode {
+    pub residual_sequence: Vec<f32>,
+    pub prepared: Qwen3SelfAttnRuntimePreparedSequence,
+    pub paged_k_cache: Vec<f32>,
+    pub paged_v_cache: Vec<f32>,
+    pub paged_block_table: Vec<u32>,
+    pub paged_block_size: usize,
+    pub paged_cache_blocks: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn qwen3_self_attn_prepare_sequence_runtime_f32(
     context: &mut RuntimeContext,
@@ -328,6 +339,73 @@ pub fn qwen3_self_attn_prepare_sequence_runtime_f32(
         q_projection_layout,
         q_gate_elements,
         output_gate_layout,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn qwen3_self_attn_prepare_sequence_for_paged_decode_f32(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    weights: &Qwen3SelfAttnRuntimeWeights,
+    residual_sequence: Vec<f32>,
+    sequence_len: usize,
+    q_norm_weight: &[f32],
+    k_norm_weight: &[f32],
+    rotary_dim: usize,
+    position_offset: usize,
+    rope_base: f32,
+    block_table: &[u32],
+    block_size: usize,
+    cache_blocks: usize,
+) -> Result<Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode, String> {
+    let projected = qwen3_self_attn_project_sequence_to_host_f32(
+        context,
+        stream,
+        weights,
+        &residual_sequence,
+        sequence_len,
+    )?;
+    let prepared = qwen3_self_attn_prepare_sequence_runtime_f32(
+        context,
+        stream,
+        weights,
+        projected,
+        sequence_len,
+        q_norm_weight,
+        k_norm_weight,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    )?;
+
+    let packed_shape = PagedDecodeShape {
+        block_size,
+        cache_blocks,
+        q_heads: prepared.shape.q_heads,
+        kv_heads: prepared.shape.kv_heads,
+        head_dim: prepared.shape.head_dim,
+        value_dim: prepared.shape.value_dim,
+    };
+
+    let PagedKvCacheReadback {
+        k: paged_k_cache,
+        v: paged_v_cache,
+    } = pack_paged_kv_cache_for_block_table(
+        &prepared.k_rope,
+        &prepared.v_projected,
+        block_table,
+        sequence_len,
+        packed_shape,
+    )?;
+
+    Ok(Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode {
+        residual_sequence,
+        prepared,
+        paged_k_cache,
+        paged_v_cache,
+        paged_block_table: block_table.to_vec(),
+        paged_block_size: block_size,
+        paged_cache_blocks: cache_blocks,
     })
 }
 
@@ -2951,10 +3029,74 @@ mod tests {
         let v_rows = kv_heads
             .checked_mul(value_dim)
             .expect("test v_rows multiplication overflow");
-        let q_matrix = context.alloc_buffer(0).unwrap();
-        let k_matrix = context.alloc_buffer(0).unwrap();
-        let v_matrix = context.alloc_buffer(0).unwrap();
-        let o_matrix = context.alloc_buffer(0).unwrap();
+        let q_matrix_elements = q_rows
+            .checked_mul(q_cols)
+            .expect("test q matrix element count overflow");
+        let k_matrix_elements = k_rows
+            .checked_mul(q_cols)
+            .expect("test k matrix element count overflow");
+        let v_matrix_elements = v_rows
+            .checked_mul(q_cols)
+            .expect("test v matrix element count overflow");
+        let o_matrix_elements = q_cols
+            .checked_mul(o_cols)
+            .expect("test o matrix element count overflow");
+        let mut q_matrix = context
+            .alloc_buffer(
+                q_matrix_elements
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .expect("test q matrix byte size overflow"),
+            )
+            .unwrap();
+        let mut k_matrix = context
+            .alloc_buffer(
+                k_matrix_elements
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .expect("test k matrix byte size overflow"),
+            )
+            .unwrap();
+        let mut v_matrix = context
+            .alloc_buffer(
+                v_matrix_elements
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .expect("test v matrix byte size overflow"),
+            )
+            .unwrap();
+        let mut o_matrix = context
+            .alloc_buffer(
+                o_matrix_elements
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .expect("test o matrix byte size overflow"),
+            )
+            .unwrap();
+        q_matrix
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&test_matrix_values(q_matrix_elements, 3)),
+                None,
+            )
+            .unwrap();
+        k_matrix
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&test_matrix_values(k_matrix_elements, 5)),
+                None,
+            )
+            .unwrap();
+        v_matrix
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&test_matrix_values(v_matrix_elements, 7)),
+                None,
+            )
+            .unwrap();
+        o_matrix
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&test_matrix_values(o_matrix_elements, 11)),
+                None,
+            )
+            .unwrap();
 
         Qwen3SelfAttnRuntimeWeights {
             q_rows,
@@ -2971,6 +3113,19 @@ mod tests {
             v_matrix,
             o_matrix,
         }
+    }
+
+    fn test_matrix_values(elements: usize, stride: usize) -> Vec<f32> {
+        (0..elements)
+            .map(|index| {
+                let residue = (index
+                    .checked_mul(stride)
+                    .and_then(|value| value.checked_add(3))
+                    .expect("test matrix value index overflow")
+                    % 23) as f32;
+                (residue - 11.0_f32) / 13.0_f32
+            })
+            .collect()
     }
 
     #[test]
@@ -3412,6 +3567,204 @@ mod tests {
         assert_f32s_close(&prepared.k_rope, &expected_k_rope, 1e-5);
         assert_f32s_close(&prepared.attention_output, &expected_attention, 1e-5);
         assert_eq!(prepared.v_projected, v_projected);
+    }
+
+    #[test]
+    fn qwen3_self_attn_prepare_sequence_for_paged_decode_f32_runs_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let sequence_len = 3_usize;
+        let q_rows = 4_usize;
+        let q_cols = 4_usize;
+        let head_dim = 2_usize;
+        let kv_heads = 2_usize;
+        let value_dim = 3_usize;
+        let shape = Qwen3SelfAttnRuntimeShape {
+            hidden: q_cols,
+            q_heads: q_rows / head_dim,
+            kv_heads,
+            head_dim,
+            value_dim,
+            attention_width: q_rows / head_dim * value_dim,
+            q_projection_layout: "plain",
+        };
+        let weights = make_qwen3_self_attn_runtime_weights(
+            &mut context,
+            q_rows,
+            q_cols,
+            head_dim,
+            kv_heads,
+            value_dim,
+            6,
+        );
+
+        let residual_sequence = (0..sequence_len * q_cols)
+            .map(|index| index as f32 * 0.25 - 0.3)
+            .collect::<Vec<_>>();
+        let q_norm_weight = vec![1.0_f32, 0.75_f32];
+        let k_norm_weight = vec![0.5_f32, 1.25_f32];
+        let rotary_dim = 2_usize;
+        let position_offset = 1_usize;
+        let rope_base = 10_000.0_f32;
+        let block_table = vec![3_u32, 0_u32];
+        let block_size = 2_usize;
+        let cache_blocks = 4_usize;
+
+        let prepared = qwen3_self_attn_prepare_sequence_for_paged_decode_f32(
+            &mut context,
+            &mut stream,
+            &weights,
+            residual_sequence.clone(),
+            sequence_len,
+            &q_norm_weight,
+            &k_norm_weight,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            &block_table,
+            block_size,
+            cache_blocks,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.residual_sequence, residual_sequence);
+        assert_eq!(prepared.paged_block_table, block_table);
+        assert_eq!(prepared.paged_block_size, block_size);
+        assert_eq!(prepared.paged_cache_blocks, cache_blocks);
+        assert_eq!(prepared.prepared.shape, shape);
+        assert_eq!(prepared.prepared.q_projection_layout, "plain");
+        assert_eq!(prepared.prepared.output_gate_layout, "none");
+        assert_eq!(prepared.prepared.q_gate_elements, 0);
+        assert!(prepared.prepared.q_gate.is_none());
+        assert!(
+            prepared
+                .prepared
+                .q_query
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        assert!(
+            prepared
+                .prepared
+                .k_projected
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        assert!(
+            prepared
+                .prepared
+                .v_projected
+                .iter()
+                .all(|value| value.is_finite())
+        );
+
+        let mut expected_q_normed = Vec::with_capacity(prepared.prepared.q_query.len());
+        for head_input in prepared.prepared.q_query.chunks_exact(shape.head_dim) {
+            expected_q_normed.extend(expected_rmsnorm_for_test(
+                head_input,
+                &q_norm_weight,
+                1e-5_f32,
+            ));
+        }
+        let mut expected_k_normed = Vec::with_capacity(prepared.prepared.k_projected.len());
+        for head_input in prepared.prepared.k_projected.chunks_exact(shape.head_dim) {
+            expected_k_normed.extend(expected_rmsnorm_for_test(
+                head_input,
+                &k_norm_weight,
+                1e-5_f32,
+            ));
+        }
+        let expected_q_rope = expected_rope_for_test(
+            &expected_q_normed,
+            sequence_len,
+            shape.q_heads,
+            shape.head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let expected_k_rope = expected_rope_for_test(
+            &expected_k_normed,
+            sequence_len,
+            shape.kv_heads,
+            shape.head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let expected_attention = expected_causal_attn_for_test(
+            &expected_q_rope,
+            &expected_k_rope,
+            &prepared.prepared.v_projected,
+            sequence_len,
+            shape.q_heads,
+            shape.kv_heads,
+            shape.head_dim,
+            shape.value_dim,
+            prepared.prepared.softmax_scale,
+        );
+
+        assert_f32s_close(&prepared.prepared.q_normed, &expected_q_normed, 1e-5);
+        assert_f32s_close(&prepared.prepared.k_normed, &expected_k_normed, 1e-5);
+        assert_f32s_close(&prepared.prepared.q_rope, &expected_q_rope, 1e-5);
+        assert_f32s_close(&prepared.prepared.k_rope, &expected_k_rope, 1e-5);
+        assert_f32s_close(
+            &prepared.prepared.attention_output,
+            &expected_attention,
+            1e-5,
+        );
+
+        let expected_shape = PagedDecodeShape {
+            block_size,
+            cache_blocks,
+            q_heads: shape.q_heads,
+            kv_heads: shape.kv_heads,
+            head_dim,
+            value_dim,
+        };
+        let expected_pack = pack_paged_kv_cache_for_block_table(
+            &prepared.prepared.k_rope,
+            &prepared.prepared.v_projected,
+            &block_table,
+            sequence_len,
+            expected_shape,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.paged_k_cache, expected_pack.k);
+        assert_eq!(prepared.paged_v_cache, expected_pack.v);
+    }
+
+    #[test]
+    fn qwen3_self_attn_prepare_sequence_for_paged_decode_f32_rejects_bad_block_table() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let sequence_len = 3_usize;
+        let weights = make_qwen3_self_attn_runtime_weights(&mut context, 24, 16, 4, 2, 3, 18);
+        let residual_sequence = vec![0.0_f32; sequence_len * weights.q_cols];
+        let q_norm_weight = vec![1.0_f32; 4];
+        let k_norm_weight = vec![1.0_f32; 4];
+        let err = qwen3_self_attn_prepare_sequence_for_paged_decode_f32(
+            &mut context,
+            &mut stream,
+            &weights,
+            residual_sequence,
+            sequence_len,
+            &q_norm_weight,
+            &k_norm_weight,
+            4_usize,
+            0_usize,
+            10_000.0_f32,
+            &[0_u32],
+            2_usize,
+            4_usize,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("block table length"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

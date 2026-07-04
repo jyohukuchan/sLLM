@@ -10,10 +10,11 @@ use ullm_engine::decoder::{
     PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntime,
     Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights,
     Qwen3SelfAttnBlockStepState, Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimePreparedSequence,
-    Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
+    Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode, Qwen3SelfAttnRuntimeShape,
+    Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
     qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
-    qwen3_self_attn_prepare_sequence_runtime_f32, qwen3_self_attn_project_sequence_to_host_f32,
-    qwen3_self_attn_runtime_shape, split_qwen3_self_attn_q_projection,
+    qwen3_self_attn_prepare_sequence_for_paged_decode_f32, qwen3_self_attn_runtime_shape,
+    split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -7629,48 +7630,56 @@ fn qwen3_self_attn_prepare_sequence_smoke(
         let step_input = linear_attn_step_input(&base_input, timestep);
         residual_sequence.extend_from_slice(&step_input);
     }
-    let projected = qwen3_self_attn_project_sequence_to_host_f32(
-        context,
-        stream,
-        self_attn_weights,
-        &residual_sequence,
-        sequence_len,
-    )?;
+    let paged_block_size = 2_usize;
+    let (paged_block_table, paged_cache_blocks, _) =
+        allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size)?;
 
-    let prepared = qwen3_self_attn_prepare_sequence_runtime_f32(
+    let prepared = qwen3_self_attn_prepare_sequence_for_paged_decode_f32(
         context,
         stream,
         self_attn_weights,
-        projected,
+        residual_sequence,
         sequence_len,
         &q_norm.values,
         &k_norm.values,
         rotary_dim,
         position_offset,
         rope_base,
+        &paged_block_table,
+        paged_block_size,
+        paged_cache_blocks,
     )?;
 
-    if q_projection_layout != prepared.q_projection_layout {
+    if q_projection_layout != prepared.prepared.q_projection_layout {
         return Err(
             "self-attn q projection layout changed between helper and runtime prepare".to_string(),
         );
     }
 
-    let Qwen3SelfAttnRuntimePreparedSequence {
-        q_query,
-        k_projected,
-        q_normed,
-        k_normed,
-        q_rope,
-        k_rope,
-        v_projected: prepared_v_projected,
-        q_gate,
-        attention_output,
-        shape,
-        softmax_scale,
-        q_projection_layout,
-        q_gate_elements,
-        output_gate_layout,
+    let Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode {
+        residual_sequence,
+        prepared:
+            Qwen3SelfAttnRuntimePreparedSequence {
+                q_query,
+                k_projected,
+                q_normed,
+                k_normed,
+                q_rope,
+                k_rope,
+                v_projected: prepared_v_projected,
+                q_gate,
+                attention_output,
+                shape,
+                softmax_scale,
+                q_projection_layout,
+                q_gate_elements,
+                output_gate_layout,
+            },
+        paged_k_cache: expected_paged_k_cache,
+        paged_v_cache: expected_paged_v_cache,
+        paged_block_table,
+        paged_block_size,
+        paged_cache_blocks,
     } = prepared;
 
     if shape.q_heads != shape_q_heads {
@@ -7760,28 +7769,6 @@ fn qwen3_self_attn_prepare_sequence_smoke(
         &expected_attention,
         1e-4_f32,
         1e-4_f32,
-    )?;
-
-    let paged_block_size = 2_usize;
-    let (paged_block_table, paged_cache_blocks, _) =
-        allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size)?;
-    let packed_shape = PagedDecodeShape {
-        block_size: paged_block_size,
-        cache_blocks: paged_cache_blocks,
-        q_heads: shape.q_heads,
-        kv_heads,
-        head_dim,
-        value_dim,
-    };
-    let PagedKvCacheReadback {
-        k: expected_paged_k_cache,
-        v: expected_paged_v_cache,
-    } = pack_paged_kv_cache_for_block_table(
-        &k_rope,
-        &prepared_v_projected,
-        &paged_block_table,
-        sequence_len,
-        packed_shape,
     )?;
 
     Ok(Qwen3SelfAttnPreparedSequence {
