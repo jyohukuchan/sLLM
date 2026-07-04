@@ -8952,6 +8952,7 @@ fn qwen3_self_attn_prepare_model_loop_sequence_smoke(
     rotary_dim: usize,
     rope_base: f32,
     position_offset: usize,
+    input_norm: &PassthroughF32Data,
     q_norm: &PassthroughF32Data,
     k_norm: &PassthroughF32Data,
     paged_block_table: &[u32],
@@ -8978,12 +8979,28 @@ fn qwen3_self_attn_prepare_model_loop_sequence_smoke(
             expected_residual_len
         ));
     }
+    if input_norm.values.len() != hidden {
+        return Err(format!(
+            "{label} input RMSNorm length {} does not match hidden={hidden}",
+            input_norm.values.len()
+        ));
+    }
+
+    let original_residual_sequence = residual_sequence;
+    let mut attention_input_normed = Vec::with_capacity(original_residual_sequence.len());
+    for residual in original_residual_sequence.chunks_exact(hidden) {
+        attention_input_normed.extend(runtime_host_rmsnorm_f32(
+            residual,
+            &input_norm.values,
+            1e-6_f32,
+        ));
+    }
 
     let prepared = qwen3_self_attn_prepare_sequence_for_paged_decode_f32(
         context,
         stream,
         self_attn_weights,
-        residual_sequence,
+        attention_input_normed,
         sequence_len,
         &q_norm.values,
         &k_norm.values,
@@ -8995,7 +9012,7 @@ fn qwen3_self_attn_prepare_model_loop_sequence_smoke(
         paged_cache_blocks,
     )?;
     let Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode {
-        residual_sequence,
+        residual_sequence: _,
         prepared:
             Qwen3SelfAttnRuntimePreparedSequence {
                 q_query,
@@ -9118,7 +9135,7 @@ fn qwen3_self_attn_prepare_model_loop_sequence_smoke(
     )?;
 
     Ok(Qwen3SelfAttnModelLoopPreparedSequence {
-        residual_sequence,
+        residual_sequence: original_residual_sequence,
         q_rope,
         k_rope,
         v_projected,
@@ -11325,6 +11342,7 @@ impl PackageModelLoopLayerRunPlan {
                     rotary_dim,
                     rope_base,
                     request_position_offset,
+                    &layer.input_norm,
                     &layer.q_norm,
                     &layer.k_norm,
                     &request_plan.block_tables[request_index],
@@ -11694,6 +11712,9 @@ impl PackageModelLoopSmokeRun {
         let generated_tokens = self.request_plan.generated_tokens()?;
         let decode_steps_by_layer = self.layer_run_plan.decode_steps_by_layer();
         let layer_indices = self.model.layer_indices();
+        let input_norm_tensors = self
+            .model
+            .tensor_names_by_layer(|layer| &layer.input_norm_tensor);
         let q_tensors = self.model.tensor_names_by_layer(|layer| &layer.q_tensor);
         let k_tensors = self.model.tensor_names_by_layer(|layer| &layer.k_tensor);
         let v_tensors = self.model.tensor_names_by_layer(|layer| &layer.v_tensor);
@@ -11710,6 +11731,7 @@ impl PackageModelLoopSmokeRun {
         let gate_tensors = self.model.tensor_names_by_layer(|layer| &layer.gate_tensor);
         let up_tensors = self.model.tensor_names_by_layer(|layer| &layer.up_tensor);
         let down_tensors = self.model.tensor_names_by_layer(|layer| &layer.down_tensor);
+        let input_norm_dtypes = self.model.input_norm_dtypes();
         let q_norm_dtypes = self.model.q_norm_dtypes();
         let k_norm_dtypes = self.model.k_norm_dtypes();
         let post_norm_dtypes = self.model.post_norm_dtypes();
@@ -11731,9 +11753,10 @@ impl PackageModelLoopSmokeRun {
         let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
 
         Ok(format!(
-            "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} decode_batch_ready_counts={:?} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+            "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} decode_batch_ready_counts={:?} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
             path,
             layer_indices,
+            input_norm_tensors,
             q_tensors,
             k_tensors,
             v_tensors,
@@ -11779,6 +11802,7 @@ impl PackageModelLoopSmokeRun {
             self.rope_base,
             self.model.softmax_scale,
             self.model.mlp_epsilon,
+            input_norm_dtypes,
             q_norm_dtypes,
             k_norm_dtypes,
             post_norm_dtypes,

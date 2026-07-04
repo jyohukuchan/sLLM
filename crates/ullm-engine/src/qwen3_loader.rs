@@ -24,6 +24,7 @@ use ullm_runtime_sys::{RuntimeContext, RuntimeStream};
 
 pub struct Qwen3PackageDecoderLayerRuntime {
     pub layer_index: usize,
+    pub input_norm_tensor: String,
     pub q_tensor: String,
     pub k_tensor: String,
     pub v_tensor: String,
@@ -34,6 +35,7 @@ pub struct Qwen3PackageDecoderLayerRuntime {
     pub gate_tensor: String,
     pub up_tensor: String,
     pub down_tensor: String,
+    pub input_norm: PassthroughF32Data,
     pub q_norm: PassthroughF32Data,
     pub k_norm: PassthroughF32Data,
     pub post_norm: PassthroughF32Data,
@@ -277,6 +279,13 @@ impl Qwen3PackageModelRuntime {
                     layer.k_norm.values.len()
                 ));
             }
+            if layer.input_norm.values.len() != hidden {
+                return Err(format!(
+                    "Qwen3 package model runtime layer {} input norm length mismatch: input_norm={} hidden={hidden}",
+                    layer.layer_index,
+                    layer.input_norm.values.len()
+                ));
+            }
         }
 
         Ok(Self {
@@ -343,6 +352,13 @@ impl Qwen3PackageModelRuntime {
             .collect()
     }
 
+    pub fn input_norm_dtypes(&self) -> Vec<String> {
+        self.layers
+            .iter()
+            .map(|layer| layer.input_norm.dtype.clone())
+            .collect()
+    }
+
     pub fn k_norm_dtypes(&self) -> Vec<String> {
         self.layers
             .iter()
@@ -372,6 +388,8 @@ pub fn qwen3_package_decoder_layer_runtime_from_package(
     chunk_bytes: usize,
     layer_index: usize,
 ) -> Result<Qwen3PackageDecoderLayerRuntime, String> {
+    let input_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
     let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
     let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
     let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
@@ -386,6 +404,8 @@ pub fn qwen3_package_decoder_layer_runtime_from_package(
     let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
     let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
 
+    let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)?;
+    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
     let mut q_norm = read_named_passthrough_f32(path, &q_norm_tensor, chunk_bytes)?;
     q_norm.values = effective_rmsnorm_weight_values(&q_norm_tensor, &q_norm.values);
     let mut k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)?;
@@ -417,6 +437,7 @@ pub fn qwen3_package_decoder_layer_runtime_from_package(
     }
     Ok(Qwen3PackageDecoderLayerRuntime {
         layer_index,
+        input_norm_tensor,
         q_tensor,
         k_tensor,
         v_tensor,
@@ -427,6 +448,7 @@ pub fn qwen3_package_decoder_layer_runtime_from_package(
         gate_tensor,
         up_tensor,
         down_tensor,
+        input_norm,
         q_norm,
         k_norm,
         post_norm,
