@@ -11318,6 +11318,19 @@ struct PackageModelLoopSmokeModel {
     mlp_epsilon: f32,
 }
 
+struct PackageModelLoopRequestPlan {
+    scheduler: SchedulerState,
+    requests: Vec<Request>,
+    request_ids: Vec<u64>,
+    prompt_tokens: Vec<usize>,
+    max_new_tokens: Vec<usize>,
+    total_tokens: Vec<usize>,
+    block_tables: Vec<Vec<u32>>,
+    initial_residuals: Vec<Vec<f32>>,
+    block_size: usize,
+    cache_blocks: usize,
+}
+
 fn load_package_model_loop_layer_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -11592,6 +11605,143 @@ impl PackageModelLoopSmokeModel {
     }
 }
 
+impl PackageModelLoopRequestPlan {
+    fn new(sequence_len: usize, hidden: usize, block_size: usize) -> Result<Self, String> {
+        if block_size == 0 {
+            return Err("model-loop block size must be greater than zero".to_string());
+        }
+        let requests = vec![
+            Request::new(201, sequence_len - 2, 2),
+            Request::new(202, sequence_len - 1, 1),
+            Request::new(203, 1, 0),
+        ];
+
+        let mut required_blocks = 0_usize;
+        for request in &requests {
+            let total_tokens = request
+                .prompt_tokens
+                .checked_add(request.max_new_tokens)
+                .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
+            if total_tokens == 0 {
+                return Err(format!("request {:?} has zero total tokens", request.id));
+            }
+            let request_blocks = (total_tokens - 1) / block_size + 1;
+            required_blocks = required_blocks
+                .checked_add(request_blocks)
+                .ok_or_else(|| "model-loop required block count overflows".to_string())?;
+        }
+        let cache_blocks = required_blocks
+            .checked_add(2)
+            .ok_or_else(|| "model-loop cache block count overflows".to_string())?;
+        if cache_blocks > u32::MAX as usize || block_size > u32::MAX as usize {
+            return Err(format!(
+                "model-loop block layout exceeds u32 range: cache_blocks={cache_blocks} block_size={block_size}"
+            ));
+        }
+
+        let mut scheduler = SchedulerState::with_block_size(cache_blocks as u32, block_size as u32);
+        for request in &requests {
+            scheduler.enqueue(request.clone());
+        }
+        let mut allocated = scheduler
+            .pop_prefill_batch_with_allocation(usize::MAX)
+            .map_err(|err| format!("failed to allocate model-loop package batch: {err}"))?;
+        if allocated.len() != requests.len() {
+            return Err(format!(
+                "model-loop selected {} requests, expected {}",
+                allocated.len(),
+                requests.len()
+            ));
+        }
+
+        let mut request_ids = Vec::with_capacity(allocated.len());
+        let mut prompt_tokens = Vec::with_capacity(allocated.len());
+        let mut max_new_tokens = Vec::with_capacity(allocated.len());
+        let mut total_tokens = Vec::with_capacity(allocated.len());
+        let mut block_tables = Vec::with_capacity(allocated.len());
+        let mut initial_residuals = Vec::with_capacity(allocated.len());
+        for (request_index, scheduled) in allocated.drain(..).enumerate() {
+            let request = scheduled.request;
+            let request_total_tokens = request
+                .prompt_tokens
+                .checked_add(request.max_new_tokens)
+                .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
+            let base_input = deterministic_f32_vector(hidden);
+            let residual_elements = request_total_tokens.checked_mul(hidden).ok_or_else(|| {
+                format!("request {:?} residual element count overflows", request.id)
+            })?;
+            let mut residual = Vec::with_capacity(residual_elements);
+            for timestep in 0..request_total_tokens {
+                let shifted_timestep = timestep
+                    .checked_add(request_index.checked_mul(sequence_len).ok_or_else(|| {
+                        "model-loop residual timestep multiplier overflows".to_string()
+                    })?)
+                    .ok_or_else(|| "model-loop residual timestep overflows".to_string())?;
+                residual.extend(linear_attn_step_input(&base_input, shifted_timestep));
+            }
+            request_ids.push(request.id.0);
+            prompt_tokens.push(request.prompt_tokens);
+            max_new_tokens.push(request.max_new_tokens);
+            total_tokens.push(request_total_tokens);
+            block_tables.push(scheduled.allocation.blocks);
+            initial_residuals.push(residual);
+        }
+
+        Ok(Self {
+            scheduler,
+            requests,
+            request_ids,
+            prompt_tokens,
+            max_new_tokens,
+            total_tokens,
+            block_tables,
+            initial_residuals,
+            block_size,
+            cache_blocks,
+        })
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests.len()
+    }
+
+    fn complete_prefill_all(&mut self) -> Result<(), String> {
+        for request in &self.requests {
+            self.scheduler.complete_prefill(request.id).map_err(|err| {
+                format!(
+                    "failed to complete package model-loop prefill {:?}: {err}",
+                    request.id
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn cached_tokens(&self) -> Result<Vec<usize>, String> {
+        self.requests
+            .iter()
+            .map(|request| {
+                self.scheduler
+                    .active_request(request.id)
+                    .map(|active| active.cached_tokens)
+                    .ok_or_else(|| format!("request {:?} is not active", request.id))
+            })
+            .collect()
+    }
+
+    fn generated_tokens(&self) -> Result<Vec<usize>, String> {
+        self.requests
+            .iter()
+            .map(|request| {
+                self.scheduler
+                    .active_request(request.id)
+                    .map(|active| active.generated_tokens)
+                    .ok_or_else(|| format!("request {:?} is not active", request.id))
+            })
+            .collect()
+    }
+}
+
 fn package_self_attn_mlp_block_model_loop_smoke(
     path: Option<String>,
     device_index: Option<String>,
@@ -11707,83 +11857,12 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     let rotary_dim = model.parse_rotary_dim(rotary_dim)?;
 
     let block_size = 2_usize;
-    let requests = vec![
-        Request::new(201, sequence_len - 2, 2),
-        Request::new(202, sequence_len - 1, 1),
-        Request::new(203, 1, 0),
-    ];
-    let mut required_blocks = 0_usize;
-    for request in &requests {
-        let total_tokens = request
-            .prompt_tokens
-            .checked_add(request.max_new_tokens)
-            .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
-        let request_blocks = (total_tokens - 1) / block_size + 1;
-        required_blocks = required_blocks
-            .checked_add(request_blocks)
-            .ok_or_else(|| "model-loop required block count overflows".to_string())?;
-    }
-    let cache_blocks = required_blocks
-        .checked_add(2)
-        .ok_or_else(|| "model-loop cache block count overflows".to_string())?;
-    if cache_blocks > u32::MAX as usize || block_size > u32::MAX as usize {
-        return Err(format!(
-            "model-loop block layout exceeds u32 range: cache_blocks={cache_blocks} block_size={block_size}"
-        ));
-    }
-    let decode_shape = model.decode_shape(block_size, cache_blocks);
+    let mut request_plan = PackageModelLoopRequestPlan::new(sequence_len, hidden, block_size)?;
+    let decode_shape = model.decode_shape(request_plan.block_size, request_plan.cache_blocks);
     let q_token_elements = decode_shape.q_elements()?;
     let k_token_elements = decode_shape.k_token_elements()?;
     let v_token_elements = decode_shape.v_token_elements()?;
     let attention_elements = decode_shape.output_elements()?;
-
-    let mut scheduler = SchedulerState::with_block_size(cache_blocks as u32, block_size as u32);
-    for request in &requests {
-        scheduler.enqueue(request.clone());
-    }
-    let mut allocated = scheduler
-        .pop_prefill_batch_with_allocation(usize::MAX)
-        .map_err(|err| format!("failed to allocate model-loop package batch: {err}"))?;
-    if allocated.len() != requests.len() {
-        return Err(format!(
-            "model-loop selected {} requests, expected {}",
-            allocated.len(),
-            requests.len()
-        ));
-    }
-
-    let mut request_ids = Vec::with_capacity(allocated.len());
-    let mut prompt_tokens = Vec::with_capacity(allocated.len());
-    let mut max_new_tokens = Vec::with_capacity(allocated.len());
-    let mut total_tokens = Vec::with_capacity(allocated.len());
-    let mut block_tables = Vec::with_capacity(allocated.len());
-    let mut initial_residuals = Vec::with_capacity(allocated.len());
-    for (request_index, scheduled) in allocated.drain(..).enumerate() {
-        let request = scheduled.request;
-        let request_total_tokens = request
-            .prompt_tokens
-            .checked_add(request.max_new_tokens)
-            .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
-        let base_input = deterministic_f32_vector(hidden);
-        let residual_elements = request_total_tokens
-            .checked_mul(hidden)
-            .ok_or_else(|| format!("request {:?} residual element count overflows", request.id))?;
-        let mut residual = Vec::with_capacity(residual_elements);
-        for timestep in 0..request_total_tokens {
-            let shifted_timestep = timestep
-                .checked_add(request_index.checked_mul(sequence_len).ok_or_else(|| {
-                    "model-loop residual timestep multiplier overflows".to_string()
-                })?)
-                .ok_or_else(|| "model-loop residual timestep overflows".to_string())?;
-            residual.extend(linear_attn_step_input(&base_input, shifted_timestep));
-        }
-        request_ids.push(request.id.0);
-        prompt_tokens.push(request.prompt_tokens);
-        max_new_tokens.push(request.max_new_tokens);
-        total_tokens.push(request_total_tokens);
-        block_tables.push(scheduled.allocation.blocks);
-        initial_residuals.push(residual);
-    }
 
     let mut layer_runs: Vec<Vec<SchedulerLayerDecodeRun>> = Vec::with_capacity(model.layer_count());
     let mut q_projection_layouts = Vec::with_capacity(model.layer_count());
@@ -11796,11 +11875,11 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     let mut causal_attention_max_abs_diff = 0.0_f32;
 
     for (layer_position, layer) in model.layers.iter().enumerate() {
-        let mut runs = Vec::with_capacity(requests.len());
-        let mut q_gate_elements = Vec::with_capacity(requests.len());
-        for (request_index, request) in requests.iter().enumerate() {
+        let mut runs = Vec::with_capacity(request_plan.request_count());
+        let mut q_gate_elements = Vec::with_capacity(request_plan.request_count());
+        for (request_index, request) in request_plan.requests.iter().enumerate() {
             let residual_sequence = if layer_position == 0 {
-                initial_residuals[request_index].clone()
+                request_plan.initial_residuals[request_index].clone()
             } else {
                 layer_runs[layer_position - 1][request_index]
                     .expected
@@ -11819,15 +11898,15 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
                 &mut stream,
                 &layer.weights.self_attn,
                 residual_sequence,
-                total_tokens[request_index],
+                request_plan.total_tokens[request_index],
                 rotary_dim,
                 rope_base,
                 request_position_offset,
                 &layer.q_norm,
                 &layer.k_norm,
-                &block_tables[request_index],
-                block_size,
-                cache_blocks,
+                &request_plan.block_tables[request_index],
+                request_plan.block_size,
+                request_plan.cache_blocks,
                 &format!(
                     "package-self-attn-mlp-block-model-loop-smoke layer {} request {:?}",
                     layer.layer_index, request.id
@@ -11861,7 +11940,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
                 &mut context,
                 &mut stream,
                 decode_shape,
-                &block_tables[request_index],
+                &request_plan.block_tables[request_index],
                 prepared.softmax_scale,
                 mlp_epsilon,
                 &prepared.q_rope,
@@ -11869,14 +11948,14 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
                 &prepared.v_projected,
                 prepared.q_gate.as_deref(),
                 &prepared.residual_sequence,
-                total_tokens[request_index],
+                request_plan.total_tokens[request_index],
             )?;
             runs.push(SchedulerLayerDecodeRun {
                 request_id: request.id,
                 prompt_tokens: request.prompt_tokens,
                 max_new_tokens: request.max_new_tokens,
-                total_tokens: total_tokens[request_index],
-                block_table: block_tables[request_index].clone(),
+                total_tokens: request_plan.total_tokens[request_index],
+                block_table: request_plan.block_tables[request_index].clone(),
                 q_sequence: prepared.q_rope,
                 k_sequence: prepared.k_rope,
                 v_sequence: prepared.v_projected,
@@ -11924,19 +12003,12 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
             }
         }
     }
-    for request in &requests {
-        scheduler.complete_prefill(request.id).map_err(|err| {
-            format!(
-                "failed to complete package model-loop prefill {:?}: {err}",
-                request.id
-            )
-        })?;
-    }
+    request_plan.complete_prefill_all()?;
 
     let expected_first_ids = [RequestId(201), RequestId(202)];
     let first_batch_ready = run_scheduler_layer_stack_ready_batch(
         &mut layer_runner,
-        &mut scheduler,
+        &mut request_plan.scheduler,
         &mut layer_runs,
         &mut stream,
         &expected_first_ids,
@@ -11952,7 +12024,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     let expected_second_ids = [RequestId(201)];
     let second_batch_ready = run_scheduler_layer_stack_ready_batch(
         &mut layer_runner,
-        &mut scheduler,
+        &mut request_plan.scheduler,
         &mut layer_runs,
         &mut stream,
         &expected_second_ids,
@@ -11964,7 +12036,8 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         hidden,
         "package model-loop second batch",
     )?;
-    let final_ready = scheduler
+    let final_ready = request_plan
+        .scheduler
         .ready_decode_batch(8)
         .map_err(|err| format!("failed to query model-loop final ready batch: {err}"))?
         .len();
@@ -12007,25 +12080,9 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         }
     }
 
-    let stats = scheduler.allocator_stats();
-    let cached_tokens = requests
-        .iter()
-        .map(|request| {
-            scheduler
-                .active_request(request.id)
-                .map(|active| active.cached_tokens)
-                .unwrap_or(0)
-        })
-        .collect::<Vec<_>>();
-    let generated_tokens = requests
-        .iter()
-        .map(|request| {
-            scheduler
-                .active_request(request.id)
-                .map(|active| active.generated_tokens)
-                .unwrap_or(0)
-        })
-        .collect::<Vec<_>>();
+    let stats = request_plan.scheduler.allocator_stats();
+    let cached_tokens = request_plan.cached_tokens()?;
+    let generated_tokens = request_plan.generated_tokens()?;
     let decode_steps_by_layer = layer_runs
         .iter()
         .map(|runs| runs.iter().map(|run| run.decode_steps).collect::<Vec<_>>())
@@ -12106,21 +12163,21 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         up_tensors,
         down_tensors,
         sequence_len,
-        requests.len(),
-        request_ids,
-        prompt_tokens,
-        max_new_tokens,
-        total_tokens,
-        block_size,
-        cache_blocks,
-        block_tables,
+        request_plan.request_count(),
+        request_plan.request_ids,
+        request_plan.prompt_tokens,
+        request_plan.max_new_tokens,
+        request_plan.total_tokens,
+        request_plan.block_size,
+        request_plan.cache_blocks,
+        request_plan.block_tables,
         first_batch_ready,
         second_batch_ready,
         final_ready,
         decode_steps_by_layer,
         cached_tokens,
         generated_tokens,
-        scheduler.active_len(),
+        request_plan.scheduler.active_len(),
         stats.free_blocks,
         stats.allocated_blocks,
         stats.free_runs,
