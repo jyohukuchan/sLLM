@@ -115,6 +115,23 @@ This recheck uses a newly exported fixture with different token ids:
 | layer8 QKV V845 cell | 1.080525398 | 7 | token 12 / hidden 3994 | 0.969970703 |
 | combined | 1.043153763 | 7 | token 12 / hidden 3994 | 0.939382553 |
 
+## Tokens201-216 Cross-Fixture Recheck
+
+This recheck uses another newly exported fixture with different token ids:
+
+- fixture: `benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens201-216`
+- token ids: `201..216`
+- layers: `0..12`
+- run mode: `actual_prefix`
+- `rotary_dim=64`
+- CPU backend
+- summary: `qwen-cross-fixture-tokens201-216-summary.md`
+
+| variant | overall max_abs | max layer | max token/hidden | layer6 | layer7 | layer11 |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| baseline | 1.140727997 | 11 | token 13 / hidden 3994 | 0.537414551 | 0.966460228 | 1.140727997 |
+| layer6 hidden3994 row-scale | 1.145284653 | 11 | token 13 / hidden 3994 | 0.476898193 | 0.497438431 | 1.145284653 |
+
 ## Manifest Metadata Prototype
 
 A hardlink package copy was created outside the repository:
@@ -156,6 +173,9 @@ Validation:
   moving the fixture max from `0.627647400` to `0.542758942`.
 - The `tokens101-116` cross-fixture recheck also improves with layer6 row-scale,
   moving the fixture max from `1.080525398` to `1.043153763`.
+- The `tokens201-216` cross-fixture recheck shows mixed behavior: layer6/layer7
+  improve strongly, but the final layer11 max worsens slightly from
+  `1.140727997` to `1.145284653`.
 - The layer `8` qkv V845 cell correction mainly reduces the later layer `11`
   hidden `3994` chain.
 - On the `tokens101-116` fixture, the layer `8` qkv V845 cell does not improve
@@ -164,6 +184,6 @@ Validation:
   metadata, not only as a smoke-only CLI override.
 - The two interventions are complementary: combined max improves to
   `0.610977173`, the best result in this batch.
-- This is still smoke-only. A durable fix should be expressed as quantizer or
-  package metadata policy after checking whether the layer `6` row-scale and
-  layer `8` qkv V-row correction generalize beyond this fixture.
+- This is still smoke-only. A durable fix should use a multi-fixture objective:
+  the layer `6` row-scale is a real local compensation candidate, but not yet
+  safe as an unconditional promotion policy.
