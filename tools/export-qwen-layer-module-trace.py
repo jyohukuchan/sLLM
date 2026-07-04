@@ -1369,6 +1369,12 @@ def run_self_attention_layer_trace(
     )
     summary_values = (
         ("attention_input_normed", attention_input_normed),
+        ("attention_q_query", self_attention_query_projection),
+        ("attention_q_gate", self_attention_gate_projection),
+        ("attention_k_projected", self_attention_k_projection),
+        ("attention_v_projected", self_attention_v_projection),
+        ("attention_q_normed", self_attention_q_normed),
+        ("attention_k_normed", self_attention_k_normed),
         ("self_attention_q_projection", self_attention_q_projection),
         ("self_attention_query_projection", self_attention_query_projection),
         ("self_attention_gate_projection", self_attention_gate_projection),
