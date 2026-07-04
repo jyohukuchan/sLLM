@@ -7,6 +7,9 @@
 
 ## 今回の変更点
 
+- Commit `e36174e Document layer stack batch advance contract` で、`Qwen3DecoderLayerStackRequestDecodeRunner::run_ready_batch_across_layers` のpublic APIコメントを追加した。
+- コメントでは、`layer_inputs` がlayer順の入力sliceであり、各sliceはready batch内の全requestに対応すること、全layerを事前検証してからschedulerを進めずに実行し、全layer成功後にscheduler batchを1回だけadvanceすることを明記した。既存テスト `qwen3_decoder_layer_stack_runner_advances_ready_batch_once_cpu` と `qwen3_decoder_layer_stack_runner_rejects_bad_layer_input_before_mutation_cpu` がこの契約を確認している。
+- 検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine decode_runner -- --test-threads=1` (`7 passed`)、`git diff --check` を通した。
 - Commit `45aa8fe Drive model loop decode from scheduler` で、`package-self-attn-mlp-block-model-loop-smoke` のdecode loopを固定の `expected_first_ids=[201,202]` / `expected_second_ids=[201]` 前提から外し、`SchedulerState::ready_decode_batch(max_decode_batch_requests)` を空になるまで処理するscheduler駆動loopへ変更した。
 - `run_scheduler_layer_stack_ready_batch` はready batchを外から受け取り、各layer/runの `cache_position`、`remaining_new_tokens`、block table整合性を検証してから `Qwen3DecoderLayerStackRequestDecodeRunner::run_ready_batch_across_layers` を呼ぶ形にした。request id列の固定比較は削除し、実際に処理したbatch sizeを返す。
 - `PackageModelLoopExecutionSummary` には `decode_batch_ready_counts` を追加し、CLI出力にも `decode_batch_ready_counts=[...]` を出すようにした。既存の `first_batch_ready` / `second_batch_ready` は互換用に残し、先頭2batchから算出している。
