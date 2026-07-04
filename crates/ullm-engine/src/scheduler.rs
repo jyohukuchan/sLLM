@@ -1,7 +1,7 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const DEFAULT_KV_BLOCK_SIZE_TOKENS: u32 = 16;
 
@@ -31,10 +31,19 @@ pub struct SchedulerRequestAllocation {
     pub allocation: BlockAllocation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveRequestState {
+    pub request: Request,
+    pub allocation: BlockAllocation,
+    pub cached_tokens: usize,
+    pub generated_tokens: usize,
+}
+
 #[derive(Debug)]
 pub struct SchedulerState {
     queue: RequestQueue,
     allocator: KvBlockAllocator,
+    active: BTreeMap<RequestId, ActiveRequestState>,
 }
 
 impl SchedulerState {
@@ -46,6 +55,7 @@ impl SchedulerState {
         Self {
             queue: RequestQueue::new(),
             allocator: KvBlockAllocator::with_block_size(total_kv_blocks, block_size_tokens),
+            active: BTreeMap::new(),
         }
     }
 
@@ -65,8 +75,97 @@ impl SchedulerState {
         self.allocator.stats()
     }
 
+    pub fn active_len(&self) -> usize {
+        self.active.len()
+    }
+
+    pub fn active_request(&self, request_id: RequestId) -> Option<&ActiveRequestState> {
+        self.active.get(&request_id)
+    }
+
+    pub fn active_request_ids(&self) -> Vec<RequestId> {
+        self.active.keys().copied().collect()
+    }
+
     pub fn release_request(&mut self, request_id: RequestId) -> usize {
+        self.active.remove(&request_id);
         self.allocator.free_request(request_id)
+    }
+
+    pub fn complete_prefill(&mut self, request_id: RequestId) -> Result<(), String> {
+        let state = self
+            .active
+            .get_mut(&request_id)
+            .ok_or_else(|| format!("request {:?} is not active", request_id))?;
+
+        if state.cached_tokens == state.request.prompt_tokens {
+            return Err(format!(
+                "request {:?} prefill already completed",
+                request_id
+            ));
+        }
+
+        if state.cached_tokens > state.request.prompt_tokens {
+            return Err(format!(
+                "request {:?} has invalid cached token progress",
+                request_id
+            ));
+        }
+
+        let max_cache_capacity = state
+            .allocation
+            .blocks
+            .len()
+            .checked_mul(self.allocator.block_size_tokens() as usize)
+            .ok_or_else(|| format!("request {:?} cache capacity overflows", request_id))?;
+        if state.request.prompt_tokens > max_cache_capacity {
+            return Err(format!(
+                "request {:?} prompt_tokens {} exceeds allocated cache capacity {}",
+                request_id, state.request.prompt_tokens, max_cache_capacity
+            ));
+        }
+
+        state.cached_tokens = state.request.prompt_tokens;
+        Ok(())
+    }
+
+    pub fn advance_decode(&mut self, request_id: RequestId) -> Result<(), String> {
+        let state = self
+            .active
+            .get_mut(&request_id)
+            .ok_or_else(|| format!("request {:?} is not active", request_id))?;
+
+        if state.cached_tokens < state.request.prompt_tokens {
+            return Err(format!("request {:?} prefill not completed", request_id));
+        }
+
+        if state.generated_tokens >= state.request.max_new_tokens {
+            return Err(format!(
+                "request {:?} exceeds max_new_tokens {}",
+                request_id, state.request.max_new_tokens
+            ));
+        }
+
+        let next_cached = state
+            .cached_tokens
+            .checked_add(1)
+            .ok_or_else(|| format!("request {:?} cached token count overflow", request_id))?;
+        let max_cache_capacity = state
+            .allocation
+            .blocks
+            .len()
+            .checked_mul(self.allocator.block_size_tokens() as usize)
+            .ok_or_else(|| format!("request {:?} cache capacity overflows", request_id))?;
+        if next_cached > max_cache_capacity {
+            return Err(format!(
+                "request {:?} exceeds allocated cache capacity {}",
+                request_id, max_cache_capacity
+            ));
+        }
+
+        state.cached_tokens = next_cached;
+        state.generated_tokens += 1;
+        Ok(())
     }
 
     pub fn pop_prefill_batch_with_allocation(
@@ -78,8 +177,22 @@ impl SchedulerState {
             return Ok(Vec::new());
         }
 
-        let mut allocations: Vec<(Request, BlockAllocation)> = Vec::with_capacity(requests.len());
+        let mut selected_ids = BTreeSet::new();
+        for request in requests.iter() {
+            let already_active = self.active.contains_key(&request.id);
+            let duplicated_in_batch = !selected_ids.insert(request.id);
+            if already_active || duplicated_in_batch {
+                for request in requests.iter().rev() {
+                    self.queue.push_front(request.clone());
+                }
+                if already_active {
+                    return Err(format!("request {:?} is already active", request.id));
+                }
+                return Err(format!("request {:?} appears multiple times", request.id));
+            }
+        }
 
+        let mut allocations: Vec<(Request, BlockAllocation)> = Vec::with_capacity(requests.len());
         for request in &requests {
             let token_count = match request.prompt_tokens.checked_add(request.max_new_tokens) {
                 Some(token_count) => token_count,
@@ -112,6 +225,18 @@ impl SchedulerState {
                     ));
                 }
             }
+        }
+
+        for (request, allocation) in allocations.iter() {
+            self.active.insert(
+                request.id,
+                ActiveRequestState {
+                    request: request.clone(),
+                    allocation: allocation.clone(),
+                    cached_tokens: 0,
+                    generated_tokens: 0,
+                },
+            );
         }
 
         Ok(allocations
@@ -426,6 +551,25 @@ mod tests {
         );
         assert_eq!(selected[1].allocation.blocks, vec![2, 3]);
         assert_eq!(scheduler.waiting_len(), 1);
+        assert_eq!(scheduler.active_len(), 2);
+        assert_eq!(
+            scheduler
+                .active_request(RequestId(1))
+                .expect("request 1 should be active")
+                .cached_tokens,
+            0
+        );
+        assert_eq!(
+            scheduler
+                .active_request(RequestId(1))
+                .expect("request 1 should be active")
+                .generated_tokens,
+            0
+        );
+        assert_eq!(
+            scheduler.active_request_ids(),
+            vec![RequestId(1), RequestId(2)]
+        );
     }
 
     #[test]
@@ -453,6 +597,8 @@ mod tests {
             vec![RequestId(1), RequestId(2), RequestId(3)]
         );
         assert_eq!(scheduler.allocator_stats().free_blocks, 3);
+        assert_eq!(scheduler.active_len(), 0);
+        assert!(scheduler.active_request_ids().is_empty());
     }
 
     #[test]
@@ -468,6 +614,8 @@ mod tests {
             "{err}"
         );
         assert_eq!(scheduler.waiting_len(), 1);
+        assert_eq!(scheduler.active_len(), 0);
+        assert!(scheduler.active_request_ids().is_empty());
         assert_eq!(scheduler.allocator_stats().free_blocks, 4);
     }
 
@@ -496,6 +644,71 @@ mod tests {
             vec![RequestId(1), RequestId(2), RequestId(3)]
         );
         assert_eq!(scheduler.allocator_stats().free_blocks, 4);
+        assert_eq!(scheduler.active_len(), 0);
+        assert!(scheduler.active_request_ids().is_empty());
+    }
+
+    #[test]
+    fn scheduler_state_pop_prefill_rejects_duplicate_request_ids_before_allocation() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 1, 1));
+        scheduler.enqueue(Request::new(1, 1, 1));
+
+        let err = scheduler
+            .pop_prefill_batch_with_allocation(2)
+            .expect_err("duplicate request ids should be rejected");
+        assert!(err.contains("appears multiple times"), "{err}");
+        assert_eq!(
+            scheduler
+                .queue
+                .waiting
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1), RequestId(1)]
+        );
+        assert_eq!(scheduler.allocator_stats().free_blocks, 4);
+        assert_eq!(scheduler.active_len(), 0);
+        assert!(scheduler.active_request_ids().is_empty());
+    }
+
+    #[test]
+    fn scheduler_state_pop_prefill_rejects_already_active_request_before_allocation() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 8, 4));
+        let selected = scheduler
+            .pop_prefill_batch_with_allocation(8)
+            .expect("initial allocation should succeed");
+        assert_eq!(selected[0].allocation.blocks, vec![0, 1]);
+        let free_blocks_after_initial_allocation = scheduler.allocator_stats().free_blocks;
+
+        scheduler.enqueue(Request::new(1, 1, 1));
+        let err = scheduler
+            .pop_prefill_batch_with_allocation(1)
+            .expect_err("already active request id should be rejected");
+        assert!(err.contains("already active"), "{err}");
+        assert_eq!(
+            scheduler
+                .queue
+                .waiting
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1)]
+        );
+        assert_eq!(
+            scheduler.allocator_stats().free_blocks,
+            free_blocks_after_initial_allocation
+        );
+        assert_eq!(scheduler.active_len(), 1);
+        assert_eq!(
+            scheduler
+                .active_request(RequestId(1))
+                .expect("request 1 should stay active")
+                .allocation
+                .blocks,
+            vec![0, 1]
+        );
     }
 
     #[test]
@@ -511,5 +724,104 @@ mod tests {
 
         assert_eq!(scheduler.release_request(RequestId(1)), 2);
         assert_eq!(scheduler.allocator_stats().free_blocks, 4);
+    }
+
+    #[test]
+    fn scheduler_state_prefill_completion_and_decode_step_progress() {
+        let mut scheduler = SchedulerState::with_block_size(8, 8);
+        scheduler.enqueue(Request::new(10, 4, 3));
+        let selected = scheduler
+            .pop_prefill_batch_with_allocation(4)
+            .expect("allocation should succeed");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(scheduler.active_len(), 1);
+
+        scheduler
+            .complete_prefill(RequestId(10))
+            .expect("complete prefill should succeed");
+        let err = scheduler
+            .complete_prefill(RequestId(10))
+            .expect_err("prefill completion should reject when already done");
+        assert!(err.contains("prefill already completed"), "{err}");
+
+        let active = scheduler
+            .active_request(RequestId(10))
+            .expect("request 10 should be active");
+        assert_eq!(active.cached_tokens, 4);
+        assert_eq!(active.generated_tokens, 0);
+
+        scheduler
+            .advance_decode(RequestId(10))
+            .expect("first decode step should succeed");
+        let active = scheduler
+            .active_request(RequestId(10))
+            .expect("request 10 should be active");
+        assert_eq!(active.cached_tokens, 5);
+        assert_eq!(active.generated_tokens, 1);
+
+        scheduler
+            .advance_decode(RequestId(10))
+            .expect("second decode step should succeed");
+        let active = scheduler
+            .active_request(RequestId(10))
+            .expect("request 10 should be active");
+        assert_eq!(active.cached_tokens, 6);
+        assert_eq!(active.generated_tokens, 2);
+    }
+
+    #[test]
+    fn scheduler_state_advance_decode_rejects_without_prefill_completion() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 4, 2));
+        scheduler
+            .pop_prefill_batch_with_allocation(4)
+            .expect("allocation should succeed");
+
+        let err = scheduler
+            .advance_decode(RequestId(1))
+            .expect_err("decode should require prefill completion");
+        assert!(err.contains("prefill not completed"), "{err}");
+        let active = scheduler
+            .active_request(RequestId(1))
+            .expect("request 1 should be active");
+        assert_eq!(active.cached_tokens, 0);
+        assert_eq!(active.generated_tokens, 0);
+    }
+
+    #[test]
+    fn scheduler_state_advance_decode_rejects_after_max_new_tokens() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 1, 1));
+        scheduler
+            .pop_prefill_batch_with_allocation(1)
+            .expect("allocation should succeed");
+        scheduler
+            .complete_prefill(RequestId(1))
+            .expect("prefill completion should succeed");
+
+        scheduler
+            .advance_decode(RequestId(1))
+            .expect("first decode step should succeed");
+        let err = scheduler
+            .advance_decode(RequestId(1))
+            .expect_err("second decode step should exceed max_new_tokens");
+        assert!(err.contains("exceeds max_new_tokens"), "{err}");
+    }
+
+    #[test]
+    fn scheduler_state_release_request_clears_active_state() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 8, 4));
+        scheduler
+            .pop_prefill_batch_with_allocation(8)
+            .expect("allocation should succeed");
+        assert_eq!(scheduler.active_len(), 1);
+        assert!(scheduler.active_request(RequestId(1)).is_some());
+
+        let freed = scheduler.release_request(RequestId(1));
+        assert_eq!(freed, 2);
+        assert_eq!(scheduler.active_len(), 0);
+        assert!(scheduler.active_request(RequestId(1)).is_none());
+        assert!(scheduler.active_request_ids().is_empty());
     }
 }

@@ -50,7 +50,7 @@ family-scale:同じfamilyに属するtensorで共有または補正に使うscal
 global-scale:local-scaleより大きい単位でのscale。tensor-scaleやfamily-scaleを含む上位概念として使う
 family:Q/K/V/OやMLPなど、性質が近いtensorをまとめる分類
 control plane:request管理、scheduler、telemetry、APIなど、kernel実行そのもの以外を制御する層
-scheduler run state:待機request queueとKV block allocatorを同じ状態として保持し、prefill batch選択とKV block allocationを一つの操作として扱うcontrol plane側の最小状態
+scheduler run state:待機request queue、KV block allocator、active decode requestを同じ状態として保持し、prefill batch選択、KV block allocation、prefill完了、cache_len/generation progress更新を一つのcontrol plane状態として扱う最小状態
 runtime:weight、KV cache、backend、kernel呼び出しを管理してmodel executionを実行する層
 runtime buffer:runtimeがbackend上またはCPU fallback上に確保するbyte buffer
 runtime stream:backend上の非同期copyやkernel実行の順序を束ねる実行stream
