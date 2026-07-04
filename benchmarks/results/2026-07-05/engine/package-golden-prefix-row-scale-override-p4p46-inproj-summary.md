@@ -45,3 +45,20 @@ The no-override CPU baseline was regenerated with the same binary used for the o
 ## Decision
 
 This validates row-dot compensation as a useful targeted experiment, not as a finished production mechanism. The next step is to move from smoke-only runtime row scaling to a quantizer-side row compensation design, while separately diagnosing the layer `11` aggregate drift.
+
+## Layer 11 Follow-Up
+
+A first self-attention-layer MLP row-scale probe was also run with:
+
+- Override file: `benchmarks/results/2026-07-05/engine/package-row-scale-overrides-layer11-hidden3377-self-attn-mlp-p4p46-inproj.json`
+- Override row: layer `11`, `mlp.down_proj.weight`, row `3377`, scale `1.218300518695`
+- Report: `benchmarks/results/2026-07-05/engine/package-golden-prefix-cpu-golden-before-layer11-row-scale-override-p4p46-inproj.jsonl`
+
+Result:
+
+| Backend | Mode | Override | Layer 11 MSE | Layer 11 Mean Abs Diff | Layer 11 Max Abs Diff | Layer 11 Cosine |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| CPU | golden_before_each_layer | no | `0.000715637264` | `0.020423743` | `0.179061234` | `0.998779597` |
+| CPU | golden_before_each_layer | row 3377 | `0.000714828336` | `0.020418806` | `0.167163849` | `0.998780983` |
+
+The layer `11` probe is only a weak improvement. After row `3377` is scaled, the max-diff coordinate moves to hidden `3994`, so layer `11` looks like a broader multi-row or mixed-path drift rather than the same single-row pattern seen at layer `10`.
