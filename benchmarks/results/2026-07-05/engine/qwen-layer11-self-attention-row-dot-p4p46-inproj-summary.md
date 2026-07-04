@@ -58,6 +58,14 @@ Hidden-row propagation summary:
 | 3994 | 14 | -0.0975656509 | 13 | 0.11529398 |
 | 3456 | 1 | 0.00994926319 | 4 | -0.0106792711 |
 
+Actual-prefix layer 11 comparison:
+
+| package/run | layer11 input max abs | input location | layer11 output max abs | output location |
+| --- | ---: | --- | ---: | --- |
+| no metadata, CPU | 1.744266510 | token 0, hidden 3456 | 1.686901093 | token 0, hidden 3456 |
+| manifest row-scale, CPU | 0.967845917 | token 0, hidden 3456 | 0.911422729 | token 0, hidden 3456 |
+| manifest row-scale, R9700 | 0.967796326 | token 0, hidden 3456 | 0.911373138 | token 0, hidden 3456 |
+
 Interpretation:
 
 - Layer `11` full-attention replay is close enough to the golden fixture for module-level debugging.
@@ -65,3 +73,4 @@ Interpretation:
 - One-row scaling is not the next best lever for layer `11`.
 - The larger raw errors are in q/k/v projection checks, especially `self_attention_v_projection` for hidden `3994`, but the causal attention mix reduces the full `o_proj` input max abs difference to about `0.188`.
 - Hidden `3994` still receives a measurable `o_proj` input contribution (`0.098` using the source row, `0.115` including the package row), so the next target is attention-input propagation rather than blind final-row scale overrides.
+- The largest actual-prefix layer `11` error is at hidden `3456`, where the layer input already carries almost the same max difference as the layer output. The layer-local propagation diagnostic only shows about `0.011` local hidden `3456` contribution, so this max coordinate is mainly inherited residual drift, not a new layer `11` row-scale target.
