@@ -442,6 +442,22 @@
 - R9700/V620 observed max diffs: `q_norm=0.000000715`, `k_norm=0.000000238`, `q_rope=0.000000119`, `k_rope=0.000000238`.
 - Next useful inference-engine step: add a small causal attention score/softmax/value-mix boundary using the RoPE q/k output and real `self_attn.v_proj.weight`.
 
+2026-07-04 inference engine causal attention smoke:
+- Commit `b59345d Add runtime f32 causal attention smoke` adds `ullm_runtime_causal_attn_f32`, Rust wrapper `ullm_runtime_sys::causal_attn_f32`, CPU fallback, HIPRTC kernel, HIP staging fallback, and CPU/HIP unit coverage.
+- Commit `d6872d0 Add runtime causal attention CLI smoke` adds `ullm-engine runtime-causal-attn-smoke [DEVICE_INDEX]`.
+- The runtime shape is `q=[sequence_len,q_heads,head_dim]`, `k=[sequence_len,kv_heads,head_dim]`, `v=[sequence_len,kv_heads,value_dim]`, and `output=[sequence_len,q_heads,value_dim]`. It requires `q_heads % kv_heads == 0` and maps `kv_head = q_head / (q_heads / kv_heads)`.
+- The kernel computes causal softmax over `source_timestep <= timestep` and value mix. It is a correctness boundary, not a final performance attention kernel.
+- Validation passed: `cargo fmt --all`, `cargo check -p ullm-runtime-sys`, `cargo test -p ullm-runtime-sys -- --test-threads=1`, `cargo check -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, `cargo build -p ullm-engine`, `cargo test --workspace -- --test-threads=1`, and `git diff --check`.
+- Runtime causal attention smoke passed on CPU device `0` with max diff `0`, on R9700/RDNA4 device `2` with `ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1` max diff `0.000000238`, and on V620/RDNA2 devices `1` and `3` with the same max diff.
+
+2026-07-04 inference engine package self attention causal smoke:
+- Commit `7c89af6 Add package self attention causal smoke` adds `ullm-engine package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]`.
+- The smoke materializes real `self_attn.q_proj/k_proj/v_proj.weight`, runs per-timestep matvec over a deterministic sequence, applies q/k RMSNorm and RoPE, then runs runtime causal attention value mix.
+- It uses current Qwen3.5-9B layer3 defaults: sequence length `2`, q heads `32`, kv heads `4`, head dim `256`, value dim `256`, rotary dim `64`, rope base `10000000`, and softmax scale `0.0625`.
+- Package self-attn causal smoke passed on CPU device `0`, R9700/RDNA4 device `2`, and V620/RDNA2 devices `1` and `3`; HIP runs used `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1`.
+- R9700/V620 observed max diffs: `q_norm=0.000000715`, `k_norm=0.000000238`, `q_rope=0.000000119`, `k_rope=0.000000238`, `attention=0.000000238`.
+- Next useful inference-engine step: connect attention output to real `self_attn.o_proj.weight`, then residual add; KV cache remains a later boundary.
+
 2026-07-04 resumed scope note:
 - Immediate hardware target is limited to locally verifiable RDNA2/Radeon PRO V620 and RDNA4/Radeon AI PRO R9700.
 - Near-term architecture support is intentionally narrow: Qwen3.5/Qwen3-style partial decoder paths that are useful for validating AQ package loading, runtime boundaries, and HIP kernels.
@@ -501,9 +517,12 @@
 - `1291251 Add package self attention qk norm smoke`
 - `6d3fc23 Add runtime f32 RoPE smoke`
 - `ae22d2d Add package self attention RoPE smoke`
+- `b59345d Add runtime f32 causal attention smoke`
+- `d6872d0 Add runtime causal attention CLI smoke`
+- `7c89af6 Add package self attention causal smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、f32 add境界、runtime RoPE境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smoke、実packageの `post RMSNorm -> MLP -> residual add` block smoke、1 tokenおよびsequence length 2の実package `input RMSNorm -> linear_attn -> residual -> post RMSNorm -> MLP -> residual` layer-level partial decoder smoke、通常self-attnのq/k/v/o projection smoke、通常self-attnのq/k projection -> head-wise RMSNorm smoke、通常self-attnのq/k norm -> RoPE smokeまで通った。次は小さいattention score/softmax/value mix境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smoke、実packageの `post RMSNorm -> MLP -> residual add` block smoke、1 tokenおよびsequence length 2の実package `input RMSNorm -> linear_attn -> residual -> post RMSNorm -> MLP -> residual` layer-level partial decoder smoke、通常self-attnのq/k/v/o projection smoke、通常self-attnのq/k projection -> head-wise RMSNorm smoke、通常self-attnのq/k norm -> RoPE smoke、通常self-attnのq/k/v -> causal attention value mix smokeまで通った。次はattention outputを `self_attn.o_proj.weight` へ接続し、residual addへ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
