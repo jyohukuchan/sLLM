@@ -1,0 +1,443 @@
+{
+  "created_at": "2026-07-04T18:42:41.971443+00:00",
+  "hidden_index": 3456,
+  "layers": [
+    10
+  ],
+  "manifest_max_match_count": 0,
+  "manifest_max_match_ratio": 0.0,
+  "missing_tensors": [],
+  "package_dir": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-reservoir65536-jobs4.ullm.d",
+  "row_count": 2,
+  "rows": [
+    {
+      "elements": 4096,
+      "group_size": 8,
+      "manifest_metrics": {
+        "max_abs_error": 0.03190711,
+        "mse": 9.09975874896551e-07,
+        "relative_mse": 0.003743181398021846
+      },
+      "max_abs_column": 1676,
+      "max_abs_error": 0.017172440886497498,
+      "max_abs_recon": -0.009316815994679928,
+      "max_abs_signed_error": -0.017172440886497498,
+      "max_abs_source": -0.0264892578125,
+      "mse": 1.1965039448114112e-06,
+      "recon_rms": 0.01746874877895776,
+      "relative_mse": 0.0038706841887477623,
+      "rms": 0.0010938482275029801,
+      "row_index": 3456,
+      "row_max_matches_manifest_max_abs": false,
+      "scale_format": "e4m3",
+      "shape": [
+        4096,
+        4096
+      ],
+      "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00004-of-00004.safetensors",
+      "source_rms": 0.01758179444186627,
+      "tensor_name": "model.language_model.layers.10.linear_attn.out_proj.weight",
+      "tensor_scale": 0.017879596,
+      "top_abs_error_columns": [
+        {
+          "abs_error": 0.017172440886497498,
+          "column_index": 1676,
+          "error": -0.017172440886497498,
+          "group_in_row": 209,
+          "rank": 1,
+          "recon": -0.009316815994679928,
+          "source": -0.0264892578125
+        },
+        {
+          "abs_error": 0.013998061418533325,
+          "column_index": 1782,
+          "error": -0.013998061418533325,
+          "group_in_row": 222,
+          "rank": 2,
+          "recon": -0.3141269385814667,
+          "source": -0.328125
+        },
+        {
+          "abs_error": 0.011801348067820072,
+          "column_index": 1675,
+          "error": -0.011801348067820072,
+          "group_in_row": 209,
+          "rank": 3,
+          "recon": -0.009316815994679928,
+          "source": -0.0211181640625
+        },
+        {
+          "abs_error": 0.010103554464876652,
+          "column_index": 1776,
+          "error": -0.010103554464876652,
+          "group_in_row": 222,
+          "rank": 4,
+          "recon": 0.010380120016634464,
+          "source": 0.0002765655517578125
+        },
+        {
+          "abs_error": 0.008469611406326294,
+          "column_index": 1673,
+          "error": -0.008469611406326294,
+          "group_in_row": 209,
+          "rank": 5,
+          "recon": -0.3528585135936737,
+          "source": -0.361328125
+        },
+        {
+          "abs_error": 0.006796465255320072,
+          "column_index": 1678,
+          "error": -0.006796465255320072,
+          "group_in_row": 209,
+          "rank": 6,
+          "recon": -0.009316815994679928,
+          "source": -0.01611328125
+        },
+        {
+          "abs_error": 0.005942739546298981,
+          "column_index": 1674,
+          "error": 0.005942739546298981,
+          "group_in_row": 209,
+          "rank": 7,
+          "recon": -0.04476109892129898,
+          "source": -0.038818359375
+        },
+        {
+          "abs_error": 0.005487754940986633,
+          "column_index": 1780,
+          "error": 0.005487754940986633,
+          "group_in_row": 222,
+          "rank": 8,
+          "recon": -0.010248497128486633,
+          "source": -0.0047607421875
+        }
+      ],
+      "worst_group_global": 1769681,
+      "worst_group_in_row": 209,
+      "worst_group_mse": 7.70211117924191e-05
+    },
+    {
+      "elements": 12288,
+      "group_size": 16,
+      "manifest_metrics": {
+        "max_abs_error": 0.026692718,
+        "mse": 6.456549974931164e-07,
+        "relative_mse": 0.00532678232485847
+      },
+      "max_abs_column": 5301,
+      "max_abs_error": 0.018229156732559204,
+      "max_abs_recon": -0.4192708432674408,
+      "max_abs_signed_error": -0.018229156732559204,
+      "max_abs_source": -0.4375,
+      "mse": 5.009945501418164e-07,
+      "recon_rms": 0.008120770748768442,
+      "relative_mse": 0.007366217156674446,
+      "rms": 0.0007078096849731688,
+      "row_index": 3456,
+      "row_max_matches_manifest_max_abs": false,
+      "scale_format": "e4m3",
+      "shape": [
+        4096,
+        12288
+      ],
+      "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00002-of-00004.safetensors",
+      "source_rms": 0.008246966718576791,
+      "tensor_name": "model.language_model.layers.10.mlp.down_proj.weight",
+      "tensor_scale": 0.015484641,
+      "top_abs_error_columns": [
+        {
+          "abs_error": 0.018229156732559204,
+          "column_index": 5301,
+          "error": -0.018229156732559204,
+          "group_in_row": 331,
+          "rank": 1,
+          "recon": -0.4192708432674408,
+          "source": -0.4375
+        },
+        {
+          "abs_error": 0.015512105077505112,
+          "column_index": 5302,
+          "error": -0.015512105077505112,
+          "group_in_row": 331,
+          "rank": 2,
+          "recon": 0.006723042111843824,
+          "source": -0.0087890625
+        },
+        {
+          "abs_error": 0.014995992183685303,
+          "column_index": 538,
+          "error": 0.014995992183685303,
+          "group_in_row": 33,
+          "rank": 3,
+          "recon": 0.2994571328163147,
+          "source": 0.314453125
+        },
+        {
+          "abs_error": 0.01436520554125309,
+          "column_index": 5299,
+          "error": 0.01436520554125309,
+          "group_in_row": 331,
+          "rank": 4,
+          "recon": -0.02449704147875309,
+          "source": -0.0101318359375
+        },
+        {
+          "abs_error": 0.013955708593130112,
+          "column_index": 5310,
+          "error": -0.013955708593130112,
+          "group_in_row": 331,
+          "rank": 5,
+          "recon": 0.006723042111843824,
+          "source": -0.007232666015625
+        },
+        {
+          "abs_error": 0.01375485397875309,
+          "column_index": 5296,
+          "error": 0.01375485397875309,
+          "group_in_row": 331,
+          "rank": 6,
+          "recon": -0.02449704147875309,
+          "source": -0.0107421875
+        },
+        {
+          "abs_error": 0.012582417577505112,
+          "column_index": 5307,
+          "error": -0.012582417577505112,
+          "group_in_row": 331,
+          "rank": 7,
+          "recon": 0.006723042111843824,
+          "source": -0.005859375
+        },
+        {
+          "abs_error": 0.012368794530630112,
+          "column_index": 5304,
+          "error": -0.012368794530630112,
+          "group_in_row": 331,
+          "rank": 8,
+          "recon": 0.006723042111843824,
+          "source": -0.005645751953125
+        }
+      ],
+      "worst_group_global": 2654539,
+      "worst_group_in_row": 331,
+      "worst_group_mse": 0.00013408542145043612
+    }
+  ],
+  "schema_version": "package-row-quant-error-v0.1",
+  "tensor_suffixes": [
+    "linear_attn.out_proj.weight",
+    "mlp.down_proj.weight"
+  ],
+  "worst_by_max_abs": {
+    "elements": 12288,
+    "group_size": 16,
+    "manifest_metrics": {
+      "max_abs_error": 0.026692718,
+      "mse": 6.456549974931164e-07,
+      "relative_mse": 0.00532678232485847
+    },
+    "max_abs_column": 5301,
+    "max_abs_error": 0.018229156732559204,
+    "max_abs_recon": -0.4192708432674408,
+    "max_abs_signed_error": -0.018229156732559204,
+    "max_abs_source": -0.4375,
+    "mse": 5.009945501418164e-07,
+    "recon_rms": 0.008120770748768442,
+    "relative_mse": 0.007366217156674446,
+    "rms": 0.0007078096849731688,
+    "row_index": 3456,
+    "row_max_matches_manifest_max_abs": false,
+    "scale_format": "e4m3",
+    "shape": [
+      4096,
+      12288
+    ],
+    "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00002-of-00004.safetensors",
+    "source_rms": 0.008246966718576791,
+    "tensor_name": "model.language_model.layers.10.mlp.down_proj.weight",
+    "tensor_scale": 0.015484641,
+    "top_abs_error_columns": [
+      {
+        "abs_error": 0.018229156732559204,
+        "column_index": 5301,
+        "error": -0.018229156732559204,
+        "group_in_row": 331,
+        "rank": 1,
+        "recon": -0.4192708432674408,
+        "source": -0.4375
+      },
+      {
+        "abs_error": 0.015512105077505112,
+        "column_index": 5302,
+        "error": -0.015512105077505112,
+        "group_in_row": 331,
+        "rank": 2,
+        "recon": 0.006723042111843824,
+        "source": -0.0087890625
+      },
+      {
+        "abs_error": 0.014995992183685303,
+        "column_index": 538,
+        "error": 0.014995992183685303,
+        "group_in_row": 33,
+        "rank": 3,
+        "recon": 0.2994571328163147,
+        "source": 0.314453125
+      },
+      {
+        "abs_error": 0.01436520554125309,
+        "column_index": 5299,
+        "error": 0.01436520554125309,
+        "group_in_row": 331,
+        "rank": 4,
+        "recon": -0.02449704147875309,
+        "source": -0.0101318359375
+      },
+      {
+        "abs_error": 0.013955708593130112,
+        "column_index": 5310,
+        "error": -0.013955708593130112,
+        "group_in_row": 331,
+        "rank": 5,
+        "recon": 0.006723042111843824,
+        "source": -0.007232666015625
+      },
+      {
+        "abs_error": 0.01375485397875309,
+        "column_index": 5296,
+        "error": 0.01375485397875309,
+        "group_in_row": 331,
+        "rank": 6,
+        "recon": -0.02449704147875309,
+        "source": -0.0107421875
+      },
+      {
+        "abs_error": 0.012582417577505112,
+        "column_index": 5307,
+        "error": -0.012582417577505112,
+        "group_in_row": 331,
+        "rank": 7,
+        "recon": 0.006723042111843824,
+        "source": -0.005859375
+      },
+      {
+        "abs_error": 0.012368794530630112,
+        "column_index": 5304,
+        "error": -0.012368794530630112,
+        "group_in_row": 331,
+        "rank": 8,
+        "recon": 0.006723042111843824,
+        "source": -0.005645751953125
+      }
+    ],
+    "worst_group_global": 2654539,
+    "worst_group_in_row": 331,
+    "worst_group_mse": 0.00013408542145043612
+  },
+  "worst_by_rms": {
+    "elements": 4096,
+    "group_size": 8,
+    "manifest_metrics": {
+      "max_abs_error": 0.03190711,
+      "mse": 9.09975874896551e-07,
+      "relative_mse": 0.003743181398021846
+    },
+    "max_abs_column": 1676,
+    "max_abs_error": 0.017172440886497498,
+    "max_abs_recon": -0.009316815994679928,
+    "max_abs_signed_error": -0.017172440886497498,
+    "max_abs_source": -0.0264892578125,
+    "mse": 1.1965039448114112e-06,
+    "recon_rms": 0.01746874877895776,
+    "relative_mse": 0.0038706841887477623,
+    "rms": 0.0010938482275029801,
+    "row_index": 3456,
+    "row_max_matches_manifest_max_abs": false,
+    "scale_format": "e4m3",
+    "shape": [
+      4096,
+      4096
+    ],
+    "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00004-of-00004.safetensors",
+    "source_rms": 0.01758179444186627,
+    "tensor_name": "model.language_model.layers.10.linear_attn.out_proj.weight",
+    "tensor_scale": 0.017879596,
+    "top_abs_error_columns": [
+      {
+        "abs_error": 0.017172440886497498,
+        "column_index": 1676,
+        "error": -0.017172440886497498,
+        "group_in_row": 209,
+        "rank": 1,
+        "recon": -0.009316815994679928,
+        "source": -0.0264892578125
+      },
+      {
+        "abs_error": 0.013998061418533325,
+        "column_index": 1782,
+        "error": -0.013998061418533325,
+        "group_in_row": 222,
+        "rank": 2,
+        "recon": -0.3141269385814667,
+        "source": -0.328125
+      },
+      {
+        "abs_error": 0.011801348067820072,
+        "column_index": 1675,
+        "error": -0.011801348067820072,
+        "group_in_row": 209,
+        "rank": 3,
+        "recon": -0.009316815994679928,
+        "source": -0.0211181640625
+      },
+      {
+        "abs_error": 0.010103554464876652,
+        "column_index": 1776,
+        "error": -0.010103554464876652,
+        "group_in_row": 222,
+        "rank": 4,
+        "recon": 0.010380120016634464,
+        "source": 0.0002765655517578125
+      },
+      {
+        "abs_error": 0.008469611406326294,
+        "column_index": 1673,
+        "error": -0.008469611406326294,
+        "group_in_row": 209,
+        "rank": 5,
+        "recon": -0.3528585135936737,
+        "source": -0.361328125
+      },
+      {
+        "abs_error": 0.006796465255320072,
+        "column_index": 1678,
+        "error": -0.006796465255320072,
+        "group_in_row": 209,
+        "rank": 6,
+        "recon": -0.009316815994679928,
+        "source": -0.01611328125
+      },
+      {
+        "abs_error": 0.005942739546298981,
+        "column_index": 1674,
+        "error": 0.005942739546298981,
+        "group_in_row": 209,
+        "rank": 7,
+        "recon": -0.04476109892129898,
+        "source": -0.038818359375
+      },
+      {
+        "abs_error": 0.005487754940986633,
+        "column_index": 1780,
+        "error": 0.005487754940986633,
+        "group_in_row": 222,
+        "rank": 8,
+        "recon": -0.010248497128486633,
+        "source": -0.0047607421875
+      }
+    ],
+    "worst_group_global": 1769681,
+    "worst_group_in_row": 209,
+    "worst_group_mse": 7.70211117924191e-05
+  }
+}
