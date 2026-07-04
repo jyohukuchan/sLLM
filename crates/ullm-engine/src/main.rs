@@ -24,6 +24,7 @@ use ullm_engine::decoder::{
     qwen3_self_attn_prepare_sequence_for_paged_decode_f32, qwen3_self_attn_runtime_shape,
     split_qwen3_self_attn_q_projection,
 };
+use ullm_engine::golden::{GoldenTensorFixture, compare_f32_slices};
 use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, PassthroughF32Data, WeightRegistry, load_package_tensor_prefix,
@@ -31,10 +32,13 @@ use ullm_engine::loader::{
     read_named_passthrough_f32, read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,
     validate_passthrough_shape_elements,
 };
-use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
+use ullm_engine::package::{
+    ReferencedFile, ReferencedFileRole, TensorSelector, select_tensor_payload_bundle,
+};
 use ullm_engine::qwen3_loader::{
     Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
     qwen3_decoder_layer_runtime_weights_from_package,
+    qwen3_package_decoder_layer_runtime_from_package,
     qwen3_package_model_run_prefill_step_from_sequence,
     qwen3_package_model_run_ready_batch_from_sequences, qwen3_package_model_stack_runner,
     qwen3_self_attn_runtime_weights_from_package,
@@ -240,6 +244,16 @@ fn main() -> ExitCode {
                 env::args().nth(10),
             )
         }
+        Some("package-layer-golden-smoke") => package_layer_golden_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+        ),
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -11761,6 +11775,418 @@ impl PackageModelLoopSmokeRun {
     }
 }
 
+fn package_layer_golden_smoke(
+    path: Option<String>,
+    fixture_path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-layer-golden-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(fixture_path) = fixture_path else {
+        eprintln!("package-layer-golden-smoke requires a golden fixture directory");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let fixture = match GoldenTensorFixture::load(&fixture_path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let layer_index = match layer_index {
+        Some(raw) => match parse_usize_value(&raw, "layer index") {
+            Ok(value) => value,
+            Err(code) => return code,
+        },
+        None => {
+            if fixture.layers().len() == 1 {
+                fixture.layers()[0].layer_index
+            } else {
+                eprintln!(
+                    "package-layer-golden-smoke requires LAYER_INDEX when fixture has {} layers",
+                    fixture.layers().len()
+                );
+                return ExitCode::from(2);
+            }
+        }
+    };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let default_position_offset = match fixture.metadata().position_ids.first() {
+        Some(value) => match usize::try_from(*value) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("golden fixture first position id does not fit usize");
+                return ExitCode::from(1);
+            }
+        },
+        None => 0,
+    };
+    let position_offset =
+        match parse_optional_usize(position_offset, default_position_offset, "position offset") {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
+
+    match package_layer_golden_smoke_impl(
+        &path,
+        &fixture_path,
+        fixture,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_layer_golden_smoke_impl(
+    path: &str,
+    fixture_path: &str,
+    fixture: GoldenTensorFixture,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+) -> Result<String, String> {
+    let golden_layer = fixture.select_layer(layer_index)?;
+    let sequence_len = fixture.metadata().sequence_len;
+    let hidden = fixture.metadata().hidden_size;
+    if sequence_len == 0 || hidden == 0 {
+        return Err(format!(
+            "golden fixture has invalid sequence_len={sequence_len} hidden_size={hidden}"
+        ));
+    }
+    validate_golden_hidden_shape(
+        &golden_layer.before_shape,
+        sequence_len,
+        hidden,
+        "golden before hidden",
+    )?;
+    validate_golden_hidden_shape(
+        &golden_layer.after_shape,
+        sequence_len,
+        hidden,
+        "golden after hidden",
+    )?;
+    validate_golden_position_ids(
+        &fixture.metadata().position_ids,
+        sequence_len,
+        position_offset,
+    )?;
+
+    let before = fixture.read_layer_before_f32(layer_index)?;
+    let after = fixture.read_layer_after_f32(layer_index)?;
+    let expected_hidden_elements = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "golden hidden element count overflows".to_string())?;
+    if before.len() != expected_hidden_elements || after.len() != expected_hidden_elements {
+        return Err(format!(
+            "golden fixture payload element mismatch: before={} after={} expected={expected_hidden_elements}",
+            before.len(),
+            after.len()
+        ));
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let layer = qwen3_package_decoder_layer_runtime_from_package(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        layer_index,
+    )?;
+    if layer.runtime_shape.hidden != hidden {
+        return Err(format!(
+            "golden hidden_size {hidden} does not match package layer hidden {}",
+            layer.runtime_shape.hidden
+        ));
+    }
+    let rotary_dim =
+        parse_package_layer_golden_rotary_dim(layer.runtime_shape.head_dim, rotary_dim)?;
+    let block_size = sequence_len;
+    let cache_blocks = 1_usize;
+    let block_table = vec![0_u32];
+    let prepared = qwen3_self_attn_prepare_sequence_for_paged_decode_f32(
+        &mut context,
+        &mut stream,
+        &layer.weights.self_attn,
+        before,
+        sequence_len,
+        &layer.q_norm.values,
+        &layer.k_norm.values,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        &block_table,
+        block_size,
+        cache_blocks,
+    )?;
+    let Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode {
+        residual_sequence,
+        prepared:
+            Qwen3SelfAttnRuntimePreparedSequence {
+                q_query: _,
+                k_projected: _,
+                q_normed: _,
+                k_normed: _,
+                q_rope,
+                k_rope,
+                v_projected,
+                q_gate,
+                attention_output: _,
+                shape,
+                softmax_scale,
+                q_projection_layout,
+                q_gate_elements,
+                output_gate_layout,
+            },
+        paged_k_cache: _,
+        paged_v_cache: _,
+        paged_block_table,
+        paged_block_size,
+        paged_cache_blocks,
+    } = prepared;
+    let decode_shape = PagedDecodeShape {
+        block_size: paged_block_size,
+        cache_blocks: paged_cache_blocks,
+        q_heads: shape.q_heads,
+        kv_heads: shape.kv_heads,
+        head_dim: shape.head_dim,
+        value_dim: shape.value_dim,
+    };
+    let mlp_epsilon = 1e-5_f32;
+    let layer_output = qwen3_decoder_layer_sequence_to_host_f32(
+        &layer.weights,
+        &mut context,
+        &mut stream,
+        decode_shape,
+        &paged_block_table,
+        softmax_scale,
+        mlp_epsilon,
+        &q_rope,
+        &k_rope,
+        &v_projected,
+        q_gate.as_deref(),
+        &residual_sequence,
+        sequence_len,
+    )?;
+    let metrics = compare_f32_slices(&layer_output.layer_output, &after)?;
+    let preview_len = 8.min(after.len()).min(layer_output.layer_output.len());
+    let diff_preview = layer_output
+        .layer_output
+        .iter()
+        .zip(after.iter())
+        .take(preview_len)
+        .map(|(actual, expected)| actual - expected)
+        .collect::<Vec<_>>();
+    let candidate_ids = package_layer_candidate_ids(path, &layer);
+
+    Ok(format!(
+        "package-layer-golden-smoke package={} fixture={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" candidate_ids={:?} sequence_len={} hidden={} before_shape={:?} after_shape={:?} block_size={} cache_blocks={} block_table={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_norm_dtype={} k_norm_dtype={} post_norm_dtype={} backend={} device_index={} name=\"{}\" mse={:.12} mean_abs_diff={:.9} max_abs_diff={:.9} cosine_similarity={:.9} expected_preview={} actual_preview={} diff_preview={} verified=true",
+        path,
+        fixture_path,
+        layer_index,
+        layer.q_tensor,
+        layer.k_tensor,
+        layer.v_tensor,
+        layer.o_tensor,
+        layer.gate_tensor,
+        layer.up_tensor,
+        layer.down_tensor,
+        candidate_ids,
+        sequence_len,
+        hidden,
+        &golden_layer.before_shape,
+        &golden_layer.after_shape,
+        paged_block_size,
+        paged_cache_blocks,
+        paged_block_table,
+        shape.q_heads,
+        shape.kv_heads,
+        shape.head_dim,
+        shape.value_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        softmax_scale,
+        mlp_epsilon,
+        q_projection_layout,
+        q_gate_elements,
+        output_gate_layout,
+        layer.q_norm.dtype,
+        layer.k_norm.dtype,
+        layer.post_norm.dtype,
+        info.backend,
+        device_index,
+        info.name,
+        metrics.mse,
+        metrics.mean_abs_diff,
+        metrics.max_abs_diff,
+        metrics.cosine_similarity,
+        format_f32_preview(&after[..preview_len]),
+        format_f32_preview(&layer_output.layer_output[..preview_len]),
+        format_f32_preview(&diff_preview),
+    ))
+}
+
+fn parse_package_layer_golden_rotary_dim(
+    head_dim: usize,
+    rotary_dim: Option<String>,
+) -> Result<usize, String> {
+    let default_rotary_dim = {
+        let candidate = if head_dim >= 4 {
+            head_dim / 4
+        } else {
+            head_dim
+        };
+        candidate - (candidate % 2)
+    };
+    if default_rotary_dim == 0 {
+        return Err(format!(
+            "default rotary_dim is zero for head_dim={head_dim}"
+        ));
+    }
+    let rotary_dim = match rotary_dim {
+        Some(raw) => raw
+            .parse::<usize>()
+            .map_err(|err| format!("invalid rotary dim {raw:?}: {err}"))?,
+        None => default_rotary_dim,
+    };
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        return Err(format!(
+            "rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim}, head_dim={head_dim}"
+        ));
+    }
+    Ok(rotary_dim)
+}
+
+fn validate_golden_hidden_shape(
+    shape: &[usize],
+    sequence_len: usize,
+    hidden: usize,
+    label: &str,
+) -> Result<(), String> {
+    let mut elements = 1_usize;
+    for dim in shape {
+        if *dim == 0 {
+            return Err(format!("{label} shape contains zero: {shape:?}"));
+        }
+        elements = elements
+            .checked_mul(*dim)
+            .ok_or_else(|| format!("{label} shape element count overflows: {shape:?}"))?;
+    }
+    let expected_elements = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| format!("{label} expected element count overflows"))?;
+    if elements != expected_elements {
+        return Err(format!(
+            "{label} shape {shape:?} has {elements} elements, expected {expected_elements}"
+        ));
+    }
+    match shape {
+        [seq, width] if *seq == sequence_len && *width == hidden => Ok(()),
+        [batch, seq, width] if *batch == 1 && *seq == sequence_len && *width == hidden => Ok(()),
+        _ => Err(format!(
+            "{label} shape {shape:?} must be [sequence_len, hidden] or [1, sequence_len, hidden] with sequence_len={sequence_len} hidden={hidden}"
+        )),
+    }
+}
+
+fn validate_golden_position_ids(
+    position_ids: &[u64],
+    sequence_len: usize,
+    position_offset: usize,
+) -> Result<(), String> {
+    if position_ids.len() != sequence_len {
+        return Err(format!(
+            "golden position_ids length {} does not match sequence_len={sequence_len}",
+            position_ids.len()
+        ));
+    }
+    for (index, position_id) in position_ids.iter().enumerate() {
+        let expected = position_offset
+            .checked_add(index)
+            .ok_or_else(|| "golden position id expectation overflows".to_string())?;
+        let expected = u64::try_from(expected)
+            .map_err(|_| "golden expected position id does not fit u64".to_string())?;
+        if *position_id != expected {
+            return Err(format!(
+                "golden position_ids are not contiguous from position_offset={position_offset}: index={index} expected={expected} got={position_id}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn package_layer_candidate_ids(
+    path: &str,
+    layer: &ullm_engine::qwen3_loader::Qwen3PackageDecoderLayerRuntime,
+) -> Vec<String> {
+    [
+        &layer.q_tensor,
+        &layer.k_tensor,
+        &layer.v_tensor,
+        &layer.o_tensor,
+        &layer.gate_tensor,
+        &layer.up_tensor,
+        &layer.down_tensor,
+    ]
+    .iter()
+    .map(|tensor_name| {
+        select_tensor_payload_bundle(path, &TensorSelector::Name((*tensor_name).clone()))
+            .ok()
+            .and_then(|bundle| bundle.candidate_id)
+            .unwrap_or_else(|| "unknown".to_string())
+    })
+    .collect()
+}
+
 fn package_self_attn_mlp_block_model_loop_smoke(
     path: Option<String>,
     device_index: Option<String>,
@@ -19675,7 +20101,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");

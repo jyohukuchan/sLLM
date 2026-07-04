@@ -1,0 +1,47 @@
+{
+  "dtype": "torch.bfloat16",
+  "format": "qwen_golden_tensor_v1",
+  "format_version": "0.1",
+  "hidden_size": 4096,
+  "layers": [
+    {
+      "after_file": "layer_3_after.f32",
+      "after_shape": [
+        1,
+        8,
+        4096
+      ],
+      "before_file": "layer_3_before.f32",
+      "before_shape": [
+        1,
+        8,
+        4096
+      ],
+      "dtype": "float32",
+      "layer_index": 3
+    }
+  ],
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "model_type": "qwen3_5_text",
+  "position_ids": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "sequence_len": 8,
+  "token_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ]
+}

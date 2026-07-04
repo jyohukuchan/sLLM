@@ -4,6 +4,7 @@
 pub mod aq;
 pub mod decode_runner;
 pub mod decoder;
+pub mod golden;
 pub mod host_bytes;
 pub mod loader;
 pub mod package;
