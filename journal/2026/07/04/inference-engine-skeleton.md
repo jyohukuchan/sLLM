@@ -7,6 +7,12 @@
 
 ## 今回の変更点
 
+- Commit `c6b0316 Add runtime f32 decode attention` で `ullm_runtime_decode_attn_f32` を追加した。1-token `q=[q_heads, head_dim]` とprefill済み `k_cache=[cache_len, kv_heads, head_dim]`、`v_cache=[cache_len, kv_heads, value_dim]` からdecode時のGQA softmax attention value mixを実行する。
+- Rust wrapper `ullm_runtime_sys::decode_attn_f32`、CPU/HIP unit test、`ullm-engine runtime-decode-attn-smoke [DEVICE_INDEX]` を追加した。HIP必須フラグは `ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1`。
+- 5.3-codex-spark subagentに `crates/ullm-runtime-sys/src/lib.rs` のextern/wrapper/test追加を分担させ、main側でC ABI/C++ runtimeとengine CLIを統合した。
+- Commit `987efd0 Add package self attention decode smoke` で `ullm-engine package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]` を追加した。
+- `package-self-attn-decode-smoke` は実 `.ullm.d` のself-attn q/k/v projection、q/k norm、RoPEでK/V cache相当の系列と最後の1 token queryを作り、runtime decode attentionの出力をfull causal attentionの最後のtokenと比較する。block tableやpaged KV cacheはまだ含まない。
+- `docs/words.txt` に `runtime decode attention smoke` と `package self attention decode smoke` を追加した。
 - Commit `1b0cd56 Add package self attention MLP block smoke` で `ullm-engine package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]` を追加した。
 - 新CLIは、実 `.ullm.d` の `self_attn.q/k/v/o_proj.weight`、`self_attn.q_norm/k_norm.weight`、`post_attention_layernorm.weight`、`mlp.gate/up/down_proj.weight` を使い、Qwen3.5 self-attention block出力からpost RMSNorm、MLP、final residual addまでを接続する。
 - self-attn側のmaterialized q/k/v/o matrixはhelperスコープ内に閉じ、MLP materialize前にdropされるようにした。現段階ではKV cacheやpaged decodeは含めない。
@@ -93,6 +99,18 @@
 
 ## 実測・検証
 
+- `target/debug/ullm-engine runtime-decode-attn-smoke 0`
+  - CPU fallbackで成功した。output previewは `[-0.2392773,0.0548403,0.0375722,0.3316899,1.0656385,1.3597561,1.5668775,1.8609953]`、max diff `0`。
+- `ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine runtime-decode-attn-smoke 2`
+  - R9700/RDNA4で成功した。max diff `0.000000238`。
+- 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でもruntime decode attention smokeが成功した。max diff `0.000000238`。
+- `target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 3`
+  - CPU fallbackでQwen3.5 layer3、cache_len 3のpackage self-attn decode smokeが成功した。decode previewは `[-0.0192080,-0.2709472,0.5872810,0.4590236,0.7492426,0.2935847,0.0432382,-0.2457060]`、全境界max diffは `0`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 3 3`
+  - R9700/RDNA4で成功した。
+- 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でもpackage self-attn decode smokeが成功した。
+- RDNA2/RDNA4のpackage self-attn decode max diffsは `q_norm=0.000000715`、`k_norm=0.000000954`、`q_rope=0.000000119`、`k_rope=0.000000238`、`attention=0.000000238`、`decode=0.000000238`、`causal_decode=0`。
+- 追加後の検証は `cargo fmt --all --check`、`cargo check -p ullm-runtime-sys`、`cargo check -p ullm-engine`、`cargo test -p ullm-runtime-sys -- --test-threads=1`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
 - `target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 2`
   - CPU fallbackでQwen3.5 layer3、seq2のself-attn block -> post RMSNorm -> MLP -> final residual addが成功した。
   - final layer previewは `[0.4800197,0.8975260,0.8388433,0.6933283,-0.2060216,-0.6192650,0.1600223,0.6590981]`、全境界max diffは `0`。
