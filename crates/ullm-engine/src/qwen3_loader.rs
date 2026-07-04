@@ -3,11 +3,99 @@
 
 use crate::decoder::{
     Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights,
-    Qwen3SelfAttnRuntimeWeights,
+    Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights, qwen3_self_attn_runtime_shape,
 };
 use crate::host_bytes::encode_f32_to_bytes;
-use crate::loader::{PassthroughF32Data, WeightRegistry, materialize_selected_aq4_matrix};
+use crate::loader::{
+    PassthroughF32Data, WeightRegistry, materialize_selected_aq4_matrix, read_named_passthrough_f32,
+};
 use ullm_runtime_sys::{RuntimeContext, RuntimeStream};
+
+pub struct Qwen3PackageDecoderLayerRuntime {
+    pub layer_index: usize,
+    pub q_tensor: String,
+    pub k_tensor: String,
+    pub v_tensor: String,
+    pub o_tensor: String,
+    pub q_norm_tensor: String,
+    pub k_norm_tensor: String,
+    pub post_norm_tensor: String,
+    pub gate_tensor: String,
+    pub up_tensor: String,
+    pub down_tensor: String,
+    pub q_norm: PassthroughF32Data,
+    pub k_norm: PassthroughF32Data,
+    pub post_norm: PassthroughF32Data,
+    pub weights: Qwen3DecoderLayerRuntimeWeights,
+    pub runtime_shape: Qwen3SelfAttnRuntimeShape,
+}
+
+pub fn qwen3_package_decoder_layer_runtime_from_package(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    layer_index: usize,
+) -> Result<Qwen3PackageDecoderLayerRuntime, String> {
+    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
+    let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
+    let o_tensor = format!("model.language_model.layers.{layer_index}.self_attn.o_proj.weight");
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+    let post_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+    let q_norm = read_named_passthrough_f32(path, &q_norm_tensor, chunk_bytes)?;
+    let k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)?;
+    let post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
+    let weights = qwen3_decoder_layer_runtime_weights_from_package(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        &q_tensor,
+        &k_tensor,
+        &v_tensor,
+        &o_tensor,
+        &q_norm,
+        &k_norm,
+        &post_norm,
+        &gate_tensor,
+        &up_tensor,
+        &down_tensor,
+    )?;
+    let runtime_shape = qwen3_self_attn_runtime_shape(&weights.self_attn)?;
+    if weights.post_attention.hidden != runtime_shape.hidden {
+        return Err(format!(
+            "Qwen3 package decoder layer {layer_index} hidden mismatch: self_attn={} post_attention={}",
+            runtime_shape.hidden, weights.post_attention.hidden
+        ));
+    }
+    Ok(Qwen3PackageDecoderLayerRuntime {
+        layer_index,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        o_tensor,
+        q_norm_tensor,
+        k_norm_tensor,
+        post_norm_tensor,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        q_norm,
+        k_norm,
+        post_norm,
+        weights,
+        runtime_shape,
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn qwen3_self_attn_runtime_weights_from_package(

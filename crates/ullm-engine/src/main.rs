@@ -32,7 +32,8 @@ use ullm_engine::loader::{
 };
 use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 use ullm_engine::qwen3_loader::{
-    qwen3_decoder_layer_runtime_weights_from_package, qwen3_self_attn_runtime_weights_from_package,
+    Qwen3PackageDecoderLayerRuntime, qwen3_decoder_layer_runtime_weights_from_package,
+    qwen3_package_decoder_layer_runtime_from_package, qwen3_self_attn_runtime_weights_from_package,
 };
 use ullm_engine::scheduler::{
     KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
@@ -11057,27 +11058,8 @@ fn package_self_attn_mlp_block_scheduler_smoke_impl(
     ))
 }
 
-struct PackageModelLoopLayerSmoke {
-    layer_index: usize,
-    q_tensor: String,
-    k_tensor: String,
-    v_tensor: String,
-    o_tensor: String,
-    q_norm_tensor: String,
-    k_norm_tensor: String,
-    post_norm_tensor: String,
-    gate_tensor: String,
-    up_tensor: String,
-    down_tensor: String,
-    q_norm: PassthroughF32Data,
-    k_norm: PassthroughF32Data,
-    post_norm: PassthroughF32Data,
-    weights: Qwen3DecoderLayerRuntimeWeights,
-    runtime_shape: Qwen3SelfAttnRuntimeShape,
-}
-
 struct PackageModelLoopSmokeModel {
-    layers: Vec<PackageModelLoopLayerSmoke>,
+    layers: Vec<Qwen3PackageDecoderLayerRuntime>,
     hidden: usize,
     q_heads: usize,
     kv_heads: usize,
@@ -11158,73 +11140,6 @@ struct PackageModelLoopSmokeRun {
     position_offset: usize,
 }
 
-fn load_package_model_loop_layer_smoke(
-    context: &mut ullm_runtime_sys::RuntimeContext,
-    stream: &mut ullm_runtime_sys::RuntimeStream,
-    path: &str,
-    chunk_bytes: usize,
-    layer_index: usize,
-) -> Result<PackageModelLoopLayerSmoke, String> {
-    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
-    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
-    let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
-    let o_tensor = format!("model.language_model.layers.{layer_index}.self_attn.o_proj.weight");
-    let q_norm_tensor =
-        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
-    let k_norm_tensor =
-        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
-    let post_norm_tensor =
-        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
-    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
-    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
-    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
-
-    let q_norm = read_named_passthrough_f32(path, &q_norm_tensor, chunk_bytes)?;
-    let k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)?;
-    let post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
-    let weights = qwen3_decoder_layer_runtime_weights_from_package(
-        context,
-        stream,
-        path,
-        chunk_bytes,
-        &q_tensor,
-        &k_tensor,
-        &v_tensor,
-        &o_tensor,
-        &q_norm,
-        &k_norm,
-        &post_norm,
-        &gate_tensor,
-        &up_tensor,
-        &down_tensor,
-    )?;
-    let runtime_shape = qwen3_self_attn_runtime_shape(&weights.self_attn)?;
-    if weights.post_attention.hidden != runtime_shape.hidden {
-        return Err(format!(
-            "model loop layer {layer_index} hidden mismatch: self_attn={} post_attention={}",
-            runtime_shape.hidden, weights.post_attention.hidden
-        ));
-    }
-    Ok(PackageModelLoopLayerSmoke {
-        layer_index,
-        q_tensor,
-        k_tensor,
-        v_tensor,
-        o_tensor,
-        q_norm_tensor,
-        k_norm_tensor,
-        post_norm_tensor,
-        gate_tensor,
-        up_tensor,
-        down_tensor,
-        q_norm,
-        k_norm,
-        post_norm,
-        weights,
-        runtime_shape,
-    })
-}
-
 impl PackageModelLoopSmokeModel {
     fn load(
         context: &mut ullm_runtime_sys::RuntimeContext,
@@ -11247,7 +11162,7 @@ impl PackageModelLoopSmokeModel {
 
         let mut layers = Vec::with_capacity(layer_indices.len());
         for &layer_index in layer_indices {
-            layers.push(load_package_model_loop_layer_smoke(
+            layers.push(qwen3_package_decoder_layer_runtime_from_package(
                 context,
                 stream,
                 path,
@@ -11395,7 +11310,7 @@ impl PackageModelLoopSmokeModel {
 
     fn tensor_names_by_layer<F>(&self, mut select: F) -> Vec<String>
     where
-        F: FnMut(&PackageModelLoopLayerSmoke) -> &str,
+        F: FnMut(&Qwen3PackageDecoderLayerRuntime) -> &str,
     {
         self.layers
             .iter()
