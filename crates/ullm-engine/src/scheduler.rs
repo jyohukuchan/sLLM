@@ -25,6 +25,105 @@ impl Request {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerRequestAllocation {
+    pub request: Request,
+    pub allocation: BlockAllocation,
+}
+
+#[derive(Debug)]
+pub struct SchedulerState {
+    queue: RequestQueue,
+    allocator: KvBlockAllocator,
+}
+
+impl SchedulerState {
+    pub fn new(total_kv_blocks: u32) -> Self {
+        Self::with_block_size(total_kv_blocks, DEFAULT_KV_BLOCK_SIZE_TOKENS)
+    }
+
+    pub fn with_block_size(total_kv_blocks: u32, block_size_tokens: u32) -> Self {
+        Self {
+            queue: RequestQueue::new(),
+            allocator: KvBlockAllocator::with_block_size(total_kv_blocks, block_size_tokens),
+        }
+    }
+
+    pub fn enqueue(&mut self, request: Request) {
+        self.queue.push(request);
+    }
+
+    pub fn waiting_len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn waiting_is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub fn allocator_stats(&self) -> KvBlockAllocatorStats {
+        self.allocator.stats()
+    }
+
+    pub fn release_request(&mut self, request_id: RequestId) -> usize {
+        self.allocator.free_request(request_id)
+    }
+
+    pub fn pop_prefill_batch_with_allocation(
+        &mut self,
+        token_budget: usize,
+    ) -> Result<Vec<SchedulerRequestAllocation>, String> {
+        let requests = self.queue.pop_prefill_batch(token_budget);
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut allocations: Vec<(Request, BlockAllocation)> = Vec::with_capacity(requests.len());
+
+        for request in &requests {
+            let token_count = match request.prompt_tokens.checked_add(request.max_new_tokens) {
+                Some(token_count) => token_count,
+                None => {
+                    for (_, allocated) in allocations.drain(..) {
+                        self.allocator.free_request(allocated.request_id);
+                    }
+                    for request in requests.iter().rev() {
+                        self.queue.push_front(request.clone());
+                    }
+                    return Err(format!(
+                        "token count overflow for request {:?}: {} + {}",
+                        request.id, request.prompt_tokens, request.max_new_tokens
+                    ));
+                }
+            };
+
+            match self.allocator.allocate_for_tokens(request.id, token_count) {
+                Ok(allocation) => allocations.push((request.clone(), allocation)),
+                Err(err) => {
+                    for (_, allocated) in allocations.drain(..) {
+                        self.allocator.free_request(allocated.request_id);
+                    }
+                    for request in requests.iter().rev() {
+                        self.queue.push_front(request.clone());
+                    }
+                    return Err(format!(
+                        "allocation failed for request {:?} with token_count {}: {}",
+                        request.id, token_count, err
+                    ));
+                }
+            }
+        }
+
+        Ok(allocations
+            .into_iter()
+            .map(|(request, allocation)| SchedulerRequestAllocation {
+                request,
+                allocation,
+            })
+            .collect())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct RequestQueue {
     waiting: VecDeque<Request>,
@@ -60,6 +159,10 @@ impl RequestQueue {
             selected.push(request);
         }
         selected
+    }
+
+    fn push_front(&mut self, request: Request) {
+        self.waiting.push_front(request);
     }
 }
 
@@ -297,5 +400,116 @@ mod tests {
         assert_eq!(stats.allocated_blocks, 4);
         assert_eq!(stats.free_runs, 2);
         assert_eq!(stats.largest_free_run, 2);
+    }
+
+    #[test]
+    fn scheduler_state_prefill_with_allocation_returns_block_assignments() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 8, 4));
+        scheduler.enqueue(Request::new(2, 3, 6));
+        scheduler.enqueue(Request::new(3, 20, 2));
+
+        let selected = scheduler
+            .pop_prefill_batch_with_allocation(12)
+            .expect("allocation should succeed");
+        assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected[0].request.id,
+            RequestId(1),
+            "first selected request"
+        );
+        assert_eq!(selected[0].allocation.blocks, vec![0, 1]);
+        assert_eq!(
+            selected[1].request.id,
+            RequestId(2),
+            "second selected request"
+        );
+        assert_eq!(selected[1].allocation.blocks, vec![2, 3]);
+        assert_eq!(scheduler.waiting_len(), 1);
+    }
+
+    #[test]
+    fn scheduler_state_pop_prefill_with_allocation_rolls_back_when_insufficient_blocks() {
+        let mut scheduler = SchedulerState::with_block_size(3, 8);
+        scheduler.enqueue(Request::new(1, 1, 1));
+        scheduler.enqueue(Request::new(2, 1, 24));
+        scheduler.enqueue(Request::new(3, 1, 1));
+
+        let err = scheduler
+            .pop_prefill_batch_with_allocation(2)
+            .expect_err("should fail due to block shortage");
+        assert!(
+            err.contains("not enough KV blocks") && err.contains("RequestId(2)"),
+            "{err}"
+        );
+        assert_eq!(scheduler.waiting_len(), 3);
+        assert_eq!(
+            scheduler
+                .queue
+                .waiting
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1), RequestId(2), RequestId(3)]
+        );
+        assert_eq!(scheduler.allocator_stats().free_blocks, 3);
+    }
+
+    #[test]
+    fn scheduler_state_pop_prefill_with_allocation_reports_overflow_error() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, usize::MAX, 1));
+
+        let err = scheduler
+            .pop_prefill_batch_with_allocation(1)
+            .expect_err("should fail due to overflow");
+        assert!(
+            err.contains("token count overflow") && err.contains("RequestId(1)"),
+            "{err}"
+        );
+        assert_eq!(scheduler.waiting_len(), 1);
+        assert_eq!(scheduler.allocator_stats().free_blocks, 4);
+    }
+
+    #[test]
+    fn scheduler_state_pop_prefill_with_allocation_rolls_back_after_partial_overflow() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 1, 1));
+        scheduler.enqueue(Request::new(2, 1, usize::MAX));
+        scheduler.enqueue(Request::new(3, 1, 1));
+
+        let err = scheduler
+            .pop_prefill_batch_with_allocation(2)
+            .expect_err("should fail due to overflow in the second selected request");
+        assert!(
+            err.contains("token count overflow") && err.contains("RequestId(2)"),
+            "{err}"
+        );
+        assert_eq!(scheduler.waiting_len(), 3);
+        assert_eq!(
+            scheduler
+                .queue
+                .waiting
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1), RequestId(2), RequestId(3)]
+        );
+        assert_eq!(scheduler.allocator_stats().free_blocks, 4);
+    }
+
+    #[test]
+    fn scheduler_state_release_request_frees_allocated_blocks() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 8, 4));
+        let selected = scheduler
+            .pop_prefill_batch_with_allocation(8)
+            .expect("allocation should succeed");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].allocation.blocks.len(), 2);
+        assert_eq!(scheduler.allocator_stats().free_blocks, 2);
+
+        assert_eq!(scheduler.release_request(RequestId(1)), 2);
+        assert_eq!(scheduler.allocator_stats().free_blocks, 4);
     }
 }
