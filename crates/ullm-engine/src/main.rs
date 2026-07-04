@@ -11360,6 +11360,21 @@ struct PackageModelLoopLayerRunPlan {
     prepared_diffs: PackageModelLoopPreparedDiffs,
 }
 
+struct PackageModelLoopExecutionPlan {
+    decode_shape: PagedDecodeShape,
+    q_token_elements: usize,
+    k_token_elements: usize,
+    v_token_elements: usize,
+    attention_elements: usize,
+    hidden: usize,
+}
+
+struct PackageModelLoopExecutionSummary {
+    first_batch_ready: usize,
+    second_batch_ready: usize,
+    final_ready: usize,
+}
+
 fn load_package_model_loop_layer_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -11945,6 +11960,144 @@ impl PackageModelLoopLayerRunPlan {
     }
 }
 
+impl PackageModelLoopExecutionPlan {
+    fn new(
+        model: &PackageModelLoopSmokeModel,
+        request_plan: &PackageModelLoopRequestPlan,
+    ) -> Result<Self, String> {
+        let decode_shape = model.decode_shape(request_plan.block_size, request_plan.cache_blocks);
+        Ok(Self {
+            decode_shape,
+            q_token_elements: decode_shape.q_elements()?,
+            k_token_elements: decode_shape.k_token_elements()?,
+            v_token_elements: decode_shape.v_token_elements()?,
+            attention_elements: decode_shape.output_elements()?,
+            hidden: model.hidden,
+        })
+    }
+
+    fn execute(
+        &self,
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        model: &PackageModelLoopSmokeModel,
+        request_plan: &mut PackageModelLoopRequestPlan,
+        layer_run_plan: &mut PackageModelLoopLayerRunPlan,
+    ) -> Result<PackageModelLoopExecutionSummary, String> {
+        let mut layer_runner = model.build_stack_runner(
+            context,
+            stream,
+            &layer_run_plan.runs_by_layer,
+            self.decode_shape,
+        )?;
+
+        for layer_position in 0..layer_runner.layer_count() {
+            for run in &mut layer_run_plan.runs_by_layer[layer_position] {
+                for timestep in 0..run.prompt_tokens {
+                    run_scheduler_layer_stack_prefill_step(
+                        &mut layer_runner,
+                        layer_position,
+                        stream,
+                        run,
+                        timestep,
+                        self.q_token_elements,
+                        self.k_token_elements,
+                        self.v_token_elements,
+                        self.attention_elements,
+                        self.hidden,
+                        &format!(
+                            "package model-loop layer {} prefill",
+                            model.layers[layer_position].layer_index
+                        ),
+                    )?;
+                }
+            }
+        }
+        request_plan.complete_prefill_all()?;
+
+        let expected_first_ids = [RequestId(201), RequestId(202)];
+        let first_batch_ready = run_scheduler_layer_stack_ready_batch(
+            &mut layer_runner,
+            &mut request_plan.scheduler,
+            &mut layer_run_plan.runs_by_layer,
+            stream,
+            &expected_first_ids,
+            8,
+            self.q_token_elements,
+            self.k_token_elements,
+            self.v_token_elements,
+            self.attention_elements,
+            self.hidden,
+            "package model-loop first batch",
+        )?;
+
+        let expected_second_ids = [RequestId(201)];
+        let second_batch_ready = run_scheduler_layer_stack_ready_batch(
+            &mut layer_runner,
+            &mut request_plan.scheduler,
+            &mut layer_run_plan.runs_by_layer,
+            stream,
+            &expected_second_ids,
+            8,
+            self.q_token_elements,
+            self.k_token_elements,
+            self.v_token_elements,
+            self.attention_elements,
+            self.hidden,
+            "package model-loop second batch",
+        )?;
+        let final_ready = request_plan
+            .scheduler
+            .ready_decode_batch(8)
+            .map_err(|err| format!("failed to query model-loop final ready batch: {err}"))?
+            .len();
+        if final_ready != 0 {
+            return Err(format!(
+                "package model-loop final ready count {final_ready}, expected 0"
+            ));
+        }
+
+        for layer_position in 0..layer_runner.layer_count() {
+            for run in &mut layer_run_plan.runs_by_layer[layer_position] {
+                let cache = layer_runner
+                    .read_layer_cache_to_host(layer_position, run.request_id, stream)
+                    .map_err(|err| {
+                        format!(
+                            "failed to read package model-loop layer {} cache for {:?}: {err}",
+                            model.layers[layer_position].layer_index, run.request_id
+                        )
+                    })?;
+                run.k_cache_max_abs_diff = verify_f32_close(
+                    &format!(
+                        "package model-loop layer {} request {:?} k cache",
+                        model.layers[layer_position].layer_index, run.request_id
+                    ),
+                    &cache.k,
+                    &run.expected.paged_cache.k,
+                    1e-5,
+                    1e-5,
+                )?;
+                run.v_cache_max_abs_diff = verify_f32_close(
+                    &format!(
+                        "package model-loop layer {} request {:?} v cache",
+                        model.layers[layer_position].layer_index, run.request_id
+                    ),
+                    &cache.v,
+                    &run.expected.paged_cache.v,
+                    1e-5,
+                    1e-5,
+                )?;
+            }
+        }
+
+        Ok(PackageModelLoopExecutionSummary {
+            first_batch_ready,
+            second_batch_ready,
+            final_ready,
+        })
+    }
+}
+
 fn package_self_attn_mlp_block_model_loop_smoke(
     path: Option<String>,
     device_index: Option<String>,
@@ -12247,129 +12400,26 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
 
     let block_size = 2_usize;
     let mut request_plan = PackageModelLoopRequestPlan::new(sequence_len, hidden, block_size)?;
-    let decode_shape = model.decode_shape(request_plan.block_size, request_plan.cache_blocks);
-    let q_token_elements = decode_shape.q_elements()?;
-    let k_token_elements = decode_shape.k_token_elements()?;
-    let v_token_elements = decode_shape.v_token_elements()?;
-    let attention_elements = decode_shape.output_elements()?;
+    let execution_plan = PackageModelLoopExecutionPlan::new(&model, &request_plan)?;
 
     let mut layer_run_plan = PackageModelLoopLayerRunPlan::prepare(
         &mut context,
         &mut stream,
         &model,
         &request_plan,
-        decode_shape,
+        execution_plan.decode_shape,
         sequence_len,
         rotary_dim,
         rope_base,
         position_offset,
     )?;
-
-    let mut layer_runner = model.build_stack_runner(
+    let execution_summary = execution_plan.execute(
         &mut context,
         &mut stream,
-        &layer_run_plan.runs_by_layer,
-        decode_shape,
+        &model,
+        &mut request_plan,
+        &mut layer_run_plan,
     )?;
-
-    for layer_position in 0..layer_runner.layer_count() {
-        for run in &mut layer_run_plan.runs_by_layer[layer_position] {
-            for timestep in 0..run.prompt_tokens {
-                run_scheduler_layer_stack_prefill_step(
-                    &mut layer_runner,
-                    layer_position,
-                    &mut stream,
-                    run,
-                    timestep,
-                    q_token_elements,
-                    k_token_elements,
-                    v_token_elements,
-                    attention_elements,
-                    hidden,
-                    &format!(
-                        "package model-loop layer {} prefill",
-                        model.layers[layer_position].layer_index
-                    ),
-                )?;
-            }
-        }
-    }
-    request_plan.complete_prefill_all()?;
-
-    let expected_first_ids = [RequestId(201), RequestId(202)];
-    let first_batch_ready = run_scheduler_layer_stack_ready_batch(
-        &mut layer_runner,
-        &mut request_plan.scheduler,
-        &mut layer_run_plan.runs_by_layer,
-        &mut stream,
-        &expected_first_ids,
-        8,
-        q_token_elements,
-        k_token_elements,
-        v_token_elements,
-        attention_elements,
-        hidden,
-        "package model-loop first batch",
-    )?;
-
-    let expected_second_ids = [RequestId(201)];
-    let second_batch_ready = run_scheduler_layer_stack_ready_batch(
-        &mut layer_runner,
-        &mut request_plan.scheduler,
-        &mut layer_run_plan.runs_by_layer,
-        &mut stream,
-        &expected_second_ids,
-        8,
-        q_token_elements,
-        k_token_elements,
-        v_token_elements,
-        attention_elements,
-        hidden,
-        "package model-loop second batch",
-    )?;
-    let final_ready = request_plan
-        .scheduler
-        .ready_decode_batch(8)
-        .map_err(|err| format!("failed to query model-loop final ready batch: {err}"))?
-        .len();
-    if final_ready != 0 {
-        return Err(format!(
-            "package model-loop final ready count {final_ready}, expected 0"
-        ));
-    }
-
-    for layer_position in 0..layer_runner.layer_count() {
-        for run in &mut layer_run_plan.runs_by_layer[layer_position] {
-            let cache = layer_runner
-                .read_layer_cache_to_host(layer_position, run.request_id, &mut stream)
-                .map_err(|err| {
-                    format!(
-                        "failed to read package model-loop layer {} cache for {:?}: {err}",
-                        model.layers[layer_position].layer_index, run.request_id
-                    )
-                })?;
-            run.k_cache_max_abs_diff = verify_f32_close(
-                &format!(
-                    "package model-loop layer {} request {:?} k cache",
-                    model.layers[layer_position].layer_index, run.request_id
-                ),
-                &cache.k,
-                &run.expected.paged_cache.k,
-                1e-5,
-                1e-5,
-            )?;
-            run.v_cache_max_abs_diff = verify_f32_close(
-                &format!(
-                    "package model-loop layer {} request {:?} v cache",
-                    model.layers[layer_position].layer_index, run.request_id
-                ),
-                &cache.v,
-                &run.expected.paged_cache.v,
-                1e-5,
-                1e-5,
-            )?;
-        }
-    }
 
     let stats = request_plan.scheduler.allocator_stats();
     let cached_tokens = request_plan.cached_tokens()?;
@@ -12429,9 +12479,9 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         request_plan.block_size,
         request_plan.cache_blocks,
         request_plan.block_tables,
-        first_batch_ready,
-        second_batch_ready,
-        final_ready,
+        execution_summary.first_batch_ready,
+        execution_summary.second_batch_ready,
+        execution_summary.final_ready,
         decode_steps_by_layer,
         cached_tokens,
         generated_tokens,
