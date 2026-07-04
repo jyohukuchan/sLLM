@@ -123,6 +123,84 @@ pub struct Qwen3SelfAttnRuntimeWeights {
     pub o_matrix: RuntimeBuffer,
 }
 
+#[derive(Debug)]
+pub struct Qwen3SelfAttnQProjectionSplit {
+    pub query: Vec<f32>,
+    pub gate: Option<Vec<f32>>,
+    pub q_heads: usize,
+    pub layout: &'static str,
+}
+
+pub fn split_qwen3_self_attn_q_projection(
+    projected: &[f32],
+    sequence_len: usize,
+    q_rows: usize,
+    hidden: usize,
+    head_dim: usize,
+) -> Result<Qwen3SelfAttnQProjectionSplit, String> {
+    if sequence_len == 0 || q_rows == 0 || hidden == 0 || head_dim == 0 {
+        return Err("self-attn q projection split received a zero dimension".to_string());
+    }
+    let expected_len = sequence_len
+        .checked_mul(q_rows)
+        .ok_or_else(|| "self-attn q projection split length overflows".to_string())?;
+    if projected.len() != expected_len {
+        return Err(format!(
+            "self-attn q projection length mismatch: got {}, expected {expected_len}",
+            projected.len()
+        ));
+    }
+
+    let qwen35_gated = hidden
+        .checked_mul(2)
+        .is_some_and(|gated_rows| gated_rows == q_rows)
+        && q_rows.is_multiple_of(2 * head_dim);
+    if qwen35_gated {
+        let q_heads = q_rows / (2 * head_dim);
+        if q_heads == 0 {
+            return Err("self-attn gated q projection has zero heads".to_string());
+        }
+        let query_len = sequence_len
+            .checked_mul(q_heads)
+            .and_then(|value| value.checked_mul(head_dim))
+            .ok_or_else(|| "self-attn gated q projection output length overflows".to_string())?;
+        let mut query = Vec::with_capacity(query_len);
+        let mut gate = Vec::with_capacity(query_len);
+        for timestep in 0..sequence_len {
+            let timestep_start = timestep * q_rows;
+            for head in 0..q_heads {
+                let head_start = timestep_start + head * 2 * head_dim;
+                let query_start = head_start;
+                let gate_start = head_start + head_dim;
+                query.extend_from_slice(&projected[query_start..query_start + head_dim]);
+                gate.extend_from_slice(&projected[gate_start..gate_start + head_dim]);
+            }
+        }
+        return Ok(Qwen3SelfAttnQProjectionSplit {
+            query,
+            gate: Some(gate),
+            q_heads,
+            layout: "qwen3.5-gated",
+        });
+    }
+
+    if !q_rows.is_multiple_of(head_dim) {
+        return Err(format!(
+            "self-attn q rows must be a multiple of head_dim: q_rows={q_rows}, head_dim={head_dim}"
+        ));
+    }
+    let q_heads = q_rows / head_dim;
+    if q_heads == 0 {
+        return Err("self-attn q projection has zero heads".to_string());
+    }
+    Ok(Qwen3SelfAttnQProjectionSplit {
+        query: projected.to_vec(),
+        gate: None,
+        q_heads,
+        layout: "plain",
+    })
+}
+
 pub struct Qwen3MlpRuntimeWeights {
     pub gate_rows: usize,
     pub gate_cols: usize,
@@ -1687,6 +1765,63 @@ mod tests {
             assert_f32s_close(&step.layer_output, &expected_layer_output, 1e-5);
         }
         assert_eq!(state.written_len(), cache_len);
+    }
+
+    #[test]
+    fn split_qwen3_self_attn_q_projection_plain_layout() {
+        let sequence_len = 2_usize;
+        let head_dim = 4_usize;
+        let q_heads = 3_usize;
+        let q_rows = q_heads * head_dim;
+        let hidden = q_rows;
+        let mut projected = vec![0.0_f32; sequence_len * q_rows];
+        for (index, value) in projected.iter_mut().enumerate() {
+            *value = index as f32;
+        }
+
+        let split =
+            split_qwen3_self_attn_q_projection(&projected, sequence_len, q_rows, hidden, head_dim)
+                .unwrap();
+
+        assert_eq!(split.q_heads, q_heads);
+        assert_eq!(split.layout, "plain");
+        assert!(split.gate.is_none());
+        assert_eq!(split.query, projected);
+    }
+
+    #[test]
+    fn split_qwen3_self_attn_q_projection_qwen35_gated_layout() {
+        let sequence_len = 2_usize;
+        let head_dim = 4_usize;
+        let q_heads = 3_usize;
+        let q_rows = q_heads * 2 * head_dim;
+        let hidden = q_rows / 2;
+        let mut projected = vec![0.0_f32; sequence_len * q_rows];
+        for (index, value) in projected.iter_mut().enumerate() {
+            *value = (index + 1) as f32;
+        }
+
+        let split =
+            split_qwen3_self_attn_q_projection(&projected, sequence_len, q_rows, hidden, head_dim)
+                .unwrap();
+
+        let mut expected_query = Vec::with_capacity(sequence_len * q_heads * head_dim);
+        let mut expected_gate = Vec::with_capacity(sequence_len * q_heads * head_dim);
+        for timestep in 0..sequence_len {
+            let timestep_start = timestep * q_rows;
+            for head in 0..q_heads {
+                let head_start = timestep_start + head * 2 * head_dim;
+                let query_start = head_start;
+                let gate_start = head_start + head_dim;
+                expected_query.extend_from_slice(&projected[query_start..query_start + head_dim]);
+                expected_gate.extend_from_slice(&projected[gate_start..gate_start + head_dim]);
+            }
+        }
+
+        assert_eq!(split.q_heads, q_heads);
+        assert_eq!(split.layout, "qwen3.5-gated");
+        assert_eq!(split.gate.as_deref(), Some(expected_gate.as_slice()));
+        assert_eq!(split.query, expected_query);
     }
 
     #[test]

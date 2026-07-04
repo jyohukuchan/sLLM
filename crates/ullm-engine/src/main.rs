@@ -9,7 +9,7 @@ use std::time::Instant;
 use ullm_engine::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntime, Qwen3DecoderLayerRuntimeWeights,
     Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnBlockStepState,
-    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimeWeights,
+    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimeWeights, split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -6190,14 +6190,19 @@ fn package_self_attn_attention_smoke(
         k_projected.extend(k_step);
         v_projected.extend(v_step);
     }
-    let q_projection_split =
-        match split_self_attn_q_projection(&q_projected, sequence_len, q_rows, q_cols, head_dim) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("{err}");
-                return ExitCode::from(1);
-            }
-        };
+    let q_projection_split = match split_qwen3_self_attn_q_projection(
+        &q_projected,
+        sequence_len,
+        q_rows,
+        q_cols,
+        head_dim,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
     let q_heads = q_projection_split.q_heads;
     if !q_heads.is_multiple_of(kv_heads) {
         eprintln!("q_heads must be a multiple of kv_heads: q_heads={q_heads}, kv_heads={kv_heads}");
@@ -6598,14 +6603,19 @@ fn package_self_attn_decode_smoke(
         k_projected.extend(k_step);
         v_projected.extend(v_step);
     }
-    let q_projection_split =
-        match split_self_attn_q_projection(&q_projected, sequence_len, q_rows, q_cols, head_dim) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("{err}");
-                return ExitCode::from(1);
-            }
-        };
+    let q_projection_split = match split_qwen3_self_attn_q_projection(
+        &q_projected,
+        sequence_len,
+        q_rows,
+        q_cols,
+        head_dim,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
     let q_heads = q_projection_split.q_heads;
     if !q_heads.is_multiple_of(kv_heads) {
         eprintln!("q_heads must be a multiple of kv_heads: q_heads={q_heads}, kv_heads={kv_heads}");
@@ -7150,14 +7160,19 @@ fn package_self_attn_block_smoke(
         k_projected.extend(k_step);
         v_projected.extend(v_step);
     }
-    let q_projection_split =
-        match split_self_attn_q_projection(&q_projected, sequence_len, q_rows, q_cols, head_dim) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("{err}");
-                return ExitCode::from(1);
-            }
-        };
+    let q_projection_split = match split_qwen3_self_attn_q_projection(
+        &q_projected,
+        sequence_len,
+        q_rows,
+        q_cols,
+        head_dim,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
     let q_heads = q_projection_split.q_heads;
     if !q_heads.is_multiple_of(kv_heads) {
         eprintln!("q_heads must be a multiple of kv_heads: q_heads={q_heads}, kv_heads={kv_heads}");
@@ -7644,7 +7659,7 @@ fn qwen3_self_attn_prepare_sequence_smoke(
     }
 
     let q_projection_split =
-        split_self_attn_q_projection(&q_projected, sequence_len, q_rows, q_cols, head_dim)?;
+        split_qwen3_self_attn_q_projection(&q_projected, sequence_len, q_rows, q_cols, head_dim)?;
     let q_heads = q_projection_split.q_heads;
     if !q_heads.is_multiple_of(kv_heads) {
         return Err(format!(
@@ -16985,83 +17000,6 @@ fn runtime_host_sigmoid_mul_f32(gate: &[f32], input: &[f32]) -> Vec<f32> {
             sigmoid * *input_value
         })
         .collect()
-}
-
-struct SelfAttnQProjectionSplit {
-    query: Vec<f32>,
-    gate: Option<Vec<f32>>,
-    q_heads: usize,
-    layout: &'static str,
-}
-
-fn split_self_attn_q_projection(
-    projected: &[f32],
-    sequence_len: usize,
-    q_rows: usize,
-    hidden: usize,
-    head_dim: usize,
-) -> Result<SelfAttnQProjectionSplit, String> {
-    if sequence_len == 0 || q_rows == 0 || hidden == 0 || head_dim == 0 {
-        return Err("self-attn q projection split received a zero dimension".to_string());
-    }
-    let expected_len = sequence_len
-        .checked_mul(q_rows)
-        .ok_or_else(|| "self-attn q projection split length overflows".to_string())?;
-    if projected.len() != expected_len {
-        return Err(format!(
-            "self-attn q projection length mismatch: got {}, expected {expected_len}",
-            projected.len()
-        ));
-    }
-
-    let qwen35_gated = hidden
-        .checked_mul(2)
-        .is_some_and(|gated_rows| gated_rows == q_rows)
-        && q_rows.is_multiple_of(2 * head_dim);
-    if qwen35_gated {
-        let q_heads = q_rows / (2 * head_dim);
-        if q_heads == 0 {
-            return Err("self-attn gated q projection has zero heads".to_string());
-        }
-        let query_len = sequence_len
-            .checked_mul(q_heads)
-            .and_then(|value| value.checked_mul(head_dim))
-            .ok_or_else(|| "self-attn gated q projection output length overflows".to_string())?;
-        let mut query = Vec::with_capacity(query_len);
-        let mut gate = Vec::with_capacity(query_len);
-        for timestep in 0..sequence_len {
-            let timestep_start = timestep * q_rows;
-            for head in 0..q_heads {
-                let head_start = timestep_start + head * 2 * head_dim;
-                let query_start = head_start;
-                let gate_start = head_start + head_dim;
-                query.extend_from_slice(&projected[query_start..query_start + head_dim]);
-                gate.extend_from_slice(&projected[gate_start..gate_start + head_dim]);
-            }
-        }
-        return Ok(SelfAttnQProjectionSplit {
-            query,
-            gate: Some(gate),
-            q_heads,
-            layout: "qwen3.5-gated",
-        });
-    }
-
-    if !q_rows.is_multiple_of(head_dim) {
-        return Err(format!(
-            "self-attn q rows must be a multiple of head_dim: q_rows={q_rows}, head_dim={head_dim}"
-        ));
-    }
-    let q_heads = q_rows / head_dim;
-    if q_heads == 0 {
-        return Err("self-attn q projection has zero heads".to_string());
-    }
-    Ok(SelfAttnQProjectionSplit {
-        query: projected.to_vec(),
-        gate: None,
-        q_heads,
-        layout: "plain",
-    })
 }
 
 fn runtime_host_add_f32(lhs: &[f32], rhs: &[f32]) -> Vec<f32> {
