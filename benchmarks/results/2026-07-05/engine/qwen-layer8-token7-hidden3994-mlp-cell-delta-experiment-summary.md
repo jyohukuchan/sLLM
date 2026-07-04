@@ -4,8 +4,12 @@ Artifacts:
 
 - `package-cell-delta-overrides-layer8-up6340-col3994-p4p46-inproj.json`
 - `package-cell-delta-overrides-layer8-gateup6340-col3994-p4p46-inproj.json`
+- `package-cell-delta-overrides-layer8-up6340-col3994-lsfit-p4p46-inproj.json`
+- `package-cell-delta-overrides-layer8-gateup6340-col3994-lsfit-p4p46-inproj.json`
 - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-cell-delta-layer8up6340col3994-p4p46-inproj.jsonl`
 - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-cell-delta-layer8gateup6340col3994-p4p46-inproj.jsonl`
+- `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-cell-delta-layer8up6340col3994-lsfit-p4p46-inproj.jsonl`
+- `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-cell-delta-layer8gateup6340col3994-lsfit-p4p46-inproj.jsonl`
 
 ## Implementation
 
@@ -46,6 +50,16 @@ Layer `8`, row `6340`, column `3994` was selected from the dot-term trace:
 The smoke report confirms the up-only override changed
 `mlp.up_proj[6340,3994]` from `0.006980899721` to `0.005920410156`.
 
+## Least-Squares Cell Fit
+
+A second pass fitted the same column `3994` cell against all `16` tokens for
+the selected row, minimizing package-vs-source row-dot error:
+
+| projection | source-restore delta | LS delta | row-dot RMSE before | row-dot RMSE after |
+| --- | ---: | ---: | ---: | ---: |
+| `mlp.up_proj[6340,3994]` | -0.001060489565 | -0.001297428526 | 0.032796258 | 0.015284518 |
+| `mlp.gate_proj[6340,3994]` | 0.001041834708 | 0.001825227037 | 0.045137044 | 0.019261286 |
+
 ## Full Prefix Results
 
 All runs use:
@@ -62,6 +76,8 @@ All runs use:
 | baseline layer6/layer10 row-scale | 0.578010559 | token 3 / hidden 3994 | 0.645338058 | token 7 / hidden 3994 |
 | up cell `6340,3994` | 0.580806732 | token 3 / hidden 3994 | 0.654584885 | token 7 / hidden 3994 |
 | gate+up cell `6340,3994` | 0.583854675 | token 3 / hidden 3994 | 0.654893875 | token 7 / hidden 3994 |
+| up cell `6340,3994` LS fit | 0.581432343 | token 3 / hidden 3994 | 0.656669617 | token 7 / hidden 3994 |
+| gate+up cell `6340,3994` LS fit | 0.586801529 | token 3 / hidden 3994 | 0.657253265 | token 7 / hidden 3994 |
 
 Layer `8`, token `7`, hidden `3994` improves locally:
 
@@ -70,6 +86,8 @@ Layer `8`, token `7`, hidden `3994` improves locally:
 | baseline | 0.296178818 | 0.077883139 |
 | up cell `6340,3994` | 0.284414291 | 0.066119172 |
 | gate+up cell `6340,3994` | 0.283128738 | 0.064832471 |
+| up cell `6340,3994` LS fit | 0.281785965 | 0.063490726 |
+| gate+up cell `6340,3994` LS fit | 0.279504776 | 0.061208840 |
 
 However, layer `8`, token `3`, hidden `3994` worsens:
 
@@ -78,6 +96,8 @@ However, layer `8`, token `3`, hidden `3994` worsens:
 | baseline | -0.578010559 | 0.160099775 |
 | up cell `6340,3994` | -0.580806732 | 0.157302916 |
 | gate+up cell `6340,3994` | -0.583854675 | 0.154254228 |
+| up cell `6340,3994` LS fit | -0.581432343 | 0.156677932 |
+| gate+up cell `6340,3994` LS fit | -0.586801529 | 0.151308775 |
 
 ## Interpretation
 
@@ -85,12 +105,14 @@ However, layer `8`, token `3`, hidden `3994` worsens:
   materialized matrix value.
 - Returning the high-leverage cell to the source weight improves the target
   layer `8`, token `7`, hidden `3994` coordinate.
-- The same correction worsens token `3` at hidden `3994`, and the full-prefix
-  layer `11` max gets worse.
+- Least-squares fitting of the same cell improves row-dot RMSE and the token `7`
+  target further, but worsens token `3` and the full-prefix layer `11` max even
+  more.
 - This confirms the row-scale result with a narrower intervention: the objective
-  cannot be "restore one suspicious source cell". The correction must be fitted
-  against a multi-token downstream objective, or the quantizer must handle the
-  full activation-weighted row/group error rather than one cell independently.
+  cannot be "restore one suspicious source cell" or "minimize one row-dot error".
+  The correction must be fitted against a downstream multi-token hidden-error
+  objective, or the quantizer must handle the full activation-weighted row/group
+  error rather than one cell independently.
 
 Next useful experiment: solve a small least-squares cell/group compensation
 using multiple tokens for `mlp.up_proj[6340]` and `mlp.gate_proj[6340]`, then

@@ -1,0 +1,12 @@
+{
+  "schema_version": "package-cell-delta-overrides-v0.1",
+  "overrides": [
+    {
+      "layer_index": 8,
+      "tensor_suffix": "mlp.up_proj.weight",
+      "row_index": 6340,
+      "col_index": 3994,
+      "delta": -0.001297428526203
+    }
+  ]
+}
