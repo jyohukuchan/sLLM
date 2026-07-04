@@ -7,6 +7,7 @@ use crate::decode_runner::{
     Qwen3DecoderLayerDecodeBatchOutput, Qwen3DecoderLayerDecodeInputLayout,
     Qwen3DecoderLayerDecodeSequenceView, Qwen3DecoderLayerStackRequestDecodeRunner,
     qwen3_decoder_layer_decode_batch_inputs_from_sequences,
+    qwen3_decoder_layer_prefill_input_from_sequence,
 };
 use crate::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights,
@@ -155,6 +156,27 @@ pub fn qwen3_package_model_stack_runner<'weights, 'requests>(
         }
     }
     Ok(layer_runner)
+}
+
+pub fn qwen3_package_model_run_prefill_step_from_sequence(
+    runner: &mut Qwen3DecoderLayerStackRequestDecodeRunner<'_>,
+    layer_index: usize,
+    stream: &mut RuntimeStream,
+    sequence: Qwen3DecoderLayerDecodeSequenceView<'_>,
+    timestep: usize,
+    decode_plan: Qwen3PackageModelDecodePlan,
+    label: &str,
+) -> Result<Qwen3DecoderLayerDecodeBatchOutput, String> {
+    let input_layout = Qwen3DecoderLayerDecodeInputLayout {
+        q_token_elements: decode_plan.q_token_elements,
+        k_token_elements: decode_plan.k_token_elements,
+        v_token_elements: decode_plan.v_token_elements,
+        attention_elements: decode_plan.attention_elements,
+        hidden: decode_plan.hidden,
+    };
+    let input =
+        qwen3_decoder_layer_prefill_input_from_sequence(sequence, timestep, input_layout, label)?;
+    runner.run_prefill_step(layer_index, stream, input)
 }
 
 pub fn qwen3_package_model_run_ready_batch_from_sequences<'a>(
@@ -808,6 +830,44 @@ mod tests {
             .expect("request should remain active after failed stack run");
         assert_eq!(active.cached_tokens, 1);
         assert_eq!(active.generated_tokens, 0);
+    }
+
+    #[test]
+    fn package_model_prefill_step_from_sequence_builds_input_before_stack_run() {
+        let mut context = RuntimeContext::create(0).expect("create CPU runtime context");
+        let mut stream = context.create_stream().expect("create CPU runtime stream");
+        let decode_plan = Qwen3PackageModelDecodePlan::from_shape(4, 2, 1, 2, 2, 2, 2)
+            .expect("decode plan from small shape");
+        let q = vec![0.125_f32; decode_plan.q_token_elements];
+        let k = vec![0.25_f32; decode_plan.k_token_elements];
+        let v = vec![0.375_f32; decode_plan.v_token_elements];
+        let gate = vec![0.5_f32; decode_plan.attention_elements];
+        let residual = vec![0.625_f32; decode_plan.hidden];
+        let sequence = Qwen3DecoderLayerDecodeSequenceView {
+            request_id: RequestId(71),
+            q_sequence: &q,
+            k_sequence: &k,
+            v_sequence: &v,
+            output_gate_sequence: Some(&gate),
+            residual_sequence: &residual,
+        };
+        let mut runner = Qwen3DecoderLayerStackRequestDecodeRunner::new();
+
+        let err = qwen3_package_model_run_prefill_step_from_sequence(
+            &mut runner,
+            0,
+            &mut stream,
+            sequence,
+            0,
+            decode_plan,
+            "package model prefill test",
+        )
+        .expect_err("empty stack runner should reject prefill after input construction");
+
+        assert!(
+            err.contains("decoder layer index 0 is out of bounds"),
+            "{err}"
+        );
     }
 
     #[test]

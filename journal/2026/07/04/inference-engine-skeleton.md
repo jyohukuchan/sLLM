@@ -1581,3 +1581,34 @@
 ### 次の行動
 
 - 次はprefill側にも同じ考え方を適用し、`Qwen3 package model prefill step/run` のような薄いlibrary境界を作る。ただしprefillはscheduler advanceを伴わないため、smoke側のprefill完了処理との境界を崩さない。
+
+## Qwen3 package model prefill step run 抽出
+
+### 前回の要点
+
+- `qwen3_package_model_run_ready_batch_from_sequences` を追加し、ready decode batch input構築とstack runner実行をqwen3_loader側へ移した。
+- prefill側には、`run_scheduler_layer_stack_prefill_step` 内でsequence viewからprefill inputを作り、stack runnerのlayer prefill stepを呼ぶ処理が残っていた。
+
+### 今回の変更点
+
+- `qwen3_loader.rs` に `qwen3_package_model_run_prefill_step_from_sequence` を追加した。
+- 新関数は `Qwen3PackageModelDecodePlan` から `Qwen3DecoderLayerDecodeInputLayout` を作り、`Qwen3DecoderLayerDecodeSequenceView` とtimestepからprefill inputを組み立てて、指定layerの `Qwen3DecoderLayerStackRequestDecodeRunner::run_prefill_step` を呼ぶ。
+- `main.rs` の `run_scheduler_layer_stack_prefill_step` は、prefill stepのcache position確認と期待値diff更新だけを持つ形にした。
+- qwen3_loader側に、prefill input構築後に空stack runnerでlayer indexエラーへ到達する単体テストを追加した。
+- `docs/words.txt` に `Qwen3 package model prefill step run` を追加した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo test -p ullm-engine decode_runner -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `package-self-attn-mlp-block-model-loop-smoke` with layers `3,7,11`, sequence len `3`, passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; all reported `decode_batch_ready_counts=[2, 1]`, `final_ready=0`, `decode_steps_by_layer=[[2, 1, 0], [2, 1, 0], [2, 1, 0]]`, `verified=true`。
+
+### 次の行動
+
+- 次は `PackageModelLoopExecutionPlan::execute` のprefill loop、decode loop、cache readback verifyをprivate methodへ分けるか、`PackageModelLoopLayerRunPlan` から実行時のinput/progress状態をさらに独立させる。

@@ -35,6 +35,7 @@ use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 use ullm_engine::qwen3_loader::{
     Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
     qwen3_decoder_layer_runtime_weights_from_package,
+    qwen3_package_model_run_prefill_step_from_sequence,
     qwen3_package_model_run_ready_batch_from_sequences, qwen3_package_model_stack_runner,
     qwen3_self_attn_runtime_weights_from_package,
 };
@@ -2505,34 +2506,25 @@ fn run_scheduler_layer_stack_prefill_step(
     stream: &mut ullm_runtime_sys::RuntimeStream,
     run: &mut SchedulerLayerDecodeRun,
     timestep: usize,
-    q_token_elements: usize,
-    k_token_elements: usize,
-    v_token_elements: usize,
-    attention_elements: usize,
-    hidden: usize,
+    decode: Qwen3PackageModelDecodePlan,
     label: &str,
 ) -> Result<(), String> {
-    let input_layout = Qwen3DecoderLayerDecodeInputLayout {
-        q_token_elements,
-        k_token_elements,
-        v_token_elements,
-        attention_elements,
-        hidden,
-    };
-    let input = qwen3_decoder_layer_prefill_input_from_sequence(
+    let step = qwen3_package_model_run_prefill_step_from_sequence(
+        runner,
+        layer_index,
+        stream,
         scheduler_layer_decode_sequence_view(run),
         timestep,
-        input_layout,
+        decode,
         label,
     )?;
-    let step = runner.run_prefill_step(layer_index, stream, input)?;
     if step.cache_position != timestep {
         return Err(format!(
             "{label} request {:?} wrote cache_position {}, expected {timestep}",
             run.request_id, step.cache_position
         ));
     }
-    verify_scheduler_layer_step_output(label, run, &step, hidden, attention_elements)
+    verify_scheduler_layer_step_output(label, run, &step, decode.hidden, decode.attention_elements)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11439,11 +11431,7 @@ impl PackageModelLoopExecutionPlan {
                         stream,
                         run,
                         timestep,
-                        self.decode.q_token_elements,
-                        self.decode.k_token_elements,
-                        self.decode.v_token_elements,
-                        self.decode.attention_elements,
-                        self.decode.hidden,
+                        self.decode,
                         &format!(
                             "package model-loop layer {} prefill",
                             model.layers[layer_position].layer_index
