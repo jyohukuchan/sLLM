@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Projection key to include. Defaults to all row_dot projections.",
     )
+    parser.add_argument(
+        "--dedupe",
+        action="store_true",
+        help="Collapse repeated row-dot summaries with identical layer/hidden/projection/error metrics.",
+    )
     parser.add_argument("--summary-json", type=Path, required=True)
     parser.add_argument("--markdown", type=Path)
     return parser.parse_args()
@@ -143,7 +148,31 @@ def summarize_projection(
     }
 
 
-def build_summary(paths: list[Path], projections: set[str] | None) -> dict[str, Any]:
+def dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            row.get("layer_index"),
+            row.get("hidden_index"),
+            row.get("projection"),
+            round(float(row.get("original_rmse") or 0.0), 12),
+            round(float(row.get("original_max_abs_error") or 0.0), 12),
+            round(float(row.get("optimal_scale") or 0.0), 12),
+            round(float(row.get("scaled_rmse") or 0.0), 12),
+            round(float(row.get("scaled_max_abs_error") or 0.0), 12),
+        )
+        existing = deduped.get(key)
+        if existing is None:
+            row = dict(row)
+            row["duplicate_source_paths"] = [row.get("source_path")]
+            deduped[key] = row
+            continue
+        existing.setdefault("duplicate_source_paths", [existing.get("source_path")])
+        existing["duplicate_source_paths"].append(row.get("source_path"))
+    return list(deduped.values())
+
+
+def build_summary(paths: list[Path], projections: set[str] | None, dedupe: bool) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for path in paths:
         for row in read_jsonl(path):
@@ -158,6 +187,9 @@ def build_summary(paths: list[Path], projections: set[str] | None) -> dict[str, 
                 summary = summarize_projection(path, row, str(projection_name), projection)
                 if summary is not None:
                     rows.append(summary)
+    raw_row_count = len(rows)
+    if dedupe:
+        rows = dedupe_rows(rows)
     rows.sort(
         key=lambda item: (
             -float(item.get("original_max_abs_error") or 0.0),
@@ -169,6 +201,8 @@ def build_summary(paths: list[Path], projections: set[str] | None) -> dict[str, 
         "schema_version": SCHEMA_VERSION,
         "source_paths": [str(path) for path in paths],
         "projection_filter": sorted(projections) if projections is not None else None,
+        "dedupe": dedupe,
+        "raw_row_count": raw_row_count,
         "row_count": len(rows),
         "rows": rows,
     }
@@ -217,7 +251,7 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
 def main() -> int:
     args = parse_args()
     projection_filter = set(args.projection) if args.projection else None
-    summary = build_summary(args.fullref_jsonl, projection_filter)
+    summary = build_summary(args.fullref_jsonl, projection_filter, args.dedupe)
     write_json(args.summary_json, summary)
     if args.markdown is not None:
         write_markdown(args.markdown, summary)

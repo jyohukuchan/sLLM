@@ -1,5 +1,7 @@
 {
+  "dedupe": false,
   "projection_filter": null,
+  "raw_row_count": 2,
   "row_count": 2,
   "rows": [
     {
