@@ -2702,6 +2702,42 @@ mod tests {
     }
 
     #[test]
+    fn cpu_depthwise_conv1d_f32_uses_causal_conv1d_weight_order() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let input_values = [1.0_f32, 2.0, 3.0];
+        let weight_values = [10.0_f32, 100.0, 1000.0];
+        let expected = [1000.0_f32, 2100.0, 3210.0];
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut weight = context
+            .alloc_buffer(weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        weight
+            .copy_from_host(0, &f32s_to_le_bytes(&weight_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        depthwise_conv1d_f32(&input, &weight, 1, 3, 3, &mut output, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; input_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
     fn cpu_depthwise_conv1d_f32_rejects_short_output() {
         let mut context = RuntimeContext::create(0).unwrap();
         let input = context
@@ -4024,8 +4060,10 @@ mod tests {
             for c in 0..channels {
                 let mut value = 0.0_f32;
                 for k in 0..kernel_size {
-                    if t >= k {
-                        value += input[(t - k) * channels + c] * weight[c * kernel_size + k];
+                    let left_padding = kernel_size - 1 - k;
+                    if t >= left_padding {
+                        value +=
+                            input[(t - left_padding) * channels + c] * weight[c * kernel_size + k];
                     }
                 }
                 output[t * channels + c] = value;

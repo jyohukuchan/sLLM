@@ -972,10 +972,11 @@ extern "C" __global__ void ullm_depthwise_conv1d_f32_kernel(
     const unsigned long long channel = index - timestep * channels;
     float sum = 0.0f;
     for (unsigned long long kernel = 0; kernel < kernel_size; ++kernel) {
-        if (timestep < kernel) {
-            break;
+        const unsigned long long left_padding = kernel_size - 1 - kernel;
+        if (timestep < left_padding) {
+            continue;
         }
-        const unsigned long long source_timestep = timestep - kernel;
+        const unsigned long long source_timestep = timestep - left_padding;
         sum += input[source_timestep * channels + channel] *
                weight[channel * kernel_size + kernel];
     }
@@ -4028,10 +4029,11 @@ void depthwise_conv1d_f32_host(
         for (size_t channel = 0; channel < channels; ++channel) {
             float sum = 0.0f;
             for (size_t kernel = 0; kernel < kernel_size; ++kernel) {
-                if (timestep < kernel) {
-                    break;
+                const size_t left_padding = kernel_size - 1 - kernel;
+                if (timestep < left_padding) {
+                    continue;
                 }
-                const size_t source_timestep = timestep - kernel;
+                const size_t source_timestep = timestep - left_padding;
                 sum += input[source_timestep * channels + channel] *
                        weight[channel * kernel_size + kernel];
             }

@@ -16,7 +16,8 @@ use crate::decoder::{
 };
 use crate::host_bytes::encode_f32_to_bytes;
 use crate::loader::{
-    PassthroughF32Data, WeightRegistry, materialize_selected_aq4_matrix, read_named_passthrough_f32,
+    PassthroughF32Data, WeightRegistry, effective_rmsnorm_weight_values,
+    materialize_selected_aq4_matrix, read_named_passthrough_f32,
 };
 use crate::scheduler::{RequestId, SchedulerDecodeRequest, SchedulerState};
 use ullm_runtime_sys::{RuntimeContext, RuntimeStream};
@@ -385,9 +386,12 @@ pub fn qwen3_package_decoder_layer_runtime_from_package(
     let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
     let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
 
-    let q_norm = read_named_passthrough_f32(path, &q_norm_tensor, chunk_bytes)?;
-    let k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)?;
-    let post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
+    let mut q_norm = read_named_passthrough_f32(path, &q_norm_tensor, chunk_bytes)?;
+    q_norm.values = effective_rmsnorm_weight_values(&q_norm_tensor, &q_norm.values);
+    let mut k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)?;
+    k_norm.values = effective_rmsnorm_weight_values(&k_norm_tensor, &k_norm.values);
+    let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
+    post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
     let weights = qwen3_decoder_layer_runtime_weights_from_package(
         context,
         stream,

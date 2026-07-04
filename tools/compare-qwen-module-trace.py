@@ -68,6 +68,133 @@ def diff(package_value: Any, fullref_value: Any) -> float | None:
     return package_float - fullref_float
 
 
+def get_hot_input_vectors(row: dict[str, Any]) -> dict[str, Any]:
+    module = row.get("module_contribution")
+    if isinstance(module, dict):
+        vectors = module.get("hot_input_vectors")
+        if isinstance(vectors, dict):
+            return vectors
+    legacy = row.get("hot_input_vectors")
+    return legacy if isinstance(legacy, dict) else {}
+
+
+def get_hot_input_vectors_for_token(row: dict[str, Any], token_index: int) -> dict[str, Any]:
+    vectors = get_hot_input_vectors(row)
+    vector_tokens = [
+        summary.get("token_index")
+        for summary in vectors.values()
+        if isinstance(summary, dict) and "token_index" in summary
+    ]
+    if vector_tokens and all(token == token_index for token in vector_tokens):
+        return vectors
+
+    module = row.get("module_contribution")
+    per_token = None
+    if isinstance(module, dict):
+        per_token = module.get("per_token_hot_input_vectors")
+    if not isinstance(per_token, list):
+        per_token = row.get("per_token_hot_input_vectors")
+    if isinstance(per_token, list):
+        for item in per_token:
+            if isinstance(item, dict) and int(item.get("token_index", -1)) == token_index:
+                return item
+    return vectors
+
+
+def compare_hot_input_vectors(
+    package_summary: dict[str, Any] | None,
+    fullref_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if package_summary is None and fullref_summary is None:
+        return {"status": "missing_both"}
+    if package_summary is None:
+        return {"status": "missing_package"}
+    if fullref_summary is None:
+        return {"status": "missing_fullref"}
+
+    package_token = package_summary.get("token_index")
+    fullref_token = fullref_summary.get("token_index")
+    result: dict[str, Any] = {
+        "status": "ok" if package_token == fullref_token else "token_mismatch",
+        "package_token": package_token,
+        "fullref_token": fullref_token,
+        "feature_count_delta": diff(
+            package_summary.get("feature_count"),
+            fullref_summary.get("feature_count"),
+        ),
+    }
+
+    package_stats = package_summary.get("stats")
+    fullref_stats = fullref_summary.get("stats")
+    if isinstance(package_stats, dict) and isinstance(fullref_stats, dict):
+        result["stats_error"] = {
+            key: diff(package_stats.get(key), fullref_stats.get(key))
+            for key in (
+                "mean",
+                "abs_mean",
+                "variance",
+                "stddev",
+                "rms",
+                "l2_norm",
+                "min",
+                "max",
+                "max_abs",
+            )
+            if key in package_stats and key in fullref_stats
+        }
+
+    package_top = package_summary.get("top_abs_features")
+    fullref_top = fullref_summary.get("top_abs_features")
+    if not isinstance(package_top, list) or not isinstance(fullref_top, list):
+        return result
+
+    package_map = {
+        item.get("feature_index"): item
+        for item in package_top
+        if isinstance(item, dict)
+        and isinstance(item.get("feature_index"), int)
+        and isinstance(item.get("value"), (int, float))
+        and isinstance(item.get("abs_value"), (int, float))
+    }
+    fullref_map = {
+        item.get("feature_index"): item
+        for item in fullref_top
+        if isinstance(item, dict)
+        and isinstance(item.get("feature_index"), int)
+        and isinstance(item.get("value"), (int, float))
+        and isinstance(item.get("abs_value"), (int, float))
+    }
+    common = [
+        int(index)
+        for index in set(package_map.keys()) & set(fullref_map.keys())
+        if isinstance(index, int)
+    ]
+    top_feature_comparison = []
+    for index in common:
+        package_item = package_map[index]
+        fullref_item = fullref_map[index]
+        value_diff = diff(package_item.get("value"), fullref_item.get("value"))
+        abs_value_diff = diff(package_item.get("abs_value"), fullref_item.get("abs_value"))
+        top_feature_comparison.append(
+            {
+                "feature_index": index,
+                "package_value": package_item.get("value"),
+                "fullref_value": fullref_item.get("value"),
+                "package_abs_value": package_item.get("abs_value"),
+                "fullref_abs_value": fullref_item.get("abs_value"),
+                "value_diff": value_diff,
+                "abs_value_diff": abs_value_diff,
+            }
+        )
+
+    top_feature_comparison.sort(
+        key=lambda item: float(abs(float_value(item.get("abs_value_diff")) or 0.0)),
+        reverse=True,
+    )
+    result["top_feature_comparison"] = top_feature_comparison[:8]
+    return result
+
+
 def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[str, Any]], run_mode: str) -> dict[str, Any]:
     fullref_by_layer = {int(row["layer_index"]): row for row in fullref_rows}
     comparisons: list[dict[str, Any]] = []
@@ -83,6 +210,18 @@ def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[st
         module = row.get("module_contribution", {})
         package_trace = module.get("max_output_diff_trace", {})
         token = int(package_trace.get("token_index"))
+        package_hidden = int(package_trace.get("hidden_index"))
+        fullref_hidden = int(fullref.get("hidden_index"))
+        if package_hidden != fullref_hidden:
+            skipped.append(
+                {
+                    "layer_index": layer,
+                    "package_hidden_index": package_hidden,
+                    "fullref_hidden_index": fullref_hidden,
+                    "reason": "hidden_mismatch",
+                }
+            )
+            continue
         full_trace = trace_by_token(fullref, token)
         if full_trace is None:
             skipped.append({"layer_index": layer, "token_index": token, "reason": "missing_full_reference_token"})
@@ -92,7 +231,7 @@ def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[st
             "layer_kind": row.get("layer_kind"),
             "run_mode": row.get("run_mode"),
             "token_index": token,
-            "hidden_index": package_trace.get("hidden_index"),
+            "hidden_index": package_hidden,
             "package_output_diff": package_trace.get("output_diff"),
             "expected_delta": package_trace.get("expected_delta"),
             "package_actual_delta": package_trace.get("actual_delta"),
@@ -106,6 +245,18 @@ def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[st
             "mlp_error": diff(package_trace.get("mlp_output"), full_trace.get("mlp_output")),
             "fullref_fixture_max_abs_diff": fullref.get("fixture_match", {}).get("max_abs_diff"),
         }
+
+        package_hot = get_hot_input_vectors_for_token(row, token)
+        fullref_hot = get_hot_input_vectors_for_token(fullref, token)
+        comparison["attention_projection_input_hot"] = compare_hot_input_vectors(
+            package_hot.get("attention_projection_input"),
+            fullref_hot.get("attention_projection_input"),
+        )
+        comparison["mlp_activation_hot"] = compare_hot_input_vectors(
+            package_hot.get("mlp_activation"),
+            fullref_hot.get("mlp_activation"),
+        )
+
         attention_row_dot = row_dot_by_token(fullref, "attention_out_proj", token)
         if attention_row_dot is not None:
             comparison.update(
@@ -155,11 +306,30 @@ def fmt(value: Any) -> str:
 
 
 def markdown(rows: list[dict[str, Any]]) -> str:
+    def top_feature_label(value: Any) -> str:
+        if not isinstance(value, dict):
+            return "-"
+        top = value.get("top_feature_comparison")
+        if not isinstance(top, list) or not top:
+            return "-"
+        first = top[0]
+        if not isinstance(first, dict):
+            return "-"
+        index = first.get("feature_index")
+        diff = first.get("value_diff")
+        if index is None:
+            return "-"
+        if diff is None:
+            return str(int(index))
+        return f"{int(index)}:{fmt(diff)}"
+
     lines = [
-        "| layer | token | hidden | pkg_out_diff | expected_delta | pkg_delta | full_delta | delta_error | attn_row_only | attn_activation | mlp_row_only | mlp_activation |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| layer | token | hidden | pkg_out_diff | expected_delta | pkg_delta | full_delta | delta_error | attn_row_only | attn_activation | mlp_row_only | mlp_activation | attn_hot_status | attn_hot_abs_mean_err | attn_hot_top1 | mlp_hot_status | mlp_hot_abs_mean_err | mlp_hot_top1 |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
+        attn_hot = row.get("attention_projection_input_hot", {})
+        mlp_hot = row.get("mlp_activation_hot", {})
         lines.append(
             "| "
             + " | ".join(
@@ -176,6 +346,12 @@ def markdown(rows: list[dict[str, Any]]) -> str:
                     fmt(row.get("attention_activation_path_error")),
                     fmt(row.get("mlp_row_only_error")),
                     fmt(row.get("mlp_activation_path_error")),
+                    str(attn_hot.get("status", "-")),
+                    fmt((attn_hot.get("stats_error") or {}).get("abs_mean")),
+                    top_feature_label(attn_hot),
+                    str(mlp_hot.get("status", "-")),
+                    fmt((mlp_hot.get("stats_error") or {}).get("abs_mean")),
+                    top_feature_label(mlp_hot),
                 ]
             )
             + " |"

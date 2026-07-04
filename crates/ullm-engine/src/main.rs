@@ -27,9 +27,10 @@ use ullm_engine::decoder::{
 use ullm_engine::golden::{GoldenTensorFixture, compare_f32_slices};
 use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
 use ullm_engine::loader::{
-    LoadOptions, LoadedPayload, PassthroughF32Data, WeightRegistry, load_package_tensor_prefix,
-    materialize_config, materialize_selected_aq4_matrix, matrix_shape_rows_cols,
-    read_named_passthrough_f32, read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,
+    LoadOptions, LoadedPayload, PassthroughF32Data, WeightRegistry,
+    effective_rmsnorm_weight_values, load_package_tensor_prefix, materialize_config,
+    materialize_selected_aq4_matrix, matrix_shape_rows_cols, read_named_passthrough_f32,
+    read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,
     validate_passthrough_shape_elements,
 };
 use ullm_engine::package::{
@@ -12256,9 +12257,12 @@ fn package_golden_prefix_smoke_impl(
                         &layer_input_for_delta,
                         &expected_before,
                         &expected_after,
+                        Some(&layer_output.attention_projection_input),
                         &layer_output.projected_output,
                         &layer_output.block_output,
                         &layer_output.post_normed,
+                        None,
+                        &[],
                         &layer_output.mlp_output,
                         &layer_output.layer_output,
                         sequence_len,
@@ -12282,6 +12286,54 @@ fn package_golden_prefix_smoke_impl(
                 if !runtime_metrics.is_empty() {
                     insert_json_detail(&mut details, "runtime_metrics", runtime_metrics);
                 }
+                let extra_hot_input_vectors = [
+                    (
+                        "attention_input_normed",
+                        run.attention_input_normed.as_slice(),
+                        hidden,
+                    ),
+                    (
+                        "attention_qkv_projection",
+                        run.attention_qkv_projection.as_slice(),
+                        run.attention_qkv_projection_dim,
+                    ),
+                    (
+                        "attention_z_projection",
+                        run.attention_z_projection.as_slice(),
+                        hidden,
+                    ),
+                    (
+                        "attention_a_projection",
+                        run.attention_a_projection.as_slice(),
+                        run.attention_gate_dim,
+                    ),
+                    (
+                        "attention_b_projection",
+                        run.attention_b_projection.as_slice(),
+                        run.attention_gate_dim,
+                    ),
+                    (
+                        "attention_conv",
+                        run.attention_conv.as_slice(),
+                        run.attention_qkv_projection_dim,
+                    ),
+                    (
+                        "attention_gate",
+                        run.attention_gate.as_slice(),
+                        run.attention_gate_dim,
+                    ),
+                    (
+                        "attention_beta",
+                        run.attention_beta.as_slice(),
+                        run.attention_gate_dim,
+                    ),
+                    (
+                        "attention_recurrent",
+                        run.attention_recurrent.as_slice(),
+                        hidden,
+                    ),
+                    ("attention_normed", run.attention_normed.as_slice(), hidden),
+                ];
                 insert_json_detail(
                     &mut details,
                     "candidate_ids",
@@ -12323,9 +12375,12 @@ fn package_golden_prefix_smoke_impl(
                         &layer_input_for_delta,
                         &expected_before,
                         &expected_after,
+                        Some(&run.attention_projection_input),
                         &run.attention_output,
                         &run.attention_block_output,
                         &run.post_normed,
+                        Some((&run.mlp_activation, run.mlp_intermediate)),
+                        &extra_hot_input_vectors,
                         &run.mlp_output,
                         &run.layer_output,
                         sequence_len,
@@ -12563,9 +12618,12 @@ fn package_module_contribution_summary(
     actual_before: &[f32],
     expected_before: &[f32],
     expected_after: &[f32],
+    attention_projection_input: Option<&[f32]>,
     attention_output: &[f32],
     attention_block_output: &[f32],
     post_normed: &[f32],
+    mlp_activation: Option<(&[f32], usize)>,
+    extra_hot_input_vectors: &[(&str, &[f32], usize)],
     mlp_output: &[f32],
     actual_after: &[f32],
     sequence_len: usize,
@@ -12587,6 +12645,46 @@ fn package_module_contribution_summary(
         if values.len() != expected_elements {
             return Err(format!(
                 "module contribution {label} length mismatch: got {} expected {expected_elements}",
+                values.len()
+            ));
+        }
+    }
+    if let Some(values) = attention_projection_input {
+        if values.len() != expected_elements {
+            return Err(format!(
+                "module contribution attention_projection_input length mismatch: got {} expected {expected_elements}",
+                values.len()
+            ));
+        }
+    }
+    if let Some((values, feature_dim)) = mlp_activation {
+        if feature_dim == 0 {
+            return Err(
+                "module contribution MLP activation feature dimension must be positive".to_string(),
+            );
+        }
+        let expected_mlp_elements = sequence_len.checked_mul(feature_dim).ok_or_else(|| {
+            "module contribution MLP activation element count overflows".to_string()
+        })?;
+        if values.len() != expected_mlp_elements {
+            return Err(format!(
+                "module contribution MLP activation length mismatch: got {} expected {expected_mlp_elements}",
+                values.len()
+            ));
+        }
+    }
+    for (name, values, feature_dim) in extra_hot_input_vectors {
+        if *feature_dim == 0 {
+            return Err(format!(
+                "module contribution {name} feature dimension must be positive"
+            ));
+        }
+        let expected_extra_elements = sequence_len
+            .checked_mul(*feature_dim)
+            .ok_or_else(|| format!("module contribution {name} element count overflows"))?;
+        if values.len() != expected_extra_elements {
+            return Err(format!(
+                "module contribution {name} length mismatch: got {} expected {expected_extra_elements}",
                 values.len()
             ));
         }
@@ -12632,6 +12730,11 @@ fn package_module_contribution_summary(
         0
     } else {
         max_output_diff_index % hidden
+    };
+    let hot_token_index = if hidden == 0 {
+        0
+    } else {
+        max_output_diff_index / hidden
     };
 
     let point = |flat_index: usize| {
@@ -12696,6 +12799,17 @@ fn package_module_contribution_summary(
     insert_json_detail(&mut summary, "hot_hidden_index", hot_hidden_index);
     insert_json_detail(
         &mut summary,
+        "hot_input_vectors",
+        package_hot_input_vectors(
+            hot_token_index,
+            hidden,
+            attention_projection_input,
+            mlp_activation,
+            extra_hot_input_vectors,
+        )?,
+    );
+    insert_json_detail(
+        &mut summary,
         "max_output_diff_trace",
         point(max_output_diff_index),
     );
@@ -12705,6 +12819,115 @@ fn package_module_contribution_summary(
         per_token_hot_hidden,
     );
     Ok(summary)
+}
+
+fn package_hot_input_vectors(
+    token_index: usize,
+    hidden: usize,
+    attention_projection_input: Option<&[f32]>,
+    mlp_activation: Option<(&[f32], usize)>,
+    extra_hot_input_vectors: &[(&str, &[f32], usize)],
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut vectors = serde_json::Map::new();
+    if let Some(values) = attention_projection_input {
+        let start = token_index
+            .checked_mul(hidden)
+            .ok_or_else(|| "attention projection input token offset overflows".to_string())?;
+        let end = start
+            .checked_add(hidden)
+            .ok_or_else(|| "attention projection input token end overflows".to_string())?;
+        let slice = values.get(start..end).ok_or_else(|| {
+            format!(
+                "attention projection input token slice {start}..{end} is outside len {}",
+                values.len()
+            )
+        })?;
+        insert_json_detail(
+            &mut vectors,
+            "attention_projection_input",
+            package_vector_summary(token_index, slice),
+        );
+    }
+    if let Some((values, feature_dim)) = mlp_activation {
+        let start = token_index
+            .checked_mul(feature_dim)
+            .ok_or_else(|| "MLP activation token offset overflows".to_string())?;
+        let end = start
+            .checked_add(feature_dim)
+            .ok_or_else(|| "MLP activation token end overflows".to_string())?;
+        let slice = values.get(start..end).ok_or_else(|| {
+            format!(
+                "MLP activation token slice {start}..{end} is outside len {}",
+                values.len()
+            )
+        })?;
+        insert_json_detail(
+            &mut vectors,
+            "mlp_activation",
+            package_vector_summary(token_index, slice),
+        );
+    }
+    for (name, values, feature_dim) in extra_hot_input_vectors {
+        let start = token_index
+            .checked_mul(*feature_dim)
+            .ok_or_else(|| format!("{name} token offset overflows"))?;
+        let end = start
+            .checked_add(*feature_dim)
+            .ok_or_else(|| format!("{name} token end overflows"))?;
+        let slice = values.get(start..end).ok_or_else(|| {
+            format!(
+                "{name} token slice {start}..{end} is outside len {}",
+                values.len()
+            )
+        })?;
+        insert_json_detail(
+            &mut vectors,
+            *name,
+            package_vector_summary(token_index, slice),
+        );
+    }
+    Ok(vectors)
+}
+
+fn package_vector_summary(
+    token_index: usize,
+    values: &[f32],
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut summary = serde_json::Map::new();
+    insert_json_detail(&mut summary, "token_index", token_index);
+    insert_json_detail(&mut summary, "feature_count", values.len());
+    insert_json_detail(
+        &mut summary,
+        "stats",
+        package_slice_distribution_stats(values),
+    );
+    insert_json_detail(
+        &mut summary,
+        "top_abs_features",
+        package_top_abs_value_locations(values, 8),
+    );
+    summary
+}
+
+fn package_top_abs_value_locations(values: &[f32], limit: usize) -> Vec<serde_json::Value> {
+    let mut indexed = values.iter().enumerate().collect::<Vec<_>>();
+    indexed.sort_by(|(_, left), (_, right)| {
+        right
+            .abs()
+            .partial_cmp(&left.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    indexed
+        .into_iter()
+        .take(limit)
+        .map(|(feature_index, value)| {
+            serde_json::json!({
+                "feature_index": feature_index,
+                "value": *value,
+                "abs_value": value.abs(),
+            })
+        })
+        .collect()
 }
 
 fn package_hidden_distribution(
@@ -18274,12 +18497,16 @@ fn package_linear_attn_mlp_block_smoke_impl(
 
     let residual = deterministic_f32_vector(hidden);
     let residual_bytes = encode_f32_to_bytes(&residual);
-    let input_norm_weight_bytes = encode_f32_to_bytes(&input_norm.values);
+    let input_norm_weight_values =
+        effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    let post_norm_weight_values =
+        effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+    let input_norm_weight_bytes = encode_f32_to_bytes(&input_norm_weight_values);
     let conv_weight_bytes = encode_f32_to_bytes(&conv.values);
     let a_log_bytes = encode_f32_to_bytes(&a_log.values);
     let dt_bias_bytes = encode_f32_to_bytes(&dt_bias.values);
     let attn_norm_weight_bytes = encode_f32_to_bytes(&attn_norm.values);
-    let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm.values);
+    let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm_weight_values);
 
     let mut input_buffer = context
         .alloc_buffer(hidden_bytes)
@@ -18320,7 +18547,7 @@ fn package_linear_attn_mlp_block_smoke_impl(
         .map_err(|err| format!("failed to synchronize after input RMSNorm copy: {err}"))?;
     let input_normed = decode_f32_le_values(&input_normed_bytes);
     let expected_input_normed =
-        runtime_host_rmsnorm_f32(&residual, &input_norm.values, input_epsilon);
+        runtime_host_rmsnorm_f32(&residual, &input_norm_weight_values, input_epsilon);
     let input_norm_max_abs_diff = verify_f32_close(
         "package-linear-attn-mlp-block-smoke input RMSNorm",
         &input_normed,
@@ -18903,8 +19130,11 @@ fn package_linear_attn_mlp_block_smoke_impl(
         )
     };
 
-    let post_normed_expected =
-        runtime_host_rmsnorm_f32(&attention_block_output, &post_norm.values, mlp_epsilon);
+    let post_normed_expected = runtime_host_rmsnorm_f32(
+        &attention_block_output,
+        &post_norm_weight_values,
+        mlp_epsilon,
+    );
     let mut attn_block_buffer = context
         .alloc_buffer(hidden_bytes)
         .map_err(|err| format!("failed to allocate retained attention block buffer: {err}"))?;
@@ -19162,9 +19392,24 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
 
 struct PackageLinearAttnMlpBlockSequenceRun {
     line: String,
+    attention_input_normed: Vec<f32>,
+    attention_qkv_projection: Vec<f32>,
+    attention_qkv_projection_dim: usize,
+    attention_z_projection: Vec<f32>,
+    attention_a_projection: Vec<f32>,
+    attention_b_projection: Vec<f32>,
+    attention_gate_dim: usize,
+    attention_conv: Vec<f32>,
+    attention_gate: Vec<f32>,
+    attention_beta: Vec<f32>,
+    attention_recurrent: Vec<f32>,
+    attention_normed: Vec<f32>,
+    attention_projection_input: Vec<f32>,
     attention_output: Vec<f32>,
     attention_block_output: Vec<f32>,
     post_normed: Vec<f32>,
+    mlp_activation: Vec<f32>,
+    mlp_intermediate: usize,
     mlp_output: Vec<f32>,
     layer_output: Vec<f32>,
 }
@@ -19308,12 +19553,16 @@ fn package_linear_attn_mlp_block_sequence_run(
             sequence_len * hidden
         ));
     }
-    let input_norm_weight_bytes = encode_f32_to_bytes(&input_norm.values);
+    let input_norm_weight_values =
+        effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    let post_norm_weight_values =
+        effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+    let input_norm_weight_bytes = encode_f32_to_bytes(&input_norm_weight_values);
     let conv_weight_bytes = encode_f32_to_bytes(&conv.values);
     let a_log_bytes = encode_f32_to_bytes(&a_log.values);
     let dt_bias_bytes = encode_f32_to_bytes(&dt_bias.values);
     let attn_norm_weight_bytes = encode_f32_to_bytes(&attn_norm.values);
-    let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm.values);
+    let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm_weight_values);
 
     let mut input_buffer = context
         .alloc_buffer(hidden_bytes)
@@ -19369,7 +19618,7 @@ fn package_linear_attn_mlp_block_sequence_run(
         stream.synchronize().map_err(|err| {
             format!("failed to synchronize after input RMSNorm host copy {timestep}: {err}")
         })?;
-        let expected = runtime_host_rmsnorm_f32(residual, &input_norm.values, input_epsilon);
+        let expected = runtime_host_rmsnorm_f32(residual, &input_norm_weight_values, input_epsilon);
         expected_input_normed.extend_from_slice(&expected);
     }
     let input_normed = decode_f32_le_values(&input_normed_sequence_bytes);
@@ -19383,6 +19632,16 @@ fn package_linear_attn_mlp_block_sequence_run(
 
     let (
         attention_block_output,
+        qkv_output,
+        z_output,
+        a_output,
+        b_output,
+        conv_output,
+        gate_output,
+        beta_output,
+        recurrent_output,
+        attn_normed,
+        attn_activated,
         attn_output,
         attn_block_max_abs_diff,
         conv_max_abs_diff,
@@ -20034,6 +20293,16 @@ fn package_linear_attn_mlp_block_sequence_run(
         )?;
         (
             attention_block_output,
+            qkv_output,
+            z_output,
+            a_output,
+            b_output,
+            conv_output,
+            gate_output,
+            beta_output,
+            recurrent_output,
+            attn_normed,
+            attn_activated,
             attn_output,
             attn_block_max_abs_diff,
             conv_max_abs_diff,
@@ -20051,7 +20320,7 @@ fn package_linear_attn_mlp_block_sequence_run(
         let end = start + hidden;
         let expected = runtime_host_rmsnorm_f32(
             &attention_block_output[start..end],
-            &post_norm.values,
+            &post_norm_weight_values,
             mlp_epsilon,
         );
         post_normed_expected.extend_from_slice(&expected);
@@ -20119,7 +20388,7 @@ fn package_linear_attn_mlp_block_sequence_run(
         1e-5,
     )?;
 
-    let (mlp_output, layer_output, layer_block_max_abs_diff) = {
+    let (mlp_activation, mlp_intermediate, mlp_output, layer_output, layer_block_max_abs_diff) = {
         let mut registry = WeightRegistry::new();
         let (gate_rows, gate_cols, gate_matrix) = materialize_selected_aq4_matrix(
             &mut context,
@@ -20179,9 +20448,17 @@ fn package_linear_attn_mlp_block_sequence_run(
             .map_err(|err| format!("failed to allocate layer output buffer: {err}"))?;
         let mut mlp_output_bytes = vec![0_u8; hidden_sequence_bytes];
         let mut layer_output_bytes = vec![0_u8; hidden_sequence_bytes];
+        let mut mlp_activated_bytes = vec![
+            0_u8;
+            intermediate_bytes.checked_mul(sequence_len).ok_or_else(
+                || "MLP activated sequence byte size overflows".to_string()
+            )?
+        ];
         for timestep in 0..sequence_len {
             let byte_start = timestep * hidden_bytes;
             let byte_end = byte_start + hidden_bytes;
+            let intermediate_byte_start = timestep * intermediate_bytes;
+            let intermediate_byte_end = intermediate_byte_start + intermediate_bytes;
             post_normed_step_buffer
                 .copy_from_host(
                     0,
@@ -20221,6 +20498,15 @@ fn package_linear_attn_mlp_block_sequence_run(
             stream.synchronize().map_err(|err| {
                 format!("failed to synchronize after MLP SiLU-mul timestep {timestep}: {err}")
             })?;
+            mlp_activated_buffer
+                .copy_to_host(
+                    0,
+                    &mut mlp_activated_bytes[intermediate_byte_start..intermediate_byte_end],
+                    Some(&mut stream),
+                )
+                .map_err(|err| {
+                    format!("failed to copy MLP activated timestep {timestep}: {err}")
+                })?;
             ullm_runtime_sys::matvec_f32(
                 &down_matrix,
                 &mlp_activated_buffer,
@@ -20273,6 +20559,7 @@ fn package_linear_attn_mlp_block_sequence_run(
                 format!("failed to synchronize after layer output copy timestep {timestep}: {err}")
             })?;
         }
+        let mlp_activation = decode_f32_le_values(&mlp_activated_bytes);
         let mlp_output = decode_f32_le_values(&mlp_output_bytes);
         let layer_output = decode_f32_le_values(&layer_output_bytes);
         let expected_layer_output = runtime_host_add_f32(&attention_block_output, &mlp_output);
@@ -20283,7 +20570,13 @@ fn package_linear_attn_mlp_block_sequence_run(
             1e-5,
             1e-6,
         )?;
-        (mlp_output, layer_output, layer_block_max_abs_diff)
+        (
+            mlp_activation,
+            intermediate,
+            mlp_output,
+            layer_output,
+            layer_block_max_abs_diff,
+        )
     };
 
     let line = format!(
@@ -20330,9 +20623,24 @@ fn package_linear_attn_mlp_block_sequence_run(
     );
     Ok(PackageLinearAttnMlpBlockSequenceRun {
         line,
+        attention_input_normed: input_normed,
+        attention_qkv_projection: qkv_output,
+        attention_qkv_projection_dim: qkv_rows_expected,
+        attention_z_projection: z_output,
+        attention_a_projection: a_output,
+        attention_b_projection: b_output,
+        attention_gate_dim: value_heads,
+        attention_conv: conv_output,
+        attention_gate: gate_output,
+        attention_beta: beta_output,
+        attention_recurrent: recurrent_output,
+        attention_normed: attn_normed,
+        attention_projection_input: attn_activated,
         attention_output: attn_output,
         attention_block_output,
         post_normed,
+        mlp_activation,
+        mlp_intermediate,
         mlp_output,
         layer_output,
     })
@@ -22049,10 +22357,11 @@ fn runtime_host_depthwise_conv1d_f32(
         for channel in 0..channels {
             let mut value = 0.0_f32;
             for kernel in 0..kernel_size {
-                if timestep < kernel {
-                    break;
+                let left_padding = kernel_size - 1 - kernel;
+                if timestep < left_padding {
+                    continue;
                 }
-                value += input[(timestep - kernel) * channels + channel]
+                value += input[(timestep - left_padding) * channels + channel]
                     * weight[channel * kernel_size + kernel];
             }
             output[timestep * channels + channel] = value;

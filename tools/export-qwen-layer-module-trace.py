@@ -23,7 +23,10 @@ from aq_scale_formats import scale_values
 from safetensors import safe_open
 
 
-SCHEMA_VERSION = "qwen-layer-module-trace-v0.1"
+SCHEMA_VERSION = "qwen-layer-module-trace-v0.2"
+
+
+TOP_ABS_FEATURES = 8
 
 
 def parse_args() -> argparse.Namespace:
@@ -260,6 +263,167 @@ def point_trace(
     }
 
 
+def vector_summary(values: np.ndarray, token_index: int) -> dict[str, Any]:
+    values = np.asarray(values)
+    finite_mask = np.isfinite(values)
+    finite_values = values[finite_mask]
+    finite_count = int(finite_values.size)
+    nonfinite_count = int(values.size - finite_count)
+
+    if finite_count == 0:
+        min_value = 0.0
+        max_value = 0.0
+        max_abs = 0.0
+        max_abs_index = 0
+        mean = 0.0
+        abs_mean = 0.0
+        variance = 0.0
+        stddev = 0.0
+        rms = 0.0
+        l2_norm = 0.0
+    else:
+        abs_values = np.abs(finite_values)
+        min_value = float(finite_values.min())
+        max_value = float(finite_values.max())
+        finite_abs_values = np.abs(finite_values)
+        max_abs_finite_index = int(np.argmax(finite_abs_values))
+        finite_indices = np.nonzero(finite_mask)[0]
+        max_abs_index = int(finite_indices[max_abs_finite_index])
+        max_abs = float(finite_abs_values[max_abs_finite_index])
+        mean = float(finite_values.mean())
+        abs_mean = float(abs_values.mean())
+        variance = float(finite_values.var())
+        stddev = float(finite_values.std())
+        rms = float(np.sqrt(np.mean(np.square(finite_values, dtype=np.float64), dtype=np.float64)))
+        l2_norm = float(np.linalg.norm(finite_values.astype(np.float64)))
+
+    if finite_values.size == 0:
+        top_indices = np.array([], dtype=int)
+        top_values = np.array([], dtype=np.float64)
+    else:
+        finite_abs = np.abs(finite_values)
+        abs_desc_idx = np.argsort(finite_abs)[::-1]
+        top_finite_indices = abs_desc_idx[: min(TOP_ABS_FEATURES, finite_values.size)]
+        finite_indices = np.nonzero(finite_mask)[0]
+        top_indices = finite_indices[top_finite_indices]
+        top_values = finite_values[top_finite_indices]
+
+    top_abs_features = [
+        {
+            "feature_index": int(index),
+            "value": float(top_values[offset]),
+            "abs_value": float(abs(top_values[offset])),
+        }
+        for offset, index in enumerate(top_indices)
+    ]
+
+    return {
+        "token_index": token_index,
+        "feature_count": int(values.size),
+        "stats": {
+            "count": int(values.size),
+            "finite_count": finite_count,
+            "nonfinite_count": nonfinite_count,
+            "mean": mean,
+            "abs_mean": abs_mean,
+            "variance": variance,
+            "stddev": stddev,
+            "rms": rms,
+            "l2_norm": l2_norm,
+            "min": min_value,
+            "max": max_value,
+            "max_abs": max_abs,
+            "max_abs_index": max_abs_index,
+        },
+        "top_abs_features": top_abs_features,
+    }
+
+
+def hot_vector_projection_summary(
+    values: np.ndarray,
+    token_index: int,
+    feature_dim: int,
+    name: str,
+) -> dict[str, Any] | None:
+    if not isinstance(values, np.ndarray):
+        return None
+    if values.ndim != 1:
+        raise ValueError(f"{name} expected 1D hot token vector, got {values.ndim}")
+    feature_count = values.size
+    if feature_dim > feature_count:
+        raise ValueError(f"{name} feature_dim={feature_dim} is larger than available {feature_count}")
+
+    vector = values[:feature_dim].astype(np.float32)
+    return vector_summary(vector, token_index)
+
+
+def hot_input_vector_summaries(
+    attention_projection_input: np.ndarray,
+    mlp_activation: np.ndarray,
+    token_index: int,
+    hidden: int,
+) -> dict[str, Any]:
+    return {
+        "attention_projection_input": hot_vector_projection_summary(
+            attention_projection_input[0, token_index],
+            token_index,
+            hidden,
+            "attention_projection_input",
+        ),
+        "mlp_activation": hot_vector_projection_summary(
+            mlp_activation[0, token_index],
+            token_index,
+            mlp_activation.shape[2],
+            "mlp_activation",
+        ),
+    }
+
+
+def add_token_vector_summary(
+    target: dict[str, Any],
+    name: str,
+    values: np.ndarray,
+    token_index: int,
+) -> None:
+    if values.ndim != 3:
+        raise ValueError(f"{name} expected [batch,seq,features], got {values.shape}")
+    target[name] = hot_vector_projection_summary(
+        values[0, token_index],
+        token_index,
+        values.shape[2],
+        name,
+    )
+
+
+def causal_conv1d_silu(values: np.ndarray, weight: np.ndarray) -> np.ndarray:
+    if values.ndim != 3:
+        raise ValueError(f"conv input expected [batch,seq,channels], got {values.shape}")
+    if weight.ndim == 3:
+        weight = weight[:, 0, :]
+    if weight.ndim != 2:
+        raise ValueError(f"conv weight expected [channels,kernel], got {weight.shape}")
+    batch, sequence_len, channels = values.shape
+    if weight.shape[0] != channels:
+        raise ValueError(f"conv channels mismatch: input={channels} weight={weight.shape[0]}")
+    kernel_size = weight.shape[1]
+    output = np.zeros((batch, sequence_len, channels), dtype=np.float32)
+    for kernel in range(kernel_size):
+        left_padding = kernel_size - 1 - kernel
+        if left_padding >= sequence_len:
+            continue
+        output[:, left_padding:, :] += values[:, : sequence_len - left_padding, :] * weight[:, kernel]
+    return (output / (1.0 + np.exp(-output))).astype(np.float32)
+
+
+def linear_attn_gate_beta(a: np.ndarray, b: np.ndarray, a_log: np.ndarray, dt_bias: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    gate = -np.exp(a_log.astype(np.float32))[None, None, :] * np.logaddexp(
+        0.0,
+        a.astype(np.float32) + dt_bias.astype(np.float32)[None, None, :],
+    )
+    beta = 1.0 / (1.0 + np.exp(-b.astype(np.float32)))
+    return gate.astype(np.float32), beta.astype(np.float32)
+
+
 def row_dot_trace(
     name: str,
     input_values: np.ndarray,
@@ -362,7 +526,13 @@ def run_layer_trace(
         return _hook
 
     handles = [
+        layer.input_layernorm.register_forward_hook(hook("attention_input_normed")),
         layer.linear_attn.register_forward_hook(hook("attention_output")),
+        layer.linear_attn.in_proj_qkv.register_forward_hook(hook("attention_qkv_projection")),
+        layer.linear_attn.in_proj_z.register_forward_hook(hook("attention_z_projection")),
+        layer.linear_attn.in_proj_a.register_forward_hook(hook("attention_a_projection")),
+        layer.linear_attn.in_proj_b.register_forward_hook(hook("attention_b_projection")),
+        layer.linear_attn.norm.register_forward_pre_hook(pre_hook("attention_recurrent_flat")),
         layer.linear_attn.out_proj.register_forward_pre_hook(pre_hook("attention_projection_input")),
         layer.post_attention_layernorm.register_forward_hook(hook("post_normed")),
         layer.mlp.down_proj.register_forward_pre_hook(pre_hook("mlp_activation")),
@@ -386,6 +556,22 @@ def run_layer_trace(
             for handle in handles:
                 handle.remove()
     actual_after = to_numpy_f32(capture_first_tensor(output))
+    attention_input_normed = captured["attention_input_normed"]
+    attention_qkv_projection = captured["attention_qkv_projection"]
+    attention_z_projection = captured["attention_z_projection"]
+    attention_a_projection = captured["attention_a_projection"]
+    attention_b_projection = captured["attention_b_projection"]
+    attention_conv = causal_conv1d_silu(
+        attention_qkv_projection,
+        tensor_to_numpy_f32(state["linear_attn.conv1d.weight"]),
+    )
+    attention_gate, attention_beta = linear_attn_gate_beta(
+        attention_a_projection,
+        attention_b_projection,
+        tensor_to_numpy_f32(state["linear_attn.A_log"]),
+        tensor_to_numpy_f32(state["linear_attn.dt_bias"]),
+    )
+    attention_recurrent = captured["attention_recurrent_flat"].reshape(before.shape[0], before.shape[1], -1)
     attention_projection_input = captured["attention_projection_input"]
     attention_output = captured["attention_output"]
     post_normed = captured["post_normed"]
@@ -439,6 +625,50 @@ def run_layer_trace(
             hidden_index,
         ),
     }
+    hot_input_vectors = hot_input_vector_summaries(
+        attention_projection_input,
+        mlp_activation,
+        token_index,
+        before.shape[2],
+    )
+    for name, values in (
+        ("attention_input_normed", attention_input_normed),
+        ("attention_qkv_projection", attention_qkv_projection),
+        ("attention_z_projection", attention_z_projection),
+        ("attention_a_projection", attention_a_projection),
+        ("attention_b_projection", attention_b_projection),
+        ("attention_conv", attention_conv),
+        ("attention_gate", attention_gate),
+        ("attention_beta", attention_beta),
+        ("attention_recurrent", attention_recurrent),
+    ):
+        add_token_vector_summary(hot_input_vectors, name, values, token_index)
+    per_token_hot_input_vectors = [
+        {
+            "token_index": token,
+            **hot_input_vector_summaries(
+                attention_projection_input,
+                mlp_activation,
+                token,
+                before.shape[2],
+            ),
+        }
+        for token in range(before.shape[1])
+    ]
+    for item in per_token_hot_input_vectors:
+        token = int(item["token_index"])
+        for name, values in (
+            ("attention_input_normed", attention_input_normed),
+            ("attention_qkv_projection", attention_qkv_projection),
+            ("attention_z_projection", attention_z_projection),
+            ("attention_a_projection", attention_a_projection),
+            ("attention_b_projection", attention_b_projection),
+            ("attention_conv", attention_conv),
+            ("attention_gate", attention_gate),
+            ("attention_beta", attention_beta),
+            ("attention_recurrent", attention_recurrent),
+        ):
+            add_token_vector_summary(item, name, values, token)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -455,6 +685,10 @@ def run_layer_trace(
         "fixture_match": compare_arrays(actual_after, expected_after),
         "max_expected_delta_trace": per_token[token_index],
         "per_token_hidden_trace": per_token,
+        "module_contribution": {
+            "hot_input_vectors": hot_input_vectors,
+            "per_token_hot_input_vectors": per_token_hot_input_vectors,
+        },
         "row_dot": row_dot,
     }
 

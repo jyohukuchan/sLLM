@@ -64,6 +64,26 @@ pub struct PassthroughF32Data {
     pub shape: Vec<u64>,
 }
 
+pub fn effective_rmsnorm_weight_values(tensor_name: &str, values: &[f32]) -> Vec<f32> {
+    if uses_additive_rmsnorm_weight(tensor_name, values) {
+        values.iter().map(|value| value + 1.0_f32).collect()
+    } else {
+        values.to_vec()
+    }
+}
+
+fn uses_additive_rmsnorm_weight(tensor_name: &str, values: &[f32]) -> bool {
+    let is_rmsnorm_tensor = tensor_name.ends_with(".input_layernorm.weight")
+        || tensor_name.ends_with(".post_attention_layernorm.weight")
+        || tensor_name.ends_with(".self_attn.q_norm.weight")
+        || tensor_name.ends_with(".self_attn.k_norm.weight");
+    if !is_rmsnorm_tensor || values.is_empty() {
+        return false;
+    }
+    let mean_abs = values.iter().map(|value| value.abs()).sum::<f32>() / values.len() as f32;
+    mean_abs < 0.75_f32
+}
+
 #[derive(Debug)]
 pub struct MaterializeConfig {
     pub scale_format: String,
@@ -981,6 +1001,33 @@ mod tests {
         assert_eq!(f32.values, vec![1.25_f32, -0.5_f32]);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn effective_rmsnorm_weight_values_handles_qwen35_additive_weights() {
+        let additive = effective_rmsnorm_weight_values(
+            "model.language_model.layers.6.input_layernorm.weight",
+            &[-0.25, 0.0, 0.5],
+        );
+        assert_eq!(additive, vec![0.75, 1.0, 1.5]);
+
+        let q_norm = effective_rmsnorm_weight_values(
+            "model.language_model.layers.3.self_attn.q_norm.weight",
+            &[0.25, -0.125],
+        );
+        assert_eq!(q_norm, vec![1.25, 0.875]);
+
+        let direct = effective_rmsnorm_weight_values(
+            "model.language_model.layers.4.linear_attn.norm.weight",
+            &[0.25, 1.0],
+        );
+        assert_eq!(direct, vec![0.25, 1.0]);
+
+        let qwen3_direct = effective_rmsnorm_weight_values(
+            "model.language_model.layers.0.input_layernorm.weight",
+            &[0.95, 1.05],
+        );
+        assert_eq!(qwen3_direct, vec![0.95, 1.05]);
     }
 
     #[test]
