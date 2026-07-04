@@ -23,6 +23,7 @@ use ullm_engine::decoder::{
     qwen3_self_attn_prepare_sequence_for_paged_decode_f32, qwen3_self_attn_runtime_shape,
     split_qwen3_self_attn_q_projection,
 };
+use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, PassthroughF32Data, WeightRegistry, load_package_tensor_prefix,
     materialize_config, materialize_selected_aq4_matrix, matrix_shape_rows_cols,
@@ -20382,29 +20383,6 @@ fn print_loaded_payload_summary(payload: &LoadedPayload) {
         payload.chunks,
         buffer_bytes
     );
-}
-
-fn decode_f32_le_values(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(std::mem::size_of::<f32>())
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("f32 chunk")))
-        .collect()
-}
-
-fn encode_f32_to_bytes(values: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
-    for value in values {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
-}
-
-fn encode_u32_to_bytes(values: &[u32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(values));
-    for value in values {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
 }
 
 fn runtime_host_rmsnorm_f32(input: &[f32], weight: &[f32], epsilon: f32) -> Vec<f32> {
