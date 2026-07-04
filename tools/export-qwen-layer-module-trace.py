@@ -23,7 +23,7 @@ from aq_scale_formats import scale_values
 from safetensors import safe_open
 
 
-SCHEMA_VERSION = "qwen-layer-module-trace-v0.9"
+SCHEMA_VERSION = "qwen-layer-module-trace-v0.10"
 
 
 TOP_ABS_FEATURES = 8
@@ -754,6 +754,62 @@ def row_dot_trace(
             )
         traces.append(trace)
 
+    def row_scale_fit(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+        numerator = 0.0
+        denominator = 0.0
+        original_errors = []
+        for entry in entries:
+            source = entry.get("source_row_dot")
+            package = entry.get("package_row_dot")
+            if not isinstance(source, (int, float)) or not isinstance(package, (int, float)):
+                continue
+            source_f = float(source)
+            package_f = float(package)
+            numerator += source_f * package_f
+            denominator += package_f * package_f
+            original_errors.append(package_f - source_f)
+        if denominator <= 0.0 or not original_errors:
+            return None
+        scale = numerator / denominator
+        scaled_errors = [
+            float(entry["package_row_dot"]) * scale - float(entry["source_row_dot"])
+            for entry in entries
+            if isinstance(entry.get("source_row_dot"), (int, float))
+            and isinstance(entry.get("package_row_dot"), (int, float))
+        ]
+        if not scaled_errors:
+            return None
+
+        def rms(values: list[float]) -> float:
+            return float(np.sqrt(np.mean(np.square(np.asarray(values, dtype=np.float64)))))
+
+        worst_index, worst_error = max(
+            enumerate(original_errors),
+            key=lambda item: abs(item[1]),
+        )
+        worst_scaled_index, worst_scaled_error = max(
+            enumerate(scaled_errors),
+            key=lambda item: abs(item[1]),
+        )
+        original_rmse = rms(original_errors)
+        scaled_rmse = rms(scaled_errors)
+        return {
+            "optimal_scale": scale,
+            "original_rmse": original_rmse,
+            "scaled_rmse": scaled_rmse,
+            "rmse_improvement_ratio": None
+            if original_rmse <= 0.0
+            else 1.0 - (scaled_rmse / original_rmse),
+            "original_max_abs_error": max(abs(value) for value in original_errors),
+            "scaled_max_abs_error": max(abs(value) for value in scaled_errors),
+            "original_mean_error": sum(original_errors) / len(original_errors),
+            "scaled_mean_error": sum(scaled_errors) / len(scaled_errors),
+            "worst_token_index": entries[worst_index].get("token_index"),
+            "worst_error": worst_error,
+            "worst_scaled_token_index": entries[worst_scaled_index].get("token_index"),
+            "worst_scaled_error": worst_scaled_error,
+        }
+
     worst_source = max(traces, key=lambda item: abs(float(item["source_row_dot_error"])))
     worst_package = None
     if package_row is not None:
@@ -767,6 +823,7 @@ def row_dot_trace(
         "source_row_l2_norm": float(np.linalg.norm(source_row.astype(np.float64))),
         "package_row_l2_norm": None if package_row is None else float(np.linalg.norm(package_row.astype(np.float64))),
         "per_token": traces,
+        "scale_fit": row_scale_fit(traces),
         "worst_source_dot_error": worst_source,
         "worst_package_row_error": worst_package,
     }
