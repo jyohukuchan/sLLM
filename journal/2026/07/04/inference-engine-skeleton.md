@@ -8,19 +8,22 @@
 ## 今回の変更点
 
 - goal再開後の当面scopeを、手元で検証できるRDNA2/V620とRDNA4/R9700に限定した。モデルアーキテクチャ対応も、まずはQwen3.5/Qwen3系の一部decoder経路だけで進める。
+- Commit `dec52c0 Use KV allocator blocks in package paged decode smoke` で `package-self-attn-decode-smoke` のpaged decode経路を `KvBlockAllocator` 由来のblock tableへ切り替えた。
+- 新helper `allocate_fragmented_paged_decode_blocks` は、一度fragment用requestをallocate/freeしてからdecode requestをallocateし、deterministicな非連続block tableを作る。defaultの `cache_len=3`、`paged_block_size=2` では `paged_cache_blocks=4`、`paged_block_table=[3,0]` になる。
+- `package-self-attn-decode-smoke` の出力に `paged_allocator_free_blocks`、`paged_allocator_allocated_blocks`、`paged_allocator_free_runs`、`paged_allocator_largest_free_run` を追加した。
 - Commit `63c8713 Add runtime KV paged decode smoke` で `ullm-engine runtime-kv-paged-decode-smoke [DEVICE_INDEX]` を追加した。
 - このsmokeはRust側の `KvBlockAllocator` で非連続block tableを作り、同じblock tableで物理paged K/V cacheをpackして、runtime paged decode attentionへ渡す。control plane側のblock table管理とruntime kernel境界の最小接続を確認する。
 - 合成ケースでは `KvBlockAllocator::with_block_size(4, 2)` に対して一度3 blockを割り当てて解放し、次の2 block割り当てで `allocated_blocks=[3,0]` を作る。`cache_len=3` のlogical K/Vをこの非連続配置へ詰め替える。
 - Commit `1b6d1da Add package self attention paged decode smoke` で `package-self-attn-decode-smoke` にruntime paged decode attention検証を追加した。
 - 既存のcontiguous K/V cache decode検証に加えて、同じRoPE済みK cacheとV cacheを物理paged K/V cacheへ詰め替え、`ullm_runtime_paged_decode_attn_f32` 経由のdecode出力を検証するようにした。
-- Package smoke内のpaged配置は `paged_block_size=2`、`paged_cache_blocks=ceil(cache_len/2)+1` とし、`paged_block_table=[1,0]` のように先頭2 logical blockを入れ替える。これにより単なるcontiguous参照ではなくblock table経由の参照を実際に通す。
+- Package smoke内のpaged配置は当初syntheticな入れ替えblock tableだったが、`dec52c0` 以降は `KvBlockAllocator` のallocate/freeから作った非連続block tableを使う。これにより単なるcontiguous参照ではなくallocator由来のblock table経由の参照を実際に通す。
 - 出力ログに `paged_block_size`、`paged_cache_blocks`、`paged_block_table`、`paged_k_cache_preview`、`paged_v_cache_preview`、`paged_decode_preview`、`paged_decode_max_abs_diff`、`decode_paged_max_abs_diff`、`causal_paged_decode_max_abs_diff` を追加した。
 - Commit `e7a2969 Add runtime f32 paged decode attention` で `ullm_runtime_paged_decode_attn_f32` を追加した。
 - Paged decode attentionのruntime layoutは、`q=[q_heads, head_dim]`、物理K cache `k_cache=[cache_blocks, block_size, kv_heads, head_dim]`、物理V cache `v_cache=[cache_blocks, block_size, kv_heads, value_dim]`、`block_table=[ceil(cache_len / block_size)]` のu32配列、`output=[q_heads, value_dim]`。
 - 論理token `t` は `block_id = block_table[t / block_size]`、`block_offset = t % block_size` で物理slotを参照する。GQAは既存decode attentionと同じく `kv_head = q_head / (q_heads / kv_heads)`。
 - C++ runtimeにCPU fallback、HIPRTC kernel、HIP staging fallbackを追加した。HIP必須フラグは `ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1`。
 - Rust wrapper `ullm_runtime_sys::paged_decode_attn_f32`、CPU/HIP unit test、`ullm-engine runtime-paged-decode-attn-smoke [DEVICE_INDEX]` を追加した。
-- 現段階ではpaged KV allocatorやscheduler全体との接続はまだ行っていない。RDNA2/V620とRDNA4/R9700で検証できるblock table参照境界を先に固定した。
+- 現段階ではscheduler全体との接続はまだ行っていない。RDNA2/V620とRDNA4/R9700で検証できるallocator由来block table参照境界を先に固定した。
 - Commit `c6b0316 Add runtime f32 decode attention` で `ullm_runtime_decode_attn_f32` を追加した。1-token `q=[q_heads, head_dim]` とprefill済み `k_cache=[cache_len, kv_heads, head_dim]`、`v_cache=[cache_len, kv_heads, value_dim]` からdecode時のGQA softmax attention value mixを実行する。
 - Rust wrapper `ullm_runtime_sys::decode_attn_f32`、CPU/HIP unit test、`ullm-engine runtime-decode-attn-smoke [DEVICE_INDEX]` を追加した。HIP必須フラグは `ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1`。
 - 5.3-codex-spark subagentに `crates/ullm-runtime-sys/src/lib.rs` のextern/wrapper/test追加を分担させ、main側でC ABI/C++ runtimeとengine CLIを統合した。
@@ -113,6 +116,12 @@
 
 ## 実測・検証
 
+- `target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 3`
+  - CPU fallbackでQwen3.5 layer3、cache_len 3のpackage self-attn decode smokeがallocator由来paged decodeまで成功した。`paged_block_table=[3,0]`、`paged_cache_blocks=4`、`paged_allocator_free_blocks=2`、`decode_paged_max_abs_diff=0`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 3 3`
+  - R9700/RDNA4で成功した。`paged_block_table=[3,0]`、`paged_decode_max_abs_diff=0.000000238`、`decode_paged_max_abs_diff=0`、`causal_paged_decode_max_abs_diff=0`。
+- 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でも成功した。各deviceで `paged_block_table=[3,0]`、`paged_decode_max_abs_diff=0.000000238`、`decode_paged_max_abs_diff=0`、`causal_paged_decode_max_abs_diff=0`。
+- 追加後の検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
 - `target/debug/ullm-engine runtime-kv-paged-decode-smoke 0`
   - CPU fallbackで成功した。`allocated_blocks=[3,0]`、`max_abs_diff=0`、`logical_paged_max_abs_diff=0`。
 - `ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine runtime-kv-paged-decode-smoke 2`
@@ -120,7 +129,7 @@
 - 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でも成功した。max diffはいずれも `0.000000238`。
 - 追加後の検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
 - `target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 3`
-  - CPU fallbackでQwen3.5 layer3、cache_len 3のpackage self-attn decode smokeがcontiguous decodeとpaged decodeの両方で成功した。`paged_block_table=[1,0]`、`paged_decode_max_abs_diff=0`、`decode_paged_max_abs_diff=0`、`causal_paged_decode_max_abs_diff=0`。
+  - CPU fallbackでQwen3.5 layer3、cache_len 3のpackage self-attn decode smokeがcontiguous decodeとpaged decodeの両方で成功した。旧synthetic block table経路では `paged_block_table=[1,0]`、`paged_decode_max_abs_diff=0`、`decode_paged_max_abs_diff=0`、`causal_paged_decode_max_abs_diff=0`。
 - `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 3 3`
   - R9700/RDNA4で成功した。`paged_decode_max_abs_diff=0.000000238`、`decode_paged_max_abs_diff=0`、`causal_paged_decode_max_abs_diff=0`。
 - 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でも成功した。各deviceで `paged_decode_max_abs_diff=0.000000238`、`decode_paged_max_abs_diff=0`、`causal_paged_decode_max_abs_diff=0`。
@@ -609,13 +618,14 @@
 - `e7a2969 Add runtime f32 paged decode attention`
 - `1b6d1da Add package self attention paged decode smoke`
 - `63c8713 Add runtime KV paged decode smoke`
+- `dec52c0 Use KV allocator blocks in package paged decode smoke`
 
 ## 次の行動
 
 - 当面はRDNA2/V620とRDNA4/R9700のCI相当smokeを優先し、広いhardware対応やfull model architecture対応は後回しにする。
-- `KvBlockAllocator` 由来のblock tableをruntime paged decodeへ渡す最小境界は通った。次はこのblock tableをpackage self-attn decode/MLP block側のstate管理へ統合する。
-- Package self-attn decode smokeは物理paged K/V cache経由まで通った。次は `KvBlockAllocator` のblock tableをruntime bufferへ渡す狭いdecoder-step API、またはpackage self-attn MLP block smokeへdecode/paged decode state境界を統合する。
+- `KvBlockAllocator` 由来のblock tableをruntime paged decodeへ渡す最小境界と、package self-attn decode smokeへの統合は通った。次はMLP block側を含むstate境界へ広げる。
+- Package self-attn decode smokeはallocator由来の物理paged K/V cache経由まで通った。次は `KvBlockAllocator` のblock tableをruntime bufferへ渡す狭いdecoder-step APIを作る。
 - Paged decode attentionのruntime境界はCPU、R9700/RDNA4、V620/RDNA2で通っており、package self-attn decode smokeからも呼べる状態になった。
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smoke、実packageの `post RMSNorm -> MLP -> residual add` block smoke、1 tokenおよびsequence length 2の実package `input RMSNorm -> linear_attn -> residual -> post RMSNorm -> MLP -> residual` layer-level partial decoder smoke、通常self-attnのq/k/v/o projection smoke、通常self-attnのq/k projection -> head-wise RMSNorm smoke、通常self-attnのq/k norm -> RoPE smoke、通常self-attnのq/k/v -> causal attention value mix smoke、Qwen3.5 gated q projectionを考慮した通常self-attnの `q/k/v -> RoPE -> causal attention -> runtime output gate -> o_proj -> residual add` block smokeまで通った。次はself-attn block outputを `post_attention_layernorm -> MLP -> residual` に接続する。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。次はtoken-by-token decode stateを持つ狭いdecoder-step APIへ寄せる。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
