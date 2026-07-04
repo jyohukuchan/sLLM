@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
+use ullm_engine::decoder::{PagedDecodeShape, PagedDecodeState};
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
 };
@@ -15894,161 +15895,59 @@ fn runtime_paged_kv_write_decode_verify(
         head_dim,
         value_dim,
     )?;
-    let q_bytes = encode_f32_to_bytes(q);
-    let block_table_bytes = encode_u32_to_bytes(block_table);
-    let k_token_elements = kv_heads * head_dim;
-    let v_token_elements = kv_heads * value_dim;
-    let k_token_bytes = k_token_elements
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} k token byte size overflows"))?;
-    let v_token_bytes = v_token_elements
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} v token byte size overflows"))?;
-    let k_cache_bytes = expected_k_cache
-        .len()
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} k cache byte size overflows"))?;
-    let v_cache_bytes = expected_v_cache
-        .len()
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} v cache byte size overflows"))?;
-    let output_elements = q_heads * value_dim;
-    let output_bytes = output_elements
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} output byte size overflows"))?;
-
-    let mut q_buffer = context
-        .alloc_buffer(q_bytes.len())
-        .map_err(|err| format!("failed to allocate {label} q buffer: {err}"))?;
-    let mut k_token_buffer = context
-        .alloc_buffer(k_token_bytes)
-        .map_err(|err| format!("failed to allocate {label} k token buffer: {err}"))?;
-    let mut v_token_buffer = context
-        .alloc_buffer(v_token_bytes)
-        .map_err(|err| format!("failed to allocate {label} v token buffer: {err}"))?;
-    let mut block_table_buffer = context
-        .alloc_buffer(block_table_bytes.len())
-        .map_err(|err| format!("failed to allocate {label} block table buffer: {err}"))?;
-    let mut k_cache_buffer = context
-        .alloc_buffer(k_cache_bytes)
-        .map_err(|err| format!("failed to allocate {label} paged k cache buffer: {err}"))?;
-    let mut v_cache_buffer = context
-        .alloc_buffer(v_cache_bytes)
-        .map_err(|err| format!("failed to allocate {label} paged v cache buffer: {err}"))?;
-    let mut output_buffer = context
-        .alloc_buffer(output_bytes)
-        .map_err(|err| format!("failed to allocate {label} output buffer: {err}"))?;
-
-    q_buffer
-        .copy_from_host(0, &q_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} q input: {err}"))?;
-    block_table_buffer
-        .copy_from_host(0, &block_table_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} block table input: {err}"))?;
-    k_cache_buffer
-        .copy_from_host(0, &vec![0_u8; k_cache_bytes], Some(stream))
-        .map_err(|err| format!("failed to initialize {label} paged k cache: {err}"))?;
-    v_cache_buffer
-        .copy_from_host(0, &vec![0_u8; v_cache_bytes], Some(stream))
-        .map_err(|err| format!("failed to initialize {label} paged v cache: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} cache setup: {err}"))?;
-
-    for timestep in 0..cache_len {
-        let k_start = timestep * k_token_elements;
-        let k_end = k_start + k_token_elements;
-        let v_start = timestep * v_token_elements;
-        let v_end = v_start + v_token_elements;
-        let k_bytes = encode_f32_to_bytes(&logical_k_cache[k_start..k_end]);
-        let v_bytes = encode_f32_to_bytes(&logical_v_cache[v_start..v_end]);
-        k_token_buffer
-            .copy_from_host(0, &k_bytes, Some(stream))
-            .map_err(|err| format!("failed to copy {label} timestep {timestep} k: {err}"))?;
-        v_token_buffer
-            .copy_from_host(0, &v_bytes, Some(stream))
-            .map_err(|err| format!("failed to copy {label} timestep {timestep} v: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after {label} timestep {timestep} inputs: {err}")
-        })?;
-        ullm_runtime_sys::paged_kv_write_f32(
-            &k_token_buffer,
-            &v_token_buffer,
-            &block_table_buffer,
-            timestep,
-            block_size,
-            cache_blocks,
-            kv_heads,
-            head_dim,
-            value_dim,
-            &mut k_cache_buffer,
-            &mut v_cache_buffer,
-            Some(stream),
-        )
-        .map_err(|err| {
-            format!("failed to run {label} timestep {timestep} paged KV write: {err}")
-        })?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after {label} timestep {timestep} paged KV write: {err}")
-        })?;
-    }
-
-    let mut k_cache_raw = vec![0_u8; k_cache_bytes];
-    let mut v_cache_raw = vec![0_u8; v_cache_bytes];
-    k_cache_buffer
-        .copy_to_host(0, &mut k_cache_raw, Some(stream))
-        .map_err(|err| format!("failed to copy {label} paged k cache output: {err}"))?;
-    v_cache_buffer
-        .copy_to_host(0, &mut v_cache_raw, Some(stream))
-        .map_err(|err| format!("failed to copy {label} paged v cache output: {err}"))?;
-    stream.synchronize().map_err(|err| {
-        format!("failed to synchronize after {label} paged cache readback: {err}")
-    })?;
-    let k_cache = decode_f32_le_values(&k_cache_raw);
-    let v_cache = decode_f32_le_values(&v_cache_raw);
-    let k_write_max_abs_diff = verify_f32_close(
-        &format!("{label} paged k cache write"),
-        &k_cache,
-        &expected_k_cache,
-        1e-5_f32,
-        1e-5_f32,
-    )?;
-    let v_write_max_abs_diff = verify_f32_close(
-        &format!("{label} paged v cache write"),
-        &v_cache,
-        &expected_v_cache,
-        1e-5_f32,
-        1e-5_f32,
-    )?;
-
-    ullm_runtime_sys::paged_decode_attn_f32(
-        &q_buffer,
-        &k_cache_buffer,
-        &v_cache_buffer,
-        &block_table_buffer,
-        cache_len,
+    let shape = PagedDecodeShape {
         block_size,
         cache_blocks,
         q_heads,
         kv_heads,
         head_dim,
         value_dim,
-        softmax_scale,
-        &mut output_buffer,
-        Some(stream),
-    )
-    .map_err(|err| format!("failed to run {label} paged decode attention: {err}"))?;
-    stream.synchronize().map_err(|err| {
-        format!("failed to synchronize after {label} paged decode attention: {err}")
-    })?;
-    let mut output_raw = vec![0_u8; output_bytes];
-    output_buffer
-        .copy_to_host(0, &mut output_raw, Some(stream))
-        .map_err(|err| format!("failed to copy {label} paged decode output: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} output copy: {err}"))?;
-    let output = decode_f32_le_values(&output_raw);
+    };
+    let mut state = PagedDecodeState::new(context, stream, shape, block_table.to_vec())
+        .map_err(|err| format!("failed to create {label} paged decode state: {err}"))?;
+    let k_token_elements = kv_heads * head_dim;
+    let v_token_elements = kv_heads * value_dim;
+
+    for timestep in 0..cache_len {
+        let k_start = timestep * k_token_elements;
+        let k_end = k_start + k_token_elements;
+        let v_start = timestep * v_token_elements;
+        let v_end = v_start + v_token_elements;
+        let written_position = state
+            .write_token(
+                stream,
+                &logical_k_cache[k_start..k_end],
+                &logical_v_cache[v_start..v_end],
+            )
+            .map_err(|err| format!("failed to write {label} timestep {timestep}: {err}"))?;
+        if written_position != timestep {
+            return Err(format!(
+                "{label} paged decode state wrote position {written_position}, expected {timestep}"
+            ));
+        }
+    }
+
+    let readback = state
+        .read_cache_to_host(stream)
+        .map_err(|err| format!("failed to read {label} paged cache: {err}"))?;
+    let k_write_max_abs_diff = verify_f32_close(
+        &format!("{label} paged k cache write"),
+        &readback.k,
+        &expected_k_cache,
+        1e-5_f32,
+        1e-5_f32,
+    )?;
+    let v_write_max_abs_diff = verify_f32_close(
+        &format!("{label} paged v cache write"),
+        &readback.v,
+        &expected_v_cache,
+        1e-5_f32,
+        1e-5_f32,
+    )?;
+
+    let output = state
+        .decode_written(stream, q, softmax_scale)
+        .map_err(|err| format!("failed to decode {label}: {err}"))?;
     let expected_output = runtime_host_paged_decode_attn_f32(
         q,
         &expected_k_cache,
@@ -16068,8 +15967,8 @@ fn runtime_paged_kv_write_decode_verify(
     Ok(RuntimePagedKvWriteDecodeResult {
         output,
         output_max_abs_diff,
-        k_cache,
-        v_cache,
+        k_cache: readback.k,
+        v_cache: readback.v,
         k_write_max_abs_diff,
         v_write_max_abs_diff,
     })
