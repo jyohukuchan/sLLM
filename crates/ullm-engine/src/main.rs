@@ -7538,6 +7538,21 @@ struct SelfAttnBlockSmokeRun {
     causal_paged_block_max_abs_diff: f32,
 }
 
+struct Qwen3MlpRuntimeWeights {
+    gate_rows: usize,
+    gate_cols: usize,
+    gate_matrix: ullm_runtime_sys::RuntimeBuffer,
+    up_matrix: ullm_runtime_sys::RuntimeBuffer,
+    down_matrix: ullm_runtime_sys::RuntimeBuffer,
+}
+
+struct Qwen3DecoderLayerRuntimeWeights {
+    hidden: usize,
+    intermediate: usize,
+    post_norm_weight: ullm_runtime_sys::RuntimeBuffer,
+    mlp: Qwen3MlpRuntimeWeights,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_self_attn_block_sequence_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
@@ -8024,6 +8039,86 @@ fn run_self_attn_block_sequence_smoke(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn qwen3_decoder_layer_runtime_weights_from_package(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    hidden: usize,
+    post_norm: &PassthroughF32Data,
+    gate_tensor: &str,
+    up_tensor: &str,
+    down_tensor: &str,
+) -> Result<Qwen3DecoderLayerRuntimeWeights, String> {
+    if post_norm.values.len() != hidden {
+        return Err(format!(
+            "post RMSNorm length must match hidden={hidden}: len={}",
+            post_norm.values.len()
+        ));
+    }
+    let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm.values);
+    let mut post_norm_weight_buffer = context
+        .alloc_buffer(post_norm_weight_bytes.len())
+        .map_err(|err| format!("failed to allocate post RMSNorm weight buffer: {err}"))?;
+    post_norm_weight_buffer
+        .copy_from_host(0, &post_norm_weight_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy post RMSNorm weight into runtime buffer: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after post RMSNorm weight copy: {err}"))?;
+
+    let mut registry = WeightRegistry::new();
+    let (gate_rows, gate_cols, gate_matrix) = materialize_selected_aq4_matrix(
+        context,
+        stream,
+        &mut registry,
+        path,
+        gate_tensor,
+        chunk_bytes,
+    )?;
+    let (up_rows, up_cols, up_matrix) = materialize_selected_aq4_matrix(
+        context,
+        stream,
+        &mut registry,
+        path,
+        up_tensor,
+        chunk_bytes,
+    )?;
+    let (down_rows, down_cols, down_matrix) = materialize_selected_aq4_matrix(
+        context,
+        stream,
+        &mut registry,
+        path,
+        down_tensor,
+        chunk_bytes,
+    )?;
+    if gate_rows != up_rows || gate_cols != up_cols || gate_cols != hidden {
+        return Err(format!(
+            "MLP gate/up shape mismatch: gate=[{gate_rows},{gate_cols}] up=[{up_rows},{up_cols}] hidden={hidden}"
+        ));
+    }
+    if down_rows != hidden || down_cols != gate_rows {
+        return Err(format!(
+            "MLP down shape mismatch: expected [{hidden},{gate_rows}], got [{down_rows},{down_cols}]"
+        ));
+    }
+    let intermediate = gate_rows;
+
+    Ok(Qwen3DecoderLayerRuntimeWeights {
+        hidden,
+        intermediate,
+        post_norm_weight: post_norm_weight_buffer,
+        mlp: Qwen3MlpRuntimeWeights {
+            gate_rows,
+            gate_cols,
+            gate_matrix,
+            up_matrix,
+            down_matrix,
+        },
+    })
+}
+
 fn package_self_attn_mlp_block_smoke(
     path: Option<String>,
     device_index: Option<String>,
@@ -8218,14 +8313,29 @@ fn package_self_attn_mlp_block_smoke_impl(
     )?;
 
     let hidden = self_attn.hidden;
-    if post_norm.values.len() != hidden {
+    let mlp_epsilon = 1e-5_f32;
+    let layer_weights = qwen3_decoder_layer_runtime_weights_from_package(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        hidden,
+        &post_norm,
+        &gate_tensor,
+        &up_tensor,
+        &down_tensor,
+    )?;
+    if layer_weights.hidden != hidden {
         return Err(format!(
-            "post RMSNorm length must match hidden={hidden}: len={}",
-            post_norm.values.len()
+            "Qwen3 decoder layer runtime weight hidden mismatch: expected={hidden} got={}",
+            layer_weights.hidden
         ));
     }
-    let mlp_epsilon = 1e-5_f32;
-    let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm.values);
+    if layer_weights.mlp.gate_rows != layer_weights.intermediate
+        || layer_weights.mlp.gate_cols != hidden
+    {
+        return Err("Qwen3 decoder layer runtime MLP gate shape is inconsistent".to_string());
+    }
 
     let mut post_normed_expected = Vec::with_capacity(sequence_len * hidden);
     for timestep in 0..sequence_len {
@@ -8239,53 +8349,7 @@ fn package_self_attn_mlp_block_smoke_impl(
         post_normed_expected.extend_from_slice(&expected);
     }
 
-    let mut post_norm_weight_buffer = context
-        .alloc_buffer(post_norm_weight_bytes.len())
-        .map_err(|err| format!("failed to allocate post RMSNorm weight buffer: {err}"))?;
-    post_norm_weight_buffer
-        .copy_from_host(0, &post_norm_weight_bytes, Some(&mut stream))
-        .map_err(|err| format!("failed to copy post RMSNorm weight into runtime buffer: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after post RMSNorm weight copy: {err}"))?;
-
     let (post_normed, mlp_output, layer_output, post_norm_max_abs_diff, layer_block_max_abs_diff) = {
-        let mut registry = WeightRegistry::new();
-        let (gate_rows, gate_cols, gate_matrix) = materialize_selected_aq4_matrix(
-            &mut context,
-            &mut stream,
-            &mut registry,
-            path,
-            &gate_tensor,
-            chunk_bytes,
-        )?;
-        let (up_rows, up_cols, up_matrix) = materialize_selected_aq4_matrix(
-            &mut context,
-            &mut stream,
-            &mut registry,
-            path,
-            &up_tensor,
-            chunk_bytes,
-        )?;
-        let (down_rows, down_cols, down_matrix) = materialize_selected_aq4_matrix(
-            &mut context,
-            &mut stream,
-            &mut registry,
-            path,
-            &down_tensor,
-            chunk_bytes,
-        )?;
-        if gate_rows != up_rows || gate_cols != up_cols || gate_cols != hidden {
-            return Err(format!(
-                "MLP gate/up shape mismatch: gate=[{gate_rows},{gate_cols}] up=[{up_rows},{up_cols}] hidden={hidden}"
-            ));
-        }
-        if down_rows != hidden || down_cols != gate_rows {
-            return Err(format!(
-                "MLP down shape mismatch: expected [{hidden},{gate_rows}], got [{down_rows},{down_cols}]"
-            ));
-        }
-        let intermediate = gate_rows;
         let decode_shape = PagedDecodeShape {
             block_size: self_attn.paged_block_size,
             cache_blocks: self_attn.paged_cache_blocks,
@@ -8300,7 +8364,7 @@ fn package_self_attn_mlp_block_smoke_impl(
             decode_shape,
             self_attn.paged_block_table.clone(),
             hidden,
-            intermediate,
+            layer_weights.intermediate,
             self_attn.softmax_scale,
             mlp_epsilon,
         )?;
@@ -8331,10 +8395,10 @@ fn package_self_attn_mlp_block_smoke_impl(
                 .step(
                     &mut stream,
                     &self_attn.o_matrix,
-                    &post_norm_weight_buffer,
-                    &gate_matrix,
-                    &up_matrix,
-                    &down_matrix,
+                    &layer_weights.post_norm_weight,
+                    &layer_weights.mlp.gate_matrix,
+                    &layer_weights.mlp.up_matrix,
+                    &layer_weights.mlp.down_matrix,
                     &self_attn.q_rope[q_start..q_end],
                     &self_attn.k_rope[k_start..k_end],
                     &self_attn.v_projected[v_start..v_end],
