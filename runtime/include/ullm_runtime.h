@@ -197,6 +197,20 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_paged_kv_write_f32(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_linear_attn_gate_beta_f32(
     const ullm_runtime_buffer *a_buffer,
     const ullm_runtime_buffer *b_buffer,

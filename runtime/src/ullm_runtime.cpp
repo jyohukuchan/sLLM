@@ -404,6 +404,15 @@ public:
             error);
     }
 
+    bool compile_paged_kv_write_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(
+            arch,
+            paged_kv_write_kernel_source(),
+            "ullm_paged_kv_write_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_depthwise_conv1d_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -897,6 +906,49 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
         weighted += weight * v_cache[v_index];
     }
     output[index] = weighted / denominator;
+}
+)";
+    }
+
+    static const char *paged_kv_write_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_paged_kv_write_f32_kernel(
+    const float *k,
+    const float *v,
+    const unsigned int *block_table,
+    unsigned long long cache_position,
+    unsigned long long block_size,
+    unsigned long long cache_blocks,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float *k_cache,
+    float *v_cache) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long k_elements = kv_heads * head_dim;
+    const unsigned long long v_elements = kv_heads * value_dim;
+    const unsigned long long total_elements = k_elements + v_elements;
+    if (index >= total_elements) {
+        return;
+    }
+    const unsigned long long block_index = cache_position / block_size;
+    const unsigned long long block_offset = cache_position - block_index * block_size;
+    const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+    if (block_id >= cache_blocks) {
+        return;
+    }
+    const unsigned long long physical_timestep = block_id * block_size + block_offset;
+    if (index < k_elements) {
+        const unsigned long long kv_head = index / head_dim;
+        const unsigned long long dim = index - kv_head * head_dim;
+        k_cache[(physical_timestep * kv_heads + kv_head) * head_dim + dim] = k[index];
+        return;
+    }
+    const unsigned long long v_index = index - k_elements;
+    const unsigned long long kv_head = v_index / value_dim;
+    const unsigned long long dim = v_index - kv_head * value_dim;
+    v_cache[(physical_timestep * kv_heads + kv_head) * value_dim + dim] = v[v_index];
 }
 )";
     }
@@ -2189,6 +2241,32 @@ void paged_decode_attn_f32_host(
             }
             output[output_base + value] = weighted / denominator;
         }
+    }
+}
+
+void paged_kv_write_f32_host(
+    const float *k,
+    const float *v,
+    const std::uint32_t *block_table,
+    size_t cache_position,
+    size_t block_size,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float *k_cache,
+    float *v_cache) {
+    const size_t block_index = cache_position / block_size;
+    const size_t block_offset = cache_position - block_index * block_size;
+    const size_t physical_timestep =
+        static_cast<size_t>(block_table[block_index]) * block_size + block_offset;
+    for (size_t kv_head = 0; kv_head < kv_heads; ++kv_head) {
+        const size_t k_src = kv_head * head_dim;
+        const size_t k_dst = (physical_timestep * kv_heads + kv_head) * head_dim;
+        std::copy(k + k_src, k + k_src + head_dim, k_cache + k_dst);
+
+        const size_t v_src = kv_head * value_dim;
+        const size_t v_dst = (physical_timestep * kv_heads + kv_head) * value_dim;
+        std::copy(v + v_src, v + v_src + value_dim, v_cache + v_dst);
     }
 }
 
@@ -3665,6 +3743,274 @@ ullm_status paged_decode_attn_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 paged decode attention HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipPagedKvWriteKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_paged_kv_write_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_paged_kv_write_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build paged KV write HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipPagedKvWriteKernelCache &hip_paged_kv_write_kernel_cache() {
+    static HipPagedKvWriteKernelCache cache;
+    return cache;
+}
+
+bool paged_kv_write_f32_hip_kernel(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = k_buffer->hip_device_id;
+    void *function = hip_paged_kv_write_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int launch_block_size = 256;
+    const size_t elements = kv_heads * head_dim + kv_heads * value_dim;
+    const size_t grid_size = (elements + launch_block_size - 1) / launch_block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "paged KV write element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+
+    unsigned long long kernel_cache_position = static_cast<unsigned long long>(cache_position);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *k_ptr = k_buffer->ptr;
+    void *v_ptr = v_buffer->ptr;
+    void *block_table_ptr = block_table_buffer->ptr;
+    void *k_cache_ptr = k_cache_buffer->ptr;
+    void *v_cache_ptr = v_cache_buffer->ptr;
+    void *kernel_params[] = {
+        &k_ptr,
+        &v_ptr,
+        &block_table_ptr,
+        &kernel_cache_position,
+        &kernel_block_size,
+        &kernel_cache_blocks,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &k_cache_ptr,
+        &v_cache_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            launch_block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 paged KV write";
+        }
+        return false;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        if (error != nullptr) {
+            *error = "failed to synchronize f32 paged KV write HIP kernel";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status paged_kv_write_f32_hip_staging(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    size_t k_bytes,
+    size_t v_bytes,
+    size_t block_table_bytes,
+    size_t k_cache_bytes,
+    size_t v_cache_bytes,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_k(k_bytes / sizeof(float));
+    std::vector<float> host_v(v_bytes / sizeof(float));
+    std::vector<std::uint32_t> host_block_table(block_table_bytes / sizeof(std::uint32_t));
+    std::vector<float> host_k_cache(k_cache_bytes / sizeof(float));
+    std::vector<float> host_v_cache(v_cache_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = k_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_k.data(),
+            k_buffer->ptr,
+            k_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_v.data(),
+            v_buffer->ptr,
+            v_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_block_table.data(),
+            block_table_buffer->ptr,
+            block_table_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k_cache.data(),
+            k_cache_buffer->ptr,
+            k_cache_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_v_cache.data(),
+            v_cache_buffer->ptr,
+            v_cache_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 paged KV write HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 paged KV write HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+
+    const size_t block_index = cache_position / block_size;
+    const std::uint32_t block_id = host_block_table[block_index];
+    if (static_cast<size_t>(block_id) >= cache_blocks) {
+        set_error("f32 paged KV write block table contains an out-of-range block id");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    paged_kv_write_f32_host(
+        host_k.data(),
+        host_v.data(),
+        host_block_table.data(),
+        cache_position,
+        block_size,
+        kv_heads,
+        head_dim,
+        value_dim,
+        host_k_cache.data(),
+        host_v_cache.data());
+
+    if (!hip_runtime().copy_async(
+            k_cache_buffer->ptr,
+            host_k_cache.data(),
+            k_cache_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            v_cache_buffer->ptr,
+            host_v_cache.data(),
+            v_cache_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 paged KV write caches back to HIP buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 paged KV write HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -6059,6 +6405,179 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
         block_table_bytes,
         output_bytes,
         output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_paged_kv_write_f32(
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream) {
+    if (k_buffer == nullptr || v_buffer == nullptr || block_table_buffer == nullptr ||
+        k_cache_buffer == nullptr || v_cache_buffer == nullptr) {
+        set_error("f32 paged KV write received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (block_size == 0 || cache_blocks == 0 || kv_heads == 0 ||
+        head_dim == 0 || value_dim == 0) {
+        set_error("f32 paged KV write dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(k_buffer, v_buffer) ||
+        !buffers_share_backend(k_buffer, block_table_buffer) ||
+        !buffers_share_backend(k_buffer, k_cache_buffer) ||
+        !buffers_share_backend(k_buffer, v_cache_buffer)) {
+        set_error("f32 paged KV write buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(k_cache_buffer, stream) ||
+        !stream_matches_buffer(v_cache_buffer, stream)) {
+        set_error("f32 paged KV write stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cache_blocks > max_size / block_size) {
+        set_error("f32 paged KV write physical cache size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t physical_tokens = cache_blocks * block_size;
+    if (cache_position >= physical_tokens) {
+        set_error("f32 paged KV write cache_position exceeds physical cache capacity");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t block_index = cache_position / block_size;
+    const size_t block_table_entries = block_index + 1;
+
+    if (head_dim > max_size / kv_heads || value_dim > max_size / kv_heads) {
+        set_error("f32 paged KV write token element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements = kv_heads * head_dim;
+    const size_t v_elements = kv_heads * value_dim;
+    if (kv_heads > max_size / physical_tokens) {
+        set_error("f32 paged KV write kv head-cache count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_cache = physical_tokens * kv_heads;
+    if (head_dim > max_size / kv_head_cache ||
+        value_dim > max_size / kv_head_cache) {
+        set_error("f32 paged KV write cache element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_cache_elements = kv_head_cache * head_dim;
+    const size_t v_cache_elements = kv_head_cache * value_dim;
+    if (k_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float) ||
+        k_cache_elements > max_size / sizeof(float) ||
+        v_cache_elements > max_size / sizeof(float) ||
+        block_table_entries > max_size / sizeof(std::uint32_t)) {
+        set_error("f32 paged KV write byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t k_cache_bytes = k_cache_elements * sizeof(float);
+    const size_t v_cache_bytes = v_cache_elements * sizeof(float);
+    const size_t block_table_bytes = block_table_entries * sizeof(std::uint32_t);
+
+    if (k_buffer->bytes < k_bytes) {
+        set_error("f32 paged KV write k buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_buffer->bytes < v_bytes) {
+        set_error("f32 paged KV write v buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (block_table_buffer->bytes < block_table_bytes) {
+        set_error("f32 paged KV write block table buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_cache_buffer->bytes < k_cache_bytes) {
+        set_error("f32 paged KV write k cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_cache_buffer->bytes < v_cache_bytes) {
+        set_error("f32 paged KV write v cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (k_buffer->backend == BackendKind::Cpu) {
+        const auto *k = static_cast<const float *>(k_buffer->ptr);
+        const auto *v = static_cast<const float *>(v_buffer->ptr);
+        const auto *block_table = static_cast<const std::uint32_t *>(block_table_buffer->ptr);
+        if (static_cast<size_t>(block_table[block_index]) >= cache_blocks) {
+            set_error("f32 paged KV write block table contains an out-of-range block id");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        auto *k_cache = static_cast<float *>(k_cache_buffer->ptr);
+        auto *v_cache = static_cast<float *>(v_cache_buffer->ptr);
+        paged_kv_write_f32_host(
+            k,
+            v,
+            block_table,
+            cache_position,
+            block_size,
+            kv_heads,
+            head_dim,
+            value_dim,
+            k_cache,
+            v_cache);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (paged_kv_write_f32_hip_kernel(
+            k_buffer,
+            v_buffer,
+            block_table_buffer,
+            cache_position,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            k_cache_buffer,
+            v_cache_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "f32 paged KV write HIP kernel is unavailable" :
+                                       hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return paged_kv_write_f32_hip_staging(
+        k_buffer,
+        v_buffer,
+        block_table_buffer,
+        cache_position,
+        block_size,
+        cache_blocks,
+        kv_heads,
+        head_dim,
+        value_dim,
+        k_bytes,
+        v_bytes,
+        block_table_bytes,
+        k_cache_bytes,
+        v_cache_bytes,
+        k_cache_buffer,
+        v_cache_buffer,
         stream);
 }
 

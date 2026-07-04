@@ -31,6 +31,7 @@ fn main() -> ExitCode {
         Some("runtime-paged-decode-attn-smoke") => {
             runtime_paged_decode_attn_smoke(env::args().nth(2))
         }
+        Some("runtime-paged-kv-write-smoke") => runtime_paged_kv_write_smoke(env::args().nth(2)),
         Some("runtime-kv-paged-decode-smoke") => {
             runtime_kv_paged_decode_attn_smoke(env::args().nth(2))
         }
@@ -1667,6 +1668,238 @@ fn runtime_paged_decode_attn_smoke(device_index: Option<String>) -> ExitCode {
         head_dim,
         value_dim,
         format_f32_preview(&output)
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_paged_kv_write_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let cache_len = 3_usize;
+    let block_size = 2_usize;
+    let (block_table, cache_blocks, stats) =
+        match allocate_fragmented_paged_decode_blocks(cache_len, block_size) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+    let kv_heads = 2_usize;
+    let head_dim = 3_usize;
+    let value_dim = 2_usize;
+    let logical_k = (0..cache_len * kv_heads * head_dim)
+        .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+        .collect::<Vec<_>>();
+    let logical_v = (0..cache_len * kv_heads * value_dim)
+        .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+        .collect::<Vec<_>>();
+    let (expected_k_cache, expected_v_cache) = match pack_paged_decode_kv_cache_for_block_table(
+        &logical_k,
+        &logical_v,
+        &block_table,
+        cache_len,
+        block_size,
+        cache_blocks,
+        kv_heads,
+        head_dim,
+        value_dim,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let k_token_bytes = kv_heads * head_dim * std::mem::size_of::<f32>();
+    let v_token_bytes = kv_heads * value_dim * std::mem::size_of::<f32>();
+    let k_cache_bytes = expected_k_cache.len() * std::mem::size_of::<f32>();
+    let v_cache_bytes = expected_v_cache.len() * std::mem::size_of::<f32>();
+    let block_table_bytes = encode_u32_to_bytes(&block_table);
+    let zero_k_cache = vec![0_u8; k_cache_bytes];
+    let zero_v_cache = vec![0_u8; v_cache_bytes];
+
+    let mut k_token_buffer = match context.alloc_buffer(k_token_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate paged KV write k token buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut v_token_buffer = match context.alloc_buffer(v_token_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate paged KV write v token buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut block_table_buffer = match context.alloc_buffer(block_table_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate paged KV write block table buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut k_cache_buffer = match context.alloc_buffer(k_cache_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate paged KV write k cache buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut v_cache_buffer = match context.alloc_buffer(v_cache_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate paged KV write v cache buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = block_table_buffer.copy_from_host(0, &block_table_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy paged KV write block table: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = k_cache_buffer.copy_from_host(0, &zero_k_cache, Some(&mut stream)) {
+        eprintln!("failed to initialize paged KV write k cache: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = v_cache_buffer.copy_from_host(0, &zero_v_cache, Some(&mut stream)) {
+        eprintln!("failed to initialize paged KV write v cache: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize paged KV write initial copies: {err}");
+        return ExitCode::from(1);
+    }
+
+    for timestep in 0..cache_len {
+        let k_start = timestep * kv_heads * head_dim;
+        let k_end = k_start + kv_heads * head_dim;
+        let v_start = timestep * kv_heads * value_dim;
+        let v_end = v_start + kv_heads * value_dim;
+        let k_bytes = encode_f32_to_bytes(&logical_k[k_start..k_end]);
+        let v_bytes = encode_f32_to_bytes(&logical_v[v_start..v_end]);
+        if let Err(err) = k_token_buffer.copy_from_host(0, &k_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy paged KV write timestep {timestep} k: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = v_token_buffer.copy_from_host(0, &v_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy paged KV write timestep {timestep} v: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize paged KV write timestep {timestep} inputs: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = ullm_runtime_sys::paged_kv_write_f32(
+            &k_token_buffer,
+            &v_token_buffer,
+            &block_table_buffer,
+            timestep,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            &mut k_cache_buffer,
+            &mut v_cache_buffer,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run paged_kv_write_f32 for timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize paged KV write timestep {timestep}: {err}");
+            return ExitCode::from(1);
+        }
+    }
+
+    let mut k_cache_raw = vec![0_u8; k_cache_bytes];
+    let mut v_cache_raw = vec![0_u8; v_cache_bytes];
+    if let Err(err) = k_cache_buffer.copy_to_host(0, &mut k_cache_raw, Some(&mut stream)) {
+        eprintln!("failed to copy paged KV write k cache back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = v_cache_buffer.copy_to_host(0, &mut v_cache_raw, Some(&mut stream)) {
+        eprintln!("failed to copy paged KV write v cache back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize paged KV write readback: {err}");
+        return ExitCode::from(1);
+    }
+    let k_cache = decode_f32_le_values(&k_cache_raw);
+    let v_cache = decode_f32_le_values(&v_cache_raw);
+    let k_max_abs_diff = match verify_f32_close(
+        "runtime paged KV write k cache",
+        &k_cache,
+        &expected_k_cache,
+        1e-5,
+        1e-5,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let v_max_abs_diff = match verify_f32_close(
+        "runtime paged KV write v cache",
+        &v_cache,
+        &expected_v_cache,
+        1e-5,
+        1e-5,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    println!(
+        "runtime-paged-kv-write-smoke backend={} device_index={} name=\"{}\" cache_len={} block_size={} cache_blocks={} block_table={:?} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} kv_heads={} head_dim={} value_dim={} k_cache_preview={} v_cache_preview={} k_max_abs_diff={k_max_abs_diff:.9} v_max_abs_diff={v_max_abs_diff:.9} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        cache_len,
+        block_size,
+        cache_blocks,
+        block_table,
+        stats.free_blocks,
+        stats.allocated_blocks,
+        stats.free_runs,
+        stats.largest_free_run,
+        kv_heads,
+        head_dim,
+        value_dim,
+        format_f32_preview(&k_cache[..8.min(k_cache.len())]),
+        format_f32_preview(&v_cache[..8.min(v_cache.len())]),
     );
     ExitCode::SUCCESS
 }
@@ -15909,7 +16142,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");

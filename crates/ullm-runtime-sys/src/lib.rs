@@ -168,6 +168,20 @@ unsafe extern "C" {
         output: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_paged_kv_write_f32(
+        k: *const RawRuntimeBuffer,
+        v: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        cache_position: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        k_cache: *mut RawRuntimeBuffer,
+        v_cache: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_linear_attn_gate_beta_f32(
         a_buffer: *const RawRuntimeBuffer,
         b_buffer: *const RawRuntimeBuffer,
@@ -938,6 +952,105 @@ pub fn paged_decode_attn_f32(
             value_dim,
             softmax_scale,
             output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn paged_kv_write_f32(
+    k: &RuntimeBuffer,
+    v: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    cache_position: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    k_cache: &mut RuntimeBuffer,
+    v_cache: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if block_size == 0 {
+        return Err("f32 paged KV write block_size must be greater than zero".to_string());
+    }
+    if cache_blocks == 0 {
+        return Err("f32 paged KV write cache_blocks must be greater than zero".to_string());
+    }
+    if kv_heads == 0 {
+        return Err("f32 paged KV write kv_heads must be greater than zero".to_string());
+    }
+    if head_dim == 0 {
+        return Err("f32 paged KV write head_dim must be greater than zero".to_string());
+    }
+    if value_dim == 0 {
+        return Err("f32 paged KV write value_dim must be greater than zero".to_string());
+    }
+
+    let physical_tokens = cache_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| "f32 paged KV write physical cache size overflows".to_string())?;
+    if cache_position >= physical_tokens {
+        return Err(
+            "f32 paged KV write cache_position exceeds physical cache capacity".to_string(),
+        );
+    }
+    let block_table_len = cache_position
+        .checked_div(block_size)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| "f32 paged KV write block table length overflows".to_string())?;
+    let k_elements = kv_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 paged KV write k element count overflows".to_string())?;
+    let v_elements = kv_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 paged KV write v element count overflows".to_string())?;
+    let kv_head_cache = physical_tokens
+        .checked_mul(kv_heads)
+        .ok_or_else(|| "f32 paged KV write kv head-cache count overflows".to_string())?;
+    let k_cache_elements = kv_head_cache
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 paged KV write k cache element count overflows".to_string())?;
+    let v_cache_elements = kv_head_cache
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 paged KV write v cache element count overflows".to_string())?;
+
+    let k_bytes = k_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged KV write k byte size overflows".to_string())?;
+    let v_bytes = v_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged KV write v byte size overflows".to_string())?;
+    let k_cache_bytes = k_cache_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged KV write k cache byte size overflows".to_string())?;
+    let v_cache_bytes = v_cache_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged KV write v cache byte size overflows".to_string())?;
+    let block_table_bytes = block_table_len
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "f32 paged KV write block_table byte size overflows".to_string())?;
+
+    check_copy_range(0, k_bytes, k.size()?)?;
+    check_copy_range(0, v_bytes, v.size()?)?;
+    check_copy_range(0, block_table_bytes, block_table.size()?)?;
+    check_copy_range(0, k_cache_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_cache_bytes, v_cache.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_kv_write_f32(
+            k.raw.as_ptr(),
+            v.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            cache_position,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
             stream,
         )
     })
@@ -2068,6 +2181,165 @@ mod tests {
     }
 
     #[test]
+    fn cpu_paged_kv_write_f32_writes_expected_physical_slot() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cache_position = 3_usize;
+        let block_size = 2_usize;
+        let cache_blocks = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let k_values = vec![0.25_f32, -0.5, 1.25, 2.0, -3.0, 4.0];
+        let v_values = vec![-0.75_f32, 0.5, 1.5, -2.5];
+        let block_table_values = vec![2_u32, 0_u32];
+        let physical_tokens = cache_blocks * block_size;
+        let mut expected_k_cache = vec![0.0_f32; physical_tokens * kv_heads * head_dim];
+        let mut expected_v_cache = vec![0.0_f32; physical_tokens * kv_heads * value_dim];
+        let physical_timestep = block_table_values[cache_position / block_size] as usize
+            * block_size
+            + (cache_position % block_size);
+        for kv_head in 0..kv_heads {
+            let k_src = kv_head * head_dim;
+            let k_dst = (physical_timestep * kv_heads + kv_head) * head_dim;
+            expected_k_cache[k_dst..k_dst + head_dim]
+                .copy_from_slice(&k_values[k_src..k_src + head_dim]);
+
+            let v_src = kv_head * value_dim;
+            let v_dst = (physical_timestep * kv_heads + kv_head) * value_dim;
+            expected_v_cache[v_dst..v_dst + value_dim]
+                .copy_from_slice(&v_values[v_src..v_src + value_dim]);
+        }
+
+        let mut k = context
+            .alloc_buffer(k_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v = context
+            .alloc_buffer(v_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut block_table = context
+            .alloc_buffer(block_table_values.len() * std::mem::size_of::<u32>())
+            .unwrap();
+        let mut k_cache = context
+            .alloc_buffer(expected_k_cache.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_cache = context
+            .alloc_buffer(expected_v_cache.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        k_cache
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&vec![0.0_f32; expected_k_cache.len()]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        v_cache
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&vec![0.0_f32; expected_v_cache.len()]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream))
+            .unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream))
+            .unwrap();
+        let block_table_bytes: Vec<u8> = block_table_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        block_table
+            .copy_from_host(0, &block_table_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        paged_kv_write_f32(
+            &k,
+            &v,
+            &block_table,
+            cache_position,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            &mut k_cache,
+            &mut v_cache,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut k_cache_bytes = vec![0_u8; expected_k_cache.len() * std::mem::size_of::<f32>()];
+        let mut v_cache_bytes = vec![0_u8; expected_v_cache.len() * std::mem::size_of::<f32>()];
+        k_cache
+            .copy_to_host(0, &mut k_cache_bytes, Some(&mut stream))
+            .unwrap();
+        v_cache
+            .copy_to_host(0, &mut v_cache_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&k_cache_bytes), &expected_k_cache, 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&v_cache_bytes), &expected_v_cache, 1e-6);
+    }
+
+    #[test]
+    fn cpu_paged_kv_write_f32_rejects_short_cache_or_block_table() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let k = context
+            .alloc_buffer(2 * 3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let v = context
+            .alloc_buffer(2 * 2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let short_block_table = context.alloc_buffer(std::mem::size_of::<u32>()).unwrap();
+        let block_table = context
+            .alloc_buffer(2 * std::mem::size_of::<u32>())
+            .unwrap();
+        let mut short_k_cache = context
+            .alloc_buffer((4 * 2 * 2 * 3 - 1) * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_cache = context
+            .alloc_buffer(4 * 2 * 2 * 2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let err = paged_kv_write_f32(
+            &k,
+            &v,
+            &short_block_table,
+            3,
+            2,
+            4,
+            2,
+            3,
+            2,
+            &mut short_k_cache,
+            &mut v_cache,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("block_table"));
+
+        let err = paged_kv_write_f32(
+            &k,
+            &v,
+            &block_table,
+            3,
+            2,
+            4,
+            2,
+            3,
+            2,
+            &mut short_k_cache,
+            &mut v_cache,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("cache"));
+    }
+
+    #[test]
     fn cpu_linear_attn_gate_beta_f32_computes_expected_values() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -3108,6 +3380,113 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-4);
+    }
+
+    #[test]
+    fn first_hip_paged_kv_write_f32_writes_expected_physical_slot_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cache_position = 3_usize;
+        let block_size = 2_usize;
+        let cache_blocks = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let k_values = vec![0.25_f32, -0.5, 1.25, 2.0, -3.0, 4.0];
+        let v_values = vec![-0.75_f32, 0.5, 1.5, -2.5];
+        let block_table_values = vec![2_u32, 0_u32];
+        let physical_tokens = cache_blocks * block_size;
+        let mut expected_k_cache = vec![0.0_f32; physical_tokens * kv_heads * head_dim];
+        let mut expected_v_cache = vec![0.0_f32; physical_tokens * kv_heads * value_dim];
+        let physical_timestep = block_table_values[cache_position / block_size] as usize
+            * block_size
+            + (cache_position % block_size);
+        for kv_head in 0..kv_heads {
+            let k_src = kv_head * head_dim;
+            let k_dst = (physical_timestep * kv_heads + kv_head) * head_dim;
+            expected_k_cache[k_dst..k_dst + head_dim]
+                .copy_from_slice(&k_values[k_src..k_src + head_dim]);
+
+            let v_src = kv_head * value_dim;
+            let v_dst = (physical_timestep * kv_heads + kv_head) * value_dim;
+            expected_v_cache[v_dst..v_dst + value_dim]
+                .copy_from_slice(&v_values[v_src..v_src + value_dim]);
+        }
+
+        let mut k = context
+            .alloc_buffer(k_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v = context
+            .alloc_buffer(v_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut block_table = context
+            .alloc_buffer(block_table_values.len() * std::mem::size_of::<u32>())
+            .unwrap();
+        let mut k_cache = context
+            .alloc_buffer(expected_k_cache.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_cache = context
+            .alloc_buffer(expected_v_cache.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        k_cache
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&vec![0.0_f32; expected_k_cache.len()]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        v_cache
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&vec![0.0_f32; expected_v_cache.len()]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream))
+            .unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream))
+            .unwrap();
+        let block_table_bytes: Vec<u8> = block_table_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        block_table
+            .copy_from_host(0, &block_table_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        paged_kv_write_f32(
+            &k,
+            &v,
+            &block_table,
+            cache_position,
+            block_size,
+            cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+            &mut k_cache,
+            &mut v_cache,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut k_cache_bytes = vec![0_u8; expected_k_cache.len() * std::mem::size_of::<f32>()];
+        let mut v_cache_bytes = vec![0_u8; expected_v_cache.len() * std::mem::size_of::<f32>()];
+        k_cache
+            .copy_to_host(0, &mut k_cache_bytes, Some(&mut stream))
+            .unwrap();
+        v_cache
+            .copy_to_host(0, &mut v_cache_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&k_cache_bytes), &expected_k_cache, 1e-5);
+        assert_f32s_close(&le_bytes_to_f32s(&v_cache_bytes), &expected_v_cache, 1e-5);
     }
 
     #[test]
