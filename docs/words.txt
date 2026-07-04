@@ -74,7 +74,8 @@ Qwen3 self attention runtime shape:Qwen3 self attention runtime weightsからhid
 Qwen3 self attention q projection split:Qwen3/Qwen3.5系self-attentionのq projection出力をqueryと任意のoutput gateへ分けるlibrary runtime API。通常Qwen3ではgateなしのplain layout、Qwen3.5 gated projectionではheadごとにqueryとgateを分離する
 Qwen3 headwise RMSNorm:Qwen3/Qwen3.5系self-attentionのq/k head単位RMSNormをruntime kernelで順次実行するlibrary runtime API。host期待値比較はsmoke側に残し、runtime実行と検証を分離する
 Qwen3 RoPE:Qwen3/Qwen3.5系self-attentionのq/k head系列へruntime RoPE kernelを適用するlibrary runtime API。host期待値比較はsmoke側に残し、runtime実行と検証を分離する
-Qwen3 self attention prepared sequence:Qwen3/Qwen3.5系self-attentionのprojection、Qwen3 self attention q projection split、Qwen3 headwise RMSNorm、Qwen3 RoPE、causal attention参照、expected paged K/V cacheをまとめたsmoke内のprepared sequence。paged decode step検証へ渡すhost側参照データを一箇所に集約する
+Qwen3 causal attention:Qwen3/Qwen3.5系self-attentionのq/k/v系列からGQA対応のcausal softmax attention value mixをruntime kernelで実行するlibrary runtime API。host期待値比較はsmoke側に残し、runtime実行と検証を分離する
+Qwen3 self attention prepared sequence:Qwen3/Qwen3.5系self-attentionのprojection、Qwen3 self attention q projection split、Qwen3 headwise RMSNorm、Qwen3 RoPE、Qwen3 causal attention参照、expected paged K/V cacheをまとめたsmoke内のprepared sequence。paged decode step検証へ渡すhost側参照データを一箇所に集約する
 Qwen3 self attention block step state:Qwen3/Qwen3.5系の狭いself-attention block step用状態。paged K/V write、paged decode attention、Qwen3.5 output gate、o projection、residual addを1 token分ずつ接続する。post RMSNormやMLPは含まない
 Qwen3 decoder layer step state:Qwen3/Qwen3.5系の狭いdecoder layer step用状態。Qwen3 self attention block step stateの出力をpost RMSNorm、MLP gate/up/down、SiLU-mul、final residual addまで1 token分ずつ接続する
 Qwen3 post attention runtime weights:Qwen3 decoder layer step stateのpost-attention側へ渡すpost RMSNorm weight、MLP gate/up/down runtime buffer、hidden/intermediate metadataをまとめるlibrary runtime API上のweight set

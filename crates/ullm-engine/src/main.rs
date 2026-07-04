@@ -10,8 +10,8 @@ use ullm_engine::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntime, Qwen3DecoderLayerRuntimeWeights,
     Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnBlockStepState,
     Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights,
-    qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32, qwen3_self_attn_runtime_shape,
-    split_qwen3_self_attn_q_projection,
+    qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
+    qwen3_self_attn_runtime_shape, split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -15797,80 +15797,32 @@ fn runtime_causal_attn_verify(
     softmax_scale: f32,
     label: &str,
 ) -> Result<(Vec<f32>, f32), String> {
-    if q.len() != sequence_len * q_heads * head_dim {
-        return Err(format!(
-            "{label} q length {} does not match sequence_len={sequence_len} q_heads={q_heads} head_dim={head_dim}",
-            q.len()
-        ));
-    }
-    if k.len() != sequence_len * kv_heads * head_dim {
-        return Err(format!(
-            "{label} k length {} does not match sequence_len={sequence_len} kv_heads={kv_heads} head_dim={head_dim}",
-            k.len()
-        ));
-    }
-    if v.len() != sequence_len * kv_heads * value_dim {
-        return Err(format!(
-            "{label} v length {} does not match sequence_len={sequence_len} kv_heads={kv_heads} value_dim={value_dim}",
-            v.len()
-        ));
-    }
-    let q_bytes = encode_f32_to_bytes(q);
-    let k_bytes = encode_f32_to_bytes(k);
-    let v_bytes = encode_f32_to_bytes(v);
-    let output_elements = sequence_len * q_heads * value_dim;
-    let output_bytes = output_elements
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} output byte size overflows"))?;
-    let mut q_buffer = context
-        .alloc_buffer(q_bytes.len())
-        .map_err(|err| format!("failed to allocate {label} q buffer: {err}"))?;
-    let mut k_buffer = context
-        .alloc_buffer(k_bytes.len())
-        .map_err(|err| format!("failed to allocate {label} k buffer: {err}"))?;
-    let mut v_buffer = context
-        .alloc_buffer(v_bytes.len())
-        .map_err(|err| format!("failed to allocate {label} v buffer: {err}"))?;
-    let mut output_buffer = context
-        .alloc_buffer(output_bytes)
-        .map_err(|err| format!("failed to allocate {label} output buffer: {err}"))?;
-    q_buffer
-        .copy_from_host(0, &q_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} q input: {err}"))?;
-    k_buffer
-        .copy_from_host(0, &k_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} k input: {err}"))?;
-    v_buffer
-        .copy_from_host(0, &v_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} v input: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} input copies: {err}"))?;
-    ullm_runtime_sys::causal_attn_f32(
-        &q_buffer,
-        &k_buffer,
-        &v_buffer,
+    let output = qwen3_causal_attn_to_host_f32(
+        context,
+        stream,
+        q,
+        k,
+        v,
         sequence_len,
         q_heads,
         kv_heads,
         head_dim,
         value_dim,
         softmax_scale,
-        &mut output_buffer,
-        Some(stream),
     )
     .map_err(|err| format!("failed to run {label} causal attention: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} causal attention: {err}"))?;
-    let mut output_bytes_host = vec![0_u8; output_bytes];
-    output_buffer
-        .copy_to_host(0, &mut output_bytes_host, Some(stream))
-        .map_err(|err| format!("failed to copy {label} output: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} output copy: {err}"))?;
-    let output = decode_f32_le_values(&output_bytes_host);
+    let output_elements = sequence_len
+        .checked_mul(q_heads)
+        .ok_or_else(|| format!("{label} output element count overflows"))?
+        .checked_mul(value_dim)
+        .ok_or_else(|| format!("{label} output element count overflows"))?;
+    if output.len() != output_elements {
+        return Err(format!(
+            "{label} runtime output size mismatch: expected {} got {}",
+            output_elements,
+            output.len()
+        ));
+    }
     let expected = runtime_host_causal_attn_f32(
         q,
         k,

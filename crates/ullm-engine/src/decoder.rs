@@ -464,6 +464,156 @@ pub fn qwen3_rope_to_host_f32(
     Ok(le_bytes_to_f32s(&output_bytes))
 }
 
+pub fn qwen3_causal_attn_to_host_f32(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+) -> Result<Vec<f32>, String> {
+    if sequence_len == 0 {
+        return Err("Qwen3 causal attention sequence length must be greater than zero".to_string());
+    }
+    if q_heads == 0 {
+        return Err("Qwen3 causal attention q_heads must be greater than zero".to_string());
+    }
+    if kv_heads == 0 {
+        return Err("Qwen3 causal attention kv_heads must be greater than zero".to_string());
+    }
+    if head_dim == 0 {
+        return Err("Qwen3 causal attention head_dim must be greater than zero".to_string());
+    }
+    if value_dim == 0 {
+        return Err("Qwen3 causal attention value_dim must be greater than zero".to_string());
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err(format!(
+            "Qwen3 causal attention q_heads must be a multiple of kv_heads: q_heads={q_heads} kv_heads={kv_heads}"
+        ));
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "Qwen3 causal attention softmax_scale must be finite and greater than zero".to_string(),
+        );
+    }
+
+    let q_elements = sequence_len
+        .checked_mul(q_heads)
+        .ok_or_else(|| "Qwen3 causal attention q element count overflows".to_string())?
+        .checked_mul(head_dim)
+        .ok_or_else(|| "Qwen3 causal attention q element count overflows".to_string())?;
+    if q.len() != q_elements {
+        return Err(format!(
+            "Qwen3 causal attention q length {} does not match sequence_len={sequence_len} q_heads={q_heads} head_dim={head_dim}",
+            q.len()
+        ));
+    }
+    let q_byte_count = q_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Qwen3 causal attention q byte size overflows".to_string())?;
+
+    let k_elements = sequence_len
+        .checked_mul(kv_heads)
+        .ok_or_else(|| "Qwen3 causal attention k element count overflows".to_string())?
+        .checked_mul(head_dim)
+        .ok_or_else(|| "Qwen3 causal attention k element count overflows".to_string())?;
+    if k.len() != k_elements {
+        return Err(format!(
+            "Qwen3 causal attention k length {} does not match sequence_len={sequence_len} kv_heads={kv_heads} head_dim={head_dim}",
+            k.len()
+        ));
+    }
+    let k_byte_count = k_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Qwen3 causal attention k byte size overflows".to_string())?;
+
+    let v_elements = sequence_len
+        .checked_mul(kv_heads)
+        .ok_or_else(|| "Qwen3 causal attention v element count overflows".to_string())?
+        .checked_mul(value_dim)
+        .ok_or_else(|| "Qwen3 causal attention v element count overflows".to_string())?;
+    if v.len() != v_elements {
+        return Err(format!(
+            "Qwen3 causal attention v length {} does not match sequence_len={sequence_len} kv_heads={kv_heads} value_dim={value_dim}",
+            v.len()
+        ));
+    }
+    let v_byte_count = v_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Qwen3 causal attention v byte size overflows".to_string())?;
+
+    let q_bytes = f32s_to_le_bytes(q);
+    let k_bytes = f32s_to_le_bytes(k);
+    let v_bytes = f32s_to_le_bytes(v);
+    let output_elements = sequence_len
+        .checked_mul(q_heads)
+        .ok_or_else(|| "Qwen3 causal attention output element count overflows".to_string())?
+        .checked_mul(value_dim)
+        .ok_or_else(|| "Qwen3 causal attention output element count overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Qwen3 causal attention output byte size overflows".to_string())?;
+
+    let mut q_buffer = context
+        .alloc_buffer(q_byte_count)
+        .map_err(|err| format!("failed to allocate Qwen3 causal attention q buffer: {err}"))?;
+    let mut k_buffer = context
+        .alloc_buffer(k_byte_count)
+        .map_err(|err| format!("failed to allocate Qwen3 causal attention k buffer: {err}"))?;
+    let mut v_buffer = context
+        .alloc_buffer(v_byte_count)
+        .map_err(|err| format!("failed to allocate Qwen3 causal attention v buffer: {err}"))?;
+    let mut output_buffer = context
+        .alloc_buffer(output_bytes)
+        .map_err(|err| format!("failed to allocate Qwen3 causal attention output buffer: {err}"))?;
+
+    q_buffer
+        .copy_from_host(0, &q_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy Qwen3 causal attention q input: {err}"))?;
+    k_buffer
+        .copy_from_host(0, &k_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy Qwen3 causal attention k input: {err}"))?;
+    v_buffer
+        .copy_from_host(0, &v_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy Qwen3 causal attention v input: {err}"))?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize Qwen3 causal attention input copies: {err}")
+    })?;
+
+    ullm_runtime_sys::causal_attn_f32(
+        &q_buffer,
+        &k_buffer,
+        &v_buffer,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        &mut output_buffer,
+        Some(stream),
+    )
+    .map_err(|err| format!("failed to run Qwen3 causal attention: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize Qwen3 causal attention: {err}"))?;
+
+    let mut output_bytes_host = vec![0_u8; output_bytes];
+    output_buffer
+        .copy_to_host(0, &mut output_bytes_host, Some(stream))
+        .map_err(|err| format!("failed to copy Qwen3 causal attention output: {err}"))?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize Qwen3 causal attention output copy: {err}")
+    })?;
+    Ok(le_bytes_to_f32s(&output_bytes_host))
+}
+
 pub struct Qwen3MlpRuntimeWeights {
     pub gate_rows: usize,
     pub gate_cols: usize,
@@ -2211,6 +2361,80 @@ mod tests {
         }
 
         assert_f32s_close(&output, &expected, 1e-6);
+    }
+
+    #[test]
+    fn qwen3_causal_attn_to_host_f32_runs_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let sequence_len = 3_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 2_usize;
+        let value_dim = 3_usize;
+        let softmax_scale = 0.75_f32;
+        let q = (0..sequence_len * q_heads * head_dim)
+            .map(|index| ((index * 2) as f32 - 3.0) / 11.0_f32)
+            .collect::<Vec<_>>();
+        let k = (0..sequence_len * kv_heads * head_dim)
+            .map(|index| ((index * 5) as f32 - 7.0) / 13.0_f32)
+            .collect::<Vec<_>>();
+        let v = (0..sequence_len * kv_heads * value_dim)
+            .map(|index| ((index * 7) as f32 - 5.0) / 17.0_f32)
+            .collect::<Vec<_>>();
+
+        let output = qwen3_causal_attn_to_host_f32(
+            &mut context,
+            &mut stream,
+            &q,
+            &k,
+            &v,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        )
+        .unwrap();
+
+        let mut expected = vec![0.0_f32; sequence_len * q_heads * value_dim];
+        let q_per_kv = q_heads / kv_heads;
+        for timestep in 0..sequence_len {
+            for q_head in 0..q_heads {
+                let kv_head = q_head / q_per_kv;
+                let q_base = (timestep * q_heads + q_head) * head_dim;
+                let mut scores = Vec::with_capacity(timestep + 1);
+                for source_timestep in 0..=timestep {
+                    let k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                    let score = (0..head_dim)
+                        .map(|dim| q[q_base + dim] * k[k_base + dim])
+                        .sum::<f32>()
+                        * softmax_scale;
+                    scores.push(score);
+                }
+                let max_score = scores
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, |max, score| max.max(score));
+                let weights = scores
+                    .iter()
+                    .map(|score| (*score - max_score).exp())
+                    .collect::<Vec<_>>();
+                let denominator = weights.iter().sum::<f32>();
+                let output_base = (timestep * q_heads + q_head) * value_dim;
+                for value in 0..value_dim {
+                    let mut weighted = 0.0_f32;
+                    for (source_timestep, weight) in weights.iter().enumerate() {
+                        let v_index = (source_timestep * kv_heads + kv_head) * value_dim + value;
+                        weighted += *weight * v[v_index];
+                    }
+                    expected[output_base + value] = weighted / denominator;
+                }
+            }
+        }
+
+        assert_f32s_close(&output, &expected, 1e-5);
     }
 
     #[test]
