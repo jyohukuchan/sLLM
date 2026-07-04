@@ -143,14 +143,28 @@ def compare_hot_input_vectors(
             if key in package_stats and key in fullref_stats
         }
 
-    package_top = package_summary.get("top_abs_features")
-    fullref_top = fullref_summary.get("top_abs_features")
-    if not isinstance(package_top, list) or not isinstance(fullref_top, list):
-        return result
+    top_feature_comparison = compare_feature_items(package_summary, fullref_summary, "top_abs_features")
+    if top_feature_comparison:
+        result["top_feature_comparison"] = top_feature_comparison[:8]
+    sampled_feature_comparison = compare_feature_items(package_summary, fullref_summary, "sampled_features")
+    if sampled_feature_comparison:
+        result["sampled_feature_comparison"] = sampled_feature_comparison[:16]
+    return result
+
+
+def compare_feature_items(
+    package_summary: dict[str, Any],
+    fullref_summary: dict[str, Any],
+    field_name: str,
+) -> list[dict[str, Any]]:
+    package_items = package_summary.get(field_name)
+    fullref_items = fullref_summary.get(field_name)
+    if not isinstance(package_items, list) or not isinstance(fullref_items, list):
+        return []
 
     package_map = {
         item.get("feature_index"): item
-        for item in package_top
+        for item in package_items
         if isinstance(item, dict)
         and isinstance(item.get("feature_index"), int)
         and isinstance(item.get("value"), (int, float))
@@ -158,7 +172,7 @@ def compare_hot_input_vectors(
     }
     fullref_map = {
         item.get("feature_index"): item
-        for item in fullref_top
+        for item in fullref_items
         if isinstance(item, dict)
         and isinstance(item.get("feature_index"), int)
         and isinstance(item.get("value"), (int, float))
@@ -186,13 +200,32 @@ def compare_hot_input_vectors(
                 "abs_value_diff": abs_value_diff,
             }
         )
+        package_group_stats = package_item.get("group_stats")
+        fullref_group_stats = fullref_item.get("group_stats")
+        if isinstance(package_group_stats, dict) and isinstance(fullref_group_stats, dict):
+            top_feature_comparison[-1]["package_group_stats"] = package_group_stats
+            top_feature_comparison[-1]["fullref_group_stats"] = fullref_group_stats
+            top_feature_comparison[-1]["group_stats_error"] = {
+                key: diff(package_group_stats.get(key), fullref_group_stats.get(key))
+                for key in (
+                    "mean",
+                    "abs_mean",
+                    "rms",
+                    "min",
+                    "max",
+                    "max_abs",
+                )
+                if key in package_group_stats and key in fullref_group_stats
+            }
+            for key in ("group_index", "group_offset", "group_width"):
+                if key in package_item and key in fullref_item:
+                    top_feature_comparison[-1][key] = package_item.get(key)
 
     top_feature_comparison.sort(
         key=lambda item: float(abs(float_value(item.get("abs_value_diff")) or 0.0)),
         reverse=True,
     )
-    result["top_feature_comparison"] = top_feature_comparison[:8]
-    return result
+    return top_feature_comparison
 
 
 def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[str, Any]], run_mode: str) -> dict[str, Any]:
@@ -312,10 +345,10 @@ def fmt(value: Any) -> str:
 
 
 def markdown(rows: list[dict[str, Any]]) -> str:
-    def top_feature_label(value: Any) -> str:
+    def feature_label(value: Any, field_name: str) -> str:
         if not isinstance(value, dict):
             return "-"
-        top = value.get("top_feature_comparison")
+        top = value.get(field_name)
         if not isinstance(top, list) or not top:
             return "-"
         first = top[0]
@@ -328,6 +361,12 @@ def markdown(rows: list[dict[str, Any]]) -> str:
         if diff is None:
             return str(int(index))
         return f"{int(index)}:{fmt(diff)}"
+
+    def top_feature_label(value: Any) -> str:
+        return feature_label(value, "top_feature_comparison")
+
+    def sampled_feature_label(value: Any) -> str:
+        return feature_label(value, "sampled_feature_comparison")
 
     lines = [
         "| layer | token | hidden | pkg_out_diff | expected_delta | pkg_delta | full_delta | delta_error | attn_row_only | attn_activation | mlp_row_only | mlp_activation | attn_hot_status | attn_hot_abs_mean_err | attn_hot_top1 | mlp_hot_status | mlp_hot_abs_mean_err | mlp_hot_top1 |",
@@ -384,6 +423,7 @@ def markdown(rows: list[dict[str, Any]]) -> str:
                         fmt(stats_error.get("rms")),
                         fmt(stats_error.get("max_abs")),
                         top_feature_label(comparison),
+                        sampled_feature_label(comparison),
                     ]
                 )
                 + " |"
@@ -394,8 +434,8 @@ def markdown(rows: list[dict[str, Any]]) -> str:
                 "",
                 "## Hot Input Vector Stage Errors",
                 "",
-                "| layer | token | hidden | stage | status | abs_mean_err | rms_err | max_abs_err | top1 |",
-                "|---:|---:|---:|---|---:|---:|---:|---:|---:|",
+                "| layer | token | hidden | stage | status | abs_mean_err | rms_err | max_abs_err | top1 | sampled_top1 |",
+                "|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|",
                 *stage_rows,
             ]
         )

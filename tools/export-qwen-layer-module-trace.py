@@ -23,7 +23,7 @@ from aq_scale_formats import scale_values
 from safetensors import safe_open
 
 
-SCHEMA_VERSION = "qwen-layer-module-trace-v0.3"
+SCHEMA_VERSION = "qwen-layer-module-trace-v0.4"
 
 
 TOP_ABS_FEATURES = 8
@@ -263,7 +263,12 @@ def point_trace(
     }
 
 
-def vector_summary(values: np.ndarray, token_index: int) -> dict[str, Any]:
+def vector_summary(
+    values: np.ndarray,
+    token_index: int,
+    sampled_feature_indices: list[int] | None = None,
+    sampled_group_width: int | None = None,
+) -> dict[str, Any]:
     values = np.asarray(values)
     finite_mask = np.isfinite(values)
     finite_values = values[finite_mask]
@@ -316,8 +321,34 @@ def vector_summary(values: np.ndarray, token_index: int) -> dict[str, Any]:
         }
         for offset, index in enumerate(top_indices)
     ]
+    sampled_features = []
+    if sampled_feature_indices:
+        for index in sorted({int(index) for index in sampled_feature_indices}):
+            if index < 0 or index >= values.size:
+                continue
+            value = float(values[index])
+            sampled_features.append(
+                {
+                    "feature_index": index,
+                    "value": value,
+                    "abs_value": abs(value),
+                }
+            )
+            if sampled_group_width is not None and sampled_group_width > 0:
+                group_index = index // sampled_group_width
+                group_start = group_index * sampled_group_width
+                group_end = min(group_start + sampled_group_width, values.size)
+                if group_start < group_end:
+                    sampled_features[-1].update(
+                        {
+                            "group_index": group_index,
+                            "group_offset": index - group_start,
+                            "group_width": group_end - group_start,
+                            "group_stats": sampled_group_stats(values[group_start:group_end]),
+                        }
+                    )
 
-    return {
+    summary = {
         "token_index": token_index,
         "feature_count": int(values.size),
         "stats": {
@@ -337,6 +368,56 @@ def vector_summary(values: np.ndarray, token_index: int) -> dict[str, Any]:
         },
         "top_abs_features": top_abs_features,
     }
+    if sampled_features:
+        summary["sampled_features"] = sampled_features
+    return summary
+
+
+def sampled_group_stats(values: np.ndarray) -> dict[str, Any]:
+    values = np.asarray(values)
+    finite_mask = np.isfinite(values)
+    finite_values = values[finite_mask]
+    if finite_values.size == 0:
+        return {
+            "count": int(values.size),
+            "finite_count": 0,
+            "nonfinite_count": int(values.size),
+            "mean": 0.0,
+            "abs_mean": 0.0,
+            "rms": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "max_abs": 0.0,
+            "max_abs_index": 0,
+        }
+    finite_abs = np.abs(finite_values)
+    finite_indices = np.nonzero(finite_mask)[0]
+    max_abs_finite_index = int(np.argmax(finite_abs))
+    return {
+        "count": int(values.size),
+        "finite_count": int(finite_values.size),
+        "nonfinite_count": int(values.size - finite_values.size),
+        "mean": float(finite_values.mean()),
+        "abs_mean": float(finite_abs.mean()),
+        "rms": float(np.sqrt(np.mean(finite_values.astype(np.float64) * finite_values.astype(np.float64)))),
+        "min": float(finite_values.min()),
+        "max": float(finite_values.max()),
+        "max_abs": float(finite_abs[max_abs_finite_index]),
+        "max_abs_index": int(finite_indices[max_abs_finite_index]),
+    }
+
+
+def top_abs_feature_indices(values: np.ndarray, limit: int = TOP_ABS_FEATURES) -> list[int]:
+    values = np.asarray(values)
+    finite_mask = np.isfinite(values)
+    finite_values = values[finite_mask]
+    if finite_values.size == 0:
+        return []
+    finite_abs = np.abs(finite_values)
+    abs_desc_idx = np.argsort(finite_abs)[::-1]
+    top_finite_indices = abs_desc_idx[: min(limit, finite_values.size)]
+    finite_indices = np.nonzero(finite_mask)[0]
+    return [int(index) for index in finite_indices[top_finite_indices]]
 
 
 def hot_vector_projection_summary(
@@ -344,6 +425,8 @@ def hot_vector_projection_summary(
     token_index: int,
     feature_dim: int,
     name: str,
+    sampled_feature_indices: list[int] | None = None,
+    sampled_group_width: int | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(values, np.ndarray):
         return None
@@ -354,7 +437,7 @@ def hot_vector_projection_summary(
         raise ValueError(f"{name} feature_dim={feature_dim} is larger than available {feature_count}")
 
     vector = values[:feature_dim].astype(np.float32)
-    return vector_summary(vector, token_index)
+    return vector_summary(vector, token_index, sampled_feature_indices, sampled_group_width)
 
 
 def hot_input_vector_summaries(
@@ -363,18 +446,27 @@ def hot_input_vector_summaries(
     token_index: int,
     hidden: int,
 ) -> dict[str, Any]:
+    attention_vector = attention_projection_input[0, token_index][:hidden].astype(np.float32)
+    attention_sampled_features = top_abs_feature_indices(attention_vector)
+    mlp_vector = mlp_activation[0, token_index].astype(np.float32)
+    mlp_sampled_features = top_abs_feature_indices(mlp_vector)
+    hidden_group_width = 128 if hidden % 128 == 0 else None
     return {
         "attention_projection_input": hot_vector_projection_summary(
             attention_projection_input[0, token_index],
             token_index,
             hidden,
             "attention_projection_input",
+            attention_sampled_features,
+            hidden_group_width,
         ),
         "mlp_activation": hot_vector_projection_summary(
             mlp_activation[0, token_index],
             token_index,
             mlp_activation.shape[2],
             "mlp_activation",
+            mlp_sampled_features,
+            None,
         ),
     }
 
@@ -384,6 +476,8 @@ def add_token_vector_summary(
     name: str,
     values: np.ndarray,
     token_index: int,
+    sampled_feature_indices: list[int] | None = None,
+    sampled_group_width: int | None = None,
 ) -> None:
     if values.ndim != 3:
         raise ValueError(f"{name} expected [batch,seq,features], got {values.shape}")
@@ -392,6 +486,8 @@ def add_token_vector_summary(
         token_index,
         values.shape[2],
         name,
+        sampled_feature_indices,
+        sampled_group_width,
     )
 
 
@@ -413,6 +509,26 @@ def causal_conv1d_silu(values: np.ndarray, weight: np.ndarray) -> np.ndarray:
             continue
         output[:, left_padding:, :] += values[:, : sequence_len - left_padding, :] * weight[:, kernel]
     return (output / (1.0 + np.exp(-output))).astype(np.float32)
+
+
+def silu(values: np.ndarray) -> np.ndarray:
+    values = values.astype(np.float32)
+    return (values / (1.0 + np.exp(-values))).astype(np.float32)
+
+
+def rmsnorm_by_head(values: np.ndarray, weight: np.ndarray, epsilon: float) -> np.ndarray:
+    if values.ndim != 3:
+        raise ValueError(f"RMSNorm input expected [batch,seq,hidden], got {values.shape}")
+    weight = weight.astype(np.float32).reshape(-1)
+    if weight.size == 0:
+        raise ValueError("RMSNorm weight must be non-empty")
+    if values.shape[2] % weight.size != 0:
+        raise ValueError(f"hidden={values.shape[2]} is not divisible by RMSNorm width={weight.size}")
+    flat = values.astype(np.float32).reshape(-1, weight.size)
+    mean_square = np.mean(flat * flat, axis=1, keepdims=True)
+    inv_rms = 1.0 / np.sqrt(mean_square + np.float32(epsilon))
+    normed = flat * inv_rms * weight[None, :]
+    return normed.reshape(values.shape).astype(np.float32)
 
 
 def linear_attn_gate_beta(a: np.ndarray, b: np.ndarray, a_log: np.ndarray, dt_bias: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -638,6 +754,12 @@ def run_layer_trace(
         tensor_to_numpy_f32(state["linear_attn.dt_bias"]),
     )
     attention_recurrent = captured["attention_recurrent_flat"].reshape(before.shape[0], before.shape[1], -1)
+    attention_pre_gate_normed = rmsnorm_by_head(
+        attention_recurrent,
+        tensor_to_numpy_f32(state["linear_attn.norm.weight"]),
+        1e-6,
+    )
+    attention_gate_silu = silu(attention_z_projection)
     attention_gated_normed = captured["attention_gated_normed"].reshape(before.shape[0], before.shape[1], -1)
     attention_projection_input = captured["attention_projection_input"]
     attention_output = captured["attention_output"]
@@ -752,15 +874,31 @@ def run_layer_trace(
         ("attention_input_normed", attention_input_normed),
         ("attention_qkv_projection", attention_qkv_projection),
         ("attention_z_projection", attention_z_projection),
+        ("attention_gate_silu", attention_gate_silu),
         ("attention_a_projection", attention_a_projection),
         ("attention_b_projection", attention_b_projection),
         ("attention_conv", attention_conv),
         ("attention_gate", attention_gate),
         ("attention_beta", attention_beta),
         ("attention_recurrent", attention_recurrent),
+        ("attention_pre_gate_normed", attention_pre_gate_normed),
         ("attention_gated_normed", attention_gated_normed),
     ):
-        add_token_vector_summary(hot_input_vectors, name, values, token_index)
+        sampled_features = None
+        if values.shape[2] == before.shape[2]:
+            sampled_features = [
+                int(item["feature_index"])
+                for item in hot_input_vectors["attention_projection_input"]["top_abs_features"]
+            ]
+        sampled_group_width = 128 if values.shape[2] == before.shape[2] and before.shape[2] % 128 == 0 else None
+        add_token_vector_summary(
+            hot_input_vectors,
+            name,
+            values,
+            token_index,
+            sampled_features,
+            sampled_group_width,
+        )
     per_token_hot_input_vectors = [
         {
             "token_index": token,
@@ -779,15 +917,31 @@ def run_layer_trace(
             ("attention_input_normed", attention_input_normed),
             ("attention_qkv_projection", attention_qkv_projection),
             ("attention_z_projection", attention_z_projection),
+            ("attention_gate_silu", attention_gate_silu),
             ("attention_a_projection", attention_a_projection),
             ("attention_b_projection", attention_b_projection),
             ("attention_conv", attention_conv),
             ("attention_gate", attention_gate),
             ("attention_beta", attention_beta),
             ("attention_recurrent", attention_recurrent),
+            ("attention_pre_gate_normed", attention_pre_gate_normed),
             ("attention_gated_normed", attention_gated_normed),
         ):
-            add_token_vector_summary(item, name, values, token)
+            sampled_features = None
+            if values.shape[2] == before.shape[2]:
+                sampled_features = [
+                    int(feature["feature_index"])
+                    for feature in item["attention_projection_input"]["top_abs_features"]
+                ]
+            sampled_group_width = 128 if values.shape[2] == before.shape[2] and before.shape[2] % 128 == 0 else None
+            add_token_vector_summary(
+                item,
+                name,
+                values,
+                token,
+                sampled_features,
+                sampled_group_width,
+            )
 
     return {
         "schema_version": SCHEMA_VERSION,

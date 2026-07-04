@@ -163,3 +163,5 @@ hot input vector:golden prefixの最大output差分が出たtoken/hidden coordin
 causal Conv1d weight order:PyTorchの`Conv1d(padding=kernel_size-1)`で現在tokenに対応するkernel位置が最後のweight要素になる順序。linear attentionのdepthwise conv1dで参照実装とruntimeの境界を合わせるために使う
 Qwen3.5 gated RMSNorm:linear attentionのrecurrent出力を`head_v_dim`単位にreshapeし、head内でRMSNormした後に同じhead単位の`F.silu(z)`を掛ける正規化境界。参照実装では`linear_attn.norm`の出力がそのまま`out_proj`入力になる
 projection row-dot check:full-referenceの入力vectorに対してsource weight rowとpackage AQ4復元rowのdot積を比較し、projection単体の量子化寄与を測る診断
+sampled feature:hot input vector内で、あるstageのtop absolute feature indexを他stageでも同じfeature indexとして記録する診断点。stageごとのtop feature集合が一致しない場合でも、同じ内部featureの値と誤差を追跡できる
+head RMS diagnostic:Qwen3.5 gated RMSNormのようにhead_v_dim単位で正規化する境界について、sampled featureが属するhead内のRMSやmax_absをpackage/full-referenceで比較する診断

@@ -12303,6 +12303,11 @@ fn package_golden_prefix_smoke_impl(
                         hidden,
                     ),
                     (
+                        "attention_gate_silu",
+                        run.attention_gate_silu.as_slice(),
+                        hidden,
+                    ),
+                    (
                         "attention_a_projection",
                         run.attention_a_projection.as_slice(),
                         run.attention_gate_dim,
@@ -12330,6 +12335,11 @@ fn package_golden_prefix_smoke_impl(
                     (
                         "attention_recurrent",
                         run.attention_recurrent.as_slice(),
+                        hidden,
+                    ),
+                    (
+                        "attention_pre_gate_normed",
+                        run.attention_normed.as_slice(),
                         hidden,
                     ),
                     ("attention_normed", run.attention_normed.as_slice(), hidden),
@@ -12829,6 +12839,8 @@ fn package_hot_input_vectors(
     extra_hot_input_vectors: &[(&str, &[f32], usize)],
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let mut vectors = serde_json::Map::new();
+    let mut attention_hot_feature_indices = Vec::new();
+    let hidden_group_width = if hidden % 128 == 0 { Some(128) } else { None };
     if let Some(values) = attention_projection_input {
         let start = token_index
             .checked_mul(hidden)
@@ -12842,10 +12854,16 @@ fn package_hot_input_vectors(
                 values.len()
             )
         })?;
+        attention_hot_feature_indices = package_top_abs_feature_indices(slice, 8);
         insert_json_detail(
             &mut vectors,
             "attention_projection_input",
-            package_vector_summary(token_index, slice),
+            package_vector_summary(
+                token_index,
+                slice,
+                &attention_hot_feature_indices,
+                hidden_group_width,
+            ),
         );
     }
     if let Some((values, feature_dim)) = mlp_activation {
@@ -12861,10 +12879,11 @@ fn package_hot_input_vectors(
                 values.len()
             )
         })?;
+        let sampled_feature_indices = package_top_abs_feature_indices(slice, 8);
         insert_json_detail(
             &mut vectors,
             "mlp_activation",
-            package_vector_summary(token_index, slice),
+            package_vector_summary(token_index, slice, &sampled_feature_indices, None),
         );
     }
     for (name, values, feature_dim) in extra_hot_input_vectors {
@@ -12880,10 +12899,24 @@ fn package_hot_input_vectors(
                 values.len()
             )
         })?;
+        let sampled_feature_indices = if *feature_dim == hidden {
+            attention_hot_feature_indices.as_slice()
+        } else {
+            &[]
+        };
         insert_json_detail(
             &mut vectors,
             *name,
-            package_vector_summary(token_index, slice),
+            package_vector_summary(
+                token_index,
+                slice,
+                sampled_feature_indices,
+                if *feature_dim == hidden {
+                    hidden_group_width
+                } else {
+                    None
+                },
+            ),
         );
     }
     Ok(vectors)
@@ -12892,6 +12925,8 @@ fn package_hot_input_vectors(
 fn package_vector_summary(
     token_index: usize,
     values: &[f32],
+    sampled_feature_indices: &[usize],
+    sampled_group_width: Option<usize>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut summary = serde_json::Map::new();
     insert_json_detail(&mut summary, "token_index", token_index);
@@ -12906,10 +12941,17 @@ fn package_vector_summary(
         "top_abs_features",
         package_top_abs_value_locations(values, 8),
     );
+    if !sampled_feature_indices.is_empty() {
+        insert_json_detail(
+            &mut summary,
+            "sampled_features",
+            package_sampled_value_locations(values, sampled_feature_indices, sampled_group_width),
+        );
+    }
     summary
 }
 
-fn package_top_abs_value_locations(values: &[f32], limit: usize) -> Vec<serde_json::Value> {
+fn package_top_abs_feature_indices(values: &[f32], limit: usize) -> Vec<usize> {
     let mut indexed = values.iter().enumerate().collect::<Vec<_>>();
     indexed.sort_by(|(_, left), (_, right)| {
         right
@@ -12920,12 +12962,69 @@ fn package_top_abs_value_locations(values: &[f32], limit: usize) -> Vec<serde_js
     indexed
         .into_iter()
         .take(limit)
+        .map(|(feature_index, _)| feature_index)
+        .collect()
+}
+
+fn package_top_abs_value_locations(values: &[f32], limit: usize) -> Vec<serde_json::Value> {
+    package_top_abs_feature_indices(values, limit)
+        .into_iter()
+        .filter_map(|feature_index| {
+            values
+                .get(feature_index)
+                .map(|value| (feature_index, value))
+        })
         .map(|(feature_index, value)| {
             serde_json::json!({
                 "feature_index": feature_index,
                 "value": *value,
                 "abs_value": value.abs(),
             })
+        })
+        .collect()
+}
+
+fn package_sampled_value_locations(
+    values: &[f32],
+    sampled_feature_indices: &[usize],
+    sampled_group_width: Option<usize>,
+) -> Vec<serde_json::Value> {
+    let mut indices = sampled_feature_indices
+        .iter()
+        .copied()
+        .filter(|index| *index < values.len())
+        .collect::<Vec<_>>();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+        .into_iter()
+        .map(|feature_index| {
+            let value = values[feature_index];
+            let mut location = serde_json::json!({
+                "feature_index": feature_index,
+                "value": value,
+                "abs_value": value.abs(),
+            });
+            if let Some(group_width) = sampled_group_width {
+                if group_width > 0 {
+                    let group_index = feature_index / group_width;
+                    let group_start = group_index * group_width;
+                    let group_end = (group_start + group_width).min(values.len());
+                    if group_start < group_end {
+                        if let Some(object) = location.as_object_mut() {
+                            insert_json_detail(object, "group_index", group_index);
+                            insert_json_detail(object, "group_offset", feature_index - group_start);
+                            insert_json_detail(object, "group_width", group_end - group_start);
+                            insert_json_detail(
+                                object,
+                                "group_stats",
+                                package_slice_distribution_stats(&values[group_start..group_end]),
+                            );
+                        }
+                    }
+                }
+            }
+            location
         })
         .collect()
 }
@@ -19396,6 +19495,7 @@ struct PackageLinearAttnMlpBlockSequenceRun {
     attention_qkv_projection: Vec<f32>,
     attention_qkv_projection_dim: usize,
     attention_z_projection: Vec<f32>,
+    attention_gate_silu: Vec<f32>,
     attention_a_projection: Vec<f32>,
     attention_b_projection: Vec<f32>,
     attention_gate_dim: usize,
@@ -20314,6 +20414,8 @@ fn package_linear_attn_mlp_block_sequence_run(
         )
     };
 
+    let z_silu_output = runtime_host_silu_f32(&z_output);
+
     let mut post_normed_expected = Vec::with_capacity(sequence_len * hidden);
     for timestep in 0..sequence_len {
         let start = timestep * hidden;
@@ -20627,6 +20729,7 @@ fn package_linear_attn_mlp_block_sequence_run(
         attention_qkv_projection: qkv_output,
         attention_qkv_projection_dim: qkv_rows_expected,
         attention_z_projection: z_output,
+        attention_gate_silu: z_silu_output,
         attention_a_projection: a_output,
         attention_b_projection: b_output,
         attention_gate_dim: value_heads,
@@ -21902,6 +22005,16 @@ fn runtime_host_silu_mul_f32(gate: &[f32], up: &[f32]) -> Vec<f32> {
         .map(|(gate_value, up_value)| {
             let gate_value = *gate_value;
             gate_value * (1.0_f32 / (1.0_f32 + (-gate_value).exp())) * *up_value
+        })
+        .collect()
+}
+
+fn runtime_host_silu_f32(values: &[f32]) -> Vec<f32> {
+    values
+        .iter()
+        .map(|value| {
+            let value = *value;
+            value * (1.0_f32 / (1.0_f32 + (-value).exp()))
         })
         .collect()
 }
