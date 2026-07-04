@@ -7,12 +7,12 @@ use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
 use ullm_engine::decoder::{
-    PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntime,
-    Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights,
-    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimePreparedSequence,
-    Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode, Qwen3SelfAttnRuntimeShape,
-    Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
-    qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
+    PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntimeWeights,
+    Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnDecodeState,
+    Qwen3SelfAttnRuntimePreparedSequence, Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode,
+    Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
+    qwen3_causal_attn_to_host_f32, qwen3_decoder_layer_sequence_to_host_f32,
+    qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
     qwen3_self_attn_block_sequence_to_host_f32,
     qwen3_self_attn_prepare_sequence_for_paged_decode_f32, qwen3_self_attn_runtime_shape,
     split_qwen3_self_attn_q_projection,
@@ -8519,77 +8519,26 @@ fn package_self_attn_mlp_block_smoke_impl(
             head_dim: self_attn.head_dim,
             value_dim: self_attn.value_dim,
         };
-        let mut layer_runtime = Qwen3DecoderLayerRuntime::new(
+        let layer_sequence_output = qwen3_decoder_layer_sequence_to_host_f32(
+            &layer_weights,
             &mut context,
             &mut stream,
-            &layer_weights,
             decode_shape,
-            self_attn.paged_block_table.clone(),
+            &self_attn.paged_block_table,
             self_attn.softmax_scale,
             mlp_epsilon,
+            &self_attn.q_rope,
+            &self_attn.k_rope,
+            &self_attn.v_projected,
+            self_attn.q_gate.as_deref(),
+            &self_attn.residual_sequence,
+            sequence_len,
         )?;
-        let q_token_elements = self_attn.q_heads * self_attn.head_dim;
-        let k_token_elements = self_attn.kv_heads * self_attn.head_dim;
-        let v_token_elements = self_attn.kv_heads * self_attn.value_dim;
-        let attention_elements = self_attn.q_heads * self_attn.value_dim;
-        let mut layer_step_block_output = Vec::with_capacity(sequence_len * hidden);
-        let mut post_normed = Vec::with_capacity(sequence_len * hidden);
-        let mut mlp_output = Vec::with_capacity(sequence_len * hidden);
-        let mut layer_output = Vec::with_capacity(sequence_len * hidden);
-        for timestep in 0..sequence_len {
-            let q_start = timestep * q_token_elements;
-            let q_end = q_start + q_token_elements;
-            let k_start = timestep * k_token_elements;
-            let k_end = k_start + k_token_elements;
-            let v_start = timestep * v_token_elements;
-            let v_end = v_start + v_token_elements;
-            let attention_start = timestep * attention_elements;
-            let attention_end = attention_start + attention_elements;
-            let residual_start = timestep * hidden;
-            let residual_end = residual_start + hidden;
-            let gate_step = self_attn
-                .q_gate
-                .as_ref()
-                .map(|gate| &gate[attention_start..attention_end]);
-            let step = layer_runtime
-                .step(
-                    &mut stream,
-                    &self_attn.q_rope[q_start..q_end],
-                    &self_attn.k_rope[k_start..k_end],
-                    &self_attn.v_projected[v_start..v_end],
-                    gate_step,
-                    &self_attn.residual_sequence[residual_start..residual_end],
-                )
-                .map_err(|err| {
-                    format!("failed to run Qwen3 decoder layer step {timestep}: {err}")
-                })?;
-            if step.cache_position != timestep {
-                return Err(format!(
-                    "Qwen3 decoder layer step wrote position {}, expected {timestep}",
-                    step.cache_position
-                ));
-            }
-            if step.cache_len != timestep + 1 {
-                return Err(format!(
-                    "Qwen3 decoder layer step reported cache_len {}, expected {}",
-                    step.cache_len,
-                    timestep + 1
-                ));
-            }
-            layer_step_block_output.extend_from_slice(&step.block_output);
-            post_normed.extend_from_slice(&step.post_normed);
-            mlp_output.extend_from_slice(&step.mlp_output);
-            layer_output.extend_from_slice(&step.layer_output);
-        }
-
-        let packed_shape = PagedDecodeShape {
-            block_size: self_attn.paged_block_size,
-            cache_blocks: self_attn.paged_cache_blocks,
-            q_heads: self_attn.q_heads,
-            kv_heads: self_attn.kv_heads,
-            head_dim: self_attn.head_dim,
-            value_dim: self_attn.value_dim,
-        };
+        let layer_step_block_output = layer_sequence_output.block_output;
+        let post_normed = layer_sequence_output.post_normed;
+        let mlp_output = layer_sequence_output.mlp_output;
+        let layer_output = layer_sequence_output.layer_output;
+        let layer_cache = layer_sequence_output.paged_cache;
         let PagedKvCacheReadback {
             k: expected_paged_k_cache,
             v: expected_paged_v_cache,
@@ -8598,11 +8547,8 @@ fn package_self_attn_mlp_block_smoke_impl(
             &self_attn.v_projected,
             &self_attn.paged_block_table,
             sequence_len,
-            packed_shape,
+            decode_shape,
         )?;
-        let layer_cache = layer_runtime
-            .read_cache_to_host(&mut stream)
-            .map_err(|err| format!("failed to read Qwen3 decoder layer paged cache: {err}"))?;
         verify_f32_close(
             "package-self-attn-mlp-block-smoke layer step paged k cache write",
             &layer_cache.k,

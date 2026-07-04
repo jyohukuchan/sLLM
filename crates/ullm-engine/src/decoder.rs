@@ -179,6 +179,15 @@ pub struct Qwen3SelfAttnBlockSequenceOutput {
     pub paged_cache: PagedKvCacheReadback,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen3DecoderLayerSequenceOutput {
+    pub block_output: Vec<f32>,
+    pub post_normed: Vec<f32>,
+    pub mlp_output: Vec<f32>,
+    pub layer_output: Vec<f32>,
+    pub paged_cache: PagedKvCacheReadback,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn qwen3_self_attn_block_sequence_to_host_f32(
     context: &mut RuntimeContext,
@@ -349,6 +358,188 @@ pub fn qwen3_self_attn_block_sequence_to_host_f32(
         attention_projection_input,
         projected_output,
         block_output,
+        paged_cache,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn qwen3_decoder_layer_sequence_to_host_f32(
+    layer_weights: &Qwen3DecoderLayerRuntimeWeights,
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    shape: PagedDecodeShape,
+    block_table: &[u32],
+    softmax_scale: f32,
+    mlp_epsilon: f32,
+    q_sequence: &[f32],
+    k_sequence: &[f32],
+    v_sequence: &[f32],
+    output_gate_sequence: Option<&[f32]>,
+    residual_sequence: &[f32],
+    sequence_len: usize,
+) -> Result<Qwen3DecoderLayerSequenceOutput, String> {
+    shape.validate()?;
+    if sequence_len == 0 {
+        return Err("decoder layer sequence length must be greater than zero".to_string());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err("decoder layer softmax_scale must be finite and greater than zero".to_string());
+    }
+    if !mlp_epsilon.is_finite() || mlp_epsilon <= 0.0 {
+        return Err("decoder layer mlp epsilon must be finite and greater than zero".to_string());
+    }
+
+    let q_token_elements = shape.q_elements()?;
+    let k_token_elements = shape.k_token_elements()?;
+    let v_token_elements = shape.v_token_elements()?;
+    let attention_elements = shape.output_elements()?;
+    let hidden = layer_weights.post_attention.hidden;
+    if hidden == 0 {
+        return Err("decoder layer hidden size must be greater than zero".to_string());
+    }
+
+    let expected_q_len = q_token_elements
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "decoder layer q sequence length overflows".to_string())?;
+    let expected_k_len = k_token_elements
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "decoder layer k sequence length overflows".to_string())?;
+    let expected_v_len = v_token_elements
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "decoder layer v sequence length overflows".to_string())?;
+    let expected_residual_len = hidden
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "decoder layer residual sequence length overflows".to_string())?;
+    let expected_attention_len = attention_elements
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "decoder layer attention sequence length overflows".to_string())?;
+    if q_sequence.len() != expected_q_len {
+        return Err(format!(
+            "decoder layer q sequence length {} does not match sequence_len={sequence_len} q_token_elements={q_token_elements}",
+            q_sequence.len()
+        ));
+    }
+    if k_sequence.len() != expected_k_len {
+        return Err(format!(
+            "decoder layer k sequence length {} does not match sequence_len={sequence_len} k_token_elements={k_token_elements}",
+            k_sequence.len()
+        ));
+    }
+    if v_sequence.len() != expected_v_len {
+        return Err(format!(
+            "decoder layer v sequence length {} does not match sequence_len={sequence_len} v_token_elements={v_token_elements}",
+            v_sequence.len()
+        ));
+    }
+    if residual_sequence.len() != expected_residual_len {
+        return Err(format!(
+            "decoder layer residual sequence length {} does not match sequence_len={sequence_len} hidden={hidden}",
+            residual_sequence.len()
+        ));
+    }
+    if let Some(gate_sequence) = output_gate_sequence {
+        if gate_sequence.len() != expected_attention_len {
+            return Err(format!(
+                "decoder layer output gate length {} does not match sequence_len={sequence_len} attention_elements={attention_elements}",
+                gate_sequence.len()
+            ));
+        }
+    }
+
+    let mut layer_runtime = Qwen3DecoderLayerRuntime::new(
+        context,
+        stream,
+        layer_weights,
+        shape,
+        block_table.to_vec(),
+        softmax_scale,
+        mlp_epsilon,
+    )
+    .map_err(|err| format!("failed to create decoder layer sequence state: {err}"))?;
+
+    let mut block_output = Vec::with_capacity(expected_residual_len);
+    let mut post_normed = Vec::with_capacity(expected_residual_len);
+    let mut mlp_output = Vec::with_capacity(expected_residual_len);
+    let mut layer_output = Vec::with_capacity(expected_residual_len);
+
+    for timestep in 0..sequence_len {
+        let q_start = timestep
+            .checked_mul(q_token_elements)
+            .ok_or_else(|| "decoder layer q slice start overflows".to_string())?;
+        let q_end = q_start
+            .checked_add(q_token_elements)
+            .ok_or_else(|| "decoder layer q slice end overflows".to_string())?;
+        let k_start = timestep
+            .checked_mul(k_token_elements)
+            .ok_or_else(|| "decoder layer k slice start overflows".to_string())?;
+        let k_end = k_start
+            .checked_add(k_token_elements)
+            .ok_or_else(|| "decoder layer k slice end overflows".to_string())?;
+        let v_start = timestep
+            .checked_mul(v_token_elements)
+            .ok_or_else(|| "decoder layer v slice start overflows".to_string())?;
+        let v_end = v_start
+            .checked_add(v_token_elements)
+            .ok_or_else(|| "decoder layer v slice end overflows".to_string())?;
+        let residual_start = timestep
+            .checked_mul(hidden)
+            .ok_or_else(|| "decoder layer residual slice start overflows".to_string())?;
+        let residual_end = residual_start
+            .checked_add(hidden)
+            .ok_or_else(|| "decoder layer residual slice end overflows".to_string())?;
+        let attention_gate = if let Some(gate) = output_gate_sequence {
+            let gate_start = timestep
+                .checked_mul(attention_elements)
+                .ok_or_else(|| "decoder layer gate slice start overflows".to_string())?;
+            let gate_end = gate_start
+                .checked_add(attention_elements)
+                .ok_or_else(|| "decoder layer gate slice end overflows".to_string())?;
+            Some(&gate[gate_start..gate_end])
+        } else {
+            None
+        };
+
+        let step = layer_runtime
+            .step(
+                stream,
+                &q_sequence[q_start..q_end],
+                &k_sequence[k_start..k_end],
+                &v_sequence[v_start..v_end],
+                attention_gate,
+                &residual_sequence[residual_start..residual_end],
+            )
+            .map_err(|err| {
+                format!("failed to run decoder layer sequence step {timestep}: {err}")
+            })?;
+        if step.cache_position != timestep {
+            return Err(format!(
+                "decoder layer sequence step wrote position {}, expected {timestep}",
+                step.cache_position
+            ));
+        }
+        if step.cache_len != timestep + 1 {
+            return Err(format!(
+                "decoder layer sequence step reported cache_len {}, expected {}",
+                step.cache_len,
+                timestep + 1
+            ));
+        }
+
+        block_output.extend_from_slice(&step.block_output);
+        post_normed.extend_from_slice(&step.post_normed);
+        mlp_output.extend_from_slice(&step.mlp_output);
+        layer_output.extend_from_slice(&step.layer_output);
+    }
+
+    let paged_cache = layer_runtime
+        .read_cache_to_host(stream)
+        .map_err(|err| format!("failed to read decoder layer sequence paged cache: {err}"))?;
+
+    Ok(Qwen3DecoderLayerSequenceOutput {
+        block_output,
+        post_normed,
+        mlp_output,
+        layer_output,
         paged_cache,
     })
 }
@@ -2983,6 +3174,239 @@ mod tests {
         );
         assert_f32s_close(&output.projected_output, &expected_projected, 1e-5);
         assert_f32s_close(&output.block_output, &expected_block, 1e-5);
+        assert_f32s_close(&output.paged_cache.k, &expected_cache.k, 1e-6);
+        assert_f32s_close(&output.paged_cache.v, &expected_cache.v, 1e-6);
+    }
+
+    #[test]
+    fn qwen3_decoder_layer_sequence_to_host_f32_runs_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 1,
+            cache_blocks: 4,
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        let hidden = 4_usize;
+        let intermediate = 3_usize;
+        let block_table = vec![1_u32, 0_u32, 2_u32];
+        let sequence_len = 3_usize;
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        let mlp_epsilon = 1e-5_f32;
+        let attention_elements = shape.output_elements().unwrap();
+        let q_token_elements = shape.q_elements().unwrap();
+        let k_token_elements = shape.k_token_elements().unwrap();
+        let v_token_elements = shape.v_token_elements().unwrap();
+        let q_matrix = (0..shape.q_elements().unwrap() * hidden)
+            .map(|index| ((index * 3) as f32 - 11.0) / 17.0)
+            .collect::<Vec<_>>();
+        let k_matrix = (0..shape.k_token_elements().unwrap() * hidden)
+            .map(|index| ((index * 5) as f32 - 13.0) / 19.0)
+            .collect::<Vec<_>>();
+        let v_matrix = (0..shape.v_token_elements().unwrap() * hidden)
+            .map(|index| ((index * 7) as f32 - 23.0) / 29.0)
+            .collect::<Vec<_>>();
+        let o_matrix = (0..hidden * attention_elements)
+            .map(|index| ((index * 11) as f32 - 13.0) / 31.0)
+            .collect::<Vec<_>>();
+        let post_norm_weight = (0..hidden)
+            .map(|index| ((index * 2) as f32 + 1.0) / 7.0)
+            .collect::<Vec<_>>();
+        let mlp_gate_matrix = (0..intermediate * hidden)
+            .map(|index| ((index * 13) as f32 - 17.0) / 23.0)
+            .collect::<Vec<_>>();
+        let mlp_up_matrix = (0..intermediate * hidden)
+            .map(|index| ((index * 29) as f32 - 31.0) / 37.0)
+            .collect::<Vec<_>>();
+        let mlp_down_matrix = (0..hidden * intermediate)
+            .map(|index| ((index * 41) as f32 - 43.0) / 47.0)
+            .collect::<Vec<_>>();
+
+        let mut q_matrix_buffer = context.alloc_buffer(f32_bytes(q_matrix.len())).unwrap();
+        let mut k_matrix_buffer = context.alloc_buffer(f32_bytes(k_matrix.len())).unwrap();
+        let mut v_matrix_buffer = context.alloc_buffer(f32_bytes(v_matrix.len())).unwrap();
+        let mut o_matrix_buffer = context.alloc_buffer(f32_bytes(o_matrix.len())).unwrap();
+        let mut post_norm_weight_buffer = context
+            .alloc_buffer(f32_bytes(post_norm_weight.len()))
+            .unwrap();
+        let mut mlp_gate_matrix_buffer = context
+            .alloc_buffer(f32_bytes(mlp_gate_matrix.len()))
+            .unwrap();
+        let mut mlp_up_matrix_buffer = context
+            .alloc_buffer(f32_bytes(mlp_up_matrix.len()))
+            .unwrap();
+        let mut mlp_down_matrix_buffer = context
+            .alloc_buffer(f32_bytes(mlp_down_matrix.len()))
+            .unwrap();
+
+        q_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&q_matrix), Some(&mut stream))
+            .unwrap();
+        k_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&k_matrix), Some(&mut stream))
+            .unwrap();
+        v_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&v_matrix), Some(&mut stream))
+            .unwrap();
+        o_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&o_matrix), Some(&mut stream))
+            .unwrap();
+        post_norm_weight_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&post_norm_weight), Some(&mut stream))
+            .unwrap();
+        mlp_gate_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&mlp_gate_matrix), Some(&mut stream))
+            .unwrap();
+        mlp_up_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&mlp_up_matrix), Some(&mut stream))
+            .unwrap();
+        mlp_down_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&mlp_down_matrix), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let q_sequence = (0..sequence_len * q_token_elements)
+            .map(|index| ((index * 2) as f32 - 7.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k_sequence = (0..sequence_len * k_token_elements)
+            .map(|index| ((index * 5) as f32 - 3.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_sequence = (0..sequence_len * v_token_elements)
+            .map(|index| ((index * 7) as f32 - 5.0) / 17.0)
+            .collect::<Vec<_>>();
+        let residual_sequence = (0..sequence_len * hidden)
+            .map(|index| ((index * 9) as f32 - 2.0) / 29.0)
+            .collect::<Vec<_>>();
+        let output_gate_sequence = (0..sequence_len * attention_elements)
+            .map(|index| ((index * 11) as f32 - 13.0) / 23.0)
+            .collect::<Vec<_>>();
+        let weights = Qwen3DecoderLayerRuntimeWeights {
+            self_attn: Qwen3SelfAttnRuntimeWeights {
+                q_rows: shape.q_elements().unwrap(),
+                q_cols: hidden,
+                k_rows: shape.k_token_elements().unwrap(),
+                v_rows: shape.v_token_elements().unwrap(),
+                o_rows: hidden,
+                o_cols: attention_elements,
+                head_dim: shape.head_dim,
+                kv_heads: shape.kv_heads,
+                value_dim: shape.value_dim,
+                q_matrix: q_matrix_buffer,
+                k_matrix: k_matrix_buffer,
+                v_matrix: v_matrix_buffer,
+                o_matrix: o_matrix_buffer,
+            },
+            post_attention: Qwen3PostAttentionRuntimeWeights {
+                hidden,
+                intermediate,
+                post_norm_weight: post_norm_weight_buffer,
+                mlp: Qwen3MlpRuntimeWeights {
+                    gate_rows: intermediate,
+                    gate_cols: hidden,
+                    gate_matrix: mlp_gate_matrix_buffer,
+                    up_matrix: mlp_up_matrix_buffer,
+                    down_matrix: mlp_down_matrix_buffer,
+                },
+            },
+        };
+
+        let output = qwen3_decoder_layer_sequence_to_host_f32(
+            &weights,
+            &mut context,
+            &mut stream,
+            shape,
+            &block_table,
+            softmax_scale,
+            mlp_epsilon,
+            &q_sequence,
+            &k_sequence,
+            &v_sequence,
+            Some(&output_gate_sequence),
+            &residual_sequence,
+            sequence_len,
+        )
+        .unwrap();
+
+        let mut expected_block_output = Vec::with_capacity(sequence_len * hidden);
+        let mut expected_post_normed = Vec::with_capacity(sequence_len * hidden);
+        let mut expected_mlp_output = Vec::with_capacity(sequence_len * hidden);
+        let mut expected_layer_output = Vec::with_capacity(sequence_len * hidden);
+        for timestep in 0..sequence_len {
+            let q_start = timestep * q_token_elements;
+            let q_end = q_start + q_token_elements;
+            let k_end = (timestep + 1) * k_token_elements;
+            let v_end = (timestep + 1) * v_token_elements;
+            let attention_start = timestep * attention_elements;
+            let attention_end = attention_start + attention_elements;
+            let residual_start = timestep * hidden;
+            let residual_end = residual_start + hidden;
+
+            let (expected_k, expected_v) = pack_paged_kv_for_test(
+                &k_sequence[..k_end],
+                &v_sequence[..v_end],
+                &block_table,
+                timestep + 1,
+                shape,
+            );
+            let expected_attention = expected_paged_decode_attn(
+                &q_sequence[q_start..q_end],
+                &expected_k,
+                &expected_v,
+                &block_table,
+                timestep + 1,
+                shape,
+                softmax_scale,
+            );
+            let expected_projection_input = sigmoid_mul_for_test(
+                &output_gate_sequence[attention_start..attention_end],
+                &expected_attention,
+            );
+            let expected_projected = matvec_for_test(
+                &o_matrix,
+                &expected_projection_input,
+                hidden,
+                attention_elements,
+            );
+            let expected_block = {
+                let residual_slice = &residual_sequence[residual_start..residual_end];
+                add_for_test(residual_slice, &expected_projected)
+            };
+            let expected_post_norm =
+                expected_rmsnorm_for_test(&expected_block, &post_norm_weight, mlp_epsilon);
+            let expected_mlp_gate =
+                matvec_for_test(&mlp_gate_matrix, &expected_post_norm, intermediate, hidden);
+            let expected_mlp_up =
+                matvec_for_test(&mlp_up_matrix, &expected_post_norm, intermediate, hidden);
+            let expected_mlp_activated = silu_mul_for_test(&expected_mlp_gate, &expected_mlp_up);
+            let expected_mlp = matvec_for_test(
+                &mlp_down_matrix,
+                &expected_mlp_activated,
+                hidden,
+                intermediate,
+            );
+            let expected_layer = add_for_test(&expected_block, &expected_mlp);
+
+            expected_block_output.extend_from_slice(&expected_block);
+            expected_post_normed.extend_from_slice(&expected_post_norm);
+            expected_mlp_output.extend_from_slice(&expected_mlp);
+            expected_layer_output.extend_from_slice(&expected_layer);
+        }
+        let expected_cache = pack_paged_kv_cache_for_block_table(
+            &k_sequence,
+            &v_sequence,
+            &block_table,
+            sequence_len,
+            shape,
+        )
+        .unwrap();
+
+        assert_f32s_close(&output.block_output, &expected_block_output, 1e-5);
+        assert_f32s_close(&output.post_normed, &expected_post_normed, 1e-5);
+        assert_f32s_close(&output.mlp_output, &expected_mlp_output, 1e-5);
+        assert_f32s_close(&output.layer_output, &expected_layer_output, 1e-5);
         assert_f32s_close(&output.paged_cache.k, &expected_cache.k, 1e-6);
         assert_f32s_close(&output.paged_cache.v, &expected_cache.v, 1e-6);
     }
