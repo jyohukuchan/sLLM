@@ -376,6 +376,25 @@ impl<'weights> Qwen3DecoderLayerRequestDecodeRunner<'weights> {
         ready_batch: &[SchedulerDecodeRequest],
         inputs: &[Qwen3DecoderLayerDecodeBatchInput<'_>],
     ) -> Result<Vec<Qwen3DecoderLayerDecodeBatchOutput>, String> {
+        let outputs =
+            self.run_ready_batch_without_advance(stream, scheduler, ready_batch, inputs)?;
+        for request in ready_batch {
+            scheduler
+                .advance_decode(request.request.id)
+                .map_err(|err| {
+                    format!("failed to advance request {:?}: {err}", request.request.id)
+                })?;
+        }
+        Ok(outputs)
+    }
+
+    pub fn run_ready_batch_without_advance(
+        &mut self,
+        stream: &mut RuntimeStream,
+        scheduler: &SchedulerState,
+        ready_batch: &[SchedulerDecodeRequest],
+        inputs: &[Qwen3DecoderLayerDecodeBatchInput<'_>],
+    ) -> Result<Vec<Qwen3DecoderLayerDecodeBatchOutput>, String> {
         validate_layer_batch_inputs(ready_batch, inputs)?;
         for request in ready_batch {
             let active = scheduler
@@ -456,14 +475,6 @@ impl<'weights> Qwen3DecoderLayerRequestDecodeRunner<'weights> {
                 ));
             }
             outputs.push(layer_batch_output_from_step(request.request.id, step));
-        }
-
-        for request in ready_batch {
-            scheduler
-                .advance_decode(request.request.id)
-                .map_err(|err| {
-                    format!("failed to advance request {:?}: {err}", request.request.id)
-                })?;
         }
         Ok(outputs)
     }
@@ -1013,6 +1024,120 @@ mod tests {
             .expect("cache readback should succeed");
         assert_f32s_close(&actual.k, &expected.k, 1e-6);
         assert_f32s_close(&actual.v, &expected.v, 1e-6);
+    }
+
+    #[test]
+    fn qwen3_decoder_layer_request_decode_runner_can_run_without_scheduler_advance_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        let hidden = 4_usize;
+        let intermediate = 3_usize;
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        let mlp_epsilon = 1e-5_f32;
+        let weights = make_layer_weights(&mut context, &mut stream, shape, hidden, intermediate);
+        let mut scheduler = SchedulerState::with_block_size(4, 2);
+        scheduler.enqueue(Request::new(31, 1, 1));
+        let mut scheduled = scheduler
+            .pop_prefill_batch_with_allocation(1)
+            .expect("allocation should succeed");
+        let allocation = scheduled.remove(0).allocation;
+
+        let mut runner = Qwen3DecoderLayerRequestDecodeRunner::new();
+        runner
+            .insert_request(
+                &mut context,
+                &mut stream,
+                allocation.request_id,
+                &weights,
+                shape,
+                allocation.blocks,
+                softmax_scale,
+                mlp_epsilon,
+            )
+            .expect("runner insert should succeed");
+
+        let q_step = shape.q_elements().unwrap();
+        let k_step = shape.k_token_elements().unwrap();
+        let v_step = shape.v_token_elements().unwrap();
+        let attention_step = shape.output_elements().unwrap();
+        let q = (0..2 * q_step)
+            .map(|index| ((index * 2) as f32 - 3.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k = (0..2 * k_step)
+            .map(|index| ((index * 5) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v = (0..2 * v_step)
+            .map(|index| ((index * 7) as f32 - 11.0) / 17.0)
+            .collect::<Vec<_>>();
+        let gate = (0..2 * attention_step)
+            .map(|index| ((index * 11) as f32 - 13.0) / 19.0)
+            .collect::<Vec<_>>();
+        let residual = (0..2 * hidden)
+            .map(|index| ((index * 13) as f32 - 17.0) / 23.0)
+            .collect::<Vec<_>>();
+
+        runner
+            .run_prefill_step(
+                &mut stream,
+                Qwen3DecoderLayerDecodeBatchInput {
+                    request_id: RequestId(31),
+                    q: &q[..q_step],
+                    k: &k[..k_step],
+                    v: &v[..v_step],
+                    output_gate: Some(&gate[..attention_step]),
+                    residual: &residual[..hidden],
+                },
+            )
+            .expect("prefill step should run");
+        scheduler
+            .complete_prefill(RequestId(31))
+            .expect("prefill completion should succeed");
+        let ready = scheduler
+            .ready_decode_batch(4)
+            .expect("ready batch should be generated");
+
+        let outputs = runner
+            .run_ready_batch_without_advance(
+                &mut stream,
+                &scheduler,
+                &ready,
+                &[Qwen3DecoderLayerDecodeBatchInput {
+                    request_id: RequestId(31),
+                    q: &q[q_step..2 * q_step],
+                    k: &k[k_step..2 * k_step],
+                    v: &v[v_step..2 * v_step],
+                    output_gate: Some(&gate[attention_step..2 * attention_step]),
+                    residual: &residual[hidden..2 * hidden],
+                }],
+            )
+            .expect("ready batch should run without scheduler advance");
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].cache_position, 1);
+        assert_eq!(outputs[0].cache_len, 2);
+        assert_eq!(runner.written_len(RequestId(31)), Some(2));
+
+        let active = scheduler
+            .active_request(RequestId(31))
+            .expect("request should remain active");
+        assert_eq!(active.cached_tokens, 1);
+        assert_eq!(active.generated_tokens, 0);
+
+        scheduler
+            .advance_decode(RequestId(31))
+            .expect("model loop owner should be able to advance after all layers");
+        let active = scheduler
+            .active_request(RequestId(31))
+            .expect("request should remain active after manual advance");
+        assert_eq!(active.cached_tokens, 2);
+        assert_eq!(active.generated_tokens, 1);
     }
 
     #[test]
