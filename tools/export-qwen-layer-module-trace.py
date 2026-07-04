@@ -23,7 +23,7 @@ from aq_scale_formats import scale_values
 from safetensors import safe_open
 
 
-SCHEMA_VERSION = "qwen-layer-module-trace-v0.4"
+SCHEMA_VERSION = "qwen-layer-module-trace-v0.5"
 
 
 TOP_ABS_FEATURES = 8
@@ -84,6 +84,14 @@ def resolve_layers(model: torch.nn.Module) -> torch.nn.ModuleList | list[torch.n
     if hasattr(model, "language_model") and hasattr(model.language_model, "layers"):
         return model.language_model.layers
     raise RuntimeError("cannot find decoder layers")
+
+
+def resolve_rotary_embedding(model: torch.nn.Module) -> torch.nn.Module | None:
+    if hasattr(model, "model") and hasattr(model.model, "rotary_emb"):
+        return model.model.rotary_emb
+    if hasattr(model, "language_model") and hasattr(model.language_model, "rotary_emb"):
+        return model.language_model.rotary_emb
+    return None
 
 
 def read_fixture_metadata(fixture: Path) -> dict[str, Any]:
@@ -565,6 +573,32 @@ def silu(values: np.ndarray) -> np.ndarray:
     return (values / (1.0 + np.exp(-values))).astype(np.float32)
 
 
+def sigmoid(values: np.ndarray) -> np.ndarray:
+    values = values.astype(np.float32)
+    return (1.0 / (1.0 + np.exp(-values))).astype(np.float32)
+
+
+def flatten_batch_sequence_features(name: str, values: np.ndarray) -> np.ndarray:
+    if values.ndim == 3:
+        return values
+    if values.ndim == 4:
+        return values.reshape(values.shape[0], values.shape[1], -1)
+    raise ValueError(f"{name} expected [batch,seq,...] tensor, got {values.shape}")
+
+
+def split_self_attention_q_gate(q_projection: np.ndarray, head_dim: int) -> tuple[np.ndarray, np.ndarray]:
+    if q_projection.ndim != 3:
+        raise ValueError(f"q projection expected [batch,seq,features], got {q_projection.shape}")
+    if head_dim <= 0 or q_projection.shape[2] % (head_dim * 2) != 0:
+        raise ValueError(
+            f"q projection feature count {q_projection.shape[2]} is not divisible by 2*head_dim={head_dim * 2}"
+        )
+    batch, sequence_len, _features = q_projection.shape
+    grouped = q_projection.reshape(batch, sequence_len, -1, head_dim * 2)
+    query, gate = np.split(grouped, 2, axis=-1)
+    return query.reshape(batch, sequence_len, -1), gate.reshape(batch, sequence_len, -1)
+
+
 def rmsnorm_by_head(values: np.ndarray, weight: np.ndarray, epsilon: float) -> np.ndarray:
     if values.ndim != 3:
         raise ValueError(f"RMSNorm input expected [batch,seq,hidden], got {values.shape}")
@@ -747,7 +781,7 @@ def projection_row_dot_trace(
     }
 
 
-def run_layer_trace(
+def run_linear_attention_layer_trace(
     model_dir: Path,
     fixture: Path,
     metadata: dict[str, Any],
@@ -1097,6 +1131,358 @@ def run_layer_trace(
     }
 
 
+def run_self_attention_layer_trace(
+    model_dir: Path,
+    fixture: Path,
+    metadata: dict[str, Any],
+    weight_files: dict[str, Path],
+    package_dir: Path | None,
+    package_tensors: dict[str, dict[str, Any]] | None,
+    layer: torch.nn.Module,
+    layer_index: int,
+    hidden_index: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    rotary_template: torch.nn.Module | None,
+) -> dict[str, Any]:
+    layer_type = getattr(layer, "layer_type", None)
+    if layer_type != "full_attention":
+        raise ValueError(f"layer {layer_index} is {layer_type}; this trace expected full_attention")
+    if rotary_template is None:
+        raise ValueError("full_attention trace requires a model rotary embedding module")
+
+    entry = fixture_layer_entry(metadata, layer_index)
+    before_shape = [int(value) for value in entry["before_shape"]]
+    after_shape = [int(value) for value in entry["after_shape"]]
+    before = read_f32_tensor(fixture / str(entry["before_file"]), before_shape)
+    expected_after = read_f32_tensor(fixture / str(entry["after_file"]), after_shape)
+    if before.ndim != 3:
+        raise ValueError(f"expected [batch,seq,hidden] fixture shape, got {before.shape}")
+    if hidden_index < 0 or hidden_index >= before.shape[-1]:
+        raise ValueError(f"hidden index {hidden_index} outside fixture hidden size {before.shape[-1]}")
+
+    layer.to_empty(device=device)
+    state = load_layer_state(model_dir, weight_files, layer_index)
+    layer.load_state_dict(state, strict=True)
+    layer.to(device=device, dtype=dtype)
+    layer.eval()
+
+    rotary_embedding = type(rotary_template)(rotary_template.config, device=device)
+    rotary_embedding.to(device=device, dtype=dtype)
+    rotary_embedding.eval()
+
+    captured: dict[str, np.ndarray] = {}
+
+    def hook(name: str):
+        def _hook(_module: torch.nn.Module, _inputs: tuple[object, ...], output: object) -> None:
+            captured[name] = to_numpy_f32(capture_first_tensor(output))
+
+        return _hook
+
+    def pre_hook(name: str):
+        def _hook(_module: torch.nn.Module, inputs: tuple[object, ...]) -> None:
+            captured[name] = to_numpy_f32(capture_first_tensor(inputs))
+
+        return _hook
+
+    handles = [
+        layer.input_layernorm.register_forward_hook(hook("attention_input_normed")),
+        layer.self_attn.register_forward_hook(hook("attention_output")),
+        layer.self_attn.q_proj.register_forward_hook(hook("self_attention_q_projection")),
+        layer.self_attn.k_proj.register_forward_hook(hook("self_attention_k_projection")),
+        layer.self_attn.v_proj.register_forward_hook(hook("self_attention_v_projection")),
+        layer.self_attn.q_norm.register_forward_hook(hook("self_attention_q_normed")),
+        layer.self_attn.k_norm.register_forward_hook(hook("self_attention_k_normed")),
+        layer.self_attn.o_proj.register_forward_pre_hook(pre_hook("attention_projection_input")),
+        layer.post_attention_layernorm.register_forward_hook(hook("post_normed")),
+        layer.mlp.down_proj.register_forward_pre_hook(pre_hook("mlp_activation")),
+        layer.mlp.register_forward_hook(hook("mlp_output")),
+    ]
+    hidden_states = torch.from_numpy(before).to(device=device, dtype=dtype)
+    batch_size = hidden_states.shape[0]
+    sequence_len = hidden_states.shape[1]
+    position_ids = torch.arange(sequence_len, dtype=torch.long, device=device).unsqueeze(0).expand(batch_size, -1)
+    rotary_position_ids = position_ids[None, ...].expand(3, batch_size, -1)
+    with torch.inference_mode():
+        try:
+            position_embeddings = rotary_embedding(hidden_states, rotary_position_ids)
+            output = layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                attention_mask=None,
+                position_ids=position_ids,
+                past_key_values=None,
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+    actual_after = to_numpy_f32(capture_first_tensor(output))
+
+    attention_input_normed = captured["attention_input_normed"]
+    self_attention_q_projection = captured["self_attention_q_projection"]
+    self_attention_k_projection = captured["self_attention_k_projection"]
+    self_attention_v_projection = captured["self_attention_v_projection"]
+    self_attention_q_normed = flatten_batch_sequence_features(
+        "self_attention_q_normed",
+        captured["self_attention_q_normed"],
+    )
+    self_attention_k_normed = flatten_batch_sequence_features(
+        "self_attention_k_normed",
+        captured["self_attention_k_normed"],
+    )
+    head_dim = int(layer.self_attn.head_dim)
+    self_attention_query_projection, self_attention_gate_projection = split_self_attention_q_gate(
+        self_attention_q_projection,
+        head_dim,
+    )
+    self_attention_gate_sigmoid = sigmoid(self_attention_gate_projection)
+    attention_projection_input = captured["attention_projection_input"]
+    attention_output = captured["attention_output"]
+    post_normed = captured["post_normed"]
+    mlp_activation = captured["mlp_activation"]
+    mlp_output = captured["mlp_output"]
+    attention_block_output = before + attention_output
+
+    expected_delta_for_hidden = expected_after[:, :, hidden_index] - before[:, :, hidden_index]
+    token_index = int(np.argmax(np.abs(expected_delta_for_hidden.reshape(-1))) % before.shape[1])
+    per_token = [
+        point_trace(
+            token,
+            hidden_index,
+            before,
+            expected_after,
+            actual_after,
+            attention_output,
+            attention_block_output,
+            post_normed,
+            mlp_output,
+        )
+        for token in range(before.shape[1])
+    ]
+
+    o_tensor_name = f"model.language_model.layers.{layer_index}.self_attn.o_proj.weight"
+    down_tensor_name = f"model.language_model.layers.{layer_index}.mlp.down_proj.weight"
+    q_tensor_name = f"model.language_model.layers.{layer_index}.self_attn.q_proj.weight"
+    k_tensor_name = f"model.language_model.layers.{layer_index}.self_attn.k_proj.weight"
+    v_tensor_name = f"model.language_model.layers.{layer_index}.self_attn.v_proj.weight"
+    package_o_row = None
+    package_down_row = None
+    package_q_tensor = None
+    package_k_tensor = None
+    package_v_tensor = None
+    if package_dir is not None and package_tensors is not None:
+        package_o_tensor = package_tensors.get(o_tensor_name)
+        package_down_tensor = package_tensors.get(down_tensor_name)
+        package_q_tensor = package_tensors.get(q_tensor_name)
+        package_k_tensor = package_tensors.get(k_tensor_name)
+        package_v_tensor = package_tensors.get(v_tensor_name)
+        if package_o_tensor is not None:
+            package_o_row = dequantize_package_row(package_dir, package_o_tensor, hidden_index)
+        if package_down_tensor is not None:
+            package_down_row = dequantize_package_row(package_dir, package_down_tensor, hidden_index)
+
+    row_dot = {
+        "self_attention_o_proj": row_dot_trace(
+            "self_attention_o_proj",
+            attention_projection_input,
+            attention_output,
+            tensor_to_numpy_f32(state["self_attn.o_proj.weight"][hidden_index]),
+            package_o_row,
+            hidden_index,
+        ),
+        "mlp_down_proj": row_dot_trace(
+            "mlp_down_proj",
+            mlp_activation,
+            mlp_output,
+            tensor_to_numpy_f32(state["mlp.down_proj.weight"][hidden_index]),
+            package_down_row,
+            hidden_index,
+        ),
+    }
+    projection_row_dot = {
+        "self_attention_q_projection": projection_row_dot_trace(
+            "self_attention_q_projection",
+            attention_input_normed,
+            self_attention_q_projection,
+            state["self_attn.q_proj.weight"],
+            package_dir,
+            package_q_tensor,
+            token_index,
+        ),
+        "self_attention_k_projection": projection_row_dot_trace(
+            "self_attention_k_projection",
+            attention_input_normed,
+            self_attention_k_projection,
+            state["self_attn.k_proj.weight"],
+            package_dir,
+            package_k_tensor,
+            token_index,
+        ),
+        "self_attention_v_projection": projection_row_dot_trace(
+            "self_attention_v_projection",
+            attention_input_normed,
+            self_attention_v_projection,
+            state["self_attn.v_proj.weight"],
+            package_dir,
+            package_v_tensor,
+            token_index,
+        ),
+    }
+
+    hot_input_vectors = hot_input_vector_summaries(
+        attention_projection_input,
+        mlp_activation,
+        token_index,
+        before.shape[2],
+    )
+    summary_values = (
+        ("attention_input_normed", attention_input_normed),
+        ("self_attention_q_projection", self_attention_q_projection),
+        ("self_attention_query_projection", self_attention_query_projection),
+        ("self_attention_gate_projection", self_attention_gate_projection),
+        ("self_attention_gate_sigmoid", self_attention_gate_sigmoid),
+        ("self_attention_k_projection", self_attention_k_projection),
+        ("self_attention_v_projection", self_attention_v_projection),
+        ("self_attention_q_normed", self_attention_q_normed),
+        ("self_attention_k_normed", self_attention_k_normed),
+    )
+    for name, values in summary_values:
+        if values.shape[2] == before.shape[2]:
+            sampled_features = [
+                int(item["feature_index"])
+                for item in hot_input_vectors["attention_projection_input"]["top_abs_features"]
+            ]
+        else:
+            sampled_features = mapped_hot_feature_indices(
+                values[0, token_index],
+                values.shape[2],
+                before.shape[2],
+                [
+                    int(item["feature_index"])
+                    for item in hot_input_vectors["attention_projection_input"]["top_abs_features"]
+                ],
+            )
+        sampled_group_width = 128 if values.shape[2] % 128 == 0 else None
+        add_token_vector_summary(
+            hot_input_vectors,
+            name,
+            values,
+            token_index,
+            sampled_features,
+            sampled_group_width,
+        )
+
+    per_token_hot_input_vectors = [
+        {
+            "token_index": token,
+            **hot_input_vector_summaries(
+                attention_projection_input,
+                mlp_activation,
+                token,
+                before.shape[2],
+            ),
+        }
+        for token in range(before.shape[1])
+    ]
+    for item in per_token_hot_input_vectors:
+        token = int(item["token_index"])
+        for name, values in summary_values:
+            if values.shape[2] == before.shape[2]:
+                sampled_features = [
+                    int(feature["feature_index"])
+                    for feature in item["attention_projection_input"]["top_abs_features"]
+                ]
+            else:
+                sampled_features = mapped_hot_feature_indices(
+                    values[0, token],
+                    values.shape[2],
+                    before.shape[2],
+                    [
+                        int(feature["feature_index"])
+                        for feature in item["attention_projection_input"]["top_abs_features"]
+                    ],
+                )
+            sampled_group_width = 128 if values.shape[2] % 128 == 0 else None
+            add_token_vector_summary(
+                item,
+                name,
+                values,
+                token,
+                sampled_features,
+                sampled_group_width,
+            )
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "command": "export-qwen-layer-module-trace",
+        "model_dir": str(model_dir),
+        "fixture": str(fixture),
+        "package_dir": None if package_dir is None else str(package_dir),
+        "layer_index": layer_index,
+        "layer_type": layer_type,
+        "hidden_index": hidden_index,
+        "device": str(device),
+        "dtype": str(dtype).replace("torch.", ""),
+        "shape": list(actual_after.shape),
+        "fixture_match": compare_arrays(actual_after, expected_after),
+        "max_expected_delta_trace": per_token[token_index],
+        "per_token_hidden_trace": per_token,
+        "module_contribution": {
+            "hot_input_vectors": hot_input_vectors,
+            "per_token_hot_input_vectors": per_token_hot_input_vectors,
+        },
+        "row_dot": row_dot,
+        "projection_row_dot": projection_row_dot,
+    }
+
+
+def run_layer_trace(
+    model_dir: Path,
+    fixture: Path,
+    metadata: dict[str, Any],
+    weight_files: dict[str, Path],
+    package_dir: Path | None,
+    package_tensors: dict[str, dict[str, Any]] | None,
+    layer: torch.nn.Module,
+    layer_index: int,
+    hidden_index: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    rotary_template: torch.nn.Module | None,
+) -> dict[str, Any]:
+    layer_type = getattr(layer, "layer_type", None)
+    if layer_type == "linear_attention":
+        return run_linear_attention_layer_trace(
+            model_dir,
+            fixture,
+            metadata,
+            weight_files,
+            package_dir,
+            package_tensors,
+            layer,
+            layer_index,
+            hidden_index,
+            device,
+            dtype,
+        )
+    if layer_type == "full_attention":
+        return run_self_attention_layer_trace(
+            model_dir,
+            fixture,
+            metadata,
+            weight_files,
+            package_dir,
+            package_tensors,
+            layer,
+            layer_index,
+            hidden_index,
+            device,
+            dtype,
+            rotary_template,
+        )
+    raise ValueError(f"layer {layer_index} is {layer_type}; unsupported layer type")
+
+
 def fmt(value: Any) -> str:
     if isinstance(value, (int, float)):
         return f"{float(value):.6g}"
@@ -1111,8 +1497,12 @@ def markdown(rows: list[dict[str, Any]]) -> str:
     for row in rows:
         trace = row["max_expected_delta_trace"]
         token = int(trace["token_index"])
-        out_row = row.get("row_dot", {}).get("attention_out_proj", {}).get("per_token", [])[token]
-        down_row = row.get("row_dot", {}).get("mlp_down_proj", {}).get("per_token", [])[token]
+        row_dot = row.get("row_dot", {})
+        out_projection = "attention_out_proj" if "attention_out_proj" in row_dot else "self_attention_o_proj"
+        out_entries = row_dot.get(out_projection, {}).get("per_token", [])
+        down_entries = row_dot.get("mlp_down_proj", {}).get("per_token", [])
+        out_row = out_entries[token] if token < len(out_entries) else {}
+        down_row = down_entries[token] if token < len(down_entries) else {}
         lines.append(
             "| "
             + " | ".join(
@@ -1154,6 +1544,7 @@ def main() -> int:
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
     model_layers = resolve_layers(model)
+    rotary_template = resolve_rotary_embedding(model)
     metadata = read_fixture_metadata(fixture)
     weight_files = build_weight_file_map(model_dir)
     package_tensors = read_package_manifest(package_dir)
@@ -1175,6 +1566,7 @@ def main() -> int:
                 args.hidden_index,
                 device,
                 dtype,
+                rotary_template,
             )
         )
 
