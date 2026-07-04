@@ -101,7 +101,9 @@ def get_hot_input_vectors_for_token(row: dict[str, Any], token_index: int) -> di
     module = row.get("module_contribution")
     per_token = None
     if isinstance(module, dict):
-        per_token = module.get("per_token_hot_input_vectors")
+        per_token = module.get("sampled_hot_input_vectors")
+        if not isinstance(per_token, list):
+            per_token = module.get("per_token_hot_input_vectors")
     if not isinstance(per_token, list):
         per_token = row.get("per_token_hot_input_vectors")
     if isinstance(per_token, list):

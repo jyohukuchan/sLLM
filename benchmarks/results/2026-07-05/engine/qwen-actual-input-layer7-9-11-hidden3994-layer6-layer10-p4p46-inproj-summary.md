@@ -41,6 +41,9 @@ Generated artifacts:
 - `qwen-module-trace-comparison-actual-input-rotary64-layers7-9-hidden3994-layer6-layer10-p4p46-inproj.md`
 - `qwen-module-trace-comparison-actual-input-rotary64-layers7-9-token7-hidden3994-layer6-layer10-p4p46-inproj.json`
 - `qwen-module-trace-comparison-actual-input-rotary64-layers7-9-token7-hidden3994-layer6-layer10-p4p46-inproj.md`
+- `package-golden-prefix-cpu-actual-prefix0-10-rotary64-manifest-row-scale-layer6-layer10-sample-t7-p4p46-inproj.jsonl`
+- `qwen-module-trace-comparison-actual-input-rotary64-layers7-9-token7-hidden3994-sampled-layer6-layer10-p4p46-inproj.json`
+- `qwen-module-trace-comparison-actual-input-rotary64-layers7-9-token7-hidden3994-sampled-layer6-layer10-p4p46-inproj.md`
 
 ## Local package error with actual-prefix inputs
 
@@ -272,15 +275,25 @@ largest local package delta error for this fixed coordinate is layer `8`:
 | 9 | 7 | -0.280066 | 1.828821 | 1.798756 | -0.030066 |
 | 11 | 7 | -0.645338 | 2.001991 | 1.981653 | -0.020338 |
 
-The hot-input-vector details in the fixed-token comparison are marked
-`token_mismatch` because `package-golden-prefix-smoke` currently stores detailed
-hot vectors for each layer's max token, not for arbitrary requested tokens. The
-delta rows above are still valid because they use per-token hidden traces.
+`package-golden-prefix-smoke` was extended with `SAMPLED_TOKEN_INDICES`; rerunning
+`0..10` with sampled token `7` gives valid package/full-reference hot-vector
+comparisons for the fixed coordinate.
+
+Layer `8`, token `7`, hidden `3994` is the largest local package-error point in
+this chain:
+
+| component | value |
+| --- | ---: |
+| local delta error | 0.171179 |
+| attention row-only error | -0.053269 |
+| attention activation-path error | 0.125137 |
+| MLP row-only error | -0.017845 |
+| MLP activation-path error | 0.070061 |
+| top attention projection input value diff | feature 845: 0.432841 |
+| top MLP activation value diff | feature 6340: 0.269271 |
 
 Updated next useful target:
 
 - Inspect layer `8`, token `7`, hidden `3994` under `rotary_dim=64`, especially
-  the linear-attention path and MLP path split (`+0.171179` local delta error).
-- If targeted hot vectors are needed, extend `package-golden-prefix-smoke` to
-  emit per-token hot vectors for requested coordinates instead of only the
-  layer max token.
+  why package activation paths add about `+0.125` through linear attention and
+  `+0.070` through MLP despite modest row-only errors.
