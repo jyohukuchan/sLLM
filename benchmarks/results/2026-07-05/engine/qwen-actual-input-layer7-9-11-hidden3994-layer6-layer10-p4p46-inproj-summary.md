@@ -29,6 +29,10 @@ Generated artifacts:
 - `package-golden-prefix-cpu-golden-before0-12-rotary64-manifest-row-scale-layer6-layer10-p4p46-inproj.jsonl`
 - `qwen-self-attention-propagation-layer7-actual-input-rotary64-token8-feature503-hidden3994-p4p46-inproj.json`
 - `qwen-self-attention-propagation-layer7-actual-input-rotary64-token8-feature503-hidden3994-p4p46-inproj.md`
+- `qwen-layer-module-trace-actual-input-rotary64-layer11-hidden3994-layer6-layer10-p4p46-inproj.jsonl`
+- `qwen-layer-module-trace-actual-input-rotary64-layer11-hidden3994-layer6-layer10-p4p46-inproj.md`
+- `qwen-module-trace-comparison-actual-input-rotary64-layer11-hidden3994-layer6-layer10-p4p46-inproj.json`
+- `qwen-module-trace-comparison-actual-input-rotary64-layer11-hidden3994-layer6-layer10-p4p46-inproj.md`
 
 ## Local package error with actual-prefix inputs
 
@@ -199,3 +203,34 @@ Next useful target:
   `11`, token `7`, hidden `3994`.
 - Stop hardcoding `rotary_dim=32` in future Qwen3.5 text smoke commands. Omit
   the CLI rotary-dim argument or pass `64`.
+
+## Remaining layer 11 hidden3994 under rotary64
+
+The remaining `rotary_dim=64 + layer6+10 row-scale` max is layer `11`, token
+`7`, hidden `3994`:
+
+| item | value |
+| --- | ---: |
+| package output diff | -0.645338058 |
+| package input diff | -0.376991272 |
+| fixture expected delta | 2.250000000 |
+| full-reference delta on actual input | 2.001991272 |
+| package delta on actual input | 1.981653214 |
+| package local delta error | -0.020338058 |
+| attention row-only error | 0.068367780 |
+| attention activation-path error | -0.052062498 |
+| MLP row-only error | -0.028672408 |
+| MLP activation-path error | -0.010083559 |
+
+So the remaining layer `11` output max is mostly inherited/input-distribution
+drift, not a large layer `11` local quantization error. The full-reference
+layer delta already moves from `2.25` to `2.001991272` when fed the package
+actual input, and the package adds only `-0.020338058` beyond that.
+
+Updated next useful target:
+
+- Trace where the `rotary_dim=64` hidden `3994` input drift is introduced before
+  layer `11`, especially layers `6..8` where actual-prefix hidden `3994`
+  becomes dominant after the hidden `3456` row-scale correction.
+- Keep layer `11` as a propagation observation, not the primary correction
+  target.
