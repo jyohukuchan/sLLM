@@ -1201,3 +1201,32 @@
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
 - CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、paged decode state/step、paged K/V cache pack、Qwen3 self attention runtime shape、Qwen3 self attention projection sequence、Qwen3 self attention runtime prepared sequence、Qwen3 self attention paged decode prepared sequence、Qwen3 self attention block sequence、Qwen3 decoder layer sequence、Qwen3 self attention q projection split、Qwen3 headwise RMSNorm、Qwen3 RoPE、Qwen3 causal attention、Qwen3 self attention runtime weights、Qwen3 self attention prepared sequence、Qwen3 self-attn block step state、Qwen3 decoder layer step state、Qwen3 post attention runtime weights、Qwen3 decoder layer runtime weights、Qwen3 decoder layer runtime、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。Qwen3.5 self-attn MLP block smokeではpaged decode step出力をlayer-level partial decoder経路へ渡せるようになった。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
+
+## host byte helpers 抽出
+
+### 前回の要点
+
+- package model loop smokeを再利用可能なrunner/APIへ寄せるため、`PassthroughF32Data` とAQ4 materialize helperを `loader.rs` 側へ移した。
+- 次の主な依存は、packageから読み込んだpost RMSNorm weightやsmoke入力をruntime bufferへ渡すためのf32/u32 byte変換だった。
+
+### 今回の変更点
+
+- `crates/ullm-engine/src/host_bytes.rs` を追加し、`decode_f32_le_values`、`encode_f32_to_bytes`、`encode_u32_to_bytes` を `main.rs` からlibrary側へ移した。
+- `lib.rs` で `host_bytes` moduleを公開し、`main.rs` はこのmoduleから変換関数をimportする形に変えた。
+- little-endian layoutを確認する単体テストを追加した。
+- `docs/words.txt` に `host byte helpers` を追加した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo test -p ullm-engine host_bytes -- --test-threads=1`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- 3-layer model-loop smoke on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with `3,7,11 3` passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`. All devices reported `decode_batch_ready_counts=[2, 1]`, `final_ready=0`, `cached_tokens=[3, 3, 1]`, `generated_tokens=[2, 1, 0]`, and `verified=true`; runtime/cache diffs stayed `0`.
+
+### 次の行動
+
+- `qwen3_self_attn_runtime_weights_from_package`、`qwen3_post_attention_runtime_weights_from_package`、`qwen3_decoder_layer_runtime_weights_from_package` を `main.rs` からlibrary側へ移し、package-loaded layer weightsをsmoke以外のrunnerから使える形へ寄せる。
