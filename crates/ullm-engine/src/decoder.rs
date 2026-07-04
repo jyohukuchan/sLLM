@@ -53,6 +53,9 @@ pub struct Qwen3SelfAttnBlockStepOutput {
 pub struct Qwen3DecoderLayerStepOutput {
     pub cache_position: usize,
     pub cache_len: usize,
+    pub attention_output: Vec<f32>,
+    pub attention_projection_input: Vec<f32>,
+    pub projected_output: Vec<f32>,
     pub block_output: Vec<f32>,
     pub post_normed: Vec<f32>,
     pub mlp_output: Vec<f32>,
@@ -181,6 +184,9 @@ pub struct Qwen3SelfAttnBlockSequenceOutput {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Qwen3DecoderLayerSequenceOutput {
+    pub attention_output: Vec<f32>,
+    pub attention_projection_input: Vec<f32>,
+    pub projected_output: Vec<f32>,
     pub block_output: Vec<f32>,
     pub post_normed: Vec<f32>,
     pub mlp_output: Vec<f32>,
@@ -458,6 +464,9 @@ pub fn qwen3_decoder_layer_sequence_to_host_f32(
     )
     .map_err(|err| format!("failed to create decoder layer sequence state: {err}"))?;
 
+    let mut attention_output = Vec::with_capacity(expected_attention_len);
+    let mut attention_projection_input = Vec::with_capacity(expected_attention_len);
+    let mut projected_output = Vec::with_capacity(expected_residual_len);
     let mut block_output = Vec::with_capacity(expected_residual_len);
     let mut post_normed = Vec::with_capacity(expected_residual_len);
     let mut mlp_output = Vec::with_capacity(expected_residual_len);
@@ -526,6 +535,9 @@ pub fn qwen3_decoder_layer_sequence_to_host_f32(
             ));
         }
 
+        attention_output.extend_from_slice(&step.attention_output);
+        attention_projection_input.extend_from_slice(&step.attention_projection_input);
+        projected_output.extend_from_slice(&step.projected_output);
         block_output.extend_from_slice(&step.block_output);
         post_normed.extend_from_slice(&step.post_normed);
         mlp_output.extend_from_slice(&step.mlp_output);
@@ -537,6 +549,9 @@ pub fn qwen3_decoder_layer_sequence_to_host_f32(
         .map_err(|err| format!("failed to read decoder layer sequence paged cache: {err}"))?;
 
     Ok(Qwen3DecoderLayerSequenceOutput {
+        attention_output,
+        attention_projection_input,
+        projected_output,
         block_output,
         post_normed,
         mlp_output,
@@ -2311,6 +2326,14 @@ impl Qwen3DecoderLayerStepState {
         let block_step =
             self.block_state
                 .step(stream, o_projection_matrix, q, k, v, output_gate, residual)?;
+        let Qwen3SelfAttnBlockStepOutput {
+            cache_position,
+            cache_len,
+            attention_output,
+            attention_projection_input,
+            projected_output,
+            block_output,
+        } = block_step;
 
         let hidden = self.block_state.hidden();
         let hidden_bytes = f32_bytes(hidden);
@@ -2348,7 +2371,7 @@ impl Qwen3DecoderLayerStepState {
         }
 
         self.post_norm_input_buffer
-            .copy_from_host(0, &f32s_to_le_bytes(&block_step.block_output), Some(stream))
+            .copy_from_host(0, &f32s_to_le_bytes(&block_output), Some(stream))
             .map_err(|err| {
                 format!("failed to copy Qwen3 decoder layer attention block output: {err}")
             })?;
@@ -2414,7 +2437,7 @@ impl Qwen3DecoderLayerStepState {
         })?;
 
         self.block_output_buffer
-            .copy_from_host(0, &f32s_to_le_bytes(&block_step.block_output), Some(stream))
+            .copy_from_host(0, &f32s_to_le_bytes(&block_output), Some(stream))
             .map_err(|err| format!("failed to copy Qwen3 decoder layer block output: {err}"))?;
         stream.synchronize().map_err(|err| {
             format!("failed to synchronize Qwen3 decoder layer block output copy: {err}")
@@ -2435,9 +2458,12 @@ impl Qwen3DecoderLayerStepState {
         let mlp_output = read_f32_buffer(&self.mlp_output_buffer, stream, hidden)?;
         let layer_output = read_f32_buffer(&self.layer_output_buffer, stream, hidden)?;
         Ok(Qwen3DecoderLayerStepOutput {
-            cache_position: block_step.cache_position,
-            cache_len: block_step.cache_len,
-            block_output: block_step.block_output,
+            cache_position,
+            cache_len,
+            attention_output,
+            attention_projection_input,
+            projected_output,
+            block_output,
             post_normed,
             mlp_output,
             layer_output,
@@ -3364,6 +3390,10 @@ mod tests {
         )
         .unwrap();
 
+        let mut expected_attention_output = Vec::with_capacity(sequence_len * attention_elements);
+        let mut expected_attention_projection_input =
+            Vec::with_capacity(sequence_len * attention_elements);
+        let mut expected_projected_output = Vec::with_capacity(sequence_len * hidden);
         let mut expected_block_output = Vec::with_capacity(sequence_len * hidden);
         let mut expected_post_normed = Vec::with_capacity(sequence_len * hidden);
         let mut expected_mlp_output = Vec::with_capacity(sequence_len * hidden);
@@ -3423,6 +3453,9 @@ mod tests {
             );
             let expected_layer = add_for_test(&expected_block, &expected_mlp);
 
+            expected_attention_output.extend_from_slice(&expected_attention);
+            expected_attention_projection_input.extend_from_slice(&expected_projection_input);
+            expected_projected_output.extend_from_slice(&expected_projected);
             expected_block_output.extend_from_slice(&expected_block);
             expected_post_normed.extend_from_slice(&expected_post_norm);
             expected_mlp_output.extend_from_slice(&expected_mlp);
@@ -3437,6 +3470,13 @@ mod tests {
         )
         .unwrap();
 
+        assert_f32s_close(&output.attention_output, &expected_attention_output, 1e-5);
+        assert_f32s_close(
+            &output.attention_projection_input,
+            &expected_attention_projection_input,
+            1e-5,
+        );
+        assert_f32s_close(&output.projected_output, &expected_projected_output, 1e-5);
         assert_f32s_close(&output.block_output, &expected_block_output, 1e-5);
         assert_f32s_close(&output.post_normed, &expected_post_normed, 1e-5);
         assert_f32s_close(&output.mlp_output, &expected_mlp_output, 1e-5);

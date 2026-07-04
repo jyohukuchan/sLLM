@@ -86,7 +86,7 @@ Qwen3 decoder layer step state:Qwen3/Qwen3.5系の狭いdecoder layer step用状
 Qwen3 post attention runtime weights:Qwen3 decoder layer step stateのpost-attention側へ渡すpost RMSNorm weight、MLP gate/up/down runtime buffer、hidden/intermediate metadataをまとめるlibrary runtime API上のweight set
 Qwen3 decoder layer runtime weights:Qwen3 self attention runtime weightsとQwen3 post attention runtime weightsをまとめたlayer-level resident weight set。library runtime APIとしてdecoder.rsに置き、package smokeではこれを先に作ってからself-attention smoke runとdecoder layer runtimeへ分配する
 Qwen3 decoder layer runtime:Qwen3 decoder layer runtime weightsとQwen3 decoder layer step stateをまとめ、step実行時にresident q/k/v/o/post RMSNorm/MLP weightを個別引数へばらさずに使うdecoder.rs上の薄いrunner
-Qwen3 decoder layer sequence:Qwen3/Qwen3.5系の狭いdecoder layer sequence実行API。Qwen3 decoder layer runtimeを内部で作り、q/k/v/gate/residual系列を1 tokenずつ実行してself-attention block出力、post RMSNorm出力、MLP出力、final residual add後のlayer出力、paged cache readbackをhostへ返す。host期待値diffはsmoke側に残す
+Qwen3 decoder layer sequence:Qwen3/Qwen3.5系の狭いdecoder layer sequence実行API。Qwen3 decoder layer runtimeを内部で作り、q/k/v/gate/residual系列を1 tokenずつ実行してattention出力、output gate後入力、o projection出力、self-attention block出力、post RMSNorm出力、MLP出力、final residual add後のlayer出力、paged cache readbackをhostへ返す。host期待値diffはsmoke側に残す
 runtime KV paged decode smoke:Rust側のKvBlockAllocatorで非連続block tableを作り、そのblock tableとhost側で検証用にpackした物理paged K/V cacheをruntime paged decode attentionへ渡すsmoke。scheduler管理とruntime kernel境界の最小接続を確認する
 depthwise conv1d:channelごとに独立した1次元畳み込み。linear attentionのconv1d.weightでは入力系列の各channelに同じchannelのkernelだけを適用する
 runtime depthwise conv1d smoke:runtime buffer上のf32系列とf32 weightからcausal depthwise conv1dを実行し、CPU/HIP kernel境界を確認するsmoke
