@@ -13032,7 +13032,16 @@ fn package_self_attn_causal_attention_runtime_diagnostic(
             &prepared_projection_input,
             layer_attention_projection_input,
             &host_projection_input,
+            q_rope,
+            k_rope,
+            v_projected,
             q_gate,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
             attention_width,
         ),
     );
@@ -13080,7 +13089,16 @@ fn package_self_attn_causal_attention_sample_locations(
     prepared_projection_input: &[f32],
     layer_projection_input: &[f32],
     host_projection_input: &[f32],
+    q_rope: &[f32],
+    k_rope: &[f32],
+    v_projected: &[f32],
     q_gate: Option<&[f32]>,
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
     attention_width: usize,
 ) -> Vec<serde_json::Value> {
     let sample_targets = [(8_usize, 503_usize)];
@@ -13100,6 +13118,19 @@ fn package_self_attn_causal_attention_sample_locations(
             let q_gate_value = q_gate.and_then(|gate| gate.get(flat_index)).copied();
             let q_gate_sigmoid =
                 q_gate_value.map(|gate| 1.0_f32 / (1.0_f32 + (-gate).exp()));
+            let attention_breakdown = package_self_attn_causal_attention_breakdown(
+                q_rope,
+                k_rope,
+                v_projected,
+                token_index,
+                feature_index,
+                sequence_len,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+            );
             Some(serde_json::json!({
                 "token_index": token_index,
                 "feature_index": feature_index,
@@ -13117,9 +13148,118 @@ fn package_self_attn_causal_attention_sample_locations(
                 "host_projection_input": host_projection,
                 "layer_projection_minus_host_projection": layer_projection - host_projection,
                 "layer_projection_minus_prepared_projection": layer_projection - prepared_projection,
+                "attention_breakdown": attention_breakdown,
             }))
         })
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_self_attn_causal_attention_breakdown(
+    q_rope: &[f32],
+    k_rope: &[f32],
+    v_projected: &[f32],
+    token_index: usize,
+    feature_index: usize,
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+) -> Option<serde_json::Value> {
+    if sequence_len == 0
+        || q_heads == 0
+        || kv_heads == 0
+        || head_dim == 0
+        || value_dim == 0
+        || token_index >= sequence_len
+        || !q_heads.is_multiple_of(kv_heads)
+    {
+        return None;
+    }
+    let q_head = feature_index / value_dim;
+    let value_offset = feature_index % value_dim;
+    if q_head >= q_heads {
+        return None;
+    }
+    let q_per_kv = q_heads / kv_heads;
+    let kv_head = q_head / q_per_kv;
+    if kv_head >= kv_heads {
+        return None;
+    }
+    let expected_q_elements = sequence_len.checked_mul(q_heads)?.checked_mul(head_dim)?;
+    let expected_k_elements = sequence_len.checked_mul(kv_heads)?.checked_mul(head_dim)?;
+    let expected_v_elements = sequence_len.checked_mul(kv_heads)?.checked_mul(value_dim)?;
+    if q_rope.len() != expected_q_elements
+        || k_rope.len() != expected_k_elements
+        || v_projected.len() != expected_v_elements
+    {
+        return None;
+    }
+
+    let q_base = token_index
+        .checked_mul(q_heads)?
+        .checked_add(q_head)?
+        .checked_mul(head_dim)?;
+    let mut scores = Vec::with_capacity(token_index + 1);
+    let mut dots = Vec::with_capacity(token_index + 1);
+    for source_token in 0..=token_index {
+        let k_base = source_token
+            .checked_mul(kv_heads)?
+            .checked_add(kv_head)?
+            .checked_mul(head_dim)?;
+        let dot = (0..head_dim)
+            .map(|dim| q_rope[q_base + dim] * k_rope[k_base + dim])
+            .sum::<f32>();
+        dots.push(dot);
+        scores.push(dot * softmax_scale);
+    }
+    let max_score = scores
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, |max, score| max.max(score));
+    let weights = scores
+        .iter()
+        .map(|score| (*score - max_score).exp())
+        .collect::<Vec<_>>();
+    let denominator = weights.iter().sum::<f32>();
+    if denominator == 0.0 || !denominator.is_finite() {
+        return None;
+    }
+
+    let mut computed_attention_output = 0.0_f32;
+    let mut source_tokens = Vec::with_capacity(token_index + 1);
+    for source_token in 0..=token_index {
+        let weight = weights[source_token] / denominator;
+        let v_index = source_token
+            .checked_mul(kv_heads)?
+            .checked_add(kv_head)?
+            .checked_mul(value_dim)?
+            .checked_add(value_offset)?;
+        let v_value = v_projected[v_index];
+        let contribution = weight * v_value;
+        computed_attention_output += contribution;
+        source_tokens.push(serde_json::json!({
+            "source_token_index": source_token,
+            "dot": dots[source_token],
+            "score": scores[source_token],
+            "softmax_weight": weight,
+            "v_value": v_value,
+            "weighted_v_contribution": contribution,
+        }));
+    }
+
+    Some(serde_json::json!({
+        "q_head": q_head,
+        "kv_head": kv_head,
+        "q_per_kv": q_per_kv,
+        "value_offset": value_offset,
+        "softmax_max_score": max_score,
+        "softmax_denominator": denominator,
+        "computed_attention_output": computed_attention_output,
+        "source_tokens": source_tokens,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]

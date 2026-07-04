@@ -1,4 +1,196 @@
 {
+  "attention_breakdowns": [
+    {
+      "feature_index": 503,
+      "package": {
+        "computed_attention_output": 1.0112384893743764,
+        "computed_minus_o_input": 3.873003850962675e-08,
+        "computed_minus_raw_attention": 3.3601976534569644e-08,
+        "computed_o_input": 0.6298119813074006,
+        "feature_index": 503,
+        "gate_projection": 0.5015031099319458,
+        "gate_sigmoid": 0.6228125095367432,
+        "head_dim": 256,
+        "kv_head": 0,
+        "o_input": 0.6298119425773621,
+        "q_head": 1,
+        "q_per_kv": 4,
+        "raw_attention": 1.0112384557724,
+        "softmax_scale": 0.0625,
+        "source_tokens": [
+          {
+            "dot": 145.47515869140625,
+            "score": 9.09219741821289,
+            "softmax_weight": 0.16572099924087524,
+            "source_token_index": 0,
+            "v_value": 3.9509618282318115,
+            "weighted_v_contribution": 0.6547573421371311
+          },
+          {
+            "dot": 108.09912109375,
+            "score": 6.756195068359375,
+            "softmax_weight": 0.016027456149458885,
+            "source_token_index": 1,
+            "v_value": 0.7679656744003296,
+            "weighted_v_contribution": 0.012308536170740902
+          },
+          {
+            "dot": 100.03672790527344,
+            "score": 6.25229549407959,
+            "softmax_weight": 0.009683309122920036,
+            "source_token_index": 2,
+            "v_value": 0.3821167051792145,
+            "weighted_v_contribution": 0.0037001541772820334
+          },
+          {
+            "dot": 114.0389175415039,
+            "score": 7.127432346343994,
+            "softmax_weight": 0.0232322309166193,
+            "source_token_index": 3,
+            "v_value": 0.6847332715988159,
+            "weighted_v_contribution": 0.015907881482075892
+          },
+          {
+            "dot": 130.3465118408203,
+            "score": 8.14665699005127,
+            "softmax_weight": 0.0643775686621666,
+            "source_token_index": 4,
+            "v_value": 0.44634342193603516,
+            "weighted_v_contribution": 0.0287345042925935
+          },
+          {
+            "dot": 143.18785095214844,
+            "score": 8.949240684509277,
+            "softmax_weight": 0.14364555478096008,
+            "source_token_index": 5,
+            "v_value": 0.10058656334877014,
+            "weighted_v_contribution": 0.014448812695744273
+          },
+          {
+            "dot": 153.309814453125,
+            "score": 9.581863403320312,
+            "softmax_weight": 0.2704187333583832,
+            "source_token_index": 6,
+            "v_value": 0.31180813908576965,
+            "weighted_v_contribution": 0.0843187620224084
+          },
+          {
+            "dot": 147.6578826904297,
+            "score": 9.228617668151855,
+            "softmax_weight": 0.1899433583021164,
+            "source_token_index": 7,
+            "v_value": 0.5245126485824585,
+            "weighted_v_contribution": 0.09962769394368998
+          },
+          {
+            "dot": 139.8983154296875,
+            "score": 8.743644714355469,
+            "softmax_weight": 0.11695075035095215,
+            "source_token_index": 8,
+            "v_value": 0.8331267833709717,
+            "weighted_v_contribution": 0.0974348024527103
+          }
+        ],
+        "token_index": 8,
+        "value_dim": 256,
+        "value_offset": 247
+      },
+      "source": {
+        "computed_attention_output": 1.0240019670309266,
+        "computed_minus_o_input": -0.0009050436568145415,
+        "computed_minus_raw_attention": 0.0005644670309266075,
+        "computed_o_input": 0.6280012063431855,
+        "feature_index": 503,
+        "gate_projection": 0.458984375,
+        "gate_sigmoid": 0.61328125,
+        "head_dim": 256,
+        "kv_head": 0,
+        "o_input": 0.62890625,
+        "q_head": 1,
+        "q_per_kv": 4,
+        "raw_attention": 1.0234375,
+        "softmax_scale": 0.0625,
+        "source_tokens": [
+          {
+            "dot": 147.2945098876953,
+            "score": 9.205906867980957,
+            "softmax_weight": 0.16233830153942108,
+            "source_token_index": 0,
+            "v_value": 4.0,
+            "weighted_v_contribution": 0.6493532061576843
+          },
+          {
+            "dot": 110.29986572265625,
+            "score": 6.893741607666016,
+            "softmax_weight": 0.016079049557447433,
+            "source_token_index": 1,
+            "v_value": 0.796875,
+            "weighted_v_contribution": 0.012812992616090924
+          },
+          {
+            "dot": 104.77568054199219,
+            "score": 6.548480033874512,
+            "softmax_weight": 0.011384531855583191,
+            "source_token_index": 2,
+            "v_value": 0.439453125,
+            "weighted_v_contribution": 0.005002968100598082
+          },
+          {
+            "dot": 119.13072204589844,
+            "score": 7.445670127868652,
+            "softmax_weight": 0.02792285941541195,
+            "source_token_index": 3,
+            "v_value": 0.7421875,
+            "weighted_v_contribution": 0.020723997222376056
+          },
+          {
+            "dot": 134.66412353515625,
+            "score": 8.416507720947266,
+            "softmax_weight": 0.07372067123651505,
+            "source_token_index": 4,
+            "v_value": 0.48046875,
+            "weighted_v_contribution": 0.03542047875816934
+          },
+          {
+            "dot": 146.97850036621094,
+            "score": 9.186156272888184,
+            "softmax_weight": 0.1591634750366211,
+            "source_token_index": 5,
+            "v_value": 0.15234375,
+            "weighted_v_contribution": 0.024247560650110245
+          },
+          {
+            "dot": 154.58572387695312,
+            "score": 9.66160774230957,
+            "softmax_weight": 0.256052702665329,
+            "source_token_index": 6,
+            "v_value": 0.341796875,
+            "weighted_v_contribution": 0.08751801360631362
+          },
+          {
+            "dot": 149.069580078125,
+            "score": 9.316848754882812,
+            "softmax_weight": 0.18138544261455536,
+            "source_token_index": 7,
+            "v_value": 0.50390625,
+            "weighted_v_contribution": 0.09140125819249079
+          },
+          {
+            "dot": 141.34884643554688,
+            "score": 8.83430290222168,
+            "softmax_weight": 0.11195292323827744,
+            "source_token_index": 8,
+            "v_value": 0.87109375,
+            "weighted_v_contribution": 0.09752149172709323
+          }
+        ],
+        "token_index": 8,
+        "value_dim": 256,
+        "value_offset": 247
+      },
+      "token_index": 8
+    }
+  ],
   "command": "analyze-qwen-self-attention-propagation",
   "dtype": "bfloat16",
   "feature_traces": [

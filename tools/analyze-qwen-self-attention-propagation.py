@@ -314,6 +314,148 @@ def summarize_feature_traces(
     return traces
 
 
+def attention_feature_breakdown(
+    stages: dict[str, torch.Tensor],
+    token_index: int,
+    feature_index: int,
+    head_dim: int,
+    softmax_scale: float,
+) -> dict[str, Any] | None:
+    query_rope = stages["query_rope"]
+    key_rope = stages["key_rope"]
+    value_projection = stages["value_projection"]
+    raw_attention = stages["raw_attention"]
+    gate_projection = stages["gate_projection"]
+    gate_sigmoid = stages["gate_sigmoid"]
+    o_input = stages["o_input"]
+    if (
+        query_rope.ndim != 3
+        or key_rope.ndim != 3
+        or value_projection.ndim != 3
+        or raw_attention.ndim != 3
+        or head_dim <= 0
+    ):
+        return None
+    sequence_len = int(query_rope.shape[1])
+    if token_index < 0 or token_index >= sequence_len:
+        return None
+    q_width = int(query_rope.shape[2])
+    k_width = int(key_rope.shape[2])
+    if q_width % head_dim != 0 or k_width % head_dim != 0:
+        return None
+    q_heads = q_width // head_dim
+    kv_heads = k_width // head_dim
+    if kv_heads == 0 or q_heads == 0 or q_heads % kv_heads != 0:
+        return None
+    value_width = int(value_projection.shape[2])
+    if value_width % kv_heads != 0:
+        return None
+    value_dim = value_width // kv_heads
+    attention_width = q_heads * value_dim
+    if feature_index < 0 or feature_index >= attention_width:
+        return None
+    q_head = feature_index // value_dim
+    value_offset = feature_index % value_dim
+    kv_head = q_head // (q_heads // kv_heads)
+
+    q_start = q_head * head_dim
+    q_end = q_start + head_dim
+    k_start = kv_head * head_dim
+    k_end = k_start + head_dim
+    v_feature = kv_head * value_dim + value_offset
+
+    q_vector = query_rope[0, token_index, q_start:q_end].float()
+    scores = []
+    dots = []
+    for source_token in range(token_index + 1):
+        k_vector = key_rope[0, source_token, k_start:k_end].float()
+        dot = float(torch.dot(q_vector, k_vector).item())
+        dots.append(dot)
+        scores.append(dot * softmax_scale)
+    score_tensor = torch.tensor(scores, dtype=torch.float32)
+    weights = torch.softmax(score_tensor, dim=0)
+
+    source_tokens = []
+    computed_attention_output = 0.0
+    for source_token, (dot, score, weight) in enumerate(
+        zip(dots, scores, weights.tolist(), strict=True)
+    ):
+        v_value = float(value_projection[0, source_token, v_feature].item())
+        contribution = float(weight * v_value)
+        computed_attention_output += contribution
+        source_tokens.append(
+            {
+                "source_token_index": source_token,
+                "dot": dot,
+                "score": score,
+                "softmax_weight": float(weight),
+                "v_value": v_value,
+                "weighted_v_contribution": contribution,
+            }
+        )
+
+    raw_value = float(raw_attention[0, token_index, feature_index].item())
+    gate_value = float(gate_projection[0, token_index, feature_index].item())
+    gate_sigmoid_value = float(gate_sigmoid[0, token_index, feature_index].item())
+    o_input_value = float(o_input[0, token_index, feature_index].item())
+    return {
+        "token_index": token_index,
+        "feature_index": feature_index,
+        "q_head": q_head,
+        "kv_head": kv_head,
+        "q_per_kv": q_heads // kv_heads,
+        "value_offset": value_offset,
+        "head_dim": head_dim,
+        "value_dim": value_dim,
+        "softmax_scale": softmax_scale,
+        "computed_attention_output": computed_attention_output,
+        "raw_attention": raw_value,
+        "computed_minus_raw_attention": computed_attention_output - raw_value,
+        "gate_projection": gate_value,
+        "gate_sigmoid": gate_sigmoid_value,
+        "o_input": o_input_value,
+        "computed_o_input": computed_attention_output * gate_sigmoid_value,
+        "computed_minus_o_input": computed_attention_output * gate_sigmoid_value - o_input_value,
+        "source_tokens": source_tokens,
+    }
+
+
+def summarize_attention_breakdowns(
+    source_stages: dict[str, torch.Tensor],
+    package_stages: dict[str, torch.Tensor],
+    token_indices: list[int],
+    feature_indices: list[int],
+    head_dim: int,
+    softmax_scale: float,
+) -> list[dict[str, Any]]:
+    breakdowns = []
+    for token_index in token_indices:
+        for feature_index in feature_indices:
+            source = attention_feature_breakdown(
+                source_stages,
+                token_index,
+                feature_index,
+                head_dim,
+                softmax_scale,
+            )
+            package = attention_feature_breakdown(
+                package_stages,
+                token_index,
+                feature_index,
+                head_dim,
+                softmax_scale,
+            )
+            breakdowns.append(
+                {
+                    "token_index": token_index,
+                    "feature_index": feature_index,
+                    "source": source,
+                    "package": package,
+                }
+            )
+    return breakdowns
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -381,6 +523,59 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
                         fmt(stage["diff"]),
                     )
                 )
+    attention_breakdowns = payload.get("attention_breakdowns")
+    if attention_breakdowns:
+        for breakdown in attention_breakdowns:
+            lines.extend(
+                [
+                    "",
+                    "## Attention Breakdown token={} feature={}".format(
+                        breakdown["token_index"],
+                        breakdown["feature_index"],
+                    ),
+                    "",
+                    "| replay | q_head | kv_head | value_offset | raw_attention | computed | gate_sigmoid | o_input |",
+                    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                ]
+            )
+            for replay_name in ("source", "package"):
+                replay = breakdown.get(replay_name)
+                if replay is None:
+                    continue
+                lines.append(
+                    "| {} | {} | {} | {} | {} | {} | {} | {} |".format(
+                        replay_name,
+                        replay["q_head"],
+                        replay["kv_head"],
+                        replay["value_offset"],
+                        fmt(replay["raw_attention"]),
+                        fmt(replay["computed_attention_output"]),
+                        fmt(replay["gate_sigmoid"]),
+                        fmt(replay["o_input"]),
+                    )
+                )
+            lines.extend(
+                [
+                    "",
+                    "| replay | source_token | score | weight | v_value | contribution |",
+                    "| --- | ---: | ---: | ---: | ---: | ---: |",
+                ]
+            )
+            for replay_name in ("source", "package"):
+                replay = breakdown.get(replay_name)
+                if replay is None:
+                    continue
+                for row in replay["source_tokens"]:
+                    lines.append(
+                        "| {} | {} | {} | {} | {} | {} |".format(
+                            replay_name,
+                            row["source_token_index"],
+                            fmt(row["score"]),
+                            fmt(row["softmax_weight"]),
+                            fmt(row["v_value"]),
+                            fmt(row["weighted_v_contribution"]),
+                        )
+                    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -526,11 +721,21 @@ def main() -> int:
         ),
     }
     if args.token_index and args.feature_index:
+        token_indices = list(dict.fromkeys(int(index) for index in args.token_index))
+        feature_indices = list(dict.fromkeys(int(index) for index in args.feature_index))
         payload["feature_traces"] = summarize_feature_traces(
             source_stages,
             package_stages,
-            list(dict.fromkeys(int(index) for index in args.token_index)),
-            list(dict.fromkeys(int(index) for index in args.feature_index)),
+            token_indices,
+            feature_indices,
+        )
+        payload["attention_breakdowns"] = summarize_attention_breakdowns(
+            source_stages,
+            package_stages,
+            token_indices,
+            feature_indices,
+            int(layer.self_attn.head_dim),
+            float(layer.self_attn.scaling),
         )
     write_json(args.summary_json, payload)
     if args.markdown is not None:

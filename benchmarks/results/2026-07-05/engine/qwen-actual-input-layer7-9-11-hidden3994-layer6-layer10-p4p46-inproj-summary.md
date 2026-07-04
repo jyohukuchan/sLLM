@@ -22,6 +22,10 @@ Generated artifacts:
 - `qwen-self-attention-propagation-layer7-actual-input-token8-feature503-hidden3994-p4p46-inproj.json`
 - `qwen-self-attention-propagation-layer7-actual-input-token8-feature503-hidden3994-p4p46-inproj.md`
 - `package-golden-prefix-cpu-actual-prefix-layer0-8-causal-attn-diag-layer7-p4p46-inproj.jsonl`
+- `package-golden-prefix-cpu-actual-prefix0-12-rotary64-no-row-scale-p4p46-inproj.jsonl`
+- `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-p4p46-inproj.jsonl`
+- `qwen-self-attention-propagation-layer7-actual-input-rotary64-token8-feature503-hidden3994-p4p46-inproj.json`
+- `qwen-self-attention-propagation-layer7-actual-input-rotary64-token8-feature503-hidden3994-p4p46-inproj.md`
 
 ## Local package error with actual-prefix inputs
 
@@ -141,9 +145,50 @@ package replay (`o_input = 0.629811943`) and Rust's prepared q/k/v attention
 path (`attention_projection_input = 1.128042817`), not between Rust paged
 attention and a host reference.
 
+## Rotary dimension correction
+
+The Qwen3.5-9B config has `head_dim = 256` and
+`partial_rotary_factor = 0.25`, so the RoPE rotated width is `64`. Earlier smoke
+runs explicitly passed `rotary_dim = 32`, which rotated only half of the
+expected RoPE width.
+
+With the old `rotary_dim = 32` layer `7` token `8` feature `503` condition:
+
+| path | raw attention | gate sigmoid | gated input |
+| --- | ---: | ---: | ---: |
+| Rust package runtime | 1.810265899 | 0.623136520 | 1.128042817 |
+| Python package replay | 1.011238489 | 0.622812510 | 0.629811943 |
+
+With `rotary_dim = 64` and a fresh actual-prefix input dump:
+
+| path | raw attention | gate sigmoid | gated input |
+| --- | ---: | ---: | ---: |
+| Rust package runtime | 0.901784599 | 0.624433100 | 0.563104153 |
+| Python package replay | 0.901458323 | 0.624092400 | 0.562593281 |
+
+The source-token attention breakdowns also align under `rotary_dim = 64`, so the
+Rust/Python self-attention replay mismatch was caused by the incorrect smoke
+RoPE dimension, not by a Rust causal-attention kernel issue.
+
+Full `0..12` CPU actual-prefix results:
+
+| condition | manifest row scales | max abs diff | max layer | token | hidden |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `rotary_dim=32`, layer6+10 row-scale | 4 | 0.889577866 | 11 | 6 | 3994 |
+| `rotary_dim=64`, no row-scale | 0 | 1.744266510 | 10 | 0 | 3456 |
+| `rotary_dim=64`, layer6+10 row-scale | 4 | 0.645338058 | 11 | 7 | 3994 |
+
+This means both findings still matter:
+
+- The hidden `3456` row-scale chain remains real under the correct RoPE width.
+- The hidden `3994` self-attention investigation was amplified by the incorrect
+  `rotary_dim=32` smoke setting, but a smaller hidden `3994` residual remains
+  after correcting RoPE and applying layer6+10 row scales.
+
 Next useful target:
 
-- Dump or compare Rust prepared `q_rope` / `k_rope` / `v_projected` against the
-  Python replay tensors for layer `7`, token `8`, especially the head containing
-  feature `503`. The likely remaining mismatch is tensor layout, RoPE placement,
-  or q/k/v projection expansion in the Python replay.
+- Re-run the core CPU/R9700 and golden-before matrices with `rotary_dim=64`
+  or omit the CLI rotary-dim argument so `package-golden-prefix-smoke` uses the
+  default `head_dim * partial_rotary_factor` equivalent.
+- Then localize the remaining `rotary_dim=64 + layer6+10 row-scale` max at layer
+  `11`, token `7`, hidden `3994`.
