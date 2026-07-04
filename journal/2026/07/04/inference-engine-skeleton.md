@@ -425,6 +425,19 @@
 - `docs/words.txt` now defines `package self attention projection smoke` and `package self attention QK norm smoke`.
 - Next useful inference-engine step: add RoPE application to normalized q/k, then a small causal attention score/softmax/value-mix boundary before paged KV cache.
 
+2026-07-04 inference engine runtime RoPE smoke:
+- Commit `6d3fc23 Add runtime f32 RoPE smoke` adds `ullm_runtime_rope_f32`, Rust wrapper `ullm_runtime_sys::rope_f32`, and `ullm-engine runtime-rope-smoke [DEVICE_INDEX]`.
+- The runtime shape is `[sequence_len, heads, head_dim]`; `rotary_dim` must be even and no greater than `head_dim`. The implementation uses split-half RoPE, copies dims beyond `rotary_dim`, and uses `position_offset + timestep` with `rope_base`.
+- The HIP kernel now assigns one thread per rotary pair and writes both halves together, so the kernel does not depend on separate input/output buffers for each RoPE pair.
+- Validation passed: `cargo fmt --all --check`, `cargo check -p ullm-runtime-sys`, `cargo check -p ullm-engine`, `cargo test -p ullm-runtime-sys -- --test-threads=1`, `cargo test -p ullm-engine -- --test-threads=1`, `cargo build -p ullm-engine`, `cargo test --workspace -- --test-threads=1`, and `git diff --check`.
+- Runtime RoPE smoke passed on CPU device `0` with max diff `0`, on R9700/RDNA4 device `2` with `ULLM_REQUIRE_HIP_ROPE_KERNEL=1` and max diff `0.000000119`, and on both V620/RDNA2 devices `1` and `3` with max diff `0.000000119`.
+- Next useful inference-engine step: connect normalized q/k from `package-self-attn-qk-norm-smoke` into RoPE, then add a small causal attention score/softmax/value-mix boundary.
+
+2026-07-04 resumed scope note:
+- Immediate hardware target is limited to locally verifiable RDNA2/Radeon PRO V620 and RDNA4/Radeon AI PRO R9700.
+- Near-term architecture support is intentionally narrow: Qwen3.5/Qwen3-style partial decoder paths that are useful for validating AQ package loading, runtime boundaries, and HIP kernels.
+- Other hardware backends and broad model architecture coverage remain project goals, but they should not block the current RDNA2/RDNA4 inference-engine vertical slice.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -477,9 +490,10 @@
 - `74af9d5 Extend package linear attention MLP block smoke sequence`
 - `4b3bf16 Add package self attention projection smoke`
 - `1291251 Add package self attention qk norm smoke`
+- `6d3fc23 Add runtime f32 RoPE smoke`
 
 ## 次の行動
 
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、f32 add境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smoke、実packageの `post RMSNorm -> MLP -> residual add` block smoke、1 tokenおよびsequence length 2の実package `input RMSNorm -> linear_attn -> residual -> post RMSNorm -> MLP -> residual` layer-level partial decoder smoke、通常self-attnのq/k/v/o projection smoke、通常self-attnのq/k projection -> head-wise RMSNorm smokeまで通った。次はRoPEまたは小さいattention score/softmax/value mix境界へ進む。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、f32 add境界、runtime RoPE境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smoke、実packageの `post RMSNorm -> MLP -> residual add` block smoke、1 tokenおよびsequence length 2の実package `input RMSNorm -> linear_attn -> residual -> post RMSNorm -> MLP -> residual` layer-level partial decoder smoke、通常self-attnのq/k/v/o projection smoke、通常self-attnのq/k projection -> head-wise RMSNorm smokeまで通った。次はnormalized q/kへのRoPE接続、または小さいattention score/softmax/value mix境界へ進む。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
