@@ -7,9 +7,10 @@ use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
 use ullm_engine::decode_runner::{
-    Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerRequestDecodeRunner,
+    Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerDecodeInputLayout,
+    Qwen3DecoderLayerDecodeSequenceView, Qwen3DecoderLayerRequestDecodeRunner,
     Qwen3DecoderLayerStackRequestDecodeRunner, Qwen3SelfAttnDecodeBatchInput,
-    Qwen3SelfAttnRequestDecodeRunner,
+    Qwen3SelfAttnRequestDecodeRunner, qwen3_decoder_layer_decode_batch_inputs_from_sequences,
 };
 use ullm_engine::decoder::{
     PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntimeWeights,
@@ -2907,50 +2908,32 @@ fn run_scheduler_layer_stack_ready_batch(
         }
     }
 
+    let input_layout = Qwen3DecoderLayerDecodeInputLayout {
+        q_token_elements,
+        k_token_elements,
+        v_token_elements,
+        attention_elements,
+        hidden,
+    };
     let mut layer_inputs = Vec::with_capacity(runs_by_layer.len());
     for (layer_position, runs) in runs_by_layer.iter().enumerate() {
-        let mut inputs = Vec::with_capacity(ready.len());
-        for request in ready {
-            let run = scheduler_layer_decode_run(runs, request.request.id).ok_or_else(|| {
-                format!(
-                    "{label} layer {layer_position} request {:?} disappeared while preparing decode input",
-                    request.request.id
-                )
-            })?;
-            let q_start = request
-                .cache_position
-                .checked_mul(q_token_elements)
-                .ok_or_else(|| format!("{label} layer {layer_position} q slice start overflows"))?;
-            let k_start = request
-                .cache_position
-                .checked_mul(k_token_elements)
-                .ok_or_else(|| format!("{label} layer {layer_position} k slice start overflows"))?;
-            let v_start = request
-                .cache_position
-                .checked_mul(v_token_elements)
-                .ok_or_else(|| format!("{label} layer {layer_position} v slice start overflows"))?;
-            let gate_start = request
-                .cache_position
-                .checked_mul(attention_elements)
-                .ok_or_else(|| {
-                    format!("{label} layer {layer_position} gate slice start overflows")
-                })?;
-            let residual_start = request.cache_position.checked_mul(hidden).ok_or_else(|| {
-                format!("{label} layer {layer_position} residual slice start overflows")
-            })?;
-            let output_gate = run
-                .output_gate_sequence
-                .as_ref()
-                .map(|gate| &gate[gate_start..gate_start + attention_elements]);
-            inputs.push(Qwen3DecoderLayerDecodeBatchInput {
-                request_id: request.request.id,
-                q: &run.q_sequence[q_start..q_start + q_token_elements],
-                k: &run.k_sequence[k_start..k_start + k_token_elements],
-                v: &run.v_sequence[v_start..v_start + v_token_elements],
-                output_gate,
-                residual: &run.residual_sequence[residual_start..residual_start + hidden],
-            });
-        }
+        let sequences = runs
+            .iter()
+            .map(|run| Qwen3DecoderLayerDecodeSequenceView {
+                request_id: run.request_id,
+                q_sequence: &run.q_sequence,
+                k_sequence: &run.k_sequence,
+                v_sequence: &run.v_sequence,
+                output_gate_sequence: run.output_gate_sequence.as_deref(),
+                residual_sequence: &run.residual_sequence,
+            })
+            .collect::<Vec<_>>();
+        let inputs = qwen3_decoder_layer_decode_batch_inputs_from_sequences(
+            ready,
+            &sequences,
+            input_layout,
+            &format!("{label} layer {layer_position}"),
+        )?;
         layer_inputs.push(inputs);
     }
 

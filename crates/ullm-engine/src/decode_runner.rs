@@ -53,6 +53,25 @@ pub struct Qwen3DecoderLayerDecodeBatchInput<'a> {
     pub residual: &'a [f32],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Qwen3DecoderLayerDecodeInputLayout {
+    pub q_token_elements: usize,
+    pub k_token_elements: usize,
+    pub v_token_elements: usize,
+    pub attention_elements: usize,
+    pub hidden: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Qwen3DecoderLayerDecodeSequenceView<'a> {
+    pub request_id: RequestId,
+    pub q_sequence: &'a [f32],
+    pub k_sequence: &'a [f32],
+    pub v_sequence: &'a [f32],
+    pub output_gate_sequence: Option<&'a [f32]>,
+    pub residual_sequence: &'a [f32],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Qwen3DecoderLayerDecodeBatchOutput {
     pub request_id: RequestId,
@@ -80,6 +99,131 @@ pub struct Qwen3DecoderLayerRequestDecodeRunner<'weights> {
 #[derive(Default)]
 pub struct Qwen3DecoderLayerStackRequestDecodeRunner<'weights> {
     layers: Vec<Qwen3DecoderLayerRequestDecodeRunner<'weights>>,
+}
+
+pub fn qwen3_decoder_layer_decode_batch_inputs_from_sequences<'a>(
+    ready_batch: &[SchedulerDecodeRequest],
+    sequences: &[Qwen3DecoderLayerDecodeSequenceView<'a>],
+    layout: Qwen3DecoderLayerDecodeInputLayout,
+    label: &str,
+) -> Result<Vec<Qwen3DecoderLayerDecodeBatchInput<'a>>, String> {
+    validate_decode_input_layout(layout, label)?;
+    let mut by_request = BTreeMap::new();
+    for sequence in sequences {
+        if by_request.insert(sequence.request_id, sequence).is_some() {
+            return Err(format!(
+                "{label} contains duplicate decode sequence for {:?}",
+                sequence.request_id
+            ));
+        }
+    }
+
+    let mut inputs = Vec::with_capacity(ready_batch.len());
+    for request in ready_batch {
+        let sequence = by_request.get(&request.request.id).ok_or_else(|| {
+            format!(
+                "{label} request {:?} has no decode sequence",
+                request.request.id
+            )
+        })?;
+        let q_start = request
+            .cache_position
+            .checked_mul(layout.q_token_elements)
+            .ok_or_else(|| {
+                format!(
+                    "{label} request {:?} q slice start overflows",
+                    request.request.id
+                )
+            })?;
+        let k_start = request
+            .cache_position
+            .checked_mul(layout.k_token_elements)
+            .ok_or_else(|| {
+                format!(
+                    "{label} request {:?} k slice start overflows",
+                    request.request.id
+                )
+            })?;
+        let v_start = request
+            .cache_position
+            .checked_mul(layout.v_token_elements)
+            .ok_or_else(|| {
+                format!(
+                    "{label} request {:?} v slice start overflows",
+                    request.request.id
+                )
+            })?;
+        let gate_start = request
+            .cache_position
+            .checked_mul(layout.attention_elements)
+            .ok_or_else(|| {
+                format!(
+                    "{label} request {:?} output gate slice start overflows",
+                    request.request.id
+                )
+            })?;
+        let residual_start = request
+            .cache_position
+            .checked_mul(layout.hidden)
+            .ok_or_else(|| {
+                format!(
+                    "{label} request {:?} residual slice start overflows",
+                    request.request.id
+                )
+            })?;
+        let q = checked_decode_slice(
+            sequence.q_sequence,
+            q_start,
+            layout.q_token_elements,
+            label,
+            request.request.id,
+            "q",
+        )?;
+        let k = checked_decode_slice(
+            sequence.k_sequence,
+            k_start,
+            layout.k_token_elements,
+            label,
+            request.request.id,
+            "k",
+        )?;
+        let v = checked_decode_slice(
+            sequence.v_sequence,
+            v_start,
+            layout.v_token_elements,
+            label,
+            request.request.id,
+            "v",
+        )?;
+        let output_gate = match sequence.output_gate_sequence {
+            Some(values) => Some(checked_decode_slice(
+                values,
+                gate_start,
+                layout.attention_elements,
+                label,
+                request.request.id,
+                "output gate",
+            )?),
+            None => None,
+        };
+        let residual = checked_decode_slice(
+            sequence.residual_sequence,
+            residual_start,
+            layout.hidden,
+            label,
+            request.request.id,
+            "residual",
+        )?;
+        inputs.push(Qwen3DecoderLayerDecodeBatchInput {
+            request_id: request.request.id,
+            q,
+            k,
+            v,
+            output_gate,
+            residual,
+        });
+    }
+    Ok(inputs)
 }
 
 impl Qwen3SelfAttnRequestDecodeRunner {
@@ -727,6 +871,55 @@ fn layer_batch_output_from_step(
     }
 }
 
+fn validate_decode_input_layout(
+    layout: Qwen3DecoderLayerDecodeInputLayout,
+    label: &str,
+) -> Result<(), String> {
+    if layout.q_token_elements == 0 {
+        return Err(format!(
+            "{label} q_token_elements must be greater than zero"
+        ));
+    }
+    if layout.k_token_elements == 0 {
+        return Err(format!(
+            "{label} k_token_elements must be greater than zero"
+        ));
+    }
+    if layout.v_token_elements == 0 {
+        return Err(format!(
+            "{label} v_token_elements must be greater than zero"
+        ));
+    }
+    if layout.attention_elements == 0 {
+        return Err(format!(
+            "{label} attention_elements must be greater than zero"
+        ));
+    }
+    if layout.hidden == 0 {
+        return Err(format!("{label} hidden must be greater than zero"));
+    }
+    Ok(())
+}
+
+fn checked_decode_slice<'a>(
+    values: &'a [f32],
+    start: usize,
+    len: usize,
+    label: &str,
+    request_id: RequestId,
+    field: &str,
+) -> Result<&'a [f32], String> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| format!("{label} request {request_id:?} {field} slice end overflows"))?;
+    values.get(start..end).ok_or_else(|| {
+        format!(
+            "{label} request {request_id:?} {field} slice [{start}..{end}] exceeds {} values",
+            values.len()
+        )
+    })
+}
+
 fn validate_batch_inputs(
     ready_batch: &[SchedulerDecodeRequest],
     inputs: &[Qwen3SelfAttnDecodeBatchInput<'_>],
@@ -820,7 +1013,7 @@ mod tests {
         Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnRuntimeWeights,
         pack_paged_kv_cache_for_block_table, qwen3_decoder_layer_sequence_to_host_f32,
     };
-    use crate::scheduler::Request;
+    use crate::scheduler::{BlockAllocation, Request};
     use ullm_runtime_sys::RuntimeBuffer;
 
     fn assert_f32s_close(actual: &[f32], expected: &[f32], tolerance: f32) {
@@ -844,6 +1037,116 @@ mod tests {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         bytes
+    }
+
+    fn ready_decode_request(id: u64, cache_position: usize) -> SchedulerDecodeRequest {
+        SchedulerDecodeRequest {
+            request: Request::new(id, cache_position, 1),
+            allocation: BlockAllocation {
+                request_id: RequestId(id),
+                blocks: vec![0, 1],
+            },
+            cached_tokens: cache_position,
+            generated_tokens: 0,
+            cache_position,
+            next_cache_len: cache_position + 1,
+            remaining_new_tokens: 1,
+        }
+    }
+
+    #[test]
+    fn decoder_layer_decode_batch_inputs_from_sequences_follow_ready_order() {
+        let ready = vec![ready_decode_request(11, 1), ready_decode_request(12, 0)];
+        let layout = Qwen3DecoderLayerDecodeInputLayout {
+            q_token_elements: 2,
+            k_token_elements: 1,
+            v_token_elements: 1,
+            attention_elements: 2,
+            hidden: 3,
+        };
+        let q11 = vec![10.0, 11.0, 12.0, 13.0];
+        let k11 = vec![20.0, 21.0];
+        let v11 = vec![30.0, 31.0];
+        let gate11 = vec![40.0, 41.0, 42.0, 43.0];
+        let residual11 = vec![50.0, 51.0, 52.0, 53.0, 54.0, 55.0];
+        let q12 = vec![100.0, 101.0];
+        let k12 = vec![120.0];
+        let v12 = vec![130.0];
+        let residual12 = vec![150.0, 151.0, 152.0];
+        let sequences = vec![
+            Qwen3DecoderLayerDecodeSequenceView {
+                request_id: RequestId(12),
+                q_sequence: &q12,
+                k_sequence: &k12,
+                v_sequence: &v12,
+                output_gate_sequence: None,
+                residual_sequence: &residual12,
+            },
+            Qwen3DecoderLayerDecodeSequenceView {
+                request_id: RequestId(11),
+                q_sequence: &q11,
+                k_sequence: &k11,
+                v_sequence: &v11,
+                output_gate_sequence: Some(&gate11),
+                residual_sequence: &residual11,
+            },
+        ];
+
+        let inputs = qwen3_decoder_layer_decode_batch_inputs_from_sequences(
+            &ready,
+            &sequences,
+            layout,
+            "decode sequence test",
+        )
+        .expect("ready batch inputs from sequences");
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].request_id, RequestId(11));
+        assert_eq!(inputs[0].q, &[12.0, 13.0]);
+        assert_eq!(inputs[0].k, &[21.0]);
+        assert_eq!(inputs[0].v, &[31.0]);
+        assert_eq!(inputs[0].output_gate, Some(&[42.0, 43.0][..]));
+        assert_eq!(inputs[0].residual, &[53.0, 54.0, 55.0]);
+        assert_eq!(inputs[1].request_id, RequestId(12));
+        assert_eq!(inputs[1].q, &[100.0, 101.0]);
+        assert_eq!(inputs[1].k, &[120.0]);
+        assert_eq!(inputs[1].v, &[130.0]);
+        assert_eq!(inputs[1].output_gate, None);
+        assert_eq!(inputs[1].residual, &[150.0, 151.0, 152.0]);
+    }
+
+    #[test]
+    fn decoder_layer_decode_batch_inputs_from_sequences_rejects_short_sequence() {
+        let ready = vec![ready_decode_request(11, 1)];
+        let layout = Qwen3DecoderLayerDecodeInputLayout {
+            q_token_elements: 2,
+            k_token_elements: 1,
+            v_token_elements: 1,
+            attention_elements: 2,
+            hidden: 3,
+        };
+        let q = vec![10.0, 11.0, 12.0];
+        let k = vec![20.0, 21.0];
+        let v = vec![30.0, 31.0];
+        let residual = vec![50.0, 51.0, 52.0, 53.0, 54.0, 55.0];
+        let sequences = vec![Qwen3DecoderLayerDecodeSequenceView {
+            request_id: RequestId(11),
+            q_sequence: &q,
+            k_sequence: &k,
+            v_sequence: &v,
+            output_gate_sequence: None,
+            residual_sequence: &residual,
+        }];
+
+        let err = qwen3_decoder_layer_decode_batch_inputs_from_sequences(
+            &ready,
+            &sequences,
+            layout,
+            "decode sequence test",
+        )
+        .expect_err("short q sequence must fail");
+
+        assert!(err.contains("q slice [2..4] exceeds 3 values"), "{err}");
     }
 
     fn f32_buffer(
