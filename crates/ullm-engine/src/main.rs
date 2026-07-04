@@ -9,8 +9,9 @@ use std::time::Instant;
 use ullm_engine::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntime, Qwen3DecoderLayerRuntimeWeights,
     Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnBlockStepState,
-    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights,
-    qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
+    Qwen3SelfAttnDecodeState, Qwen3SelfAttnProjectedSequence, Qwen3SelfAttnRuntimeShape,
+    Qwen3SelfAttnRuntimeWeights, qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32,
+    qwen3_rope_to_host_f32, qwen3_self_attn_project_sequence_to_host_f32,
     qwen3_self_attn_runtime_shape, split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
@@ -7605,64 +7606,26 @@ fn qwen3_self_attn_prepare_sequence_smoke(
         attention_width: _,
         q_projection_layout,
     } = qwen3_self_attn_runtime_shape(self_attn_weights)?;
-    let q_rows = self_attn_weights.q_rows;
-    let k_rows = self_attn_weights.k_rows;
-    let v_rows = self_attn_weights.v_rows;
     let q_cols = hidden;
-
-    let hidden_bytes = hidden
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| "hidden input byte size overflows".to_string())?;
+    let q_rows = self_attn_weights.q_rows;
 
     let base_input = deterministic_f32_vector(q_cols);
     let mut residual_sequence = Vec::with_capacity(sequence_len * q_cols);
-    let mut input_buffer = context
-        .alloc_buffer(hidden_bytes)
-        .map_err(|err| format!("failed to allocate {label} input buffer: {err}"))?;
-    let mut q_projected = Vec::with_capacity(sequence_len * q_rows);
-    let mut k_projected = Vec::with_capacity(sequence_len * k_rows);
-    let mut v_projected = Vec::with_capacity(sequence_len * v_rows);
     for timestep in 0..sequence_len {
         let step_input = linear_attn_step_input(&base_input, timestep);
         residual_sequence.extend_from_slice(&step_input);
-        let step_input_bytes = encode_f32_to_bytes(&step_input);
-        input_buffer
-            .copy_from_host(0, &step_input_bytes, Some(stream))
-            .map_err(|err| format!("failed to copy {label} timestep {timestep} input: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after {label} timestep {timestep} input copy: {err}")
-        })?;
-        let q_step = runtime_matvec_to_host_f32(
-            context,
-            stream,
-            &self_attn_weights.q_matrix,
-            &input_buffer,
-            q_rows,
-            q_cols,
-            &format!("{label} q projection"),
-        )?;
-        let k_step = runtime_matvec_to_host_f32(
-            context,
-            stream,
-            &self_attn_weights.k_matrix,
-            &input_buffer,
-            k_rows,
-            q_cols,
-            &format!("{label} k projection"),
-        )?;
-        let v_step = runtime_matvec_to_host_f32(
-            context,
-            stream,
-            &self_attn_weights.v_matrix,
-            &input_buffer,
-            v_rows,
-            q_cols,
-            &format!("{label} v projection"),
-        )?;
-        q_projected.extend(q_step);
-        k_projected.extend(k_step);
-        v_projected.extend(v_step);
     }
+    let Qwen3SelfAttnProjectedSequence {
+        q_projected,
+        k_projected,
+        v_projected,
+    } = qwen3_self_attn_project_sequence_to_host_f32(
+        context,
+        stream,
+        self_attn_weights,
+        &residual_sequence,
+        sequence_len,
+    )?;
 
     let q_projection_split =
         split_qwen3_self_attn_q_projection(&q_projected, sequence_len, q_rows, q_cols, head_dim)?;

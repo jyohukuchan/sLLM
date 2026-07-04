@@ -134,6 +134,13 @@ pub struct Qwen3SelfAttnRuntimeShape {
     pub q_projection_layout: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen3SelfAttnProjectedSequence {
+    pub q_projected: Vec<f32>,
+    pub k_projected: Vec<f32>,
+    pub v_projected: Vec<f32>,
+}
+
 pub fn qwen3_self_attn_runtime_shape(
     weights: &Qwen3SelfAttnRuntimeWeights,
 ) -> Result<Qwen3SelfAttnRuntimeShape, String> {
@@ -231,6 +238,260 @@ pub fn qwen3_self_attn_runtime_shape(
         attention_width,
         q_projection_layout,
     })
+}
+
+pub fn qwen3_self_attn_project_sequence_to_host_f32(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    weights: &Qwen3SelfAttnRuntimeWeights,
+    input_sequence: &[f32],
+    sequence_len: usize,
+) -> Result<Qwen3SelfAttnProjectedSequence, String> {
+    let shape = qwen3_self_attn_runtime_shape(weights)?;
+    if sequence_len == 0 {
+        return Err(
+            "self-attn sequence projection sequence_len must be greater than zero".to_string(),
+        );
+    }
+
+    let hidden = shape.hidden;
+    let expected_input_len = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "self-attn sequence projection input length overflows".to_string())?;
+    if input_sequence.len() != expected_input_len {
+        return Err(format!(
+            "self-attn sequence projection input length {} does not match sequence_len={sequence_len} hidden={hidden}",
+            input_sequence.len()
+        ));
+    }
+
+    let q_elements = sequence_len
+        .checked_mul(weights.q_rows)
+        .ok_or_else(|| "self-attn sequence projection q output length overflows".to_string())?;
+    let k_rows = weights.k_rows;
+    let v_rows = weights.v_rows;
+    let k_elements = sequence_len
+        .checked_mul(k_rows)
+        .ok_or_else(|| "self-attn sequence projection k output length overflows".to_string())?;
+    let v_elements = sequence_len
+        .checked_mul(v_rows)
+        .ok_or_else(|| "self-attn sequence projection v output length overflows".to_string())?;
+
+    let hidden_bytes = hidden
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn sequence projection input byte size overflows".to_string())?;
+    let q_bytes = weights
+        .q_rows
+        .checked_mul(hidden)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "self-attn q projection matrix byte size overflows".to_string())?;
+    if weights.q_matrix.size()? != q_bytes {
+        return Err(format!(
+            "self-attn q projection matrix byte size mismatch: expected {q_bytes}, got {}",
+            weights.q_matrix.size()?
+        ));
+    }
+    let k_bytes = k_rows
+        .checked_mul(hidden)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "self-attn k projection matrix byte size overflows".to_string())?;
+    if weights.k_matrix.size()? != k_bytes {
+        return Err(format!(
+            "self-attn k projection matrix byte size mismatch: expected {k_bytes}, got {}",
+            weights.k_matrix.size()?
+        ));
+    }
+    let v_bytes = v_rows
+        .checked_mul(hidden)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "self-attn v projection matrix byte size overflows".to_string())?;
+    if weights.v_matrix.size()? != v_bytes {
+        return Err(format!(
+            "self-attn v projection matrix byte size mismatch: expected {v_bytes}, got {}",
+            weights.v_matrix.size()?
+        ));
+    }
+    let q_step_bytes = weights
+        .q_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn q projection step output byte size overflows".to_string())?;
+    let k_step_bytes = k_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn k projection step output byte size overflows".to_string())?;
+    let v_step_bytes = v_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn v projection step output byte size overflows".to_string())?;
+
+    let mut input_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        format!("failed to allocate Qwen3 self-attn projection input buffer: {err}")
+    })?;
+    let mut q_buffer = context.alloc_buffer(q_step_bytes).map_err(|err| {
+        format!("failed to allocate Qwen3 self-attn q projection output buffer: {err}")
+    })?;
+    let mut k_buffer = context.alloc_buffer(k_step_bytes).map_err(|err| {
+        format!("failed to allocate Qwen3 self-attn k projection output buffer: {err}")
+    })?;
+    let mut v_buffer = context.alloc_buffer(v_step_bytes).map_err(|err| {
+        format!("failed to allocate Qwen3 self-attn v projection output buffer: {err}")
+    })?;
+
+    let mut q_projected = Vec::with_capacity(q_elements);
+    let mut k_projected = Vec::with_capacity(k_elements);
+    let mut v_projected = Vec::with_capacity(v_elements);
+
+    for timestep in 0..sequence_len {
+        let step_input = &input_sequence[timestep * hidden..(timestep + 1) * hidden];
+        input_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(step_input), Some(stream))
+            .map_err(|err| {
+                format!(
+                    "failed to copy Qwen3 self-attn sequence input at timestep {timestep}: {err}"
+                )
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!(
+                "failed to synchronize Qwen3 self-attn sequence input copy at timestep {timestep}: {err}"
+            )
+        })?;
+
+        q_projected.extend(qwen3_self_attn_project_to_host_f32(
+            &weights.q_matrix,
+            &input_buffer,
+            &mut q_buffer,
+            weights.q_rows,
+            hidden,
+            stream,
+            "q",
+            timestep,
+        )?);
+        k_projected.extend(qwen3_self_attn_project_to_host_f32(
+            &weights.k_matrix,
+            &input_buffer,
+            &mut k_buffer,
+            k_rows,
+            hidden,
+            stream,
+            "k",
+            timestep,
+        )?);
+        v_projected.extend(qwen3_self_attn_project_to_host_f32(
+            &weights.v_matrix,
+            &input_buffer,
+            &mut v_buffer,
+            v_rows,
+            hidden,
+            stream,
+            "v",
+            timestep,
+        )?);
+    }
+
+    if q_projected.len() != q_elements
+        || k_projected.len() != k_elements
+        || v_projected.len() != v_elements
+    {
+        return Err("self-attn sequence projection produced unexpected output length".to_string());
+    }
+
+    let q_output_bytes = q_projected
+        .len()
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn q projection output byte size overflows".to_string())?;
+    let k_output_bytes = k_projected
+        .len()
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn k projection output byte size overflows".to_string())?;
+    let v_output_bytes = v_projected
+        .len()
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn v projection output byte size overflows".to_string())?;
+
+    let expected_q_output_bytes = q_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn expected q projection byte size overflows".to_string())?;
+    let expected_k_output_bytes = k_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn expected k projection byte size overflows".to_string())?;
+    let expected_v_output_bytes = v_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "self-attn expected v projection byte size overflows".to_string())?;
+
+    if q_output_bytes != expected_q_output_bytes
+        || k_output_bytes != expected_k_output_bytes
+        || v_output_bytes != expected_v_output_bytes
+    {
+        return Err("self-attn sequence projection output byte size mismatch".to_string());
+    }
+
+    Ok(Qwen3SelfAttnProjectedSequence {
+        q_projected,
+        k_projected,
+        v_projected,
+    })
+}
+
+fn qwen3_self_attn_project_to_host_f32(
+    matrix: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    output_buffer: &mut RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    stream: &mut RuntimeStream,
+    projection_name: &str,
+    timestep: usize,
+) -> Result<Vec<f32>, String> {
+    if rows == 0 {
+        return Err(format!(
+            "self-attn {projection_name} projection rows must be greater than zero"
+        ));
+    }
+    if cols == 0 {
+        return Err(format!(
+            "self-attn {projection_name} projection cols must be greater than zero"
+        ));
+    }
+    let output_bytes = rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            format!("self-attn {projection_name} projection output byte size overflows")
+        })?;
+    if output_buffer.size()? != output_bytes {
+        return Err(format!(
+            "self-attn {projection_name} projection output buffer has unexpected byte size: got {} expected {}",
+            output_buffer.size()?,
+            output_bytes
+        ));
+    }
+    ullm_runtime_sys::matvec_f32(
+        matrix,
+        input_buffer,
+        rows,
+        cols,
+        output_buffer,
+        Some(stream),
+    )
+    .map_err(|err| {
+        format!("failed to run Qwen3 self-attn {projection_name} projection at timestep {timestep}: {err}")
+    })?;
+    stream.synchronize().map_err(|err| {
+        format!(
+            "failed to synchronize Qwen3 self-attn {projection_name} projection at timestep {timestep}: {err}"
+        )
+    })?;
+    let mut output_bytes_host = vec![0_u8; output_bytes];
+    output_buffer
+        .copy_to_host(0, &mut output_bytes_host, Some(stream))
+        .map_err(|err| {
+            format!(
+                "failed to copy Qwen3 self-attn {projection_name} projection at timestep {timestep}: {err}"
+            )
+        })?;
+    stream.synchronize().map_err(|err| {
+        format!(
+            "failed to synchronize Qwen3 self-attn {projection_name} projection output copy at timestep {timestep}: {err}"
+        )
+    })?;
+    Ok(le_bytes_to_f32s(&output_bytes_host))
 }
 
 #[derive(Debug)]
@@ -2235,6 +2496,112 @@ mod tests {
         assert_eq!(split.layout, "qwen3.5-gated");
         assert_eq!(split.gate.as_deref(), Some(expected_gate.as_slice()));
         assert_eq!(split.query, expected_query);
+    }
+
+    #[test]
+    fn qwen3_self_attn_project_sequence_to_host_f32_runs_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let q_rows = 4_usize;
+        let q_cols = 3_usize;
+        let head_dim = 2_usize;
+        let kv_heads = 2_usize;
+        let value_dim = 3_usize;
+        let o_rows = q_cols;
+        let o_cols = 6_usize;
+        let sequence_len = 3_usize;
+
+        let q_matrix_host = vec![
+            0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2,
+        ];
+        let k_matrix_host = vec![
+            1.2_f32, -0.2, 0.7, 0.9, -0.5, 1.4, -0.9, 0.8, 0.3, 1.1, -0.7, -1.0,
+        ];
+        let v_matrix_host = vec![
+            0.7_f32, 0.4, -0.1, 0.2, 0.3, 0.9, 1.5, -0.5, -1.1, 0.6, 0.8, -0.2, 0.4, 0.5, -0.7,
+            1.3, 0.8, -0.9,
+        ];
+        let o_matrix_host = vec![0.2_f32; o_rows * o_cols];
+
+        let mut q_matrix = context
+            .alloc_buffer(q_matrix_host.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_matrix = context
+            .alloc_buffer(k_matrix_host.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_matrix = context
+            .alloc_buffer(v_matrix_host.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut o_matrix = context
+            .alloc_buffer(o_rows * o_cols * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q_matrix
+            .copy_from_host(0, &f32s_to_le_bytes(&q_matrix_host), Some(&mut stream))
+            .unwrap();
+        k_matrix
+            .copy_from_host(0, &f32s_to_le_bytes(&k_matrix_host), Some(&mut stream))
+            .unwrap();
+        v_matrix
+            .copy_from_host(0, &f32s_to_le_bytes(&v_matrix_host), Some(&mut stream))
+            .unwrap();
+        o_matrix
+            .copy_from_host(0, &f32s_to_le_bytes(&o_matrix_host), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let weights = Qwen3SelfAttnRuntimeWeights {
+            q_rows,
+            q_cols,
+            k_rows: kv_heads * head_dim,
+            v_rows: kv_heads * value_dim,
+            o_rows,
+            o_cols,
+            head_dim,
+            kv_heads,
+            value_dim,
+            q_matrix,
+            k_matrix,
+            v_matrix,
+            o_matrix,
+        };
+
+        let input_sequence = (0..sequence_len * q_cols)
+            .map(|index| (index as f32 * 0.25) - 0.3)
+            .collect::<Vec<_>>();
+
+        let projected = qwen3_self_attn_project_sequence_to_host_f32(
+            &mut context,
+            &mut stream,
+            &weights,
+            &input_sequence,
+            sequence_len,
+        )
+        .unwrap();
+
+        let mut expected_q = Vec::with_capacity(sequence_len * q_rows);
+        let mut expected_k = Vec::with_capacity(sequence_len * weights.k_rows);
+        let mut expected_v = Vec::with_capacity(sequence_len * weights.v_rows);
+        for timestep in 0..sequence_len {
+            let step_input = &input_sequence[timestep * q_cols..(timestep + 1) * q_cols];
+            expected_q.extend(matvec_for_test(&q_matrix_host, step_input, q_rows, q_cols));
+            expected_k.extend(matvec_for_test(
+                &k_matrix_host,
+                step_input,
+                weights.k_rows,
+                q_cols,
+            ));
+            expected_v.extend(matvec_for_test(
+                &v_matrix_host,
+                step_input,
+                weights.v_rows,
+                q_cols,
+            ));
+        }
+
+        assert_f32s_close(&projected.q_projected, &expected_q, 1e-5);
+        assert_f32s_close(&projected.k_projected, &expected_k, 1e-5);
+        assert_f32s_close(&projected.v_projected, &expected_v, 1e-5);
     }
 
     fn make_qwen3_self_attn_runtime_weights(
