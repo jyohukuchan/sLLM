@@ -869,6 +869,8 @@ def run_linear_attention_layer_trace(
         layer.linear_attn.norm.register_forward_hook(hook("attention_gated_normed")),
         layer.linear_attn.out_proj.register_forward_pre_hook(pre_hook("attention_projection_input")),
         layer.post_attention_layernorm.register_forward_hook(hook("post_normed")),
+        layer.mlp.gate_proj.register_forward_hook(hook("mlp_gate_projection")),
+        layer.mlp.up_proj.register_forward_hook(hook("mlp_up_projection")),
         layer.mlp.down_proj.register_forward_pre_hook(pre_hook("mlp_activation")),
         layer.mlp.register_forward_hook(hook("mlp_output")),
     ]
@@ -930,6 +932,9 @@ def run_linear_attention_layer_trace(
     attention_projection_input = captured["attention_projection_input"]
     attention_output = captured["attention_output"]
     post_normed = captured["post_normed"]
+    mlp_gate_projection = captured["mlp_gate_projection"]
+    mlp_gate_silu = silu(mlp_gate_projection)
+    mlp_up_projection = captured["mlp_up_projection"]
     mlp_activation = captured["mlp_activation"]
     mlp_output = captured["mlp_output"]
     attention_block_output = before + attention_output
@@ -1036,6 +1041,10 @@ def run_linear_attention_layer_trace(
         token_index,
         before.shape[2],
     )
+    mlp_sampled_features = [
+        int(item["feature_index"])
+        for item in hot_input_vectors["mlp_activation"]["top_abs_features"]
+    ]
     for name, values in (
         ("attention_input_normed", attention_input_normed),
         ("attention_qkv_projection", attention_qkv_projection),
@@ -1078,6 +1087,19 @@ def run_linear_attention_layer_trace(
             token_index,
             sampled_features,
             sampled_group_width,
+        )
+    for name, values in (
+        ("mlp_gate_projection", mlp_gate_projection),
+        ("mlp_gate_silu", mlp_gate_silu),
+        ("mlp_up_projection", mlp_up_projection),
+    ):
+        add_token_vector_summary(
+            hot_input_vectors,
+            name,
+            values,
+            token_index,
+            mlp_sampled_features,
+            None,
         )
     per_token_hot_input_vectors = [
         {
@@ -1135,6 +1157,23 @@ def run_linear_attention_layer_trace(
                 token,
                 sampled_features,
                 sampled_group_width,
+            )
+        mlp_sampled_features = [
+            int(feature["feature_index"])
+            for feature in item["mlp_activation"]["top_abs_features"]
+        ]
+        for name, values in (
+            ("mlp_gate_projection", mlp_gate_projection),
+            ("mlp_gate_silu", mlp_gate_silu),
+            ("mlp_up_projection", mlp_up_projection),
+        ):
+            add_token_vector_summary(
+                item,
+                name,
+                values,
+                token,
+                mlp_sampled_features,
+                None,
             )
 
     return {
@@ -1227,6 +1266,8 @@ def run_self_attention_layer_trace(
         layer.self_attn.k_norm.register_forward_hook(hook("self_attention_k_normed")),
         layer.self_attn.o_proj.register_forward_pre_hook(pre_hook("attention_projection_input")),
         layer.post_attention_layernorm.register_forward_hook(hook("post_normed")),
+        layer.mlp.gate_proj.register_forward_hook(hook("mlp_gate_projection")),
+        layer.mlp.up_proj.register_forward_hook(hook("mlp_up_projection")),
         layer.mlp.down_proj.register_forward_pre_hook(pre_hook("mlp_activation")),
         layer.mlp.register_forward_hook(hook("mlp_output")),
     ]
@@ -1271,6 +1312,9 @@ def run_self_attention_layer_trace(
     attention_projection_input = captured["attention_projection_input"]
     attention_output = captured["attention_output"]
     post_normed = captured["post_normed"]
+    mlp_gate_projection = captured["mlp_gate_projection"]
+    mlp_gate_silu = silu(mlp_gate_projection)
+    mlp_up_projection = captured["mlp_up_projection"]
     mlp_activation = captured["mlp_activation"]
     mlp_output = captured["mlp_output"]
     attention_block_output = before + attention_output
@@ -1367,6 +1411,10 @@ def run_self_attention_layer_trace(
         token_index,
         before.shape[2],
     )
+    mlp_sampled_features = [
+        int(item["feature_index"])
+        for item in hot_input_vectors["mlp_activation"]["top_abs_features"]
+    ]
     summary_values = (
         ("attention_input_normed", attention_input_normed),
         ("attention_q_query", self_attention_query_projection),
@@ -1409,6 +1457,19 @@ def run_self_attention_layer_trace(
             sampled_features,
             sampled_group_width,
         )
+    for name, values in (
+        ("mlp_gate_projection", mlp_gate_projection),
+        ("mlp_gate_silu", mlp_gate_silu),
+        ("mlp_up_projection", mlp_up_projection),
+    ):
+        add_token_vector_summary(
+            hot_input_vectors,
+            name,
+            values,
+            token_index,
+            mlp_sampled_features,
+            None,
+        )
 
     per_token_hot_input_vectors = [
         {
@@ -1448,6 +1509,23 @@ def run_self_attention_layer_trace(
                 token,
                 sampled_features,
                 sampled_group_width,
+            )
+        mlp_sampled_features = [
+            int(feature["feature_index"])
+            for feature in item["mlp_activation"]["top_abs_features"]
+        ]
+        for name, values in (
+            ("mlp_gate_projection", mlp_gate_projection),
+            ("mlp_gate_silu", mlp_gate_silu),
+            ("mlp_up_projection", mlp_up_projection),
+        ):
+            add_token_vector_summary(
+                item,
+                name,
+                values,
+                token,
+                mlp_sampled_features,
+                None,
             )
 
     return {

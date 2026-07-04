@@ -12566,6 +12566,21 @@ fn package_golden_prefix_smoke_impl(
                         hidden,
                     ),
                     ("attention_normed", run.attention_normed.as_slice(), hidden),
+                    (
+                        "mlp_gate_projection",
+                        run.mlp_gate_projection.as_slice(),
+                        run.mlp_intermediate,
+                    ),
+                    (
+                        "mlp_gate_silu",
+                        run.mlp_gate_silu.as_slice(),
+                        run.mlp_intermediate,
+                    ),
+                    (
+                        "mlp_up_projection",
+                        run.mlp_up_projection.as_slice(),
+                        run.mlp_intermediate,
+                    ),
                 ];
                 insert_json_detail(
                     &mut details,
@@ -13529,6 +13544,7 @@ fn package_hot_input_vectors(
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let mut vectors = serde_json::Map::new();
     let mut attention_hot_feature_indices = Vec::new();
+    let mut mlp_hot_feature_indices = Vec::new();
     let hidden_group_width = if hidden % 128 == 0 { Some(128) } else { None };
     if let Some(values) = attention_projection_input {
         let start = token_index
@@ -13568,11 +13584,11 @@ fn package_hot_input_vectors(
                 values.len()
             )
         })?;
-        let sampled_feature_indices = package_top_abs_feature_indices(slice, 8);
+        mlp_hot_feature_indices = package_top_abs_feature_indices(slice, 8);
         insert_json_detail(
             &mut vectors,
             "mlp_activation",
-            package_vector_summary(token_index, slice, &sampled_feature_indices, None),
+            package_vector_summary(token_index, slice, &mlp_hot_feature_indices, None),
         );
     }
     for (name, values, feature_dim) in extra_hot_input_vectors {
@@ -13588,12 +13604,21 @@ fn package_hot_input_vectors(
                 values.len()
             )
         })?;
-        let sampled_feature_indices_storage = package_mapped_hot_feature_indices(
-            slice,
-            *feature_dim,
-            hidden,
-            &attention_hot_feature_indices,
-        );
+        let sampled_feature_indices_storage =
+            if name.starts_with("mlp_") && !mlp_hot_feature_indices.is_empty() {
+                mlp_hot_feature_indices
+                    .iter()
+                    .copied()
+                    .filter(|feature_index| *feature_index < *feature_dim)
+                    .collect::<Vec<_>>()
+            } else {
+                package_mapped_hot_feature_indices(
+                    slice,
+                    *feature_dim,
+                    hidden,
+                    &attention_hot_feature_indices,
+                )
+            };
         let sampled_feature_indices = sampled_feature_indices_storage.as_slice();
         insert_json_detail(
             &mut vectors,
@@ -20537,6 +20562,9 @@ struct PackageLinearAttnMlpBlockSequenceRun {
     attention_output: Vec<f32>,
     attention_block_output: Vec<f32>,
     post_normed: Vec<f32>,
+    mlp_gate_projection: Vec<f32>,
+    mlp_gate_silu: Vec<f32>,
+    mlp_up_projection: Vec<f32>,
     mlp_activation: Vec<f32>,
     mlp_intermediate: usize,
     mlp_output: Vec<f32>,
@@ -21546,7 +21574,16 @@ fn package_linear_attn_mlp_block_sequence_run(
         1e-5,
     )?;
 
-    let (mlp_activation, mlp_intermediate, mlp_output, layer_output, layer_block_max_abs_diff) = {
+    let (
+        mlp_gate_projection,
+        mlp_gate_silu,
+        mlp_up_projection,
+        mlp_activation,
+        mlp_intermediate,
+        mlp_output,
+        layer_output,
+        layer_block_max_abs_diff,
+    ) = {
         let mut registry = WeightRegistry::new();
         let (gate_rows, gate_cols, gate_matrix) = materialize_selected_aq4_matrix(
             &mut context,
@@ -21625,6 +21662,18 @@ fn package_linear_attn_mlp_block_sequence_run(
                 || "MLP activated sequence byte size overflows".to_string()
             )?
         ];
+        let mut mlp_gate_bytes = vec![
+            0_u8;
+            intermediate_bytes.checked_mul(sequence_len).ok_or_else(
+                || "MLP gate sequence byte size overflows".to_string()
+            )?
+        ];
+        let mut mlp_up_bytes = vec![
+            0_u8;
+            intermediate_bytes.checked_mul(sequence_len).ok_or_else(
+                || "MLP up sequence byte size overflows".to_string()
+            )?
+        ];
         for timestep in 0..sequence_len {
             let byte_start = timestep * hidden_bytes;
             let byte_end = byte_start + hidden_bytes;
@@ -21657,6 +21706,23 @@ fn package_linear_attn_mlp_block_sequence_run(
             .map_err(|err| format!("failed to run MLP up matvec timestep {timestep}: {err}"))?;
             stream.synchronize().map_err(|err| {
                 format!("failed to synchronize after MLP gate/up timestep {timestep}: {err}")
+            })?;
+            gate_buffer
+                .copy_to_host(
+                    0,
+                    &mut mlp_gate_bytes[intermediate_byte_start..intermediate_byte_end],
+                    Some(&mut stream),
+                )
+                .map_err(|err| format!("failed to copy MLP gate timestep {timestep}: {err}"))?;
+            up_buffer
+                .copy_to_host(
+                    0,
+                    &mut mlp_up_bytes[intermediate_byte_start..intermediate_byte_end],
+                    Some(&mut stream),
+                )
+                .map_err(|err| format!("failed to copy MLP up timestep {timestep}: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize after MLP gate/up host copy {timestep}: {err}")
             })?;
             ullm_runtime_sys::silu_mul_f32(
                 &gate_buffer,
@@ -21730,6 +21796,9 @@ fn package_linear_attn_mlp_block_sequence_run(
                 format!("failed to synchronize after layer output copy timestep {timestep}: {err}")
             })?;
         }
+        let mlp_gate_projection = decode_f32_le_values(&mlp_gate_bytes);
+        let mlp_gate_silu = runtime_host_silu_f32(&mlp_gate_projection);
+        let mlp_up_projection = decode_f32_le_values(&mlp_up_bytes);
         let mlp_activation = decode_f32_le_values(&mlp_activated_bytes);
         let mlp_output = decode_f32_le_values(&mlp_output_bytes);
         let layer_output = decode_f32_le_values(&layer_output_bytes);
@@ -21742,6 +21811,9 @@ fn package_linear_attn_mlp_block_sequence_run(
             1e-6,
         )?;
         (
+            mlp_gate_projection,
+            mlp_gate_silu,
+            mlp_up_projection,
             mlp_activation,
             intermediate,
             mlp_output,
@@ -21818,6 +21890,9 @@ fn package_linear_attn_mlp_block_sequence_run(
         attention_output: attn_output,
         attention_block_output,
         post_normed,
+        mlp_gate_projection,
+        mlp_gate_silu,
+        mlp_up_projection,
         mlp_activation,
         mlp_intermediate,
         mlp_output,
