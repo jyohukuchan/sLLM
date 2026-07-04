@@ -6774,35 +6774,14 @@ fn package_self_attn_decode_smoke(
         }
     };
     let paged_block_size = 2_usize;
-    let scheduled_paged_decode =
-        match allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("{err}");
-                return ExitCode::from(1);
-            }
-        };
-    let ScheduledPagedDecodeBlocks {
-        block_table: paged_block_table,
-        cache_blocks: paged_cache_blocks,
-        allocator_stats: paged_allocator_stats,
-        request_id: scheduler_request_id,
-        prefill_tokens: scheduler_prefill_tokens,
-        max_new_tokens: scheduler_max_new_tokens,
-        cached_tokens: scheduler_cached_tokens,
-        generated_tokens: scheduler_generated_tokens,
-        active_len: scheduler_active_len,
-    } = scheduled_paged_decode;
     let paged_decode = match runtime_paged_kv_write_decode_verify(
         &mut context,
         &mut stream,
         &q_rope,
         &k_rope,
         &v_projected,
-        &paged_block_table,
         sequence_len,
         paged_block_size,
-        paged_cache_blocks,
         q_heads,
         kv_heads,
         head_dim,
@@ -6877,7 +6856,7 @@ fn package_self_attn_decode_smoke(
     };
 
     println!(
-        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} scheduler_request_id={} scheduler_prefill_tokens={} scheduler_max_new_tokens={} scheduler_cached_tokens={} scheduler_generated_tokens={} scheduler_active_len={} paged_allocator_free_blocks={} paged_allocator_allocated_blocks={} paged_allocator_free_runs={} paged_allocator_largest_free_run={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} paged_k_cache_preview={} paged_v_cache_preview={} causal_last_preview={} decode_preview={} paged_decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} paged_kv_write_k_max_abs_diff={paged_kv_write_k_max_abs_diff:.9} paged_kv_write_v_max_abs_diff={paged_kv_write_v_max_abs_diff:.9} paged_decode_max_abs_diff={paged_decode_max_abs_diff:.9} paged_step_decode_max_abs_diff={paged_step_decode_max_abs_diff:.9} decode_paged_max_abs_diff={decode_paged_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} causal_paged_decode_max_abs_diff={causal_paged_decode_max_abs_diff:.9} causal_paged_step_decode_max_abs_diff={causal_paged_step_decode_max_abs_diff:.9} verified=true",
+        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} scheduler_decode_batches={} scheduler_request_id={} scheduler_prefill_tokens={} scheduler_max_new_tokens={} scheduler_cached_tokens={} scheduler_generated_tokens={} scheduler_active_len={} paged_allocator_free_blocks={} paged_allocator_allocated_blocks={} paged_allocator_free_runs={} paged_allocator_largest_free_run={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} paged_k_cache_preview={} paged_v_cache_preview={} causal_last_preview={} decode_preview={} paged_decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} paged_kv_write_k_max_abs_diff={paged_kv_write_k_max_abs_diff:.9} paged_kv_write_v_max_abs_diff={paged_kv_write_v_max_abs_diff:.9} paged_decode_max_abs_diff={paged_decode_max_abs_diff:.9} paged_step_decode_max_abs_diff={paged_step_decode_max_abs_diff:.9} decode_paged_max_abs_diff={decode_paged_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} causal_paged_decode_max_abs_diff={causal_paged_decode_max_abs_diff:.9} causal_paged_step_decode_max_abs_diff={causal_paged_step_decode_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -6888,18 +6867,19 @@ fn package_self_attn_decode_smoke(
         q_cols,
         sequence_len,
         paged_block_size,
-        paged_cache_blocks,
-        paged_block_table,
-        scheduler_request_id.0,
-        scheduler_prefill_tokens,
-        scheduler_max_new_tokens,
-        scheduler_cached_tokens,
-        scheduler_generated_tokens,
-        scheduler_active_len,
-        paged_allocator_stats.free_blocks,
-        paged_allocator_stats.allocated_blocks,
-        paged_allocator_stats.free_runs,
-        paged_allocator_stats.largest_free_run,
+        paged_decode.cache_blocks,
+        paged_decode.block_table,
+        paged_decode.scheduler_decode_batches,
+        paged_decode.scheduler_request_id.0,
+        paged_decode.scheduler_prefill_tokens,
+        paged_decode.scheduler_max_new_tokens,
+        paged_decode.scheduler_cached_tokens,
+        paged_decode.scheduler_generated_tokens,
+        paged_decode.scheduler_active_len,
+        paged_decode.allocator_stats.free_blocks,
+        paged_decode.allocator_stats.allocated_blocks,
+        paged_decode.allocator_stats.free_runs,
+        paged_decode.allocator_stats.largest_free_run,
         q_projection_layout,
         q_gate_elements,
         q_heads,
@@ -15835,6 +15815,16 @@ fn runtime_paged_decode_attn_verify(
 struct RuntimePagedKvWriteDecodeResult {
     output: Vec<f32>,
     step_outputs: Vec<f32>,
+    cache_blocks: usize,
+    block_table: Vec<u32>,
+    allocator_stats: KvBlockAllocatorStats,
+    scheduler_request_id: RequestId,
+    scheduler_prefill_tokens: usize,
+    scheduler_max_new_tokens: usize,
+    scheduler_cached_tokens: usize,
+    scheduler_generated_tokens: usize,
+    scheduler_active_len: usize,
+    scheduler_decode_batches: usize,
     output_max_abs_diff: f32,
     step_output_max_abs_diff: f32,
     k_cache: Vec<f32>,
@@ -15850,10 +15840,8 @@ fn runtime_paged_kv_write_decode_verify(
     q_sequence: &[f32],
     logical_k_cache: &[f32],
     logical_v_cache: &[f32],
-    block_table: &[u32],
     cache_len: usize,
     block_size: usize,
-    cache_blocks: usize,
     q_heads: usize,
     kv_heads: usize,
     head_dim: usize,
@@ -15879,6 +15867,14 @@ fn runtime_paged_kv_write_decode_verify(
             logical_v_cache.len()
         ));
     }
+    let prepared = prepare_fragmented_paged_decode_state(cache_len, block_size)?;
+    let mut scheduler = prepared.scheduler;
+    let prefill_prompt_tokens = prepared.prefill_tokens;
+    let max_new_tokens = prepared.max_new_tokens;
+    let block_table = prepared.block_table;
+    let cache_blocks = prepared.cache_blocks;
+    let scheduler_request_id = prepared.request_id;
+
     let readback_shape = PagedDecodeShape {
         block_size,
         cache_blocks,
@@ -15893,7 +15889,7 @@ fn runtime_paged_kv_write_decode_verify(
     } = pack_paged_kv_cache_for_block_table(
         logical_k_cache,
         logical_v_cache,
-        block_table,
+        &block_table,
         cache_len,
         readback_shape,
     )?;
@@ -15916,14 +15912,16 @@ fn runtime_paged_kv_write_decode_verify(
     let output_elements = q_heads * value_dim;
     let mut step_outputs = Vec::with_capacity(cache_len * output_elements);
     let mut step_output_max_abs_diff = 0.0_f32;
+    let mut scheduler_decode_batches = 0_usize;
 
-    for timestep in 0..cache_len {
+    for timestep in 0..prefill_prompt_tokens {
         let q_start = timestep * q_token_elements;
         let q_end = q_start + q_token_elements;
         let k_start = timestep * k_token_elements;
         let k_end = k_start + k_token_elements;
         let v_start = timestep * v_token_elements;
         let v_end = v_start + v_token_elements;
+
         let step = state
             .step(
                 stream,
@@ -15931,25 +15929,34 @@ fn runtime_paged_kv_write_decode_verify(
                 &logical_k_cache[k_start..k_end],
                 &logical_v_cache[v_start..v_end],
             )
-            .map_err(|err| format!("failed to run {label} timestep {timestep}: {err}"))?;
+            .map_err(|err| {
+                format!("{label} failed to run prefix/prefill decode timestep {timestep}: {err}")
+            })?;
         if step.cache_position != timestep {
             return Err(format!(
-                "{label} paged decode state wrote position {}, expected {timestep}",
+                "{label} prefix/prefill decode request wrote position {}, expected {timestep}",
                 step.cache_position
             ));
         }
         if step.cache_len != timestep + 1 {
             return Err(format!(
-                "{label} paged decode state reported cache_len {}, expected {}",
+                "{label} prefix/prefill decode request reported cache_len {}, expected {}",
                 step.cache_len,
                 timestep + 1
             ));
         }
+        if step.attention_output.len() != output_elements {
+            return Err(format!(
+                "{label} prefix/prefill timestep {timestep} produced {} outputs, expected {output_elements}",
+                step.attention_output.len()
+            ));
+        }
+
         let expected_step_output = runtime_host_paged_decode_attn_f32(
             &q_sequence[q_start..q_end],
             &expected_k_cache,
             &expected_v_cache,
-            block_table,
+            &block_table,
             timestep + 1,
             block_size,
             q_heads,
@@ -15968,6 +15975,103 @@ fn runtime_paged_kv_write_decode_verify(
         step_output_max_abs_diff = step_output_max_abs_diff.max(step_max_abs_diff);
         step_outputs.extend_from_slice(&step.attention_output);
     }
+
+    scheduler
+        .complete_prefill(scheduler_request_id)
+        .map_err(|err| format!("failed to complete decode prefill in {label}: {err}"))?;
+
+    for timestep in prefill_prompt_tokens..cache_len {
+        let mut decode_requests = scheduler
+            .ready_decode_batch(1)
+            .map_err(|err| format!("failed to ready decode batch in {label}: {err}"))?;
+        let request = decode_requests.pop().ok_or_else(|| {
+            format!("{label} expected one ready decode request for timestep {timestep}, got none")
+        })?;
+
+        if request.cache_position != timestep {
+            return Err(format!(
+                "{label} ready decode request cache position {} does not match timestep {timestep}",
+                request.cache_position
+            ));
+        }
+        if request.next_cache_len != timestep + 1 {
+            return Err(format!(
+                "{label} ready decode request next cache len {} does not match {}",
+                request.next_cache_len,
+                timestep + 1
+            ));
+        }
+        if request.request.id != scheduler_request_id {
+            return Err(format!(
+                "{label} ready decode request id {:?} does not match scheduler request {:?}",
+                request.request.id, scheduler_request_id
+            ));
+        }
+
+        let q_start = timestep * q_token_elements;
+        let q_end = q_start + q_token_elements;
+        let k_start = timestep * k_token_elements;
+        let k_end = k_start + k_token_elements;
+        let v_start = timestep * v_token_elements;
+        let v_end = v_start + v_token_elements;
+        let step = state
+            .step(
+                stream,
+                &q_sequence[q_start..q_end],
+                &logical_k_cache[k_start..k_end],
+                &logical_v_cache[v_start..v_end],
+            )
+            .map_err(|err| format!("failed to run {label} timestep {timestep}: {err}"))?;
+
+        if step.cache_position != request.cache_position {
+            return Err(format!(
+                "{label} paged decode state wrote position {}, expected {}",
+                step.cache_position, request.cache_position
+            ));
+        }
+        if step.cache_len != request.next_cache_len {
+            return Err(format!(
+                "{label} paged decode state reported cache_len {}, expected {}",
+                step.cache_len, request.next_cache_len
+            ));
+        }
+        let expected_step_output = runtime_host_paged_decode_attn_f32(
+            &q_sequence[q_start..q_end],
+            &expected_k_cache,
+            &expected_v_cache,
+            &block_table,
+            timestep + 1,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+        let step_max_abs_diff = verify_f32_close(
+            &format!("{label} timestep {timestep} paged decode step"),
+            &step.attention_output,
+            &expected_step_output,
+            1e-4_f32,
+            1e-4_f32,
+        )?;
+        step_output_max_abs_diff = step_output_max_abs_diff.max(step_max_abs_diff);
+        step_outputs.extend_from_slice(&step.attention_output);
+
+        scheduler
+            .advance_decode(scheduler_request_id)
+            .map_err(|err| format!("failed to advance decode in {label}: {err}"))?;
+        scheduler_decode_batches += 1;
+    }
+
+    let scheduler_active = scheduler
+        .active_request(scheduler_request_id)
+        .ok_or_else(|| {
+            format!(
+                "{label} decode request {:?} missing after scheduler progress",
+                scheduler_request_id
+            )
+        })?;
 
     let readback = state
         .read_cache_to_host(stream)
@@ -15994,7 +16098,7 @@ fn runtime_paged_kv_write_decode_verify(
         &q_sequence[(cache_len - 1) * q_token_elements..cache_len * q_token_elements],
         &expected_k_cache,
         &expected_v_cache,
-        block_table,
+        &block_table,
         cache_len,
         block_size,
         q_heads,
@@ -16009,6 +16113,16 @@ fn runtime_paged_kv_write_decode_verify(
     Ok(RuntimePagedKvWriteDecodeResult {
         output,
         step_outputs,
+        cache_blocks,
+        block_table,
+        allocator_stats: scheduler.allocator_stats(),
+        scheduler_request_id,
+        scheduler_prefill_tokens: prefill_prompt_tokens,
+        scheduler_max_new_tokens: max_new_tokens,
+        scheduler_cached_tokens: scheduler_active.cached_tokens,
+        scheduler_generated_tokens: scheduler_active.generated_tokens,
+        scheduler_active_len: scheduler.active_len(),
+        scheduler_decode_batches,
         output_max_abs_diff,
         step_output_max_abs_diff,
         k_cache: readback.k,
@@ -16848,10 +16962,19 @@ struct ScheduledPagedDecodeBlocks {
     active_len: usize,
 }
 
-fn allocate_fragmented_paged_decode_blocks(
+struct PreparedFragmentedPagedDecodeState {
+    scheduler: SchedulerState,
+    block_table: Vec<u32>,
+    cache_blocks: usize,
+    request_id: RequestId,
+    prefill_tokens: usize,
+    max_new_tokens: usize,
+}
+
+fn prepare_fragmented_paged_decode_state(
     cache_len: usize,
     block_size: usize,
-) -> Result<ScheduledPagedDecodeBlocks, String> {
+) -> Result<PreparedFragmentedPagedDecodeState, String> {
     if cache_len == 0 {
         return Err("paged decode cache_len must be greater than zero".to_string());
     }
@@ -16863,6 +16986,7 @@ fn allocate_fragmented_paged_decode_blocks(
             "paged decode block_size={block_size} exceeds u32 block size range"
         ));
     }
+
     let block_count = (cache_len - 1) / block_size + 1;
     if block_count > u32::MAX as usize - 2 {
         return Err(format!(
@@ -16872,6 +16996,7 @@ fn allocate_fragmented_paged_decode_blocks(
     let cache_blocks = block_count
         .checked_add(2)
         .ok_or_else(|| "paged decode cache_blocks overflows".to_string())?;
+
     let mut scheduler = SchedulerState::with_block_size(cache_blocks as u32, block_size as u32);
     let fragment_blocks = cache_blocks - 1;
     let fragment_tokens = fragment_blocks
@@ -16924,11 +17049,48 @@ fn allocate_fragmented_paged_decode_blocks(
         ));
     }
 
+    Ok(PreparedFragmentedPagedDecodeState {
+        scheduler,
+        block_table: allocation.blocks,
+        cache_blocks,
+        request_id,
+        prefill_tokens: prefill_prompt_tokens,
+        max_new_tokens,
+    })
+}
+
+fn allocate_fragmented_paged_decode_blocks(
+    cache_len: usize,
+    block_size: usize,
+) -> Result<ScheduledPagedDecodeBlocks, String> {
+    let prepared = prepare_fragmented_paged_decode_state(cache_len, block_size)?;
+    let mut scheduler = prepared.scheduler;
+    let cache_blocks = prepared.cache_blocks;
+    let request_id = prepared.request_id;
+
     scheduler
         .complete_prefill(request_id)
         .map_err(|err| format!("failed to complete decode prefill: {err}"))?;
 
-    if max_new_tokens > 0 {
+    if prepared.max_new_tokens > 0 {
+        let mut ready = scheduler
+            .ready_decode_batch(1)
+            .map_err(|err| format!("failed to prepare ready decode batch: {err}"))?;
+        let request = ready
+            .pop()
+            .ok_or_else(|| "expected one ready decode request after prefill".to_string())?;
+        if request.request.id != request_id {
+            return Err(format!(
+                "ready decode request {:?} does not match expected {:?}",
+                request.request.id, request_id
+            ));
+        }
+        if request.cache_position != prepared.prefill_tokens {
+            return Err(format!(
+                "ready decode cache_position {} does not match prefill tokens {}",
+                request.cache_position, prepared.prefill_tokens
+            ));
+        }
         scheduler
             .advance_decode(request_id)
             .map_err(|err| format!("failed to advance decode by one token: {err}"))?;
@@ -16942,12 +17104,12 @@ fn allocate_fragmented_paged_decode_blocks(
     let active_len = scheduler.active_len();
     let stats = scheduler.allocator_stats();
     Ok(ScheduledPagedDecodeBlocks {
-        block_table: allocation.blocks,
+        block_table: prepared.block_table,
         cache_blocks,
         allocator_stats: stats,
         request_id,
-        prefill_tokens: prefill_prompt_tokens,
-        max_new_tokens,
+        prefill_tokens: prepared.prefill_tokens,
+        max_new_tokens: prepared.max_new_tokens,
         cached_tokens,
         generated_tokens,
         active_len,

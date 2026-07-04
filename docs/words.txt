@@ -52,6 +52,7 @@ family:Q/K/V/OやMLPなど、性質が近いtensorをまとめる分類
 control plane:request管理、scheduler、telemetry、APIなど、kernel実行そのもの以外を制御する層
 scheduler run state:待機request queue、KV block allocator、active decode requestを同じ状態として保持し、prefill batch選択、KV block allocation、prefill完了、cache_len/generation progress更新を一つのcontrol plane状態として扱う最小状態
 scheduler decode batch:prefill完了済みで、まだ生成可能なactive decode requestを安定順序で集めたcontrol plane側のdecode実行候補。各requestについて次に書き込むcache position、decode後のcache_len、残り生成token数を含む
+scheduler decode runner:scheduler decode batchから取り出したrequestをruntime paged decode stateへ渡し、成功後にscheduler run stateをadvance_decodeで進める実行境界
 scheduled paged decode blocks:scheduler run stateを通して得たpaged decode用block tableとcache block数、KV allocator stats、active decode requestのprefill/decode進行値をまとめたsmoke用の結果
 runtime:weight、KV cache、backend、kernel呼び出しを管理してmodel executionを実行する層
 runtime buffer:runtimeがbackend上またはCPU fallback上に確保するbyte buffer
