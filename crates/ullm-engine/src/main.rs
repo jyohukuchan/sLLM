@@ -7564,6 +7564,7 @@ struct Qwen3SelfAttnPreparedSequence {
     paged_cache_blocks: usize,
 }
 
+#[allow(dead_code)]
 struct SelfAttnBlockSmokeRun {
     residual_sequence: Vec<f32>,
     q_rope: Vec<f32>,
@@ -7801,7 +7802,7 @@ fn qwen3_self_attn_prepare_sequence_smoke(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn run_self_attn_block_sequence_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -8471,7 +8472,7 @@ fn package_self_attn_mlp_block_smoke_impl(
         &up_tensor,
         &down_tensor,
     )?;
-    let self_attn = run_self_attn_block_sequence_smoke(
+    let self_attn = qwen3_self_attn_prepare_sequence_smoke(
         &mut context,
         &mut stream,
         &layer_weights.self_attn,
@@ -8498,19 +8499,42 @@ fn package_self_attn_mlp_block_smoke_impl(
         return Err("Qwen3 decoder layer runtime MLP gate shape is inconsistent".to_string());
     }
 
-    let mut post_normed_expected = Vec::with_capacity(sequence_len * hidden);
-    for timestep in 0..sequence_len {
-        let start = timestep * hidden;
-        let end = start + hidden;
-        let expected = runtime_host_rmsnorm_f32(
-            &self_attn.block_output[start..end],
-            &post_norm.values,
-            mlp_epsilon,
-        );
-        post_normed_expected.extend_from_slice(&expected);
-    }
+    let (
+        post_normed,
+        mlp_output,
+        layer_output,
+        attention_output,
+        attention_projection_input,
+        attn_projected,
+        layer_step_block_output,
+        paged_kv_write_k_max_abs_diff,
+        paged_kv_write_v_max_abs_diff,
+        paged_step_attention_max_abs_diff,
+        causal_paged_step_attention_max_abs_diff,
+        output_gate_max_abs_diff,
+        o_proj_max_abs_diff,
+        block_max_abs_diff,
+        causal_paged_block_max_abs_diff,
+        post_norm_max_abs_diff,
+        layer_block_max_abs_diff,
+    ) = {
+        let o_rows = layer_weights.self_attn.o_rows;
+        let o_cols = layer_weights.self_attn.o_cols;
+        let o_matrix_bytes = o_rows
+            .checked_mul(o_cols)
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| "o projection matrix byte size overflows".to_string())?;
+        let mut o_matrix_raw = vec![0_u8; o_matrix_bytes];
+        layer_weights
+            .self_attn
+            .o_matrix
+            .copy_to_host(0, &mut o_matrix_raw, Some(&mut stream))
+            .map_err(|err| format!("failed to copy materialized o projection to host: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize after o projection host copy: {err}"))?;
+        let o_matrix_host = decode_f32_le_values(&o_matrix_raw);
 
-    let (post_normed, mlp_output, layer_output, post_norm_max_abs_diff, layer_block_max_abs_diff) = {
         let decode_shape = PagedDecodeShape {
             block_size: self_attn.paged_block_size,
             cache_blocks: self_attn.paged_cache_blocks,
@@ -8534,42 +8558,164 @@ fn package_self_attn_mlp_block_smoke_impl(
             &self_attn.residual_sequence,
             sequence_len,
         )?;
+        let attention_output = layer_sequence_output.attention_output;
+        let attention_projection_input = layer_sequence_output.attention_projection_input;
+        let attn_projected = layer_sequence_output.projected_output;
         let layer_step_block_output = layer_sequence_output.block_output;
         let post_normed = layer_sequence_output.post_normed;
         let mlp_output = layer_sequence_output.mlp_output;
         let layer_output = layer_sequence_output.layer_output;
         let layer_cache = layer_sequence_output.paged_cache;
-        let PagedKvCacheReadback {
-            k: expected_paged_k_cache,
-            v: expected_paged_v_cache,
-        } = pack_paged_kv_cache_for_block_table(
-            &self_attn.k_rope,
-            &self_attn.v_projected,
-            &self_attn.paged_block_table,
-            sequence_len,
-            decode_shape,
-        )?;
-        verify_f32_close(
+        let paged_kv_write_k_max_abs_diff = verify_f32_close(
             "package-self-attn-mlp-block-smoke layer step paged k cache write",
             &layer_cache.k,
-            &expected_paged_k_cache,
+            &self_attn.expected_paged_k_cache,
             1e-5,
             1e-5,
         )?;
-        verify_f32_close(
+        let paged_kv_write_v_max_abs_diff = verify_f32_close(
             "package-self-attn-mlp-block-smoke layer step paged v cache write",
             &layer_cache.v,
-            &expected_paged_v_cache,
+            &self_attn.expected_paged_v_cache,
             1e-5,
             1e-5,
         )?;
+        let q_token_elements = self_attn.q_heads * self_attn.head_dim;
+        let attention_elements = self_attn.q_heads * self_attn.value_dim;
+
+        let mut expected_paged_step_attention_output =
+            Vec::with_capacity(sequence_len * attention_elements);
+        for timestep in 0..sequence_len {
+            let q_start = timestep
+                .checked_mul(q_token_elements)
+                .ok_or_else(|| "self-attn q slice start overflows".to_string())?;
+            let q_end = q_start
+                .checked_add(q_token_elements)
+                .ok_or_else(|| "self-attn q slice end overflows".to_string())?;
+            let expected_step_output = runtime_host_paged_decode_attn_f32(
+                &self_attn.q_rope[q_start..q_end],
+                &self_attn.expected_paged_k_cache,
+                &self_attn.expected_paged_v_cache,
+                &self_attn.paged_block_table,
+                timestep + 1,
+                self_attn.paged_block_size,
+                self_attn.q_heads,
+                self_attn.kv_heads,
+                self_attn.head_dim,
+                self_attn.value_dim,
+                self_attn.softmax_scale,
+            );
+            expected_paged_step_attention_output.extend_from_slice(&expected_step_output);
+        }
+        let expected_paged_projection_input = if let Some(gate) = self_attn.q_gate.as_ref() {
+            runtime_host_sigmoid_mul_f32(gate, &attention_output)
+        } else {
+            attention_output.clone()
+        };
+        let mut expected_paged_attn_projected = Vec::with_capacity(sequence_len * o_rows);
+        for timestep in 0..sequence_len {
+            let input_start = timestep
+                .checked_mul(attention_elements)
+                .ok_or_else(|| "attention start overflow".to_string())?;
+            let input_end = input_start
+                .checked_add(attention_elements)
+                .ok_or_else(|| "attention end overflow".to_string())?;
+            expected_paged_attn_projected.extend(runtime_host_matvec_f32(
+                &o_matrix_host,
+                &expected_paged_projection_input[input_start..input_end],
+                o_rows,
+                o_cols,
+            ));
+        }
+
+        let expected_runtime_block_output =
+            runtime_host_add_f32(&self_attn.residual_sequence, &attn_projected);
         verify_f32_close(
             "package-self-attn-mlp-block-smoke layer step attention block",
             &layer_step_block_output,
-            &self_attn.block_output,
+            &expected_runtime_block_output,
             1e-4,
             1e-5,
         )?;
+
+        let paged_step_attention_max_abs_diff = verify_f32_close(
+            "package-self-attn-mlp-block-smoke Qwen3 self-attn step",
+            &attention_output,
+            &expected_paged_step_attention_output,
+            1e-4,
+            1e-4,
+        )?;
+        let output_gate_max_abs_diff = verify_f32_close(
+            "package-self-attn-mlp-block-smoke Qwen3 self-attn output gate",
+            &attention_projection_input,
+            &expected_paged_projection_input,
+            1e-5,
+            1e-6,
+        )?;
+        let o_proj_max_abs_diff = verify_f32_close(
+            "package-self-attn-mlp-block-smoke Qwen3 self-attn o projection",
+            &attn_projected,
+            &expected_paged_attn_projected,
+            1e-4,
+            1e-5,
+        )?;
+        let block_max_abs_diff = verify_f32_close(
+            "package-self-attn-mlp-block-smoke Qwen3 self-attn residual add",
+            &layer_step_block_output,
+            &expected_runtime_block_output,
+            1e-5,
+            1e-6,
+        )?;
+
+        let causal_paged_step_attention_max_abs_diff = verify_f32_close(
+            "package-self-attn-mlp-block-smoke causal-vs-paged-step-attention",
+            &attention_output,
+            &self_attn.attention_output,
+            1e-4,
+            1e-4,
+        )?;
+        let causal_attention_projection_input = if let Some(gate) = self_attn.q_gate.as_ref() {
+            runtime_host_sigmoid_mul_f32(gate, &self_attn.attention_output)
+        } else {
+            self_attn.attention_output.clone()
+        };
+        let mut causal_attn_projected = Vec::with_capacity(sequence_len * o_rows);
+        for timestep in 0..sequence_len {
+            let input_start = timestep
+                .checked_mul(attention_elements)
+                .ok_or_else(|| "causal attention start overflow".to_string())?;
+            let input_end = input_start
+                .checked_add(attention_elements)
+                .ok_or_else(|| "causal attention end overflow".to_string())?;
+            causal_attn_projected.extend(runtime_host_matvec_f32(
+                &o_matrix_host,
+                &causal_attention_projection_input[input_start..input_end],
+                o_rows,
+                o_cols,
+            ));
+        }
+        let expected_causal_block_output =
+            runtime_host_add_f32(&self_attn.residual_sequence, &causal_attn_projected);
+        let causal_paged_block_max_abs_diff = verify_f32_close(
+            "package-self-attn-mlp-block-smoke causal-vs-paged-block",
+            &layer_step_block_output,
+            &expected_causal_block_output,
+            3e-3,
+            2e-5,
+        )?;
+
+        let mut post_normed_expected = Vec::with_capacity(sequence_len * hidden);
+        for timestep in 0..sequence_len {
+            let start = timestep * hidden;
+            let end = start + hidden;
+            let expected = runtime_host_rmsnorm_f32(
+                &layer_step_block_output[start..end],
+                &post_norm.values,
+                mlp_epsilon,
+            );
+            post_normed_expected.extend_from_slice(&expected);
+        }
+
         let post_norm_max_abs_diff = verify_f32_close(
             "package-self-attn-mlp-block-smoke post RMSNorm",
             &post_normed,
@@ -8589,6 +8735,18 @@ fn package_self_attn_mlp_block_smoke_impl(
             post_normed,
             mlp_output,
             layer_output,
+            attention_output,
+            attention_projection_input,
+            attn_projected,
+            layer_step_block_output,
+            paged_kv_write_k_max_abs_diff,
+            paged_kv_write_v_max_abs_diff,
+            paged_step_attention_max_abs_diff,
+            causal_paged_step_attention_max_abs_diff,
+            output_gate_max_abs_diff,
+            o_proj_max_abs_diff,
+            block_max_abs_diff,
+            causal_paged_block_max_abs_diff,
             post_norm_max_abs_diff,
             layer_block_max_abs_diff,
         )
@@ -8633,13 +8791,10 @@ fn package_self_attn_mlp_block_smoke_impl(
         format_f32_preview(
             &self_attn.residual_sequence[..8.min(self_attn.residual_sequence.len())]
         ),
-        format_f32_preview(&self_attn.attention_output[..8.min(self_attn.attention_output.len())]),
-        format_f32_preview(
-            &self_attn.attention_projection_input
-                [..8.min(self_attn.attention_projection_input.len())],
-        ),
-        format_f32_preview(&self_attn.attn_projected[..8.min(self_attn.attn_projected.len())]),
-        format_f32_preview(&self_attn.block_output[..8.min(self_attn.block_output.len())]),
+        format_f32_preview(&attention_output[..8.min(attention_output.len())]),
+        format_f32_preview(&attention_projection_input[..8.min(attention_projection_input.len())]),
+        format_f32_preview(&attn_projected[..8.min(attn_projected.len())]),
+        format_f32_preview(&layer_step_block_output[..8.min(layer_step_block_output.len())]),
         format_f32_preview(&post_normed[..8.min(post_normed.len())]),
         format_f32_preview(&mlp_output[..8.min(mlp_output.len())]),
         format_f32_preview(&layer_output[..8.min(layer_output.len())]),
@@ -8648,14 +8803,14 @@ fn package_self_attn_mlp_block_smoke_impl(
         self_attn.q_rope_max_abs_diff,
         self_attn.k_rope_max_abs_diff,
         self_attn.attention_max_abs_diff,
-        self_attn.paged_kv_write_k_max_abs_diff,
-        self_attn.paged_kv_write_v_max_abs_diff,
-        self_attn.paged_step_attention_max_abs_diff,
-        self_attn.causal_paged_step_attention_max_abs_diff,
-        self_attn.output_gate_max_abs_diff,
-        self_attn.o_proj_max_abs_diff,
-        self_attn.block_max_abs_diff,
-        self_attn.causal_paged_block_max_abs_diff,
+        paged_kv_write_k_max_abs_diff,
+        paged_kv_write_v_max_abs_diff,
+        paged_step_attention_max_abs_diff,
+        causal_paged_step_attention_max_abs_diff,
+        output_gate_max_abs_diff,
+        o_proj_max_abs_diff,
+        block_max_abs_diff,
+        causal_paged_block_max_abs_diff,
         post_norm_max_abs_diff,
         layer_block_max_abs_diff,
     ))
