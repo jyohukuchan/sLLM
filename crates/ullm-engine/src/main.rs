@@ -11375,6 +11375,18 @@ struct PackageModelLoopExecutionSummary {
     final_ready: usize,
 }
 
+struct PackageModelLoopSmokeRun {
+    model: PackageModelLoopSmokeModel,
+    request_plan: PackageModelLoopRequestPlan,
+    layer_run_plan: PackageModelLoopLayerRunPlan,
+    execution_plan: PackageModelLoopExecutionPlan,
+    execution_summary: Option<PackageModelLoopExecutionSummary>,
+    sequence_len: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    position_offset: usize,
+}
+
 fn load_package_model_loop_layer_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -12098,6 +12110,180 @@ impl PackageModelLoopExecutionPlan {
     }
 }
 
+impl PackageModelLoopSmokeRun {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        layer_indices: &[usize],
+        sequence_len: usize,
+        rotary_dim: Option<String>,
+        rope_base: f32,
+        position_offset: usize,
+    ) -> Result<Self, String> {
+        let model =
+            PackageModelLoopSmokeModel::load(context, stream, path, chunk_bytes, layer_indices)?;
+        let rotary_dim = model.parse_rotary_dim(rotary_dim)?;
+        let block_size = 2_usize;
+        let request_plan =
+            PackageModelLoopRequestPlan::new(sequence_len, model.hidden, block_size)?;
+        let execution_plan = PackageModelLoopExecutionPlan::new(&model, &request_plan)?;
+
+        let layer_run_plan = PackageModelLoopLayerRunPlan::prepare(
+            context,
+            stream,
+            &model,
+            &request_plan,
+            execution_plan.decode_shape,
+            sequence_len,
+            rotary_dim,
+            rope_base,
+            position_offset,
+        )?;
+
+        Ok(Self {
+            model,
+            request_plan,
+            layer_run_plan,
+            execution_plan,
+            execution_summary: None,
+            sequence_len,
+            rotary_dim,
+            rope_base,
+            position_offset,
+        })
+    }
+
+    fn execute(
+        &mut self,
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<(), String> {
+        if self.execution_summary.is_some() {
+            return Err("package model-loop smoke run has already executed".to_string());
+        }
+        let summary = self.execution_plan.execute(
+            context,
+            stream,
+            &self.model,
+            &mut self.request_plan,
+            &mut self.layer_run_plan,
+        )?;
+        self.execution_summary = Some(summary);
+        Ok(())
+    }
+
+    fn format_output(
+        &self,
+        path: &str,
+        device_index: u32,
+        info: &ullm_runtime_sys::DeviceInfo,
+    ) -> Result<String, String> {
+        let execution_summary = self
+            .execution_summary
+            .as_ref()
+            .ok_or_else(|| "package model-loop smoke run has not executed".to_string())?;
+        let stats = self.request_plan.scheduler.allocator_stats();
+        let cached_tokens = self.request_plan.cached_tokens()?;
+        let generated_tokens = self.request_plan.generated_tokens()?;
+        let decode_steps_by_layer = self.layer_run_plan.decode_steps_by_layer();
+        let layer_indices = self.model.layer_indices();
+        let q_tensors = self.model.tensor_names_by_layer(|layer| &layer.q_tensor);
+        let k_tensors = self.model.tensor_names_by_layer(|layer| &layer.k_tensor);
+        let v_tensors = self.model.tensor_names_by_layer(|layer| &layer.v_tensor);
+        let o_tensors = self.model.tensor_names_by_layer(|layer| &layer.o_tensor);
+        let q_norm_tensors = self
+            .model
+            .tensor_names_by_layer(|layer| &layer.q_norm_tensor);
+        let k_norm_tensors = self
+            .model
+            .tensor_names_by_layer(|layer| &layer.k_norm_tensor);
+        let post_norm_tensors = self
+            .model
+            .tensor_names_by_layer(|layer| &layer.post_norm_tensor);
+        let gate_tensors = self.model.tensor_names_by_layer(|layer| &layer.gate_tensor);
+        let up_tensors = self.model.tensor_names_by_layer(|layer| &layer.up_tensor);
+        let down_tensors = self.model.tensor_names_by_layer(|layer| &layer.down_tensor);
+        let q_norm_dtypes = self.model.q_norm_dtypes();
+        let k_norm_dtypes = self.model.k_norm_dtypes();
+        let post_norm_dtypes = self.model.post_norm_dtypes();
+        let prepared_diffs = &self.layer_run_plan.prepared_diffs;
+        let runtime_diffs = self.layer_run_plan.runtime_diffs();
+        let q_norm_max_abs_diff = prepared_diffs.q_norm_max_abs_diff;
+        let k_norm_max_abs_diff = prepared_diffs.k_norm_max_abs_diff;
+        let q_rope_max_abs_diff = prepared_diffs.q_rope_max_abs_diff;
+        let k_rope_max_abs_diff = prepared_diffs.k_rope_max_abs_diff;
+        let causal_attention_max_abs_diff = prepared_diffs.causal_attention_max_abs_diff;
+        let attention_max_abs_diff = runtime_diffs.attention_max_abs_diff;
+        let projection_input_max_abs_diff = runtime_diffs.projection_input_max_abs_diff;
+        let projected_max_abs_diff = runtime_diffs.projected_max_abs_diff;
+        let block_max_abs_diff = runtime_diffs.block_max_abs_diff;
+        let post_norm_max_abs_diff = runtime_diffs.post_norm_max_abs_diff;
+        let mlp_max_abs_diff = runtime_diffs.mlp_max_abs_diff;
+        let layer_max_abs_diff = runtime_diffs.layer_max_abs_diff;
+        let k_cache_max_abs_diff = runtime_diffs.k_cache_max_abs_diff;
+        let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
+
+        Ok(format!(
+            "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+            path,
+            layer_indices,
+            q_tensors,
+            k_tensors,
+            v_tensors,
+            o_tensors,
+            q_norm_tensors,
+            k_norm_tensors,
+            post_norm_tensors,
+            gate_tensors,
+            up_tensors,
+            down_tensors,
+            self.sequence_len,
+            self.request_plan.request_count(),
+            self.request_plan.request_ids,
+            self.request_plan.prompt_tokens,
+            self.request_plan.max_new_tokens,
+            self.request_plan.total_tokens,
+            self.request_plan.block_size,
+            self.request_plan.cache_blocks,
+            self.request_plan.block_tables,
+            execution_summary.first_batch_ready,
+            execution_summary.second_batch_ready,
+            execution_summary.final_ready,
+            decode_steps_by_layer,
+            cached_tokens,
+            generated_tokens,
+            self.request_plan.scheduler.active_len(),
+            stats.free_blocks,
+            stats.allocated_blocks,
+            stats.free_runs,
+            stats.largest_free_run,
+            self.model.hidden,
+            self.model.intermediates(),
+            self.layer_run_plan.q_projection_layouts,
+            self.layer_run_plan.q_gate_elements_by_layer,
+            self.layer_run_plan.output_gate_layouts,
+            self.model.q_heads,
+            self.model.kv_heads,
+            self.model.head_dim,
+            self.model.value_dim,
+            self.rotary_dim,
+            self.position_offset,
+            self.rope_base,
+            self.model.softmax_scale,
+            self.model.mlp_epsilon,
+            q_norm_dtypes,
+            k_norm_dtypes,
+            post_norm_dtypes,
+            info.backend,
+            device_index,
+            info.name,
+        ))
+    }
+}
+
 fn package_self_attn_mlp_block_model_loop_smoke(
     path: Option<String>,
     device_index: Option<String>,
@@ -12382,133 +12568,19 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
 
-    let model = PackageModelLoopSmokeModel::load(
+    let mut smoke_run = PackageModelLoopSmokeRun::new(
         &mut context,
         &mut stream,
         path,
         chunk_bytes,
         &layer_indices,
-    )?;
-    let hidden = model.hidden;
-    let q_heads = model.q_heads;
-    let kv_heads = model.kv_heads;
-    let head_dim = model.head_dim;
-    let value_dim = model.value_dim;
-    let softmax_scale = model.softmax_scale;
-    let mlp_epsilon = model.mlp_epsilon;
-    let rotary_dim = model.parse_rotary_dim(rotary_dim)?;
-
-    let block_size = 2_usize;
-    let mut request_plan = PackageModelLoopRequestPlan::new(sequence_len, hidden, block_size)?;
-    let execution_plan = PackageModelLoopExecutionPlan::new(&model, &request_plan)?;
-
-    let mut layer_run_plan = PackageModelLoopLayerRunPlan::prepare(
-        &mut context,
-        &mut stream,
-        &model,
-        &request_plan,
-        execution_plan.decode_shape,
         sequence_len,
         rotary_dim,
         rope_base,
         position_offset,
     )?;
-    let execution_summary = execution_plan.execute(
-        &mut context,
-        &mut stream,
-        &model,
-        &mut request_plan,
-        &mut layer_run_plan,
-    )?;
-
-    let stats = request_plan.scheduler.allocator_stats();
-    let cached_tokens = request_plan.cached_tokens()?;
-    let generated_tokens = request_plan.generated_tokens()?;
-    let decode_steps_by_layer = layer_run_plan.decode_steps_by_layer();
-    let layer_indices = model.layer_indices();
-    let q_tensors = model.tensor_names_by_layer(|layer| &layer.q_tensor);
-    let k_tensors = model.tensor_names_by_layer(|layer| &layer.k_tensor);
-    let v_tensors = model.tensor_names_by_layer(|layer| &layer.v_tensor);
-    let o_tensors = model.tensor_names_by_layer(|layer| &layer.o_tensor);
-    let q_norm_tensors = model.tensor_names_by_layer(|layer| &layer.q_norm_tensor);
-    let k_norm_tensors = model.tensor_names_by_layer(|layer| &layer.k_norm_tensor);
-    let post_norm_tensors = model.tensor_names_by_layer(|layer| &layer.post_norm_tensor);
-    let gate_tensors = model.tensor_names_by_layer(|layer| &layer.gate_tensor);
-    let up_tensors = model.tensor_names_by_layer(|layer| &layer.up_tensor);
-    let down_tensors = model.tensor_names_by_layer(|layer| &layer.down_tensor);
-    let q_norm_dtypes = model.q_norm_dtypes();
-    let k_norm_dtypes = model.k_norm_dtypes();
-    let post_norm_dtypes = model.post_norm_dtypes();
-    let prepared_diffs = &layer_run_plan.prepared_diffs;
-    let runtime_diffs = layer_run_plan.runtime_diffs();
-    let q_norm_max_abs_diff = prepared_diffs.q_norm_max_abs_diff;
-    let k_norm_max_abs_diff = prepared_diffs.k_norm_max_abs_diff;
-    let q_rope_max_abs_diff = prepared_diffs.q_rope_max_abs_diff;
-    let k_rope_max_abs_diff = prepared_diffs.k_rope_max_abs_diff;
-    let causal_attention_max_abs_diff = prepared_diffs.causal_attention_max_abs_diff;
-    let attention_max_abs_diff = runtime_diffs.attention_max_abs_diff;
-    let projection_input_max_abs_diff = runtime_diffs.projection_input_max_abs_diff;
-    let projected_max_abs_diff = runtime_diffs.projected_max_abs_diff;
-    let block_max_abs_diff = runtime_diffs.block_max_abs_diff;
-    let post_norm_max_abs_diff = runtime_diffs.post_norm_max_abs_diff;
-    let mlp_max_abs_diff = runtime_diffs.mlp_max_abs_diff;
-    let layer_max_abs_diff = runtime_diffs.layer_max_abs_diff;
-    let k_cache_max_abs_diff = runtime_diffs.k_cache_max_abs_diff;
-    let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
-
-    Ok(format!(
-        "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} mlp_epsilon={mlp_epsilon:.9} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
-        path,
-        layer_indices,
-        q_tensors,
-        k_tensors,
-        v_tensors,
-        o_tensors,
-        q_norm_tensors,
-        k_norm_tensors,
-        post_norm_tensors,
-        gate_tensors,
-        up_tensors,
-        down_tensors,
-        sequence_len,
-        request_plan.request_count(),
-        request_plan.request_ids,
-        request_plan.prompt_tokens,
-        request_plan.max_new_tokens,
-        request_plan.total_tokens,
-        request_plan.block_size,
-        request_plan.cache_blocks,
-        request_plan.block_tables,
-        execution_summary.first_batch_ready,
-        execution_summary.second_batch_ready,
-        execution_summary.final_ready,
-        decode_steps_by_layer,
-        cached_tokens,
-        generated_tokens,
-        request_plan.scheduler.active_len(),
-        stats.free_blocks,
-        stats.allocated_blocks,
-        stats.free_runs,
-        stats.largest_free_run,
-        hidden,
-        model.intermediates(),
-        layer_run_plan.q_projection_layouts,
-        layer_run_plan.q_gate_elements_by_layer,
-        layer_run_plan.output_gate_layouts,
-        q_heads,
-        kv_heads,
-        head_dim,
-        value_dim,
-        rotary_dim,
-        position_offset,
-        rope_base,
-        q_norm_dtypes,
-        k_norm_dtypes,
-        post_norm_dtypes,
-        info.backend,
-        device_index,
-        info.name,
-    ))
+    smoke_run.execute(&mut context, &mut stream)?;
+    smoke_run.format_output(path, device_index, &info)
 }
 
 fn package_linear_attn_aux_smoke(
