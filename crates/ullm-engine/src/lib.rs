@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod aq;
+pub mod decode_runner;
 pub mod decoder;
 pub mod loader;
 pub mod package;

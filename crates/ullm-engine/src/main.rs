@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
+use ullm_engine::decode_runner::{Qwen3SelfAttnDecodeBatchInput, Qwen3SelfAttnRequestDecodeRunner};
 use ullm_engine::decoder::{
     PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntimeWeights,
     Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnDecodeState,
@@ -1954,7 +1955,6 @@ struct SyntheticSchedulerPagedDecodeRun {
     v_sequence: Vec<f32>,
     expected_k_cache: Vec<f32>,
     expected_v_cache: Vec<f32>,
-    state: Qwen3SelfAttnDecodeState,
     decode_steps: usize,
     attention_max_abs_diff: f32,
     k_cache_max_abs_diff: f32,
@@ -1980,6 +1980,13 @@ fn synthetic_scheduler_decode_values(
     values
 }
 
+fn synthetic_scheduler_decode_run(
+    runs: &[SyntheticSchedulerPagedDecodeRun],
+    request_id: RequestId,
+) -> Option<&SyntheticSchedulerPagedDecodeRun> {
+    runs.iter().find(|run| run.request_id == request_id)
+}
+
 fn synthetic_scheduler_decode_run_mut(
     runs: &mut [SyntheticSchedulerPagedDecodeRun],
     request_id: RequestId,
@@ -1989,6 +1996,7 @@ fn synthetic_scheduler_decode_run_mut(
 
 #[allow(clippy::too_many_arguments)]
 fn run_synthetic_scheduler_decode_step(
+    runner: &mut Qwen3SelfAttnRequestDecodeRunner,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     run: &mut SyntheticSchedulerPagedDecodeRun,
     timestep: usize,
@@ -2028,13 +2036,15 @@ fn run_synthetic_scheduler_decode_step(
         .checked_add(v_token_elements)
         .ok_or_else(|| format!("{label} v slice end overflows"))?;
 
-    let step = run
-        .state
-        .step(
+    let step = runner
+        .run_prefill_step(
             stream,
-            &run.q_sequence[q_start..q_end],
-            &run.k_sequence[k_start..k_end],
-            &run.v_sequence[v_start..v_end],
+            Qwen3SelfAttnDecodeBatchInput {
+                request_id: run.request_id,
+                q: &run.q_sequence[q_start..q_end],
+                k: &run.k_sequence[k_start..k_end],
+                v: &run.v_sequence[v_start..v_end],
+            },
         )
         .map_err(|err| {
             format!(
@@ -2083,6 +2093,7 @@ fn run_synthetic_scheduler_decode_step(
 
 #[allow(clippy::too_many_arguments)]
 fn run_synthetic_scheduler_ready_batch(
+    runner: &mut Qwen3SelfAttnRequestDecodeRunner,
     scheduler: &mut SchedulerState,
     runs: &mut [SyntheticSchedulerPagedDecodeRun],
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -2111,7 +2122,7 @@ fn run_synthetic_scheduler_ready_batch(
     }
 
     for request in &ready {
-        let run = synthetic_scheduler_decode_run_mut(runs, request.request.id)
+        let run = synthetic_scheduler_decode_run(runs, request.request.id)
             .ok_or_else(|| format!("{label} request {:?} has no decode run", request.request.id))?;
         let expected_cache_position =
             run.prompt_tokens
@@ -2150,38 +2161,105 @@ fn run_synthetic_scheduler_ready_batch(
                 request.request.id, request.allocation.blocks, run.block_table
             ));
         }
-
-        run_synthetic_scheduler_decode_step(
-            stream,
-            run,
-            request.cache_position,
-            block_size,
-            q_heads,
-            kv_heads,
-            head_dim,
-            value_dim,
-            softmax_scale,
-            label,
-        )?;
     }
 
-    for request in ready {
-        scheduler
-            .advance_decode(request.request.id)
-            .map_err(|err| format!("{label} failed to advance {:?}: {err}", request.request.id))?;
-        let run =
-            synthetic_scheduler_decode_run_mut(runs, request.request.id).ok_or_else(|| {
-                format!(
-                    "{label} advanced request {:?} disappeared",
-                    request.request.id
-                )
-            })?;
+    let outputs = {
+        let q_token_elements = q_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| format!("{label} q token element count overflows"))?;
+        let k_token_elements = kv_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| format!("{label} k token element count overflows"))?;
+        let v_token_elements = kv_heads
+            .checked_mul(value_dim)
+            .ok_or_else(|| format!("{label} v token element count overflows"))?;
+        let mut inputs = Vec::with_capacity(ready.len());
+        for request in &ready {
+            let run =
+                synthetic_scheduler_decode_run(runs, request.request.id).ok_or_else(|| {
+                    format!(
+                        "{label} request {:?} disappeared while preparing decode input",
+                        request.request.id
+                    )
+                })?;
+            let q_start = request
+                .cache_position
+                .checked_mul(q_token_elements)
+                .ok_or_else(|| format!("{label} q slice start overflows"))?;
+            let q_end = q_start
+                .checked_add(q_token_elements)
+                .ok_or_else(|| format!("{label} q slice end overflows"))?;
+            let k_start = request
+                .cache_position
+                .checked_mul(k_token_elements)
+                .ok_or_else(|| format!("{label} k slice start overflows"))?;
+            let k_end = k_start
+                .checked_add(k_token_elements)
+                .ok_or_else(|| format!("{label} k slice end overflows"))?;
+            let v_start = request
+                .cache_position
+                .checked_mul(v_token_elements)
+                .ok_or_else(|| format!("{label} v slice start overflows"))?;
+            let v_end = v_start
+                .checked_add(v_token_elements)
+                .ok_or_else(|| format!("{label} v slice end overflows"))?;
+            inputs.push(Qwen3SelfAttnDecodeBatchInput {
+                request_id: request.request.id,
+                q: &run.q_sequence[q_start..q_end],
+                k: &run.k_sequence[k_start..k_end],
+                v: &run.v_sequence[v_start..v_end],
+            });
+        }
+        runner.run_ready_batch(stream, scheduler, &ready, &inputs)?
+    };
+
+    for output in outputs {
+        let run = synthetic_scheduler_decode_run_mut(runs, output.request_id).ok_or_else(|| {
+            format!(
+                "{label} advanced request {:?} disappeared",
+                output.request_id
+            )
+        })?;
         run.decode_steps = run.decode_steps.checked_add(1).ok_or_else(|| {
             format!(
                 "{label} request {:?} decode step count overflows",
                 run.request_id
             )
         })?;
+        let q_token_elements = q_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| format!("{label} q token element count overflows"))?;
+        let q_start = output
+            .cache_position
+            .checked_mul(q_token_elements)
+            .ok_or_else(|| format!("{label} q expected slice start overflows"))?;
+        let q_end = q_start
+            .checked_add(q_token_elements)
+            .ok_or_else(|| format!("{label} q expected slice end overflows"))?;
+        let expected = runtime_host_paged_decode_attn_f32(
+            &run.q_sequence[q_start..q_end],
+            &run.expected_k_cache,
+            &run.expected_v_cache,
+            &run.block_table,
+            output.cache_len,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+        let max_abs_diff = verify_f32_close(
+            &format!(
+                "{label} request {:?} timestep {}",
+                run.request_id, output.cache_position
+            ),
+            &output.attention_output,
+            &expected,
+            1e-4,
+            1e-4,
+        )?;
+        run.attention_max_abs_diff = run.attention_max_abs_diff.max(max_abs_diff);
     }
     Ok(expected_ids.len())
 }
@@ -2230,6 +2308,7 @@ fn runtime_scheduler_paged_decode_smoke_impl(device_index: u32) -> Result<String
     for request in &requests {
         scheduler.enqueue(request.clone());
     }
+    let mut decode_runner = Qwen3SelfAttnRequestDecodeRunner::new();
     let mut allocated = scheduler
         .pop_prefill_batch_with_allocation(usize::MAX)
         .map_err(|err| format!("failed to allocate synthetic scheduler decode batch: {err}"))?;
@@ -2277,19 +2356,14 @@ fn runtime_scheduler_paged_decode_smoke_impl(device_index: u32) -> Result<String
             total_tokens,
             shape,
         )?;
-        let state = Qwen3SelfAttnDecodeState::new(
+        decode_runner.insert_request(
             &mut context,
             &mut stream,
+            request.id,
             shape,
             block_table.clone(),
             softmax_scale,
-        )
-        .map_err(|err| {
-            format!(
-                "failed to create synthetic scheduler decode state for {:?}: {err}",
-                request.id
-            )
-        })?;
+        )?;
         let mut run = SyntheticSchedulerPagedDecodeRun {
             request_id: request.id,
             prompt_tokens: request.prompt_tokens,
@@ -2301,7 +2375,6 @@ fn runtime_scheduler_paged_decode_smoke_impl(device_index: u32) -> Result<String
             v_sequence,
             expected_k_cache,
             expected_v_cache,
-            state,
             decode_steps: 0,
             attention_max_abs_diff: 0.0,
             k_cache_max_abs_diff: 0.0,
@@ -2309,6 +2382,7 @@ fn runtime_scheduler_paged_decode_smoke_impl(device_index: u32) -> Result<String
         };
         for timestep in 0..run.prompt_tokens {
             run_synthetic_scheduler_decode_step(
+                &mut decode_runner,
                 &mut stream,
                 &mut run,
                 timestep,
@@ -2331,6 +2405,7 @@ fn runtime_scheduler_paged_decode_smoke_impl(device_index: u32) -> Result<String
     }
 
     let first_batch_ready = run_synthetic_scheduler_ready_batch(
+        &mut decode_runner,
         &mut scheduler,
         &mut runs,
         &mut stream,
@@ -2345,6 +2420,7 @@ fn runtime_scheduler_paged_decode_smoke_impl(device_index: u32) -> Result<String
         "runtime scheduler paged decode first batch",
     )?;
     let second_batch_ready = run_synthetic_scheduler_ready_batch(
+        &mut decode_runner,
         &mut scheduler,
         &mut runs,
         &mut stream,
@@ -2387,12 +2463,14 @@ fn runtime_scheduler_paged_decode_smoke_impl(device_index: u32) -> Result<String
                 run.request_id, active.generated_tokens, run.max_new_tokens
             ));
         }
-        let cache = run.state.read_cache_to_host(&mut stream).map_err(|err| {
-            format!(
-                "failed to read synthetic cache for {:?}: {err}",
-                run.request_id
-            )
-        })?;
+        let cache = decode_runner
+            .read_cache_to_host(run.request_id, &mut stream)
+            .map_err(|err| {
+                format!(
+                    "failed to read synthetic cache for {:?}: {err}",
+                    run.request_id
+                )
+            })?;
         run.k_cache_max_abs_diff = verify_f32_close(
             &format!(
                 "runtime scheduler paged decode request {:?} k cache",
