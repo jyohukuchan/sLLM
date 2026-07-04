@@ -11331,6 +11331,35 @@ struct PackageModelLoopRequestPlan {
     cache_blocks: usize,
 }
 
+#[derive(Default)]
+struct PackageModelLoopPreparedDiffs {
+    q_norm_max_abs_diff: f32,
+    k_norm_max_abs_diff: f32,
+    q_rope_max_abs_diff: f32,
+    k_rope_max_abs_diff: f32,
+    causal_attention_max_abs_diff: f32,
+}
+
+struct PackageModelLoopRuntimeDiffs {
+    attention_max_abs_diff: f32,
+    projection_input_max_abs_diff: f32,
+    projected_max_abs_diff: f32,
+    block_max_abs_diff: f32,
+    post_norm_max_abs_diff: f32,
+    mlp_max_abs_diff: f32,
+    layer_max_abs_diff: f32,
+    k_cache_max_abs_diff: f32,
+    v_cache_max_abs_diff: f32,
+}
+
+struct PackageModelLoopLayerRunPlan {
+    runs_by_layer: Vec<Vec<SchedulerLayerDecodeRun>>,
+    q_projection_layouts: Vec<&'static str>,
+    output_gate_layouts: Vec<&'static str>,
+    q_gate_elements_by_layer: Vec<Vec<usize>>,
+    prepared_diffs: PackageModelLoopPreparedDiffs,
+}
+
 fn load_package_model_loop_layer_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -11742,6 +11771,180 @@ impl PackageModelLoopRequestPlan {
     }
 }
 
+impl PackageModelLoopPreparedDiffs {
+    fn observe(&mut self, prepared: &Qwen3SelfAttnModelLoopPreparedSequence) {
+        self.q_norm_max_abs_diff = self.q_norm_max_abs_diff.max(prepared.q_norm_max_abs_diff);
+        self.k_norm_max_abs_diff = self.k_norm_max_abs_diff.max(prepared.k_norm_max_abs_diff);
+        self.q_rope_max_abs_diff = self.q_rope_max_abs_diff.max(prepared.q_rope_max_abs_diff);
+        self.k_rope_max_abs_diff = self.k_rope_max_abs_diff.max(prepared.k_rope_max_abs_diff);
+        self.causal_attention_max_abs_diff = self
+            .causal_attention_max_abs_diff
+            .max(prepared.attention_max_abs_diff);
+    }
+}
+
+impl PackageModelLoopLayerRunPlan {
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        model: &PackageModelLoopSmokeModel,
+        request_plan: &PackageModelLoopRequestPlan,
+        decode_shape: PagedDecodeShape,
+        sequence_len: usize,
+        rotary_dim: usize,
+        rope_base: f32,
+        position_offset: usize,
+    ) -> Result<Self, String> {
+        let mut runs_by_layer: Vec<Vec<SchedulerLayerDecodeRun>> =
+            Vec::with_capacity(model.layer_count());
+        let mut q_projection_layouts = Vec::with_capacity(model.layer_count());
+        let mut output_gate_layouts = Vec::with_capacity(model.layer_count());
+        let mut q_gate_elements_by_layer = Vec::with_capacity(model.layer_count());
+        let mut prepared_diffs = PackageModelLoopPreparedDiffs::default();
+
+        for (layer_position, layer) in model.layers.iter().enumerate() {
+            let mut runs = Vec::with_capacity(request_plan.request_count());
+            let mut q_gate_elements = Vec::with_capacity(request_plan.request_count());
+            for (request_index, request) in request_plan.requests.iter().enumerate() {
+                let residual_sequence = if layer_position == 0 {
+                    request_plan.initial_residuals[request_index].clone()
+                } else {
+                    runs_by_layer[layer_position - 1][request_index]
+                        .expected
+                        .layer_output
+                        .clone()
+                };
+                let request_position_stride =
+                    request_index.checked_mul(sequence_len).ok_or_else(|| {
+                        "model-loop request position offset multiplier overflows".to_string()
+                    })?;
+                let request_position_offset = position_offset
+                    .checked_add(request_position_stride)
+                    .ok_or_else(|| "model-loop request position offset overflows".to_string())?;
+                let prepared = qwen3_self_attn_prepare_model_loop_sequence_smoke(
+                    context,
+                    stream,
+                    &layer.weights.self_attn,
+                    residual_sequence,
+                    request_plan.total_tokens[request_index],
+                    rotary_dim,
+                    rope_base,
+                    request_position_offset,
+                    &layer.q_norm,
+                    &layer.k_norm,
+                    &request_plan.block_tables[request_index],
+                    request_plan.block_size,
+                    request_plan.cache_blocks,
+                    &format!(
+                        "package-self-attn-mlp-block-model-loop-smoke layer {} request {:?}",
+                        layer.layer_index, request.id
+                    ),
+                )?;
+                if prepared.hidden != model.hidden
+                    || prepared.q_heads != model.q_heads
+                    || prepared.kv_heads != model.kv_heads
+                    || prepared.head_dim != model.head_dim
+                    || prepared.value_dim != model.value_dim
+                {
+                    return Err(format!(
+                        "model-loop prepared shape mismatch for layer {} request {:?}",
+                        layer.layer_index, request.id
+                    ));
+                }
+                q_gate_elements.push(prepared.q_gate_elements);
+                prepared_diffs.observe(&prepared);
+                if request_index == 0 {
+                    q_projection_layouts.push(prepared.q_projection_layout);
+                    output_gate_layouts.push(prepared.output_gate_layout);
+                }
+
+                let expected = qwen3_decoder_layer_sequence_to_host_f32(
+                    &layer.weights,
+                    context,
+                    stream,
+                    decode_shape,
+                    &request_plan.block_tables[request_index],
+                    prepared.softmax_scale,
+                    model.mlp_epsilon,
+                    &prepared.q_rope,
+                    &prepared.k_rope,
+                    &prepared.v_projected,
+                    prepared.q_gate.as_deref(),
+                    &prepared.residual_sequence,
+                    request_plan.total_tokens[request_index],
+                )?;
+                runs.push(SchedulerLayerDecodeRun {
+                    request_id: request.id,
+                    prompt_tokens: request.prompt_tokens,
+                    max_new_tokens: request.max_new_tokens,
+                    total_tokens: request_plan.total_tokens[request_index],
+                    block_table: request_plan.block_tables[request_index].clone(),
+                    q_sequence: prepared.q_rope,
+                    k_sequence: prepared.k_rope,
+                    v_sequence: prepared.v_projected,
+                    output_gate_sequence: prepared.q_gate,
+                    residual_sequence: prepared.residual_sequence,
+                    expected,
+                    decode_steps: 0,
+                    attention_max_abs_diff: 0.0,
+                    projection_input_max_abs_diff: 0.0,
+                    projected_max_abs_diff: 0.0,
+                    block_max_abs_diff: 0.0,
+                    post_norm_max_abs_diff: 0.0,
+                    mlp_max_abs_diff: 0.0,
+                    layer_max_abs_diff: 0.0,
+                    k_cache_max_abs_diff: 0.0,
+                    v_cache_max_abs_diff: 0.0,
+                });
+            }
+            q_gate_elements_by_layer.push(q_gate_elements);
+            runs_by_layer.push(runs);
+        }
+
+        Ok(Self {
+            runs_by_layer,
+            q_projection_layouts,
+            output_gate_layouts,
+            q_gate_elements_by_layer,
+            prepared_diffs,
+        })
+    }
+
+    fn decode_steps_by_layer(&self) -> Vec<Vec<usize>> {
+        self.runs_by_layer
+            .iter()
+            .map(|runs| runs.iter().map(|run| run.decode_steps).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    }
+
+    fn runtime_diffs(&self) -> PackageModelLoopRuntimeDiffs {
+        PackageModelLoopRuntimeDiffs {
+            attention_max_abs_diff: self.max_run_diff(|run| run.attention_max_abs_diff),
+            projection_input_max_abs_diff: self
+                .max_run_diff(|run| run.projection_input_max_abs_diff),
+            projected_max_abs_diff: self.max_run_diff(|run| run.projected_max_abs_diff),
+            block_max_abs_diff: self.max_run_diff(|run| run.block_max_abs_diff),
+            post_norm_max_abs_diff: self.max_run_diff(|run| run.post_norm_max_abs_diff),
+            mlp_max_abs_diff: self.max_run_diff(|run| run.mlp_max_abs_diff),
+            layer_max_abs_diff: self.max_run_diff(|run| run.layer_max_abs_diff),
+            k_cache_max_abs_diff: self.max_run_diff(|run| run.k_cache_max_abs_diff),
+            v_cache_max_abs_diff: self.max_run_diff(|run| run.v_cache_max_abs_diff),
+        }
+    }
+
+    fn max_run_diff<F>(&self, select: F) -> f32
+    where
+        F: Fn(&SchedulerLayerDecodeRun) -> f32,
+    {
+        self.runs_by_layer
+            .iter()
+            .flatten()
+            .map(select)
+            .fold(0.0_f32, f32::max)
+    }
+}
+
 fn package_self_attn_mlp_block_model_loop_smoke(
     path: Option<String>,
     device_index: Option<String>,
@@ -12050,125 +12253,27 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     let v_token_elements = decode_shape.v_token_elements()?;
     let attention_elements = decode_shape.output_elements()?;
 
-    let mut layer_runs: Vec<Vec<SchedulerLayerDecodeRun>> = Vec::with_capacity(model.layer_count());
-    let mut q_projection_layouts = Vec::with_capacity(model.layer_count());
-    let mut output_gate_layouts = Vec::with_capacity(model.layer_count());
-    let mut q_gate_elements_by_layer = Vec::with_capacity(model.layer_count());
-    let mut q_norm_max_abs_diff = 0.0_f32;
-    let mut k_norm_max_abs_diff = 0.0_f32;
-    let mut q_rope_max_abs_diff = 0.0_f32;
-    let mut k_rope_max_abs_diff = 0.0_f32;
-    let mut causal_attention_max_abs_diff = 0.0_f32;
+    let mut layer_run_plan = PackageModelLoopLayerRunPlan::prepare(
+        &mut context,
+        &mut stream,
+        &model,
+        &request_plan,
+        decode_shape,
+        sequence_len,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    )?;
 
-    for (layer_position, layer) in model.layers.iter().enumerate() {
-        let mut runs = Vec::with_capacity(request_plan.request_count());
-        let mut q_gate_elements = Vec::with_capacity(request_plan.request_count());
-        for (request_index, request) in request_plan.requests.iter().enumerate() {
-            let residual_sequence = if layer_position == 0 {
-                request_plan.initial_residuals[request_index].clone()
-            } else {
-                layer_runs[layer_position - 1][request_index]
-                    .expected
-                    .layer_output
-                    .clone()
-            };
-            let request_position_stride =
-                request_index.checked_mul(sequence_len).ok_or_else(|| {
-                    "model-loop request position offset multiplier overflows".to_string()
-                })?;
-            let request_position_offset = position_offset
-                .checked_add(request_position_stride)
-                .ok_or_else(|| "model-loop request position offset overflows".to_string())?;
-            let prepared = qwen3_self_attn_prepare_model_loop_sequence_smoke(
-                &mut context,
-                &mut stream,
-                &layer.weights.self_attn,
-                residual_sequence,
-                request_plan.total_tokens[request_index],
-                rotary_dim,
-                rope_base,
-                request_position_offset,
-                &layer.q_norm,
-                &layer.k_norm,
-                &request_plan.block_tables[request_index],
-                request_plan.block_size,
-                request_plan.cache_blocks,
-                &format!(
-                    "package-self-attn-mlp-block-model-loop-smoke layer {} request {:?}",
-                    layer.layer_index, request.id
-                ),
-            )?;
-            if prepared.hidden != hidden
-                || prepared.q_heads != q_heads
-                || prepared.kv_heads != kv_heads
-                || prepared.head_dim != head_dim
-                || prepared.value_dim != value_dim
-            {
-                return Err(format!(
-                    "model-loop prepared shape mismatch for layer {} request {:?}",
-                    layer.layer_index, request.id
-                ));
-            }
-            q_gate_elements.push(prepared.q_gate_elements);
-            q_norm_max_abs_diff = q_norm_max_abs_diff.max(prepared.q_norm_max_abs_diff);
-            k_norm_max_abs_diff = k_norm_max_abs_diff.max(prepared.k_norm_max_abs_diff);
-            q_rope_max_abs_diff = q_rope_max_abs_diff.max(prepared.q_rope_max_abs_diff);
-            k_rope_max_abs_diff = k_rope_max_abs_diff.max(prepared.k_rope_max_abs_diff);
-            causal_attention_max_abs_diff =
-                causal_attention_max_abs_diff.max(prepared.attention_max_abs_diff);
-            if request_index == 0 {
-                q_projection_layouts.push(prepared.q_projection_layout);
-                output_gate_layouts.push(prepared.output_gate_layout);
-            }
-
-            let expected = qwen3_decoder_layer_sequence_to_host_f32(
-                &layer.weights,
-                &mut context,
-                &mut stream,
-                decode_shape,
-                &request_plan.block_tables[request_index],
-                prepared.softmax_scale,
-                mlp_epsilon,
-                &prepared.q_rope,
-                &prepared.k_rope,
-                &prepared.v_projected,
-                prepared.q_gate.as_deref(),
-                &prepared.residual_sequence,
-                request_plan.total_tokens[request_index],
-            )?;
-            runs.push(SchedulerLayerDecodeRun {
-                request_id: request.id,
-                prompt_tokens: request.prompt_tokens,
-                max_new_tokens: request.max_new_tokens,
-                total_tokens: request_plan.total_tokens[request_index],
-                block_table: request_plan.block_tables[request_index].clone(),
-                q_sequence: prepared.q_rope,
-                k_sequence: prepared.k_rope,
-                v_sequence: prepared.v_projected,
-                output_gate_sequence: prepared.q_gate,
-                residual_sequence: prepared.residual_sequence,
-                expected,
-                decode_steps: 0,
-                attention_max_abs_diff: 0.0,
-                projection_input_max_abs_diff: 0.0,
-                projected_max_abs_diff: 0.0,
-                block_max_abs_diff: 0.0,
-                post_norm_max_abs_diff: 0.0,
-                mlp_max_abs_diff: 0.0,
-                layer_max_abs_diff: 0.0,
-                k_cache_max_abs_diff: 0.0,
-                v_cache_max_abs_diff: 0.0,
-            });
-        }
-        q_gate_elements_by_layer.push(q_gate_elements);
-        layer_runs.push(runs);
-    }
-
-    let mut layer_runner =
-        model.build_stack_runner(&mut context, &mut stream, &layer_runs, decode_shape)?;
+    let mut layer_runner = model.build_stack_runner(
+        &mut context,
+        &mut stream,
+        &layer_run_plan.runs_by_layer,
+        decode_shape,
+    )?;
 
     for layer_position in 0..layer_runner.layer_count() {
-        for run in &mut layer_runs[layer_position] {
+        for run in &mut layer_run_plan.runs_by_layer[layer_position] {
             for timestep in 0..run.prompt_tokens {
                 run_scheduler_layer_stack_prefill_step(
                     &mut layer_runner,
@@ -12195,7 +12300,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     let first_batch_ready = run_scheduler_layer_stack_ready_batch(
         &mut layer_runner,
         &mut request_plan.scheduler,
-        &mut layer_runs,
+        &mut layer_run_plan.runs_by_layer,
         &mut stream,
         &expected_first_ids,
         8,
@@ -12211,7 +12316,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     let second_batch_ready = run_scheduler_layer_stack_ready_batch(
         &mut layer_runner,
         &mut request_plan.scheduler,
-        &mut layer_runs,
+        &mut layer_run_plan.runs_by_layer,
         &mut stream,
         &expected_second_ids,
         8,
@@ -12234,7 +12339,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     }
 
     for layer_position in 0..layer_runner.layer_count() {
-        for run in &mut layer_runs[layer_position] {
+        for run in &mut layer_run_plan.runs_by_layer[layer_position] {
             let cache = layer_runner
                 .read_layer_cache_to_host(layer_position, run.request_id, &mut stream)
                 .map_err(|err| {
@@ -12269,10 +12374,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     let stats = request_plan.scheduler.allocator_stats();
     let cached_tokens = request_plan.cached_tokens()?;
     let generated_tokens = request_plan.generated_tokens()?;
-    let decode_steps_by_layer = layer_runs
-        .iter()
-        .map(|runs| runs.iter().map(|run| run.decode_steps).collect::<Vec<_>>())
-        .collect::<Vec<_>>();
+    let decode_steps_by_layer = layer_run_plan.decode_steps_by_layer();
     let layer_indices = model.layer_indices();
     let q_tensors = model.tensor_names_by_layer(|layer| &layer.q_tensor);
     let k_tensors = model.tensor_names_by_layer(|layer| &layer.k_tensor);
@@ -12287,52 +12389,22 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     let q_norm_dtypes = model.q_norm_dtypes();
     let k_norm_dtypes = model.k_norm_dtypes();
     let post_norm_dtypes = model.post_norm_dtypes();
-
-    let attention_max_abs_diff = layer_runs
-        .iter()
-        .flatten()
-        .map(|run| run.attention_max_abs_diff)
-        .fold(0.0_f32, f32::max);
-    let projection_input_max_abs_diff = layer_runs
-        .iter()
-        .flatten()
-        .map(|run| run.projection_input_max_abs_diff)
-        .fold(0.0_f32, f32::max);
-    let projected_max_abs_diff = layer_runs
-        .iter()
-        .flatten()
-        .map(|run| run.projected_max_abs_diff)
-        .fold(0.0_f32, f32::max);
-    let block_max_abs_diff = layer_runs
-        .iter()
-        .flatten()
-        .map(|run| run.block_max_abs_diff)
-        .fold(0.0_f32, f32::max);
-    let post_norm_max_abs_diff = layer_runs
-        .iter()
-        .flatten()
-        .map(|run| run.post_norm_max_abs_diff)
-        .fold(0.0_f32, f32::max);
-    let mlp_max_abs_diff = layer_runs
-        .iter()
-        .flatten()
-        .map(|run| run.mlp_max_abs_diff)
-        .fold(0.0_f32, f32::max);
-    let layer_max_abs_diff = layer_runs
-        .iter()
-        .flatten()
-        .map(|run| run.layer_max_abs_diff)
-        .fold(0.0_f32, f32::max);
-    let k_cache_max_abs_diff = layer_runs
-        .iter()
-        .flatten()
-        .map(|run| run.k_cache_max_abs_diff)
-        .fold(0.0_f32, f32::max);
-    let v_cache_max_abs_diff = layer_runs
-        .iter()
-        .flatten()
-        .map(|run| run.v_cache_max_abs_diff)
-        .fold(0.0_f32, f32::max);
+    let prepared_diffs = &layer_run_plan.prepared_diffs;
+    let runtime_diffs = layer_run_plan.runtime_diffs();
+    let q_norm_max_abs_diff = prepared_diffs.q_norm_max_abs_diff;
+    let k_norm_max_abs_diff = prepared_diffs.k_norm_max_abs_diff;
+    let q_rope_max_abs_diff = prepared_diffs.q_rope_max_abs_diff;
+    let k_rope_max_abs_diff = prepared_diffs.k_rope_max_abs_diff;
+    let causal_attention_max_abs_diff = prepared_diffs.causal_attention_max_abs_diff;
+    let attention_max_abs_diff = runtime_diffs.attention_max_abs_diff;
+    let projection_input_max_abs_diff = runtime_diffs.projection_input_max_abs_diff;
+    let projected_max_abs_diff = runtime_diffs.projected_max_abs_diff;
+    let block_max_abs_diff = runtime_diffs.block_max_abs_diff;
+    let post_norm_max_abs_diff = runtime_diffs.post_norm_max_abs_diff;
+    let mlp_max_abs_diff = runtime_diffs.mlp_max_abs_diff;
+    let layer_max_abs_diff = runtime_diffs.layer_max_abs_diff;
+    let k_cache_max_abs_diff = runtime_diffs.k_cache_max_abs_diff;
+    let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
 
     Ok(format!(
         "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} mlp_epsilon={mlp_epsilon:.9} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
@@ -12370,9 +12442,9 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         stats.largest_free_run,
         hidden,
         model.intermediates(),
-        q_projection_layouts,
-        q_gate_elements_by_layer,
-        output_gate_layouts,
+        layer_run_plan.q_projection_layouts,
+        layer_run_plan.q_gate_elements_by_layer,
+        layer_run_plan.output_gate_layouts,
         q_heads,
         kv_heads,
         head_dim,
