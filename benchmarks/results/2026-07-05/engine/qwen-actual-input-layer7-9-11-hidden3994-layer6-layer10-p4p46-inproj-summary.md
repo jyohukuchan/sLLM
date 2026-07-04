@@ -24,6 +24,9 @@ Generated artifacts:
 - `package-golden-prefix-cpu-actual-prefix-layer0-8-causal-attn-diag-layer7-p4p46-inproj.jsonl`
 - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-no-row-scale-p4p46-inproj.jsonl`
 - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-p4p46-inproj.jsonl`
+- `package-golden-prefix-r9700-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-p4p46-inproj.jsonl`
+- `package-golden-prefix-cpu-golden-before0-12-rotary64-no-row-scale-p4p46-inproj.jsonl`
+- `package-golden-prefix-cpu-golden-before0-12-rotary64-manifest-row-scale-layer6-layer10-p4p46-inproj.jsonl`
 - `qwen-self-attention-propagation-layer7-actual-input-rotary64-token8-feature503-hidden3994-p4p46-inproj.json`
 - `qwen-self-attention-propagation-layer7-actual-input-rotary64-token8-feature503-hidden3994-p4p46-inproj.md`
 
@@ -172,11 +175,14 @@ RoPE dimension, not by a Rust causal-attention kernel issue.
 
 Full `0..12` CPU actual-prefix results:
 
-| condition | manifest row scales | max abs diff | max layer | token | hidden |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `rotary_dim=32`, layer6+10 row-scale | 4 | 0.889577866 | 11 | 6 | 3994 |
-| `rotary_dim=64`, no row-scale | 0 | 1.744266510 | 10 | 0 | 3456 |
-| `rotary_dim=64`, layer6+10 row-scale | 4 | 0.645338058 | 11 | 7 | 3994 |
+| condition | backend | run mode | manifest row scales | max abs diff | max layer | token | hidden |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `rotary_dim=32`, layer6+10 row-scale | CPU | actual-prefix | 4 | 0.889577866 | 11 | 6 | 3994 |
+| `rotary_dim=64`, no row-scale | CPU | actual-prefix | 0 | 1.744266510 | 10 | 0 | 3456 |
+| `rotary_dim=64`, layer6+10 row-scale | CPU | actual-prefix | 4 | 0.645338058 | 11 | 7 | 3994 |
+| `rotary_dim=64`, layer6+10 row-scale | R9700 | actual-prefix | 4 | 0.645345688 | 11 | 7 | 3994 |
+| `rotary_dim=64`, no row-scale | CPU | golden-before | 0 | 0.875896454 | 10 | 0 | 3456 |
+| `rotary_dim=64`, layer6+10 row-scale | CPU | golden-before | 4 | 0.472949982 | 6 | 0 | 3994 |
 
 This means both findings still matter:
 
@@ -184,11 +190,12 @@ This means both findings still matter:
 - The hidden `3994` self-attention investigation was amplified by the incorrect
   `rotary_dim=32` smoke setting, but a smaller hidden `3994` residual remains
   after correcting RoPE and applying layer6+10 row scales.
+- CPU and R9700 remain aligned under the corrected RoPE width, so the remaining
+  drift is not backend-specific.
 
 Next useful target:
 
-- Re-run the core CPU/R9700 and golden-before matrices with `rotary_dim=64`
-  or omit the CLI rotary-dim argument so `package-golden-prefix-smoke` uses the
-  default `head_dim * partial_rotary_factor` equivalent.
-- Then localize the remaining `rotary_dim=64 + layer6+10 row-scale` max at layer
+- Localize the remaining `rotary_dim=64 + layer6+10 row-scale` max at layer
   `11`, token `7`, hidden `3994`.
+- Stop hardcoding `rotary_dim=32` in future Qwen3.5 text smoke commands. Omit
+  the CLI rotary-dim argument or pass `64`.
