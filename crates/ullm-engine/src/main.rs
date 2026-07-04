@@ -12119,9 +12119,10 @@ fn package_golden_prefix_smoke_impl(
             package_hidden_distribution(&current_hidden, &expected_before, sequence_len, hidden)?;
 
         let layer_input = match run_mode {
-            PackageGoldenPrefixRunMode::ActualPrefix => current_hidden,
-            PackageGoldenPrefixRunMode::GoldenBeforeEachLayer => expected_before,
+            PackageGoldenPrefixRunMode::ActualPrefix => current_hidden.clone(),
+            PackageGoldenPrefixRunMode::GoldenBeforeEachLayer => expected_before.clone(),
         };
+        let layer_input_for_delta = layer_input.clone();
 
         let layer_kind = package_decoder_layer_kind(path, layer_index)?;
         let (actual, details) = match layer_kind {
@@ -12248,10 +12249,26 @@ fn package_golden_prefix_smoke_impl(
                 insert_json_detail(&mut details, "q_norm_dtype", &layer.q_norm.dtype);
                 insert_json_detail(&mut details, "k_norm_dtype", &layer.k_norm.dtype);
                 insert_json_detail(&mut details, "post_norm_dtype", &layer.post_norm.dtype);
+                insert_json_detail(
+                    &mut details,
+                    "module_contribution",
+                    package_module_contribution_summary(
+                        &layer_input_for_delta,
+                        &expected_before,
+                        &expected_after,
+                        &layer_output.projected_output,
+                        &layer_output.block_output,
+                        &layer_output.post_normed,
+                        &layer_output.mlp_output,
+                        &layer_output.layer_output,
+                        sequence_len,
+                        hidden,
+                    )?,
+                );
                 (layer_output.layer_output, details)
             }
             PackageDecoderLayerKind::LinearAttention => {
-                let (line, actual) = package_linear_attn_mlp_block_sequence_run(
+                let run = package_linear_attn_mlp_block_sequence_run(
                     path,
                     device_index,
                     chunk_bytes,
@@ -12260,8 +12277,8 @@ fn package_golden_prefix_smoke_impl(
                     layer_input,
                 )?;
                 let mut details = serde_json::Map::new();
-                insert_json_detail(&mut details, "runtime_line", &line);
-                let runtime_metrics = package_runtime_line_metrics(&line);
+                insert_json_detail(&mut details, "runtime_line", &run.line);
+                let runtime_metrics = package_runtime_line_metrics(&run.line);
                 if !runtime_metrics.is_empty() {
                     insert_json_detail(&mut details, "runtime_metrics", runtime_metrics);
                 }
@@ -12299,7 +12316,23 @@ fn package_golden_prefix_smoke_impl(
                     "down_tensor",
                     format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight"),
                 );
-                (actual, details)
+                insert_json_detail(
+                    &mut details,
+                    "module_contribution",
+                    package_module_contribution_summary(
+                        &layer_input_for_delta,
+                        &expected_before,
+                        &expected_after,
+                        &run.attention_output,
+                        &run.attention_block_output,
+                        &run.post_normed,
+                        &run.mlp_output,
+                        &run.layer_output,
+                        sequence_len,
+                        hidden,
+                    )?,
+                );
+                (run.layer_output, details)
             }
         };
         let metrics = compare_f32_slices(&actual, &expected_after)?;
@@ -12523,6 +12556,155 @@ fn package_runtime_line_metric_key(key: &str) -> bool {
         || key.ends_with("_mse")
         || key.ends_with("_mean_abs_diff")
         || key.ends_with("_cosine_similarity")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_module_contribution_summary(
+    actual_before: &[f32],
+    expected_before: &[f32],
+    expected_after: &[f32],
+    attention_output: &[f32],
+    attention_block_output: &[f32],
+    post_normed: &[f32],
+    mlp_output: &[f32],
+    actual_after: &[f32],
+    sequence_len: usize,
+    hidden: usize,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let expected_elements = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "module contribution hidden element count overflows".to_string())?;
+    for (label, values) in [
+        ("actual_before", actual_before),
+        ("expected_before", expected_before),
+        ("expected_after", expected_after),
+        ("attention_output", attention_output),
+        ("attention_block_output", attention_block_output),
+        ("post_normed", post_normed),
+        ("mlp_output", mlp_output),
+        ("actual_after", actual_after),
+    ] {
+        if values.len() != expected_elements {
+            return Err(format!(
+                "module contribution {label} length mismatch: got {} expected {expected_elements}",
+                values.len()
+            ));
+        }
+    }
+
+    let actual_delta = actual_after
+        .iter()
+        .zip(actual_before.iter())
+        .map(|(after, before)| after - before)
+        .collect::<Vec<_>>();
+    let expected_delta = expected_after
+        .iter()
+        .zip(expected_before.iter())
+        .map(|(after, before)| after - before)
+        .collect::<Vec<_>>();
+    let delta_diff = actual_delta
+        .iter()
+        .zip(expected_delta.iter())
+        .map(|(actual, expected)| actual - expected)
+        .collect::<Vec<_>>();
+    let residual_identity_error = actual_delta
+        .iter()
+        .zip(attention_output.iter())
+        .zip(mlp_output.iter())
+        .map(|((delta, attention), mlp)| delta - attention - mlp)
+        .collect::<Vec<_>>();
+
+    let max_output_diff_index = actual_after
+        .iter()
+        .zip(expected_after.iter())
+        .enumerate()
+        .max_by(
+            |(_, (actual_left, expected_left)), (_, (actual_right, expected_right))| {
+                (*actual_left - *expected_left)
+                    .abs()
+                    .partial_cmp(&(*actual_right - *expected_right).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            },
+        )
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let hot_hidden_index = if hidden == 0 {
+        0
+    } else {
+        max_output_diff_index % hidden
+    };
+
+    let point = |flat_index: usize| {
+        let output_diff = actual_after[flat_index] - expected_after[flat_index];
+        let delta_diff = delta_diff[flat_index];
+        serde_json::json!({
+            "flat_index": flat_index,
+            "token_index": flat_index / hidden,
+            "hidden_index": flat_index % hidden,
+            "actual_input": actual_before[flat_index],
+            "expected_input": expected_before[flat_index],
+            "input_diff": actual_before[flat_index] - expected_before[flat_index],
+            "attention_output": attention_output[flat_index],
+            "attention_block_output": attention_block_output[flat_index],
+            "post_normed": post_normed[flat_index],
+            "mlp_output": mlp_output[flat_index],
+            "actual_delta": actual_delta[flat_index],
+            "expected_delta": expected_delta[flat_index],
+            "delta_diff": delta_diff,
+            "residual_identity_error": residual_identity_error[flat_index],
+            "actual_output": actual_after[flat_index],
+            "expected_output": expected_after[flat_index],
+            "output_diff": output_diff,
+            "abs_output_diff": output_diff.abs(),
+        })
+    };
+    let per_token_hot_hidden = (0..sequence_len)
+        .map(|token_index| point(token_index * hidden + hot_hidden_index))
+        .collect::<Vec<_>>();
+
+    let mut summary = serde_json::Map::new();
+    insert_json_detail(
+        &mut summary,
+        "delta_distribution",
+        package_hidden_distribution(&actual_delta, &expected_delta, sequence_len, hidden)?,
+    );
+    insert_json_detail(
+        &mut summary,
+        "actual_delta_stats",
+        package_slice_distribution_stats(&actual_delta),
+    );
+    insert_json_detail(
+        &mut summary,
+        "expected_delta_stats",
+        package_slice_distribution_stats(&expected_delta),
+    );
+    insert_json_detail(
+        &mut summary,
+        "attention_output_stats",
+        package_slice_distribution_stats(attention_output),
+    );
+    insert_json_detail(
+        &mut summary,
+        "mlp_output_stats",
+        package_slice_distribution_stats(mlp_output),
+    );
+    insert_json_detail(
+        &mut summary,
+        "residual_identity_error_stats",
+        package_slice_distribution_stats(&residual_identity_error),
+    );
+    insert_json_detail(&mut summary, "hot_hidden_index", hot_hidden_index);
+    insert_json_detail(
+        &mut summary,
+        "max_output_diff_trace",
+        point(max_output_diff_index),
+    );
+    insert_json_detail(
+        &mut summary,
+        "per_token_hot_hidden_trace",
+        per_token_hot_hidden,
+    );
+    Ok(summary)
 }
 
 fn package_hidden_distribution(
@@ -18967,7 +19149,7 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
     for timestep in 0..sequence_len {
         residual_sequence.extend(linear_attn_step_input(&base_residual, timestep));
     }
-    let (line, _) = package_linear_attn_mlp_block_sequence_run(
+    let run = package_linear_attn_mlp_block_sequence_run(
         path,
         device_index,
         chunk_bytes,
@@ -18975,7 +19157,16 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
         sequence_len,
         residual_sequence,
     )?;
-    Ok(line)
+    Ok(run.line)
+}
+
+struct PackageLinearAttnMlpBlockSequenceRun {
+    line: String,
+    attention_output: Vec<f32>,
+    attention_block_output: Vec<f32>,
+    post_normed: Vec<f32>,
+    mlp_output: Vec<f32>,
+    layer_output: Vec<f32>,
 }
 
 fn package_linear_attn_mlp_block_sequence_run(
@@ -18985,7 +19176,7 @@ fn package_linear_attn_mlp_block_sequence_run(
     layer_index: usize,
     sequence_len: usize,
     residual_sequence: Vec<f32>,
-) -> Result<(String, Vec<f32>), String> {
+) -> Result<PackageLinearAttnMlpBlockSequenceRun, String> {
     let key_heads = 16_usize;
     let value_heads = 32_usize;
     let key_dim = 128_usize;
@@ -20137,7 +20328,14 @@ fn package_linear_attn_mlp_block_sequence_run(
         format_f32_preview(&mlp_output[..8.min(mlp_output.len())]),
         format_f32_preview(&layer_output[..8.min(layer_output.len())]),
     );
-    Ok((line, layer_output))
+    Ok(PackageLinearAttnMlpBlockSequenceRun {
+        line,
+        attention_output: attn_output,
+        attention_block_output,
+        post_normed,
+        mlp_output,
+        layer_output,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
