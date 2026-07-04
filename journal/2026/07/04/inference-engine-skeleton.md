@@ -959,6 +959,18 @@
 - Near-term architecture support is intentionally narrow: Qwen3.5/Qwen3-style partial decoder paths that are useful for validating AQ package loading, runtime boundaries, and HIP kernels.
 - Other hardware backends and broad model architecture coverage remain project goals, but they should not block the current RDNA2/RDNA4 inference-engine vertical slice.
 
+2026-07-04 package model loop smoke:
+- Commit `d5a175d Add layer decode batch no-advance API` adds `Qwen3DecoderLayerRequestDecodeRunner::run_ready_batch_without_advance`, so each layer can consume the same scheduler decode batch without advancing request progress.
+- Commit `dc7df79 Add scheduler decode batch advance` adds `SchedulerState::advance_decode_batch(&[SchedulerDecodeRequest])`. It validates the whole batch before mutating scheduler progress, rejects duplicate/stale request entries, and keeps partial progress out of failure paths.
+- Commit `0be4510 Add package model loop smoke` adds `ullm-engine package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [FIRST_LAYER_INDEX] [SECOND_LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]`.
+- The smoke loads two real `.ullm.d` Qwen3.5/Qwen3-style self-attention decoder layers, defaults to layers `3` and `7`, and runs three requests through the same `SchedulerState`.
+- Each layer has its own `Qwen3DecoderLayerRequestDecodeRunner`; prefill is run for every request and every layer before `complete_prefill`, then each ready decode batch is executed by all layers with no scheduler advance. After every layer has consumed the batch, `advance_decode_batch` advances request progress once.
+- Layer `n+1` receives layer `n` `layer_output` as its residual input. RoPE absolute positions are request-local and do not shift per layer, matching a real model loop where the same token position passes through every layer.
+- Validation passed: `cargo fmt --all --check`, `cargo check -p ullm-engine`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, `cargo test --workspace -- --test-threads=1`, `git diff --check`, CPU `runtime-scheduler-layer-decode-smoke 0`, CPU `package-self-attn-mlp-block-scheduler-smoke ... 0 1048576 3 3`, and `package-self-attn-mlp-block-model-loop-smoke` on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`.
+- Model-loop smoke result for `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d`, layers `3,7`, seq3: CPU all reported diffs `0`; R9700/V620 had prepared-path diffs q/k norm `0.000000954`, q RoPE `0.000000238`, k RoPE `0.000000477`, causal attention `0.000000477`, while layer output and K/V cache diffs stayed `0`.
+- 5.3-codex-spark reviewer Chandrasekhar flagged an earlier draft where layer position changed RoPE offset and a residual capacity multiplication lacked checked arithmetic; both were fixed before commit.
+- Next useful step: turn this smoke-local model loop shape into a reusable narrow package/model decode-loop owner, still scoped to locally testable RDNA2/RDNA4 and a small Qwen3.5/Qwen3 partial decoder path.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -1065,6 +1077,9 @@
 - `1174892 Use layer request runner in package MLP smoke`
 - `721bd6c Add scheduler layer decode smoke`
 - `cec9548 Add package scheduler layer smoke`
+- `d5a175d Add layer decode batch no-advance API`
+- `dc7df79 Add scheduler decode batch advance`
+- `0be4510 Add package model loop smoke`
 
 ## 次の行動
 
