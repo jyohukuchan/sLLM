@@ -1,0 +1,12 @@
+{
+  "schema_version": "package-cell-delta-overrides-v0.1",
+  "overrides": [
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3994,
+      "delta": 0.002373228780925274
+    }
+  ]
+}

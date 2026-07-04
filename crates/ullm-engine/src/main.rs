@@ -20627,12 +20627,13 @@ fn validate_package_cell_delta_override(
         override_entry.tensor_suffix.as_str(),
         "linear_attn.out_proj.weight"
             | "self_attn.o_proj.weight"
+            | "linear_attn.in_proj_qkv.weight"
             | "mlp.down_proj.weight"
             | "mlp.gate_proj.weight"
             | "mlp.up_proj.weight"
     ) {
         return Err(format!(
-            "unsupported cell delta override tensor_suffix={}; expected linear_attn.out_proj.weight, self_attn.o_proj.weight, mlp.down_proj.weight, mlp.gate_proj.weight, or mlp.up_proj.weight",
+            "unsupported cell delta override tensor_suffix={}; expected linear_attn.in_proj_qkv.weight, linear_attn.out_proj.weight, self_attn.o_proj.weight, mlp.down_proj.weight, mlp.gate_proj.weight, or mlp.up_proj.weight",
             override_entry.tensor_suffix
         ));
     }
@@ -21143,7 +21144,7 @@ fn package_linear_attn_mlp_block_sequence_run(
         attn_output_max_abs_diff,
     ) = {
         let mut registry = WeightRegistry::new();
-        let (qkv_rows, qkv_cols, qkv_matrix) = materialize_selected_aq4_matrix(
+        let (qkv_rows, qkv_cols, mut qkv_matrix) = materialize_selected_aq4_matrix(
             &mut context,
             &mut stream,
             &mut registry,
@@ -21198,6 +21199,19 @@ fn package_linear_attn_mlp_block_sequence_run(
                 "z/out shape must be [{hidden},{hidden}], got z=[{z_rows},{z_cols}] out=[{out_rows},{out_cols}]"
             ));
         }
+        let qkv_cell_delta_overrides = matching_package_cell_delta_overrides(
+            cell_delta_overrides,
+            layer_index,
+            "linear_attn.in_proj_qkv.weight",
+        );
+        applied_cell_delta_overrides.extend(apply_package_cell_delta_overrides_to_matrix(
+            &mut stream,
+            &mut qkv_matrix,
+            qkv_rows,
+            qkv_cols,
+            &qkv_tensor,
+            &qkv_cell_delta_overrides,
+        )?);
         let out_row_scale_overrides = matching_package_row_scale_overrides(
             row_scale_overrides,
             layer_index,
