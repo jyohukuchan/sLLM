@@ -9,9 +9,9 @@ use std::time::Instant;
 use ullm_engine::decode_runner::{Qwen3SelfAttnDecodeBatchInput, Qwen3SelfAttnRequestDecodeRunner};
 use ullm_engine::decoder::{
     PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntimeWeights,
-    Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnDecodeState,
-    Qwen3SelfAttnRuntimePreparedSequence, Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode,
-    Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
+    Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnRuntimePreparedSequence,
+    Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode, Qwen3SelfAttnRuntimeShape,
+    Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
     qwen3_causal_attn_to_host_f32, qwen3_decoder_layer_sequence_to_host_f32,
     qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
     qwen3_self_attn_block_sequence_to_host_f32,
@@ -16527,11 +16527,15 @@ fn runtime_paged_kv_write_decode_verify(
         head_dim,
         value_dim,
     };
-    let mut state =
-        Qwen3SelfAttnDecodeState::new(context, stream, shape, block_table.to_vec(), softmax_scale)
-            .map_err(|err| {
-                format!("failed to create {label} Qwen3 self-attn decode state: {err}")
-            })?;
+    let mut decode_runner = Qwen3SelfAttnRequestDecodeRunner::new();
+    decode_runner.insert_request(
+        context,
+        stream,
+        scheduler_request_id,
+        shape,
+        block_table.to_vec(),
+        softmax_scale,
+    )?;
     let q_token_elements = q_heads * head_dim;
     let k_token_elements = kv_heads * head_dim;
     let v_token_elements = kv_heads * value_dim;
@@ -16548,12 +16552,15 @@ fn runtime_paged_kv_write_decode_verify(
         let v_start = timestep * v_token_elements;
         let v_end = v_start + v_token_elements;
 
-        let step = state
-            .step(
+        let step = decode_runner
+            .run_prefill_step(
                 stream,
-                &q_sequence[q_start..q_end],
-                &logical_k_cache[k_start..k_end],
-                &logical_v_cache[v_start..v_end],
+                Qwen3SelfAttnDecodeBatchInput {
+                    request_id: scheduler_request_id,
+                    q: &q_sequence[q_start..q_end],
+                    k: &logical_k_cache[k_start..k_end],
+                    v: &logical_v_cache[v_start..v_end],
+                },
             )
             .map_err(|err| {
                 format!("{label} failed to run prefix/prefill decode timestep {timestep}: {err}")
@@ -16607,10 +16614,10 @@ fn runtime_paged_kv_write_decode_verify(
         .map_err(|err| format!("failed to complete decode prefill in {label}: {err}"))?;
 
     for timestep in prefill_prompt_tokens..cache_len {
-        let mut decode_requests = scheduler
+        let decode_requests = scheduler
             .ready_decode_batch(1)
             .map_err(|err| format!("failed to ready decode batch in {label}: {err}"))?;
-        let request = decode_requests.pop().ok_or_else(|| {
+        let request = decode_requests.first().ok_or_else(|| {
             format!("{label} expected one ready decode request for timestep {timestep}, got none")
         })?;
 
@@ -16640,14 +16647,25 @@ fn runtime_paged_kv_write_decode_verify(
         let k_end = k_start + k_token_elements;
         let v_start = timestep * v_token_elements;
         let v_end = v_start + v_token_elements;
-        let step = state
-            .step(
-                stream,
-                &q_sequence[q_start..q_end],
-                &logical_k_cache[k_start..k_end],
-                &logical_v_cache[v_start..v_end],
-            )
+
+        let inputs = [Qwen3SelfAttnDecodeBatchInput {
+            request_id: request.request.id,
+            q: &q_sequence[q_start..q_end],
+            k: &logical_k_cache[k_start..k_end],
+            v: &logical_v_cache[v_start..v_end],
+        }];
+        let mut outputs = decode_runner
+            .run_ready_batch(stream, &mut scheduler, &decode_requests, &inputs)
             .map_err(|err| format!("failed to run {label} timestep {timestep}: {err}"))?;
+        let step = outputs.pop().ok_or_else(|| {
+            format!("{label} ready decode batch produced no output for timestep {timestep}")
+        })?;
+        if step.request_id != scheduler_request_id {
+            return Err(format!(
+                "{label} output request id {:?} does not match scheduler request {:?}",
+                step.request_id, scheduler_request_id
+            ));
+        }
 
         if step.cache_position != request.cache_position {
             return Err(format!(
@@ -16684,9 +16702,6 @@ fn runtime_paged_kv_write_decode_verify(
         step_output_max_abs_diff = step_output_max_abs_diff.max(step_max_abs_diff);
         step_outputs.extend_from_slice(&step.attention_output);
 
-        scheduler
-            .advance_decode(scheduler_request_id)
-            .map_err(|err| format!("failed to advance decode in {label}: {err}"))?;
         scheduler_decode_batches += 1;
     }
 
@@ -16699,8 +16714,8 @@ fn runtime_paged_kv_write_decode_verify(
             )
         })?;
 
-    let readback = state
-        .read_cache_to_host(stream)
+    let readback = decode_runner
+        .read_cache_to_host(scheduler_request_id, stream)
         .map_err(|err| format!("failed to read {label} paged cache: {err}"))?;
     let k_write_max_abs_diff = verify_f32_close(
         &format!("{label} paged k cache write"),
