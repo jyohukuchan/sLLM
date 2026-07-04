@@ -1714,14 +1714,24 @@ fn runtime_paged_kv_write_smoke(device_index: Option<String>) -> ExitCode {
 
     let cache_len = 3_usize;
     let block_size = 2_usize;
-    let (block_table, cache_blocks, stats) =
-        match allocate_fragmented_paged_decode_blocks(cache_len, block_size) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("{err}");
-                return ExitCode::from(1);
-            }
-        };
+    let scheduled = match allocate_fragmented_paged_decode_blocks(cache_len, block_size) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let ScheduledPagedDecodeBlocks {
+        block_table,
+        cache_blocks,
+        allocator_stats: stats,
+        request_id: scheduler_request_id,
+        prefill_tokens: scheduler_prefill_tokens,
+        max_new_tokens: scheduler_max_new_tokens,
+        cached_tokens: scheduler_cached_tokens,
+        generated_tokens: scheduler_generated_tokens,
+        active_len: scheduler_active_len,
+    } = scheduled;
     let kv_heads = 2_usize;
     let head_dim = 3_usize;
     let value_dim = 2_usize;
@@ -1903,7 +1913,7 @@ fn runtime_paged_kv_write_smoke(device_index: Option<String>) -> ExitCode {
     };
 
     println!(
-        "runtime-paged-kv-write-smoke backend={} device_index={} name=\"{}\" cache_len={} block_size={} cache_blocks={} block_table={:?} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} kv_heads={} head_dim={} value_dim={} k_cache_preview={} v_cache_preview={} k_max_abs_diff={k_max_abs_diff:.9} v_max_abs_diff={v_max_abs_diff:.9} verified=true",
+        "runtime-paged-kv-write-smoke backend={} device_index={} name=\"{}\" cache_len={} block_size={} cache_blocks={} block_table={:?} scheduler_request_id={} scheduler_prefill_tokens={} scheduler_max_new_tokens={} scheduler_cached_tokens={} scheduler_generated_tokens={} scheduler_active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} kv_heads={} head_dim={} value_dim={} k_cache_preview={} v_cache_preview={} k_max_abs_diff={k_max_abs_diff:.9} v_max_abs_diff={v_max_abs_diff:.9} verified=true",
         info.backend,
         device_index,
         info.name,
@@ -1911,6 +1921,12 @@ fn runtime_paged_kv_write_smoke(device_index: Option<String>) -> ExitCode {
         block_size,
         cache_blocks,
         block_table,
+        scheduler_request_id.0,
+        scheduler_prefill_tokens,
+        scheduler_max_new_tokens,
+        scheduler_cached_tokens,
+        scheduler_generated_tokens,
+        scheduler_active_len,
         stats.free_blocks,
         stats.allocated_blocks,
         stats.free_runs,
@@ -6758,7 +6774,7 @@ fn package_self_attn_decode_smoke(
         }
     };
     let paged_block_size = 2_usize;
-    let (paged_block_table, paged_cache_blocks, paged_allocator_stats) =
+    let scheduled_paged_decode =
         match allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size) {
             Ok(value) => value,
             Err(err) => {
@@ -6766,6 +6782,17 @@ fn package_self_attn_decode_smoke(
                 return ExitCode::from(1);
             }
         };
+    let ScheduledPagedDecodeBlocks {
+        block_table: paged_block_table,
+        cache_blocks: paged_cache_blocks,
+        allocator_stats: paged_allocator_stats,
+        request_id: scheduler_request_id,
+        prefill_tokens: scheduler_prefill_tokens,
+        max_new_tokens: scheduler_max_new_tokens,
+        cached_tokens: scheduler_cached_tokens,
+        generated_tokens: scheduler_generated_tokens,
+        active_len: scheduler_active_len,
+    } = scheduled_paged_decode;
     let paged_decode = match runtime_paged_kv_write_decode_verify(
         &mut context,
         &mut stream,
@@ -6850,7 +6877,7 @@ fn package_self_attn_decode_smoke(
     };
 
     println!(
-        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} paged_allocator_free_blocks={} paged_allocator_allocated_blocks={} paged_allocator_free_runs={} paged_allocator_largest_free_run={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} paged_k_cache_preview={} paged_v_cache_preview={} causal_last_preview={} decode_preview={} paged_decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} paged_kv_write_k_max_abs_diff={paged_kv_write_k_max_abs_diff:.9} paged_kv_write_v_max_abs_diff={paged_kv_write_v_max_abs_diff:.9} paged_decode_max_abs_diff={paged_decode_max_abs_diff:.9} paged_step_decode_max_abs_diff={paged_step_decode_max_abs_diff:.9} decode_paged_max_abs_diff={decode_paged_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} causal_paged_decode_max_abs_diff={causal_paged_decode_max_abs_diff:.9} causal_paged_step_decode_max_abs_diff={causal_paged_step_decode_max_abs_diff:.9} verified=true",
+        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} scheduler_request_id={} scheduler_prefill_tokens={} scheduler_max_new_tokens={} scheduler_cached_tokens={} scheduler_generated_tokens={} scheduler_active_len={} paged_allocator_free_blocks={} paged_allocator_allocated_blocks={} paged_allocator_free_runs={} paged_allocator_largest_free_run={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} paged_k_cache_preview={} paged_v_cache_preview={} causal_last_preview={} decode_preview={} paged_decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} paged_kv_write_k_max_abs_diff={paged_kv_write_k_max_abs_diff:.9} paged_kv_write_v_max_abs_diff={paged_kv_write_v_max_abs_diff:.9} paged_decode_max_abs_diff={paged_decode_max_abs_diff:.9} paged_step_decode_max_abs_diff={paged_step_decode_max_abs_diff:.9} decode_paged_max_abs_diff={decode_paged_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} causal_paged_decode_max_abs_diff={causal_paged_decode_max_abs_diff:.9} causal_paged_step_decode_max_abs_diff={causal_paged_step_decode_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -6863,6 +6890,12 @@ fn package_self_attn_decode_smoke(
         paged_block_size,
         paged_cache_blocks,
         paged_block_table,
+        scheduler_request_id.0,
+        scheduler_prefill_tokens,
+        scheduler_max_new_tokens,
+        scheduler_cached_tokens,
+        scheduler_generated_tokens,
+        scheduler_active_len,
         paged_allocator_stats.free_blocks,
         paged_allocator_stats.allocated_blocks,
         paged_allocator_stats.free_runs,
@@ -7078,7 +7111,7 @@ fn package_self_attn_block_smoke_impl(
     )?;
 
     Ok(format!(
-        "package-self-attn-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} sequence_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" attention_preview={} gated_attention_preview={} projected_preview={} block_preview={} q_norm_max_abs_diff={:.9} k_norm_max_abs_diff={:.9} q_rope_max_abs_diff={:.9} k_rope_max_abs_diff={:.9} attention_max_abs_diff={:.9} paged_kv_write_k_max_abs_diff={:.9} paged_kv_write_v_max_abs_diff={:.9} paged_step_attention_max_abs_diff={:.9} causal_paged_step_attention_max_abs_diff={:.9} output_gate_max_abs_diff={:.9} o_proj_max_abs_diff={:.9} block_max_abs_diff={:.9} causal_paged_block_max_abs_diff={:.9} verified=true",
+        "package-self-attn-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} sequence_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} scheduler_request_id={} scheduler_prefill_tokens={} scheduler_max_new_tokens={} scheduler_cached_tokens={} scheduler_generated_tokens={} scheduler_active_len={} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" attention_preview={} gated_attention_preview={} projected_preview={} block_preview={} q_norm_max_abs_diff={:.9} k_norm_max_abs_diff={:.9} q_rope_max_abs_diff={:.9} k_rope_max_abs_diff={:.9} attention_max_abs_diff={:.9} paged_kv_write_k_max_abs_diff={:.9} paged_kv_write_v_max_abs_diff={:.9} paged_step_attention_max_abs_diff={:.9} causal_paged_step_attention_max_abs_diff={:.9} output_gate_max_abs_diff={:.9} o_proj_max_abs_diff={:.9} block_max_abs_diff={:.9} causal_paged_block_max_abs_diff={:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -7092,6 +7125,12 @@ fn package_self_attn_block_smoke_impl(
         self_attn.paged_block_size,
         self_attn.paged_cache_blocks,
         self_attn.paged_block_table,
+        self_attn.scheduler_request_id.0,
+        self_attn.scheduler_prefill_tokens,
+        self_attn.scheduler_max_new_tokens,
+        self_attn.scheduler_cached_tokens,
+        self_attn.scheduler_generated_tokens,
+        self_attn.scheduler_active_len,
         self_attn.q_projection_layout,
         self_attn.q_gate_elements,
         self_attn.output_gate_layout,
@@ -7157,6 +7196,12 @@ struct Qwen3SelfAttnPreparedSequence {
     paged_block_table: Vec<u32>,
     paged_block_size: usize,
     paged_cache_blocks: usize,
+    scheduler_request_id: RequestId,
+    scheduler_prefill_tokens: usize,
+    scheduler_max_new_tokens: usize,
+    scheduler_cached_tokens: usize,
+    scheduler_generated_tokens: usize,
+    scheduler_active_len: usize,
 }
 
 #[allow(dead_code)]
@@ -7173,6 +7218,12 @@ struct SelfAttnBlockSmokeRun {
     paged_block_table: Vec<u32>,
     paged_block_size: usize,
     paged_cache_blocks: usize,
+    scheduler_request_id: RequestId,
+    scheduler_prefill_tokens: usize,
+    scheduler_max_new_tokens: usize,
+    scheduler_cached_tokens: usize,
+    scheduler_generated_tokens: usize,
+    scheduler_active_len: usize,
     hidden: usize,
     q_heads: usize,
     kv_heads: usize,
@@ -7228,8 +7279,19 @@ fn qwen3_self_attn_prepare_sequence_smoke(
         residual_sequence.extend_from_slice(&step_input);
     }
     let paged_block_size = 2_usize;
-    let (paged_block_table, paged_cache_blocks, _) =
+    let scheduled_paged_decode =
         allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size)?;
+    let ScheduledPagedDecodeBlocks {
+        block_table: paged_block_table,
+        cache_blocks: paged_cache_blocks,
+        allocator_stats: _,
+        request_id: scheduler_request_id,
+        prefill_tokens: scheduler_prefill_tokens,
+        max_new_tokens: scheduler_max_new_tokens,
+        cached_tokens: scheduler_cached_tokens,
+        generated_tokens: scheduler_generated_tokens,
+        active_len: scheduler_active_len,
+    } = scheduled_paged_decode;
 
     let prepared = qwen3_self_attn_prepare_sequence_for_paged_decode_f32(
         context,
@@ -7394,6 +7456,12 @@ fn qwen3_self_attn_prepare_sequence_smoke(
         paged_block_table,
         paged_block_size,
         paged_cache_blocks,
+        scheduler_request_id,
+        scheduler_prefill_tokens,
+        scheduler_max_new_tokens,
+        scheduler_cached_tokens,
+        scheduler_generated_tokens,
+        scheduler_active_len,
     })
 }
 
@@ -7448,6 +7516,12 @@ fn run_self_attn_block_sequence_smoke(
         paged_block_table,
         paged_block_size,
         paged_cache_blocks,
+        scheduler_request_id,
+        scheduler_prefill_tokens,
+        scheduler_max_new_tokens,
+        scheduler_cached_tokens,
+        scheduler_generated_tokens,
+        scheduler_active_len,
     } = prepared;
 
     let o_rows = self_attn_weights.o_rows;
@@ -7625,6 +7699,12 @@ fn run_self_attn_block_sequence_smoke(
         paged_block_table,
         paged_block_size,
         paged_cache_blocks,
+        scheduler_request_id,
+        scheduler_prefill_tokens,
+        scheduler_max_new_tokens,
+        scheduler_cached_tokens,
+        scheduler_generated_tokens,
+        scheduler_active_len,
         hidden,
         q_heads,
         kv_heads,
@@ -8348,7 +8428,7 @@ fn package_self_attn_mlp_block_smoke_impl(
     };
 
     Ok(format!(
-        "package-self-attn-mlp-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} sequence_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} q_norm_dtype={} k_norm_dtype={} post_norm_dtype={} backend={} device_index={} name=\"{}\" residual_preview={} attention_preview={} gated_attention_preview={} projected_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} q_norm_max_abs_diff={:.9} k_norm_max_abs_diff={:.9} q_rope_max_abs_diff={:.9} k_rope_max_abs_diff={:.9} attention_max_abs_diff={:.9} paged_kv_write_k_max_abs_diff={:.9} paged_kv_write_v_max_abs_diff={:.9} paged_step_attention_max_abs_diff={:.9} causal_paged_step_attention_max_abs_diff={:.9} output_gate_max_abs_diff={:.9} o_proj_max_abs_diff={:.9} block_max_abs_diff={:.9} causal_paged_block_max_abs_diff={:.9} post_norm_max_abs_diff={:.9} layer_block_max_abs_diff={:.9} verified=true",
+        "package-self-attn-mlp-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} sequence_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} scheduler_request_id={} scheduler_prefill_tokens={} scheduler_max_new_tokens={} scheduler_cached_tokens={} scheduler_generated_tokens={} scheduler_active_len={} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} q_norm_dtype={} k_norm_dtype={} post_norm_dtype={} backend={} device_index={} name=\"{}\" residual_preview={} attention_preview={} gated_attention_preview={} projected_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} q_norm_max_abs_diff={:.9} k_norm_max_abs_diff={:.9} q_rope_max_abs_diff={:.9} k_rope_max_abs_diff={:.9} attention_max_abs_diff={:.9} paged_kv_write_k_max_abs_diff={:.9} paged_kv_write_v_max_abs_diff={:.9} paged_step_attention_max_abs_diff={:.9} causal_paged_step_attention_max_abs_diff={:.9} output_gate_max_abs_diff={:.9} o_proj_max_abs_diff={:.9} block_max_abs_diff={:.9} causal_paged_block_max_abs_diff={:.9} post_norm_max_abs_diff={:.9} layer_block_max_abs_diff={:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -8366,6 +8446,12 @@ fn package_self_attn_mlp_block_smoke_impl(
         self_attn.paged_block_size,
         self_attn.paged_cache_blocks,
         self_attn.paged_block_table,
+        self_attn.scheduler_request_id.0,
+        self_attn.scheduler_prefill_tokens,
+        self_attn.scheduler_max_new_tokens,
+        self_attn.scheduler_cached_tokens,
+        self_attn.scheduler_generated_tokens,
+        self_attn.scheduler_active_len,
         self_attn.q_projection_layout,
         self_attn.q_gate_elements,
         self_attn.output_gate_layout,
@@ -16750,10 +16836,22 @@ fn runtime_host_paged_decode_attn_f32(
     output
 }
 
+struct ScheduledPagedDecodeBlocks {
+    block_table: Vec<u32>,
+    cache_blocks: usize,
+    allocator_stats: KvBlockAllocatorStats,
+    request_id: RequestId,
+    prefill_tokens: usize,
+    max_new_tokens: usize,
+    cached_tokens: usize,
+    generated_tokens: usize,
+    active_len: usize,
+}
+
 fn allocate_fragmented_paged_decode_blocks(
     cache_len: usize,
     block_size: usize,
-) -> Result<(Vec<u32>, usize, KvBlockAllocatorStats), String> {
+) -> Result<ScheduledPagedDecodeBlocks, String> {
     if cache_len == 0 {
         return Err("paged decode cache_len must be greater than zero".to_string());
     }
@@ -16797,13 +16895,20 @@ fn allocate_fragmented_paged_decode_blocks(
             fragment.allocation.blocks.len()
         ));
     }
+
+    let request_id = RequestId(101);
+    let (prefill_prompt_tokens, max_new_tokens) = if cache_len > 1 {
+        (cache_len - 1, 1)
+    } else {
+        (cache_len, 0)
+    };
     scheduler.enqueue(Request {
-        id: RequestId(101),
-        prompt_tokens: cache_len,
-        max_new_tokens: 0,
+        id: request_id,
+        prompt_tokens: prefill_prompt_tokens,
+        max_new_tokens,
     });
     let mut decode_batch = scheduler
-        .pop_prefill_batch_with_allocation(cache_len)
+        .pop_prefill_batch_with_allocation(prefill_prompt_tokens)
         .map_err(|err| format!("failed to allocate decode KV blocks: {err}"))?;
     if decode_batch.len() != 1 {
         return Err(format!(
@@ -16818,8 +16923,35 @@ fn allocate_fragmented_paged_decode_blocks(
             allocation.blocks.len()
         ));
     }
+
+    scheduler
+        .complete_prefill(request_id)
+        .map_err(|err| format!("failed to complete decode prefill: {err}"))?;
+
+    if max_new_tokens > 0 {
+        scheduler
+            .advance_decode(request_id)
+            .map_err(|err| format!("failed to advance decode by one token: {err}"))?;
+    }
+
+    let active = scheduler
+        .active_request(request_id)
+        .ok_or_else(|| "decode request is not active after scheduler progress".to_string())?;
+    let cached_tokens = active.cached_tokens;
+    let generated_tokens = active.generated_tokens;
+    let active_len = scheduler.active_len();
     let stats = scheduler.allocator_stats();
-    Ok((allocation.blocks, cache_blocks, stats))
+    Ok(ScheduledPagedDecodeBlocks {
+        block_table: allocation.blocks,
+        cache_blocks,
+        allocator_stats: stats,
+        request_id,
+        prefill_tokens: prefill_prompt_tokens,
+        max_new_tokens,
+        cached_tokens,
+        generated_tokens,
+        active_len,
+    })
 }
 
 fn runtime_host_depthwise_conv1d_f32(
