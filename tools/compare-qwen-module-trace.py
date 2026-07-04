@@ -47,6 +47,19 @@ def trace_by_token(row: dict[str, Any], token_index: int) -> dict[str, Any] | No
     return None
 
 
+def row_dot_by_token(row: dict[str, Any], projection: str, token_index: int) -> dict[str, Any] | None:
+    row_dot = row.get("row_dot")
+    if not isinstance(row_dot, dict):
+        return None
+    projection_payload = row_dot.get(projection)
+    if not isinstance(projection_payload, dict):
+        return None
+    for trace in projection_payload.get("per_token", []):
+        if int(trace.get("token_index", -1)) == token_index:
+            return trace
+    return None
+
+
 def diff(package_value: Any, fullref_value: Any) -> float | None:
     package_float = float_value(package_value)
     fullref_float = float_value(fullref_value)
@@ -93,6 +106,30 @@ def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[st
             "mlp_error": diff(package_trace.get("mlp_output"), full_trace.get("mlp_output")),
             "fullref_fixture_max_abs_diff": fullref.get("fixture_match", {}).get("max_abs_diff"),
         }
+        attention_row_dot = row_dot_by_token(fullref, "attention_out_proj", token)
+        if attention_row_dot is not None:
+            comparison.update(
+                {
+                    "fullref_package_attention_row_dot": attention_row_dot.get("package_row_dot"),
+                    "attention_row_only_error": attention_row_dot.get("package_row_dot_error_vs_source_row"),
+                    "attention_activation_path_error": diff(
+                        package_trace.get("attention_output"),
+                        attention_row_dot.get("package_row_dot"),
+                    ),
+                }
+            )
+        mlp_row_dot = row_dot_by_token(fullref, "mlp_down_proj", token)
+        if mlp_row_dot is not None:
+            comparison.update(
+                {
+                    "fullref_package_mlp_row_dot": mlp_row_dot.get("package_row_dot"),
+                    "mlp_row_only_error": mlp_row_dot.get("package_row_dot_error_vs_source_row"),
+                    "mlp_activation_path_error": diff(
+                        package_trace.get("mlp_output"),
+                        mlp_row_dot.get("package_row_dot"),
+                    ),
+                }
+            )
         comparisons.append(comparison)
 
     worst_delta = max(
@@ -119,8 +156,8 @@ def fmt(value: Any) -> str:
 
 def markdown(rows: list[dict[str, Any]]) -> str:
     lines = [
-        "| layer | token | hidden | pkg_out_diff | expected_delta | pkg_delta | full_delta | delta_error | pkg_attn | full_attn | attn_error | pkg_mlp | full_mlp | mlp_error |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| layer | token | hidden | pkg_out_diff | expected_delta | pkg_delta | full_delta | delta_error | attn_row_only | attn_activation | mlp_row_only | mlp_activation |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
@@ -135,12 +172,10 @@ def markdown(rows: list[dict[str, Any]]) -> str:
                     fmt(row["package_actual_delta"]),
                     fmt(row["fullref_actual_delta"]),
                     fmt(row["actual_delta_error"]),
-                    fmt(row["package_attention_output"]),
-                    fmt(row["fullref_attention_output"]),
-                    fmt(row["attention_error"]),
-                    fmt(row["package_mlp_output"]),
-                    fmt(row["fullref_mlp_output"]),
-                    fmt(row["mlp_error"]),
+                    fmt(row.get("attention_row_only_error")),
+                    fmt(row.get("attention_activation_path_error")),
+                    fmt(row.get("mlp_row_only_error")),
+                    fmt(row.get("mlp_activation_path_error")),
                 ]
             )
             + " |"
