@@ -88,6 +88,10 @@
 - `docs/words.txt` に `Qwen3 decoder layer sequence` を追加し、`package self attention MLP block smoke` の定義をsequence API経由に更新した。
 - 検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` を通した。`cargo test -p ullm-engine` は47件成功した。
 - `package-self-attn-mlp-block-smoke` はCPU `0`、R9700/RDNA4 `2`、V620/RDNA2 `1`/`3` で通した。CPUは全diff `0`、RDNA2/RDNA4は既知範囲で `q_norm_max_abs_diff=0.000000715`、`k_norm_max_abs_diff=0.000000238`、`q_rope_max_abs_diff=0.000000119`、`k_rope_max_abs_diff=0.000000238`、`attention_max_abs_diff=0.000000119`、`paged_step_attention_max_abs_diff=0.000000119`、`output_gate_max_abs_diff=0.000000119`、`o_proj_max_abs_diff=0.000005722`、`block_max_abs_diff=0`、`causal_paged_block_max_abs_diff=0.000005722`、`post_norm_max_abs_diff=0.000001907`、`layer_block_max_abs_diff=0`。
+- Commit `de1a846 Validate Qwen3 decoder layer decode shape` で、`Qwen3DecoderLayerRuntime::new` と `qwen3_decoder_layer_sequence_to_host_f32` の入口に、`PagedDecodeShape` と `Qwen3SelfAttnRuntimeWeights` 由来shapeの一致確認を追加した。
+- これにより、callerが間違ったq_heads/kv_heads/head_dim/value_dimを渡した場合、q/k/v sequence長不一致やkernel側shape不一致より前に `decode shape mismatch` として失敗する。既存の成功pathに加えてshape mismatch regressionを `qwen3_decoder_layer_sequence_to_host_f32_runs_cpu` に追加した。
+- 検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` を通した。`cargo test -p ullm-engine` は47件成功した。
+- `package-self-attn-mlp-block-smoke` はCPU `0`、R9700/RDNA4 `2`、V620/RDNA2 `1`/`3` で通した。CPUは全diff `0`、RDNA2/RDNA4は既知範囲で `q_norm_max_abs_diff=0.000000715`、`k_norm_max_abs_diff=0.000000238`、`q_rope_max_abs_diff=0.000000119`、`k_rope_max_abs_diff=0.000000238`、`attention_max_abs_diff=0.000000119`、`paged_step_attention_max_abs_diff=0.000000119`、`output_gate_max_abs_diff=0.000000119`、`o_proj_max_abs_diff=0.000005722`、`block_max_abs_diff=0`、`causal_paged_block_max_abs_diff=0.000005722`、`post_norm_max_abs_diff=0.000001907`、`layer_block_max_abs_diff=0`。
 - Commit `b9a1988 Add Qwen3 self attention prepared sequence` で `Qwen3SelfAttnPreparedSequence` と `qwen3_self_attn_prepare_sequence_smoke` を追加した。
 - projection、Qwen3.5 q/gate split、q/k RMSNorm、RoPE、causal attention参照、expected paged K/V cache packまでをprepared sequence helperに切り出し、`run_self_attn_block_sequence_smoke` はprepared sequenceを使ってpaged decode step、output gate、o projection、residual add、cache readback検証に集中する形へ整理した。
 - `SelfAttnBlockSmokeRun` の返却内容、CLI出力、既存diff名、許容誤差は維持した。中間Vecは新structへmoveしており、大きな追加コピーは入れていない。
@@ -271,6 +275,13 @@
 - `cargo test -p ullm-engine -- --test-threads=1` では、`qwen3_decoder_layer_sequence_to_host_f32_runs_cpu` を含む47件が通った。
 - `target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 2`
   - CPU fallbackで、`qwen3_decoder_layer_sequence_to_host_f32` 経由のlayer3 seq2 smokeが成功した。全diffは `0`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 3 2`
+  - R9700/RDNA4で成功した。`q_norm_max_abs_diff=0.000000715`、`k_norm_max_abs_diff=0.000000238`、`q_rope_max_abs_diff=0.000000119`、`k_rope_max_abs_diff=0.000000238`、`attention_max_abs_diff=0.000000119`、`paged_step_attention_max_abs_diff=0.000000119`、`output_gate_max_abs_diff=0.000000119`、`o_proj_max_abs_diff=0.000005722`、`block_max_abs_diff=0`、`causal_paged_block_max_abs_diff=0.000005722`、`post_norm_max_abs_diff=0.000001907`、`layer_block_max_abs_diff=0`。
+- 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でも成功した。diffはR9700/RDNA4と同じ範囲だった。
+- `de1a846 Validate Qwen3 decoder layer decode shape` 後に、`cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
+- `cargo test -p ullm-engine -- --test-threads=1` では、`qwen3_decoder_layer_sequence_to_host_f32_runs_cpu` 内のshape mismatch regressionを含む47件が通った。
+- `target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 2`
+  - CPU fallbackで、decoder layer decode shape validation追加後のlayer3 seq2 smokeが成功した。全diffは `0`。
 - `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 3 2`
   - R9700/RDNA4で成功した。`q_norm_max_abs_diff=0.000000715`、`k_norm_max_abs_diff=0.000000238`、`q_rope_max_abs_diff=0.000000119`、`k_rope_max_abs_diff=0.000000238`、`attention_max_abs_diff=0.000000119`、`paged_step_attention_max_abs_diff=0.000000119`、`output_gate_max_abs_diff=0.000000119`、`o_proj_max_abs_diff=0.000005722`、`block_max_abs_diff=0`、`causal_paged_block_max_abs_diff=0.000005722`、`post_norm_max_abs_diff=0.000001907`、`layer_block_max_abs_diff=0`。
 - 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でも成功した。diffはR9700/RDNA4と同じ範囲だった。
@@ -920,6 +931,7 @@
 - `cb401ed Add Qwen3 paged decode prepare API`
 - `d16dca5 Add Qwen3 self attention block sequence API`
 - `af31735 Add Qwen3 decoder layer sequence API`
+- `de1a846 Validate Qwen3 decoder layer decode shape`
 
 ## 次の行動
 
