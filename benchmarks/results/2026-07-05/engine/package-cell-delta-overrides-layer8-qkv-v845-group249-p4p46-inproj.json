@@ -1,0 +1,117 @@
+{
+  "schema_version": "package-cell-delta-overrides-v0.1",
+  "overrides": [
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3984,
+      "delta": 0.0014567170292139053
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3985,
+      "delta": 0.0005692709237337112
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3986,
+      "delta": 0.00244199950248003
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3987,
+      "delta": -0.0011550923809409142
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3988,
+      "delta": -0.00134218018501997
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3989,
+      "delta": 0.0018919026479125023
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3990,
+      "delta": 0.0018397346138954163
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3991,
+      "delta": -0.0008780043572187424
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3992,
+      "delta": -0.0012771626934409142
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3993,
+      "delta": 0.00018768105655908585
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3994,
+      "delta": 0.002373228780925274
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3995,
+      "delta": 0.0006913412362337112
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3996,
+      "delta": -0.00201356690376997
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3997,
+      "delta": 0.0013041705824434757
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3998,
+      "delta": -0.002036580815911293
+    },
+    {
+      "layer_index": 8,
+      "tensor_suffix": "linear_attn.in_proj_qkv.weight",
+      "row_index": 4941,
+      "col_index": 3999,
+      "delta": -0.0006785290315747261
+    }
+  ]
+}

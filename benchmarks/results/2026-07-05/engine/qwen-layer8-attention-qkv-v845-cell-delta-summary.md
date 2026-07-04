@@ -4,8 +4,11 @@ Artifacts:
 
 - `package-cell-delta-overrides-layer8-qkv-v845-col3994-p4p46-inproj.json`
 - `package-cell-delta-overrides-layer8-qkv-v845-col3994-lsfit-p4p46-inproj.json`
+- `package-cell-delta-overrides-layer8-qkv-v845-group249-p4p46-inproj.json`
 - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-cell-delta-layer8qkv-v845col3994-p4p46-inproj.jsonl`
 - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-cell-delta-layer8qkv-v845col3994-lsfit-p4p46-inproj.jsonl`
+- `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6-layer10-cell-delta-layer8qkv-v845group249-p4p46-inproj.jsonl`
+- `qwen-layer-module-trace-actual-input-rotary64-layer8-token7-hidden3994-qkv-v845-group249-trackedcols-layer6-layer10-p4p46-inproj.jsonl`
 
 ## Target
 
@@ -52,6 +55,7 @@ Run settings:
 | baseline layer6/layer10 row-scale | 0.645338058 | 11 | token 7 / hidden 3994 | 0.645338058 | token 7 / hidden 3994 |
 | qkv V845 cell source-restore | 0.627647400 | 7 | token 0 / hidden 3994 | 0.619235992 | token 7 / hidden 3994 |
 | qkv V845 cell LS fit | 0.628797531 | 11 | token 7 / hidden 3994 | 0.628797531 | token 7 / hidden 3994 |
+| qkv V845 group249 source-restore | 0.627647400 | 7 | token 0 / hidden 3994 | 0.621194839 | token 7 / hidden 3994 |
 
 Layer detail:
 
@@ -60,9 +64,11 @@ Layer detail:
 | baseline | 8 | 0.578010559 | 0.032954554 | 0.001845195 | token 3 / hidden 3994 |
 | qkv V845 cell | 8 | 0.588329315 | 0.032803790 | 0.001830218 | token 3 / hidden 3994 |
 | qkv V845 cell LS fit | 8 | 0.584562302 | 0.032855703 | 0.001835375 | token 3 / hidden 3994 |
+| qkv V845 group249 | 8 | 0.585012436 | 0.032816154 | 0.001831368 | token 3 / hidden 3994 |
 | baseline | 11 | 0.645338058 | 0.043868927 | 0.003148948 | token 7 / hidden 3994 |
 | qkv V845 cell | 11 | 0.619235992 | 0.043696373 | 0.003124643 | token 7 / hidden 3994 |
 | qkv V845 cell LS fit | 11 | 0.628797531 | 0.043756262 | 0.003133063 | token 7 / hidden 3994 |
+| qkv V845 group249 | 11 | 0.621194839 | 0.043712156 | 0.003126978 | token 7 / hidden 3994 |
 
 Layer `8`, hidden `3994` token detail:
 
@@ -89,6 +95,10 @@ Layer `8`, hidden `3994` token detail:
   worsening, but it leaves a larger layer `11` max than source restoration.
   For the current full-prefix objective, source restoration is the better
   single-cell probe.
+- Restoring all 16 cells in group `249` also improves the full-prefix max to the
+  layer `7` floor, and reduces the layer `8` local worsening compared with the
+  single-cell source-restore. But it leaves layer `11` slightly worse than the
+  single-cell source-restore (`0.621194839` vs `0.619235992`).
 - A promotion candidate should not be a single smoke-only cell override. The
   next step is a controlled row/group compensation or quantizer policy experiment
   for this qkv V row, evaluated against full-prefix hidden error.
