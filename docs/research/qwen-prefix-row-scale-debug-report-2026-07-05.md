@@ -58,6 +58,11 @@ Layer6 row-scale still improves early layers on tokens201:
 - layer7: `0.966460228 -> 0.497438431`
 - layer11 final max: `1.140727997 -> 1.145284653`
 
+Layer6 `mlp.down_proj.weight[3994]` row-dot scale is stable across the two available v0.10 traces:
+
+- token ids `1..16`: scale `1.026471714`, RMSE `0.117735388 -> 0.063680278`
+- token ids `101..116`: scale `1.023383096`, RMSE `0.131756300 -> 0.061972585`
+
 This means the local correction is real, but it changes later propagation in a way that the current policy cannot accept.
 
 ## Verification
@@ -68,6 +73,7 @@ This means the local correction is real, but it changes later propagation in a w
 - `python3 -m py_compile tools/run-qwen-prefix-smoke-matrix.py`
 - JSON parse checks for generated summary/candidate/gate artifacts.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
+- Regenerated tokens1 layer6 hidden3994 trace with `qwen-layer-module-trace-v0.10`.
 
 ## Next Action
 
