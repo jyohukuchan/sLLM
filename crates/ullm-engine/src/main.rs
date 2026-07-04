@@ -11746,12 +11746,12 @@ fn package_self_attn_mlp_block_model_loop_smoke(
     path: Option<String>,
     device_index: Option<String>,
     chunk_bytes: Option<String>,
-    first_layer_index: Option<String>,
-    second_layer_index: Option<String>,
-    sequence_len: Option<String>,
-    rotary_dim: Option<String>,
-    rope_base: Option<String>,
-    position_offset: Option<String>,
+    layer_indices: Option<String>,
+    second_layer_or_sequence_len: Option<String>,
+    sequence_len_or_rotary_dim: Option<String>,
+    rotary_dim_or_rope_base: Option<String>,
+    rope_base_or_position_offset: Option<String>,
+    position_offset_or_extra: Option<String>,
 ) -> ExitCode {
     let Some(path) = path else {
         eprintln!("package-self-attn-mlp-block-model-loop-smoke requires a .ullm.d path");
@@ -11769,16 +11769,18 @@ fn package_self_attn_mlp_block_model_loop_smoke(
         }
         Err(code) => return code,
     };
-    let first_layer_index = match parse_optional_usize(first_layer_index, 3, "first layer index") {
+    let cli_tail = match parse_package_model_loop_cli_tail(
+        layer_indices,
+        second_layer_or_sequence_len,
+        sequence_len_or_rotary_dim,
+        rotary_dim_or_rope_base,
+        rope_base_or_position_offset,
+        position_offset_or_extra,
+    ) {
         Ok(value) => value,
         Err(code) => return code,
     };
-    let second_layer_index = match parse_optional_usize(second_layer_index, 7, "second layer index")
-    {
-        Ok(value) => value,
-        Err(code) => return code,
-    };
-    let sequence_len = match parse_optional_usize(sequence_len, 3, "sequence length") {
+    let sequence_len = match parse_optional_usize(cli_tail.sequence_len, 3, "sequence length") {
         Ok(value) if value >= 3 => value,
         Ok(_) => {
             eprintln!("sequence length must be at least three for model-loop smoke");
@@ -11786,7 +11788,7 @@ fn package_self_attn_mlp_block_model_loop_smoke(
         }
         Err(code) => return code,
     };
-    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+    let rope_base = match parse_optional_f32(cli_tail.rope_base, 10_000_000.0, "rope base") {
         Ok(value) if value > 1.0 => value,
         Ok(_) => {
             eprintln!("rope base must be greater than one");
@@ -11794,7 +11796,8 @@ fn package_self_attn_mlp_block_model_loop_smoke(
         }
         Err(code) => return code,
     };
-    let position_offset = match parse_optional_usize(position_offset, 3, "position offset") {
+    let position_offset = match parse_optional_usize(cli_tail.position_offset, 3, "position offset")
+    {
         Ok(value) => value,
         Err(code) => return code,
     };
@@ -11803,9 +11806,9 @@ fn package_self_attn_mlp_block_model_loop_smoke(
         &path,
         device_index,
         chunk_bytes,
-        [first_layer_index, second_layer_index],
+        cli_tail.layer_indices,
         sequence_len,
-        rotary_dim,
+        cli_tail.rotary_dim,
         rope_base,
         position_offset,
     ) {
@@ -11820,12 +11823,195 @@ fn package_self_attn_mlp_block_model_loop_smoke(
     }
 }
 
+struct PackageModelLoopCliTail {
+    layer_indices: Vec<usize>,
+    sequence_len: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+}
+
+fn parse_package_model_loop_cli_tail(
+    layer_indices: Option<String>,
+    second_layer_or_sequence_len: Option<String>,
+    sequence_len_or_rotary_dim: Option<String>,
+    rotary_dim_or_rope_base: Option<String>,
+    rope_base_or_position_offset: Option<String>,
+    position_offset_or_extra: Option<String>,
+) -> Result<PackageModelLoopCliTail, ExitCode> {
+    let Some(first) = layer_indices else {
+        return Ok(PackageModelLoopCliTail {
+            layer_indices: vec![3, 7],
+            sequence_len: None,
+            rotary_dim: None,
+            rope_base: None,
+            position_offset: None,
+        });
+    };
+
+    if first.contains(',') {
+        if position_offset_or_extra.is_some() {
+            eprintln!(
+                "too many model-loop arguments for comma-separated layer list; expected LAYERS_CSV [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+            );
+            return Err(ExitCode::from(2));
+        }
+        return Ok(PackageModelLoopCliTail {
+            layer_indices: parse_usize_csv(&first, "layer list")?,
+            sequence_len: second_layer_or_sequence_len,
+            rotary_dim: sequence_len_or_rotary_dim,
+            rope_base: rotary_dim_or_rope_base,
+            position_offset: rope_base_or_position_offset,
+        });
+    }
+
+    let first_layer_index = parse_usize_value(&first, "first layer index")?;
+    if let Some(raw) = second_layer_or_sequence_len
+        .as_deref()
+        .filter(|raw| raw.contains(','))
+    {
+        let mut layer_indices = Vec::new();
+        layer_indices.push(first_layer_index);
+        layer_indices.extend(parse_usize_csv(raw, "second layer list")?);
+        return Ok(PackageModelLoopCliTail {
+            layer_indices,
+            sequence_len: sequence_len_or_rotary_dim,
+            rotary_dim: rotary_dim_or_rope_base,
+            rope_base: rope_base_or_position_offset,
+            position_offset: position_offset_or_extra,
+        });
+    }
+
+    let second_layer_index = match second_layer_or_sequence_len {
+        Some(raw) => parse_usize_value(&raw, "second layer index")?,
+        None => 7,
+    };
+    Ok(PackageModelLoopCliTail {
+        layer_indices: vec![first_layer_index, second_layer_index],
+        sequence_len: sequence_len_or_rotary_dim,
+        rotary_dim: rotary_dim_or_rope_base,
+        rope_base: rope_base_or_position_offset,
+        position_offset: position_offset_or_extra,
+    })
+}
+
+fn parse_usize_csv(value: &str, label: &str) -> Result<Vec<usize>, ExitCode> {
+    let mut parsed = Vec::new();
+    for raw in value.split(',') {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            eprintln!("invalid {label}: empty entry in {value:?}");
+            return Err(ExitCode::from(2));
+        }
+        parsed.push(parse_usize_value(entry, label)?);
+    }
+    if parsed.is_empty() {
+        eprintln!("invalid {label}: expected at least one entry");
+        return Err(ExitCode::from(2));
+    }
+    Ok(parsed)
+}
+
+fn parse_usize_value(value: &str, label: &str) -> Result<usize, ExitCode> {
+    value.parse::<usize>().map_err(|err| {
+        eprintln!("invalid {label}: {err}");
+        ExitCode::from(2)
+    })
+}
+
+#[cfg(test)]
+mod package_model_loop_cli_tail_tests {
+    use super::*;
+
+    fn parse_tail(
+        args: [Option<&str>; 6],
+    ) -> Result<PackageModelLoopCliTail, std::process::ExitCode> {
+        parse_package_model_loop_cli_tail(
+            args[0].map(str::to_string),
+            args[1].map(str::to_string),
+            args[2].map(str::to_string),
+            args[3].map(str::to_string),
+            args[4].map(str::to_string),
+            args[5].map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn package_model_loop_cli_tail_defaults_to_two_layers() {
+        let tail = parse_tail([None, None, None, None, None, None]).unwrap();
+        assert_eq!(tail.layer_indices, vec![3, 7]);
+        assert_eq!(tail.sequence_len, None);
+        assert_eq!(tail.rotary_dim, None);
+        assert_eq!(tail.rope_base, None);
+        assert_eq!(tail.position_offset, None);
+    }
+
+    #[test]
+    fn package_model_loop_cli_tail_keeps_legacy_two_layer_layout() {
+        let tail = parse_tail([
+            Some("3"),
+            Some("7"),
+            Some("5"),
+            Some("16"),
+            Some("10000000"),
+            Some("4"),
+        ])
+        .unwrap();
+        assert_eq!(tail.layer_indices, vec![3, 7]);
+        assert_eq!(tail.sequence_len.as_deref(), Some("5"));
+        assert_eq!(tail.rotary_dim.as_deref(), Some("16"));
+        assert_eq!(tail.rope_base.as_deref(), Some("10000000"));
+        assert_eq!(tail.position_offset.as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn package_model_loop_cli_tail_accepts_first_argument_layer_csv() {
+        let tail = parse_tail([
+            Some("3,7,11"),
+            Some("5"),
+            Some("16"),
+            Some("10000000"),
+            Some("4"),
+            None,
+        ])
+        .unwrap();
+        assert_eq!(tail.layer_indices, vec![3, 7, 11]);
+        assert_eq!(tail.sequence_len.as_deref(), Some("5"));
+        assert_eq!(tail.rotary_dim.as_deref(), Some("16"));
+        assert_eq!(tail.rope_base.as_deref(), Some("10000000"));
+        assert_eq!(tail.position_offset.as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn package_model_loop_cli_tail_accepts_second_argument_layer_csv() {
+        let tail = parse_tail([
+            Some("3"),
+            Some("7,11"),
+            Some("5"),
+            Some("16"),
+            Some("10000000"),
+            Some("4"),
+        ])
+        .unwrap();
+        assert_eq!(tail.layer_indices, vec![3, 7, 11]);
+        assert_eq!(tail.sequence_len.as_deref(), Some("5"));
+        assert_eq!(tail.rotary_dim.as_deref(), Some("16"));
+        assert_eq!(tail.rope_base.as_deref(), Some("10000000"));
+        assert_eq!(tail.position_offset.as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn package_model_loop_cli_tail_rejects_empty_layer_csv_entry() {
+        assert!(parse_tail([Some("3,,7"), None, None, None, None, None]).is_err());
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn package_self_attn_mlp_block_model_loop_smoke_impl(
     path: &str,
     device_index: u32,
     chunk_bytes: usize,
-    layer_indices: [usize; 2],
+    layer_indices: Vec<usize>,
     sequence_len: usize,
     rotary_dim: Option<String>,
     rope_base: f32,
@@ -20092,10 +20278,13 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [FIRST_LAYER_INDEX] [SECOND_LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
+    eprintln!(
+        "model-loop layer list: use LAYER_INDEX,... or FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]"
+    );
     eprintln!(
         "linear attention aux selector: a-log|dt-bias|conv1d|norm|all (aliases: a_log|alog|dt_bias)"
     );
