@@ -96,14 +96,37 @@ Layer detail:
 | baseline | 0.480636597 | 0.627647400 |
 | layer6 row-scale | 0.465695381 | 0.428003311 |
 
+## Tokens101-116 Cross-Fixture Recheck
+
+This recheck uses a newly exported fixture with different token ids:
+
+- fixture: `benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens101-116`
+- token ids: `101..116`
+- layers: `0..12`
+- run mode: `actual_prefix`
+- `rotary_dim=64`
+- CPU backend
+- summary: `qwen-cross-fixture-tokens101-116-summary.md`
+
+| variant | overall max_abs | max layer | max token/hidden | layer11 max_abs |
+| --- | ---: | ---: | --- | ---: |
+| baseline | 1.080525398 | 7 | token 12 / hidden 3994 | 0.946708679 |
+| layer6 row-scale | 1.043153763 | 7 | token 12 / hidden 3994 | 0.916080475 |
+| layer8 QKV V845 cell | 1.080525398 | 7 | token 12 / hidden 3994 | 0.969970703 |
+| combined | 1.043153763 | 7 | token 12 / hidden 3994 | 0.939382553 |
+
 ## Interpretation
 
 - The layer `6` row-scale directly reduces the inherited layer `7` floor from
   `0.627647400` to `0.428003311`.
 - The `prefix0-8-seq16` partial recheck repeats the same layer `7` reduction,
   moving the fixture max from `0.627647400` to `0.542758942`.
+- The `tokens101-116` cross-fixture recheck also improves with layer6 row-scale,
+  moving the fixture max from `1.080525398` to `1.043153763`.
 - The layer `8` qkv V845 cell correction mainly reduces the later layer `11`
   hidden `3994` chain.
+- On the `tokens101-116` fixture, the layer `8` qkv V845 cell does not improve
+  the overall max and worsens layer `11` versus layer6 row-scale alone.
 - The two interventions are complementary: combined max improves to
   `0.610977173`, the best result in this batch.
 - This is still smoke-only. A durable fix should be expressed as quantizer or
