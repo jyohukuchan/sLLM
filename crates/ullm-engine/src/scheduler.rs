@@ -238,6 +238,89 @@ impl SchedulerState {
         Ok(())
     }
 
+    pub fn advance_decode_batch(
+        &mut self,
+        ready_batch: &[SchedulerDecodeRequest],
+    ) -> Result<(), String> {
+        let mut request_ids = BTreeSet::new();
+        for request in ready_batch {
+            if !request_ids.insert(request.request.id) {
+                return Err(format!(
+                    "ready decode batch contains duplicate request {:?}",
+                    request.request.id
+                ));
+            }
+            let active = self
+                .active
+                .get(&request.request.id)
+                .ok_or_else(|| format!("request {:?} is not active", request.request.id))?;
+            if active.request != request.request {
+                return Err(format!(
+                    "ready decode request {:?} metadata is stale",
+                    request.request.id
+                ));
+            }
+            if active.allocation != request.allocation {
+                return Err(format!(
+                    "ready decode request {:?} allocation is stale",
+                    request.request.id
+                ));
+            }
+            if active.cached_tokens != request.cached_tokens
+                || active.generated_tokens != request.generated_tokens
+            {
+                return Err(format!(
+                    "ready decode request {:?} is stale: scheduler cached/generated={}/{} batch cached/generated={}/{}",
+                    request.request.id,
+                    active.cached_tokens,
+                    active.generated_tokens,
+                    request.cached_tokens,
+                    request.generated_tokens
+                ));
+            }
+            if request.cache_position != active.cached_tokens {
+                return Err(format!(
+                    "ready decode request {:?} cache_position {} does not match cached_tokens {}",
+                    request.request.id, request.cache_position, active.cached_tokens
+                ));
+            }
+            let expected_next_cache_len = active.cached_tokens.checked_add(1).ok_or_else(|| {
+                format!(
+                    "request {:?} cached token count overflow",
+                    request.request.id
+                )
+            })?;
+            if request.next_cache_len != expected_next_cache_len {
+                return Err(format!(
+                    "ready decode request {:?} next_cache_len {} does not match cached_tokens + 1",
+                    request.request.id, request.next_cache_len
+                ));
+            }
+            if request.remaining_new_tokens
+                != active
+                    .request
+                    .max_new_tokens
+                    .checked_sub(active.generated_tokens)
+                    .ok_or_else(|| {
+                        format!(
+                            "request {:?} generated token count exceeds max_new_tokens",
+                            request.request.id
+                        )
+                    })?
+            {
+                return Err(format!(
+                    "ready decode request {:?} remaining_new_tokens {} is stale",
+                    request.request.id, request.remaining_new_tokens
+                ));
+            }
+        }
+
+        for request in ready_batch {
+            self.advance_decode(request.request.id)?;
+        }
+        Ok(())
+    }
+
     pub fn pop_prefill_batch_with_allocation(
         &mut self,
         token_budget: usize,
@@ -1029,11 +1112,8 @@ mod tests {
         );
 
         scheduler
-            .advance_decode(RequestId(1))
-            .expect("request 1 should advance");
-        scheduler
-            .advance_decode(RequestId(2))
-            .expect("request 2 should advance");
+            .advance_decode_batch(&first)
+            .expect("first ready batch should advance");
         let second = scheduler
             .ready_decode_batch(8)
             .expect("second ready decode batch should be generated");
@@ -1047,6 +1127,42 @@ mod tests {
         assert_eq!(second[0].cache_position, 3);
         assert_eq!(second[0].next_cache_len, 4);
         assert_eq!(second[0].remaining_new_tokens, 1);
+    }
+
+    #[test]
+    fn scheduler_state_advance_decode_batch_rejects_stale_batch_without_partial_progress() {
+        let mut scheduler = SchedulerState::with_block_size(8, 4);
+        scheduler.enqueue(Request::new(1, 2, 2));
+        scheduler.enqueue(Request::new(2, 3, 1));
+        scheduler
+            .pop_prefill_batch_with_allocation(8)
+            .expect("allocation should succeed");
+        scheduler
+            .complete_prefill(RequestId(1))
+            .expect("request 1 prefill complete");
+        scheduler
+            .complete_prefill(RequestId(2))
+            .expect("request 2 prefill complete");
+
+        let mut ready = scheduler
+            .ready_decode_batch(8)
+            .expect("ready decode batch should be generated");
+        ready[1].generated_tokens = 99;
+        let err = scheduler
+            .advance_decode_batch(&ready)
+            .expect_err("stale batch should be rejected");
+        assert!(err.contains("stale"), "{err}");
+
+        let first = scheduler
+            .active_request(RequestId(1))
+            .expect("request 1 should remain active");
+        assert_eq!(first.cached_tokens, 2);
+        assert_eq!(first.generated_tokens, 0);
+        let second = scheduler
+            .active_request(RequestId(2))
+            .expect("request 2 should remain active");
+        assert_eq!(second.cached_tokens, 3);
+        assert_eq!(second.generated_tokens, 0);
     }
 
     #[test]
