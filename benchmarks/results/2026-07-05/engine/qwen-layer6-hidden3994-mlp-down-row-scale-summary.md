@@ -68,10 +68,40 @@ Layer detail:
 | layer8 qkv cell | 0.480636597 | 0.627647400 | 0.588329315 | 0.619235992 |
 | combined | 0.465695381 | 0.428003311 | 0.575433731 | 0.610977173 |
 
+## Prefix0-8 Seq16 Partial Recheck
+
+This recheck uses the shorter existing fixture:
+
+- fixture: `benchmarks/golden/2026-07-05/qwen35-9b-prefix0-8-seq16`
+- token ids: `1..16`
+- layers: `0..8`
+- run mode: `actual_prefix`
+- `rotary_dim=64`
+- CPU backend
+
+Artifacts:
+
+- baseline report: `package-golden-prefix-cpu-actual-prefix0-8-seq16-rotary64-manifest-row-scale-layer6-layer10-p4p46-inproj.jsonl`
+- layer6 row-scale report: `package-golden-prefix-cpu-actual-prefix0-8-seq16-rotary64-layer6h3994-row-scale-p4p46-inproj.jsonl`
+
+| variant | overall max_abs | max layer | max token/hidden |
+| --- | ---: | ---: | --- |
+| baseline layer6/layer10 manifest row-scale | 0.627647400 | 7 | token 0 / hidden 3994 |
+| layer6 hidden3994 MLP down row-scale | 0.542758942 | 4 | token 14 / hidden 3994 |
+
+Layer detail:
+
+| variant | layer 6 | layer 7 |
+| --- | ---: | ---: |
+| baseline | 0.480636597 | 0.627647400 |
+| layer6 row-scale | 0.465695381 | 0.428003311 |
+
 ## Interpretation
 
 - The layer `6` row-scale directly reduces the inherited layer `7` floor from
   `0.627647400` to `0.428003311`.
+- The `prefix0-8-seq16` partial recheck repeats the same layer `7` reduction,
+  moving the fixture max from `0.627647400` to `0.542758942`.
 - The layer `8` qkv V845 cell correction mainly reduces the later layer `11`
   hidden `3994` chain.
 - The two interventions are complementary: combined max improves to
