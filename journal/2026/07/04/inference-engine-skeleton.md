@@ -1612,3 +1612,31 @@
 ### 次の行動
 
 - 次は `PackageModelLoopExecutionPlan::execute` のprefill loop、decode loop、cache readback verifyをprivate methodへ分けるか、`PackageModelLoopLayerRunPlan` から実行時のinput/progress状態をさらに独立させる。
+
+## PackageModelLoopExecutionPlan execute 分割
+
+### 前回の要点
+
+- prefill/ready batchの入力構築とstack runner呼び出しは、`qwen3_package_model_run_prefill_step_from_sequence` と `qwen3_package_model_run_ready_batch_from_sequences` へ移した。
+- `PackageModelLoopExecutionPlan::execute` には、runner構築、prefill loop、decode loop、final ready確認、cache readback verifyが1つの関数に残っていた。
+
+### 今回の変更点
+
+- `PackageModelLoopExecutionPlan::build_layer_runner` を追加し、`PackageModelLoopLayerRunPlan::stack_requests()` からstack runnerを作る処理を分離した。
+- `run_prefill_layers`、`run_decode_batches`、`final_ready`、`verify_layer_caches` を追加し、`execute` は実行手順の並びだけを示す薄い関数にした。
+- 挙動変更はなく、次にcontrol-plane runner化する候補の単位を見えやすくした。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `package-self-attn-mlp-block-model-loop-smoke` with layers `3,7,11`, sequence len `3`, passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; all reported `decode_batch_ready_counts=[2, 1]`, `final_ready=0`, `decode_steps_by_layer=[[2, 1, 0], [2, 1, 0], [2, 1, 0]]`, `verified=true`。
+
+### 次の行動
+
+- 次は `PackageModelLoopLayerRunPlan` 側の入力・進行状態を、実runner向け状態とsmoke期待値生成状態へさらに分けるか、またはcache verifyをsmoke-only checksの集計APIとして小さくする。

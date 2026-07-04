@@ -11417,16 +11417,46 @@ impl PackageModelLoopExecutionPlan {
         request_plan: &mut PackageModelLoopRequestPlan,
         layer_run_plan: &mut PackageModelLoopLayerRunPlan,
     ) -> Result<PackageModelLoopExecutionSummary, String> {
-        let mut layer_runner = {
-            let layer_requests = layer_run_plan.stack_requests();
-            qwen3_package_model_stack_runner(model, context, stream, self.decode, &layer_requests)?
-        };
+        let mut layer_runner = self.build_layer_runner(context, stream, model, layer_run_plan)?;
+        self.run_prefill_layers(&mut layer_runner, stream, model, layer_run_plan)?;
+        request_plan.complete_prefill_all()?;
 
+        let decode_batch_ready_counts =
+            self.run_decode_batches(&mut layer_runner, stream, request_plan, layer_run_plan)?;
+        let final_ready = self.final_ready(request_plan)?;
+        self.verify_layer_caches(&layer_runner, stream, model, layer_run_plan)?;
+
+        Ok(PackageModelLoopExecutionSummary {
+            first_batch_ready: decode_batch_ready_counts.first().copied().unwrap_or(0),
+            second_batch_ready: decode_batch_ready_counts.get(1).copied().unwrap_or(0),
+            decode_batch_ready_counts,
+            final_ready,
+        })
+    }
+
+    fn build_layer_runner<'weights>(
+        &self,
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        model: &'weights Qwen3PackageModelRuntime,
+        layer_run_plan: &PackageModelLoopLayerRunPlan,
+    ) -> Result<Qwen3DecoderLayerStackRequestDecodeRunner<'weights>, String> {
+        let layer_requests = layer_run_plan.stack_requests();
+        qwen3_package_model_stack_runner(model, context, stream, self.decode, &layer_requests)
+    }
+
+    fn run_prefill_layers(
+        &self,
+        layer_runner: &mut Qwen3DecoderLayerStackRequestDecodeRunner<'_>,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        model: &Qwen3PackageModelRuntime,
+        layer_run_plan: &mut PackageModelLoopLayerRunPlan,
+    ) -> Result<(), String> {
         for layer_position in 0..layer_runner.layer_count() {
             for run in &mut layer_run_plan.runs_by_layer[layer_position] {
                 for timestep in 0..run.prompt_tokens {
                     run_scheduler_layer_stack_prefill_step(
-                        &mut layer_runner,
+                        layer_runner,
                         layer_position,
                         stream,
                         run,
@@ -11440,8 +11470,16 @@ impl PackageModelLoopExecutionPlan {
                 }
             }
         }
-        request_plan.complete_prefill_all()?;
+        Ok(())
+    }
 
+    fn run_decode_batches(
+        &self,
+        layer_runner: &mut Qwen3DecoderLayerStackRequestDecodeRunner<'_>,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_plan: &mut PackageModelLoopRequestPlan,
+        layer_run_plan: &mut PackageModelLoopLayerRunPlan,
+    ) -> Result<Vec<usize>, String> {
         let mut decode_batch_ready_counts = Vec::new();
         loop {
             let ready = request_plan
@@ -11454,7 +11492,7 @@ impl PackageModelLoopExecutionPlan {
             let batch_index = decode_batch_ready_counts.len();
             let label = format!("package model-loop decode batch {batch_index}");
             let ready_count = run_scheduler_layer_stack_ready_batch(
-                &mut layer_runner,
+                layer_runner,
                 &mut request_plan.scheduler,
                 &mut layer_run_plan.runs_by_layer,
                 stream,
@@ -11464,6 +11502,10 @@ impl PackageModelLoopExecutionPlan {
             )?;
             decode_batch_ready_counts.push(ready_count);
         }
+        Ok(decode_batch_ready_counts)
+    }
+
+    fn final_ready(&self, request_plan: &PackageModelLoopRequestPlan) -> Result<usize, String> {
         let final_ready = request_plan
             .scheduler
             .ready_decode_batch(self.max_decode_batch_requests)
@@ -11474,7 +11516,16 @@ impl PackageModelLoopExecutionPlan {
                 "package model-loop final ready count {final_ready}, expected 0"
             ));
         }
+        Ok(final_ready)
+    }
 
+    fn verify_layer_caches(
+        &self,
+        layer_runner: &Qwen3DecoderLayerStackRequestDecodeRunner<'_>,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        model: &Qwen3PackageModelRuntime,
+        layer_run_plan: &mut PackageModelLoopLayerRunPlan,
+    ) -> Result<(), String> {
         for layer_position in 0..layer_runner.layer_count() {
             for run in &mut layer_run_plan.runs_by_layer[layer_position] {
                 let cache = layer_runner
@@ -11507,13 +11558,7 @@ impl PackageModelLoopExecutionPlan {
                 )?;
             }
         }
-
-        Ok(PackageModelLoopExecutionSummary {
-            first_batch_ready: decode_batch_ready_counts.first().copied().unwrap_or(0),
-            second_batch_ready: decode_batch_ready_counts.get(1).copied().unwrap_or(0),
-            decode_batch_ready_counts,
-            final_ready,
-        })
+        Ok(())
     }
 }
 
