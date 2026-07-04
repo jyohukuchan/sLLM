@@ -1002,6 +1002,18 @@
 - 5.3-codex-spark reviewer Singer confirmed this is the right smoke-local boundary for now, and recommended keeping expected/diff calculation outside the plan.
 - Next useful step: either let the model-loop CLI accept more than two layer indices, or move layer-run expected preparation into a small plan object so `package_self_attn_mlp_block_model_loop_smoke_impl` becomes a thinner orchestration function.
 
+2026-07-04 package model loop layer lists:
+- Commit `0c30193 Allow model loop layer lists` changes `package-self-attn-mlp-block-model-loop-smoke` from a two-layer-only CLI to a layer list aware CLI.
+- Existing positional form still works: `FIRST_LAYER_INDEX SECOND_LAYER_INDEX [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]`.
+- New forms are `LAYER_INDEX,... [SEQUENCE_LEN] ...` and `FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...] [SEQUENCE_LEN] ...`, so `3,7,11 3` and `3 7,11 3` both run layers `[3, 7, 11]`.
+- Added `PackageModelLoopCliTail` parsing plus unit coverage for default layers, legacy two-layer layout, first-argument CSV, second-argument CSV, and empty CSV entry rejection.
+- `docs/words.txt` adds `package model loop layer list`, and `print_help` documents the new accepted layer-list forms.
+- Validation passed: `cargo fmt --all --check`, `git diff --check`, `cargo check -p ullm-engine`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine package_model_loop_cli_tail -- --test-threads=1`, `cargo test -p ullm-engine -- --test-threads=1`, and `cargo test --workspace -- --test-threads=1`.
+- Smoke validation passed on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d`: legacy CPU `[3, 7]`, CSV CPU `[3, 7, 11]`, and CSV R9700/RDNA4 `[3, 7, 11]` with HIP-required kernel flags.
+- CSV R9700/RDNA4 result: q norm max diff `0.000000954`, k norm `0.000001192`, q RoPE `0.000000313`, k RoPE `0.000000477`, causal attention `0.000000477`; attention/projection/block/post_norm/MLP/layer/K/V cache diffs stayed `0`.
+- 5.3-codex-spark explorer Bacon confirmed the existing model/load/stack runner path already accepted arbitrary layer slices and the CLI argument parsing was the only narrow blocker.
+- Next useful step: move layer-run expected preparation into a small plan object, or start extracting a narrow reusable model-loop runner from the smoke now that layer count is no longer fixed at two.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -1114,6 +1126,7 @@
 - `18defff Add decoder layer stack runner`
 - `ecf75a0 Add package model loop bundle`
 - `71e1766 Add package model loop request plan`
+- `0c30193 Allow model loop layer lists`
 
 ## 次の行動
 
