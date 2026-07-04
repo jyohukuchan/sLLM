@@ -1290,3 +1290,35 @@
 ### 次の行動
 
 - `PackageModelLoopSmokeModel::load` 自体をlibrary側のmodel loaderへ寄せるか、先にrequest/execution planをrunner API化するかを選ぶ。現状ではlayer load境界はlibrary側に出たため、次はmodel-level shape consistencyとrunner setupのどちらを切り出すかが分岐点。
+
+## Qwen3 package model runtime 抽出
+
+### 前回の要点
+
+- `qwen3_loader.rs` にlayer-index単位の `Qwen3PackageDecoderLayerRuntime` loaderを追加し、model-loop smoke側からlayerごとのtensor名・passthrough・resident weights構築を外した。
+- 残っていた `PackageModelLoopSmokeModel` は、複数layer load、層間shape consistency、softmax scale、MLP epsilon、metadata accessorを持つだけになっていた。
+
+### 今回の変更点
+
+- `qwen3_loader.rs` に `Qwen3PackageModelRuntime` を追加し、複数layer load、重複layer拒否、層間shape consistency確認、softmax scale、MLP epsilon、model metadata accessorをlibrary側へ移した。
+- `main.rs` から `PackageModelLoopSmokeModel` を削除し、`PackageModelLoopSmokeRun` は `Qwen3PackageModelRuntime` を保持するようにした。
+- CLI由来の `rotary_dim: Option<String>` parsingはsmoke側に残し、`qwen3_loader.rs` には `default_rotary_dim` とmodel metadataだけを置いた。
+- `build_stack_runner` は `SchedulerLayerDecodeRun` とstack-runner executionに依存するため、`build_package_model_loop_stack_runner` としてsmoke側に残した。
+- `Qwen3PackageModelRuntime::load` のempty layer listとduplicate layer listをpackage I/O前に拒否する単体テストを追加した。
+- `docs/words.txt` に `Qwen3 package model runtime` を追加し、`package model loop smoke model` の定義を現在の境界に合わせて更新した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- 3-layer model-loop smoke on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with `3,7,11 3` passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`. All devices reported `decode_batch_ready_counts=[2, 1]`, `final_ready=0`, `cached_tokens=[3, 3, 1]`, `generated_tokens=[2, 1, 0]`, and `verified=true`; runtime/cache diffs stayed `0`.
+
+### 次の行動
+
+- 次はmodel-loop request/execution側の境界を見直す。`PackageModelLoopRequestPlan` はsynthetic requestとdeterministic residual生成を含むため当面smoke-localに残し、`PackageModelLoopExecutionPlan` からstack runner setupやprefill/decode orchestrationの再利用可能部分を切り出せるかを検討する。
