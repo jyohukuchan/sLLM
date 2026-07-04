@@ -7,4 +7,5 @@ pub mod decoder;
 pub mod host_bytes;
 pub mod loader;
 pub mod package;
+pub mod qwen3_loader;
 pub mod scheduler;
