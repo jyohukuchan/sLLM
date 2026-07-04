@@ -34,7 +34,8 @@ use ullm_engine::loader::{
     validate_passthrough_shape_elements,
 };
 use ullm_engine::package::{
-    ReferencedFile, ReferencedFileRole, TensorSelector, select_tensor_payload_bundle,
+    ReferencedFile, ReferencedFileRole, TensorSelector, list_tensor_payload_bundles,
+    select_tensor_payload_bundle,
 };
 use ullm_engine::qwen3_loader::{
     Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
@@ -12057,6 +12058,10 @@ fn package_golden_prefix_smoke_impl(
     run_mode: PackageGoldenPrefixRunMode,
     row_scale_overrides: Option<&PackageRowScaleOverrides>,
 ) -> Result<String, String> {
+    let manifest_row_scale_override_count = list_tensor_payload_bundles(path)?
+        .iter()
+        .map(|bundle| bundle.row_scale_overrides.len())
+        .sum::<usize>();
     let golden_layers = fixture.select_contiguous_layers(layer_start, layer_end_exclusive)?;
     let sequence_len = fixture.metadata().sequence_len;
     let hidden = fixture.metadata().hidden_size;
@@ -12586,6 +12591,11 @@ fn package_golden_prefix_smoke_impl(
             .collect::<Vec<_>>();
         let failure_class = package_golden_prefix_failure_class(&metrics);
         let mut details = details;
+        insert_json_detail(
+            &mut details,
+            "manifest_row_scale_override_count",
+            manifest_row_scale_override_count,
+        );
         let output_distribution =
             package_hidden_distribution(&actual, &expected_after, sequence_len, hidden)?;
         insert_json_detail(&mut details, "input_distribution", input_distribution);
@@ -12627,7 +12637,7 @@ fn package_golden_prefix_smoke_impl(
     }
 
     Ok(format!(
-        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} run_mode={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} row_scale_overrides={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
+        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} run_mode={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} row_scale_overrides={} manifest_row_scale_overrides={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
         path,
         fixture_path,
         layer_start,
@@ -12647,6 +12657,7 @@ fn package_golden_prefix_smoke_impl(
         row_scale_overrides
             .map(|overrides| overrides.source_path.as_str())
             .unwrap_or("none"),
+        manifest_row_scale_override_count,
         info.backend,
         device_index,
         info.name,
