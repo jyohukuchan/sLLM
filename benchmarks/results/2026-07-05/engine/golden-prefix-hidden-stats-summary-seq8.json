@@ -1,0 +1,2837 @@
+{
+  "schema_version": "golden-prefix-hidden-stats-v0.1",
+  "generated_at": "2026-07-04T16:17:20.804038+00:00",
+  "sources": [
+    "benchmarks/results/2026-07-05/engine/package-golden-prefix-hidden-stats-cpu-actual-prefix0-8-seq8.jsonl",
+    "benchmarks/results/2026-07-05/engine/package-golden-prefix-hidden-stats-cpu-actual-prefix4-8-seq8.jsonl",
+    "benchmarks/results/2026-07-05/engine/package-golden-prefix-hidden-stats-cpu-golden-before4-8-seq8.jsonl",
+    "benchmarks/results/2026-07-05/engine/package-golden-prefix-hidden-stats-r9700-actual-prefix0-8-seq8.jsonl",
+    "benchmarks/results/2026-07-05/engine/package-golden-prefix-hidden-stats-r9700-actual-prefix4-8-seq8.jsonl",
+    "benchmarks/results/2026-07-05/engine/package-golden-prefix-hidden-stats-r9700-golden-before4-8-seq8.jsonl"
+  ],
+  "summary": {
+    "first_distribution_bad_layer": {
+      "layer_index": 6,
+      "device_index": 2,
+      "backend": "hip",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "reason": "largest_output_diff_rms_or_sudden_jump",
+      "output_diff_rms": 0.5144601868328423,
+      "output_diff_max_abs": 44.61832809448242,
+      "output_per_token_max_mse": 1.0383415576303274,
+      "score": 1.0383415576303274,
+      "samples": 1
+    },
+    "layer_count": 32,
+    "hot_hidden_counts": {
+      "3994": 218,
+      "3842": 10,
+      "3456": 10,
+      "310": 6,
+      "14": 2,
+      "3986": 2,
+      "2862": 2,
+      "207": 2,
+      "2504": 2,
+      "56": 2
+    },
+    "rows": [
+      {
+        "layer": 0,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output": {
+          "mean": 0.0006604732306199068,
+          "rms": 0.08519272444185397,
+          "l2_norm": 15.42153040911152,
+          "max_abs_diff": 5.489426612854004,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.012019224031668376,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "14": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 0,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output": {
+          "mean": 0.0006604753455619061,
+          "rms": 0.08519277522484842,
+          "l2_norm": 15.421539601815454,
+          "max_abs_diff": 5.489425182342529,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.012019220425812422,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "14": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 1,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.052020688089736034,
+          "rms": 0.08519272444185397,
+          "l2_norm": 15.42153040911152,
+          "per_token_max_mse": 0.012019224031668376,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": 0.0007280534192055654,
+          "rms": 0.1122143517879047,
+          "l2_norm": 20.31296744849413,
+          "max_abs_diff": 9.846384048461914,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03476893737983177,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 6,
+            "3842": 1,
+            "310": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 1,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.052020690151174165,
+          "rms": 0.08519277522484842,
+          "l2_norm": 15.421539601815454,
+          "per_token_max_mse": 0.012019220425812422,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": 0.0007280557936795162,
+          "rms": 0.11221437209036106,
+          "l2_norm": 20.3129711236313,
+          "max_abs_diff": 9.846382141113281,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03476892889004832,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 6,
+            "3842": 1,
+            "310": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 2,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.06873141498240543,
+          "rms": 0.1122143517879047,
+          "l2_norm": 20.31296744849413,
+          "per_token_max_mse": 0.03476893737983177,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": 0.0011848341531397466,
+          "rms": 0.16117781700192155,
+          "l2_norm": 29.176301408999205,
+          "max_abs_diff": 15.920772552490234,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.0855890214033345,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 6,
+            "3842": 1,
+            "310": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 2,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.06873141749067457,
+          "rms": 0.11221437209036106,
+          "l2_norm": 20.3129711236313,
+          "per_token_max_mse": 0.03476892889004832,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": 0.0011848353209913398,
+          "rms": 0.16117783511969574,
+          "l2_norm": 29.176304688666658,
+          "max_abs_diff": 15.920771598815918,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.08558901502131191,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 6,
+            "3842": 1,
+            "310": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 3,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0950623347645525,
+          "rms": 0.16117781700192155,
+          "l2_norm": 29.176301408999205,
+          "per_token_max_mse": 0.0855890214033345,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": 0.0011180161280108791,
+          "rms": 0.18999675076079128,
+          "l2_norm": 34.39308566178966,
+          "max_abs_diff": 14.526961326599121,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.08190156350453134,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 5,
+            "3842": 2,
+            "310": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 3,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.09506233342630566,
+          "rms": 0.16117783511969574,
+          "l2_norm": 29.176304688666658,
+          "per_token_max_mse": 0.08558901502131191,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": 0.001118017558994211,
+          "rms": 0.18999672373826468,
+          "l2_norm": 34.39308077018983,
+          "max_abs_diff": 14.526959419250488,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.08190155104867913,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 5,
+            "3842": 2,
+            "310": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 4,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.12285810444480916,
+          "rms": 0.18999675076079128,
+          "l2_norm": 34.39308566178966,
+          "per_token_max_mse": 0.08190156350453134,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0010250170212771081,
+          "rms": 0.2927727395086589,
+          "l2_norm": 52.99752690000265,
+          "max_abs_diff": 18.845571517944336,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.12797700658054578,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 4,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.12285810148429732,
+          "rms": 0.18999672373826468,
+          "l2_norm": 34.39308077018983,
+          "per_token_max_mse": 0.08190155104867913,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0010250174018509028,
+          "rms": 0.29277267756639347,
+          "l2_norm": 52.9975156872549,
+          "max_abs_diff": 18.845596313476562,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.1279769794997883,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 4,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output": {
+          "mean": -0.001762085130479818,
+          "rms": 0.17225418428789635,
+          "l2_norm": 31.181338060218565,
+          "max_abs_diff": 9.683818817138672,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03362017083029893,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 4,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "golden_before_each_layer",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output": {
+          "mean": -0.001762085130479818,
+          "rms": 0.17225418428789635,
+          "l2_norm": 31.181338060218565,
+          "max_abs_diff": 9.683818817138672,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03362017083029893,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 4,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output": {
+          "mean": -0.0017620845600987423,
+          "rms": 0.172254164060603,
+          "l2_norm": 31.181334398687355,
+          "max_abs_diff": 9.683826446533203,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.033620192989878575,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 4,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "golden_before_each_layer",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output": {
+          "mean": -0.0017620845600987423,
+          "rms": 0.172254164060603,
+          "l2_norm": 31.181334398687355,
+          "max_abs_diff": 9.683826446533203,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.033620192989878575,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 5,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.14948322724160334,
+          "rms": 0.2927727395086589,
+          "l2_norm": 52.99752690000265,
+          "per_token_max_mse": 0.12797700658054578,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0013642564614819719,
+          "rms": 0.3310368129384535,
+          "l2_norm": 59.92406406429775,
+          "max_abs_diff": 24.462188720703125,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.201557398461991,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "numeric_drift"
+      },
+      {
+        "layer": 5,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.14948322849593154,
+          "rms": 0.29277267756639347,
+          "l2_norm": 52.9975156872549,
+          "per_token_max_mse": 0.1279769794997883,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0013642579038588565,
+          "rms": 0.33103682004941315,
+          "l2_norm": 59.92406535151895,
+          "max_abs_diff": 24.46222686767578,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.20155786590791788,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "numeric_drift"
+      },
+      {
+        "layer": 5,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.08508937715589582,
+          "rms": 0.17225418428789635,
+          "l2_norm": 31.181338060218565,
+          "per_token_max_mse": 0.03362017083029893,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.002005469259628967,
+          "rms": 0.21500241633824646,
+          "l2_norm": 38.919594640452466,
+          "max_abs_diff": 11.25866985321045,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.057316669047730785,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 5,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "golden_before_each_layer",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.08508937715589582,
+          "rms": 0.17225418428789635,
+          "l2_norm": 31.181338060218565,
+          "per_token_max_mse": 0.03362017083029893,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0017942901425378466,
+          "rms": 0.14525324149188756,
+          "l2_norm": 26.293645324349665,
+          "max_abs_diff": 7.194999694824219,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.029424047364056946,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 5,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0850893702245088,
+          "rms": 0.172254164060603,
+          "l2_norm": 31.181334398687355,
+          "per_token_max_mse": 0.033620192989878575,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.002005469139106708,
+          "rms": 0.21500239219221617,
+          "l2_norm": 38.91959026955409,
+          "max_abs_diff": 11.258665084838867,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.05731668340609711,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 5,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "golden_before_each_layer",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0850893702245088,
+          "rms": 0.172254164060603,
+          "l2_norm": 31.181334398687355,
+          "per_token_max_mse": 0.033620192989878575,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0017942910812109858,
+          "rms": 0.14525325760880922,
+          "l2_norm": 26.293648241824123,
+          "max_abs_diff": 7.195010185241699,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.029424095470569404,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 6,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.16563006696500437,
+          "rms": 0.3310368129384535,
+          "l2_norm": 59.92406406429775,
+          "per_token_max_mse": 0.201557398461991,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0044355750016009665,
+          "rms": 0.5144601750223666,
+          "l2_norm": 93.12723927263579,
+          "max_abs_diff": 44.618324279785156,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 1.038341467834043,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        },
+        "failure_class": "numeric_drift"
+      },
+      {
+        "layer": 6,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.1656300728407416,
+          "rms": 0.33103682004941315,
+          "l2_norm": 59.92406535151895,
+          "per_token_max_mse": 0.20155786590791788,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.004435576579950862,
+          "rms": 0.5144601868328423,
+          "l2_norm": 93.12724141056026,
+          "max_abs_diff": 44.61832809448242,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 1.0383415576303274,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        },
+        "failure_class": "numeric_drift"
+      },
+      {
+        "layer": 6,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.11689892630506904,
+          "rms": 0.21500241633824646,
+          "l2_norm": 38.919594640452466,
+          "per_token_max_mse": 0.057316669047730785,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0049395664518314675,
+          "rms": 0.3959194142031893,
+          "l2_norm": 71.66906946213905,
+          "max_abs_diff": 32.01405334472656,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6762197067335117,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 6,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "golden_before_each_layer",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.08450861521219011,
+          "rms": 0.14525324149188756,
+          "l2_norm": 26.293645324349665,
+          "per_token_max_mse": 0.029424047364056946,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.003019005802286756,
+          "rms": 0.2961299369776409,
+          "l2_norm": 53.60524455660411,
+          "max_abs_diff": 25.146648406982422,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.4850402578726103,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 1,
+            "3456": 1,
+            "3842": 1,
+            "3986": 1,
+            "2862": 1,
+            "207": 1,
+            "2504": 1,
+            "56": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 6,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.11689892143158431,
+          "rms": 0.21500239219221617,
+          "l2_norm": 38.91959026955409,
+          "per_token_max_mse": 0.05731668340609711,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.004939566693359154,
+          "rms": 0.3959194163011823,
+          "l2_norm": 71.66906984191634,
+          "max_abs_diff": 32.014060974121094,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6762198268436542,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 6,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "golden_before_each_layer",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.0845086108576254,
+          "rms": 0.14525325760880922,
+          "l2_norm": 26.293648241824123,
+          "per_token_max_mse": 0.029424095470569404,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0030190058408479103,
+          "rms": 0.2961299373598139,
+          "l2_norm": 53.60524462578482,
+          "max_abs_diff": 25.146648406982422,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.48504025848705923,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 1,
+            "3456": 1,
+            "3842": 1,
+            "3986": 1,
+            "2862": 1,
+            "207": 1,
+            "2504": 1,
+            "56": 1
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 7,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.22872787478024037,
+          "rms": 0.5144601750223666,
+          "l2_norm": 93.12723927263579,
+          "per_token_max_mse": 1.038341467834043,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0027708383793338953,
+          "rms": 0.4881210088260178,
+          "l2_norm": 88.35934089740692,
+          "max_abs_diff": 31.469402313232422,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6677869199856894,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        },
+        "failure_class": "numeric_drift"
+      },
+      {
+        "layer": 7,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 0,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.22872787857275512,
+          "rms": 0.5144601868328423,
+          "l2_norm": 93.12724141056026,
+          "per_token_max_mse": 1.0383415576303274,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.002770841439556193,
+          "rms": 0.4881210106442326,
+          "l2_norm": 88.35934122653896,
+          "max_abs_diff": 31.469440460205078,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6677869756812725,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        },
+        "failure_class": "numeric_drift"
+      },
+      {
+        "layer": 7,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "actual_prefix",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.1892110525747981,
+          "rms": 0.3959194142031893,
+          "l2_norm": 71.66906946213905,
+          "per_token_max_mse": 0.6762197067335117,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0022446356855994054,
+          "rms": 0.3625806070514162,
+          "l2_norm": 65.63410072903459,
+          "max_abs_diff": 19.880502700805664,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3456
+          },
+          "per_token_max_mse": 0.39756867733009654,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3456
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        },
+        "failure_class": "numeric_drift"
+      },
+      {
+        "layer": 7,
+        "device_index": 0,
+        "backend": "cpu",
+        "run_mode": "golden_before_each_layer",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.14363730687611564,
+          "rms": 0.2961299369776409,
+          "l2_norm": 53.60524455660411,
+          "per_token_max_mse": 0.4850402578726103,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0003116134444525187,
+          "rms": 0.14910680872443385,
+          "l2_norm": 26.99121550595396,
+          "max_abs_diff": 5.71348762512207,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.031142432450467213,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      },
+      {
+        "layer": 7,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "actual_prefix",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.1892110500598747,
+          "rms": 0.3959194163011823,
+          "l2_norm": 71.66906984191634,
+          "per_token_max_mse": 0.6762198268436542,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.002244637074397815,
+          "rms": 0.36258059059031805,
+          "l2_norm": 65.63409774925752,
+          "max_abs_diff": 19.880502700805664,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3456
+          },
+          "per_token_max_mse": 0.39756869246558535,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3456
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        },
+        "failure_class": "numeric_drift"
+      },
+      {
+        "layer": 7,
+        "device_index": 2,
+        "backend": "hip",
+        "run_mode": "golden_before_each_layer",
+        "layer_start": 4,
+        "layer_end_exclusive": 8,
+        "count": 1,
+        "input": {
+          "mean": 0.1436373066491754,
+          "rms": 0.2961299373598139,
+          "l2_norm": 53.60524462578482,
+          "per_token_max_mse": 0.48504025848705923,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output": {
+          "mean": -0.0003116100327673621,
+          "rms": 0.1491067966307119,
+          "l2_norm": 26.99121331675644,
+          "max_abs_diff": 5.713481903076172,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.031142430561018966,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        },
+        "failure_class": "possible_quantization_error"
+      }
+    ]
+  },
+  "table_rows": [
+    {
+      "layer": 0,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.0,
+      "output_diff_rms": 0.08519272444185397,
+      "output_diff_max_abs": 5.489426612854004,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "max_abs_diff": 0.0,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 4095
+          },
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output_distribution": {
+          "mean": 0.0006604732306199068,
+          "rms": 0.08519272444185397,
+          "l2_norm": 15.42153040911152,
+          "max_abs_diff": 5.489426612854004,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.012019224031668376,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "14": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 0,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.0,
+      "output_diff_rms": 0.08519277522484842,
+      "output_diff_max_abs": 5.489425182342529,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "max_abs_diff": 0.0,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 4095
+          },
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output_distribution": {
+          "mean": 0.0006604753455619061,
+          "rms": 0.08519277522484842,
+          "l2_norm": 15.421539601815454,
+          "max_abs_diff": 5.489425182342529,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.012019220425812422,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "14": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 1,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.08519272444185397,
+      "output_diff_rms": 0.1122143517879047,
+      "output_diff_max_abs": 9.846384048461914,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.052020688089736034,
+          "rms": 0.08519272444185397,
+          "l2_norm": 15.42153040911152,
+          "max_abs_diff": 5.489426612854004,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.012019224031668376,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": 0.0007280534192055654,
+          "rms": 0.1122143517879047,
+          "l2_norm": 20.31296744849413,
+          "max_abs_diff": 9.846384048461914,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03476893737983177,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 6,
+            "3842": 1,
+            "310": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 1,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.08519277522484842,
+      "output_diff_rms": 0.11221437209036106,
+      "output_diff_max_abs": 9.846382141113281,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.052020690151174165,
+          "rms": 0.08519277522484842,
+          "l2_norm": 15.421539601815454,
+          "max_abs_diff": 5.489425182342529,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.012019220425812422,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": 0.0007280557936795162,
+          "rms": 0.11221437209036106,
+          "l2_norm": 20.3129711236313,
+          "max_abs_diff": 9.846382141113281,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03476892889004832,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 6,
+            "3842": 1,
+            "310": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 2,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.1122143517879047,
+      "output_diff_rms": 0.16117781700192155,
+      "output_diff_max_abs": 15.920772552490234,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.06873141498240543,
+          "rms": 0.1122143517879047,
+          "l2_norm": 20.31296744849413,
+          "max_abs_diff": 9.846384048461914,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03476893737983177,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": 0.0011848341531397466,
+          "rms": 0.16117781700192155,
+          "l2_norm": 29.176301408999205,
+          "max_abs_diff": 15.920772552490234,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.0855890214033345,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 6,
+            "3842": 1,
+            "310": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 2,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.11221437209036106,
+      "output_diff_rms": 0.16117783511969574,
+      "output_diff_max_abs": 15.920771598815918,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.06873141749067457,
+          "rms": 0.11221437209036106,
+          "l2_norm": 20.3129711236313,
+          "max_abs_diff": 9.846382141113281,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03476892889004832,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": 0.0011848353209913398,
+          "rms": 0.16117783511969574,
+          "l2_norm": 29.176304688666658,
+          "max_abs_diff": 15.920771598815918,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.08558901502131191,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 6,
+            "3842": 1,
+            "310": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 3,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.16117781700192155,
+      "output_diff_rms": 0.18999675076079128,
+      "output_diff_max_abs": 14.526961326599121,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0950623347645525,
+          "rms": 0.16117781700192155,
+          "l2_norm": 29.176301408999205,
+          "max_abs_diff": 15.920772552490234,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.0855890214033345,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": 0.0011180161280108791,
+          "rms": 0.18999675076079128,
+          "l2_norm": 34.39308566178966,
+          "max_abs_diff": 14.526961326599121,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.08190156350453134,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 5,
+            "3842": 2,
+            "310": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 3,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.16117783511969574,
+      "output_diff_rms": 0.18999672373826468,
+      "output_diff_max_abs": 14.526959419250488,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.09506233342630566,
+          "rms": 0.16117783511969574,
+          "l2_norm": 29.176304688666658,
+          "max_abs_diff": 15.920771598815918,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.08558901502131191,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": 0.001118017558994211,
+          "rms": 0.18999672373826468,
+          "l2_norm": 34.39308077018983,
+          "max_abs_diff": 14.526959419250488,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.08190155104867913,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 5,
+            "3842": 2,
+            "310": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 4,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.18999675076079128,
+      "output_diff_rms": 0.2927727395086589,
+      "output_diff_max_abs": 18.845571517944336,
+      "max_abs_token": 1,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.12285810444480916,
+          "rms": 0.18999675076079128,
+          "l2_norm": 34.39308566178966,
+          "max_abs_diff": 14.526961326599121,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.08190156350453134,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0010250170212771081,
+          "rms": 0.2927727395086589,
+          "l2_norm": 52.99752690000265,
+          "max_abs_diff": 18.845571517944336,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.12797700658054578,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 4,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.18999672373826468,
+      "output_diff_rms": 0.29277267756639347,
+      "output_diff_max_abs": 18.845596313476562,
+      "max_abs_token": 1,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.12285810148429732,
+          "rms": 0.18999672373826468,
+          "l2_norm": 34.39308077018983,
+          "max_abs_diff": 14.526959419250488,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.08190155104867913,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0010250174018509028,
+          "rms": 0.29277267756639347,
+          "l2_norm": 52.9975156872549,
+          "max_abs_diff": 18.845596313476562,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.1279769794997883,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 4,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "4..8",
+      "input_diff_rms": 0.0,
+      "output_diff_rms": 0.17225418428789635,
+      "output_diff_max_abs": 9.683818817138672,
+      "max_abs_token": 7,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "max_abs_diff": 0.0,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 4095
+          },
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output_distribution": {
+          "mean": -0.001762085130479818,
+          "rms": 0.17225418428789635,
+          "l2_norm": 31.181338060218565,
+          "max_abs_diff": 9.683818817138672,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03362017083029893,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 4,
+      "device_backend": "0/cpu",
+      "run_mode": "golden_before_each_layer",
+      "range": "4..8",
+      "input_diff_rms": 0.0,
+      "output_diff_rms": 0.17225418428789635,
+      "output_diff_max_abs": 9.683818817138672,
+      "max_abs_token": 7,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "max_abs_diff": 0.0,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 4095
+          },
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output_distribution": {
+          "mean": -0.001762085130479818,
+          "rms": 0.17225418428789635,
+          "l2_norm": 31.181338060218565,
+          "max_abs_diff": 9.683818817138672,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03362017083029893,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 4,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "4..8",
+      "input_diff_rms": 0.0,
+      "output_diff_rms": 0.172254164060603,
+      "output_diff_max_abs": 9.683826446533203,
+      "max_abs_token": 7,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "max_abs_diff": 0.0,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 4095
+          },
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0017620845600987423,
+          "rms": 0.172254164060603,
+          "l2_norm": 31.181334398687355,
+          "max_abs_diff": 9.683826446533203,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.033620192989878575,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 4,
+      "device_backend": "2/hip",
+      "run_mode": "golden_before_each_layer",
+      "range": "4..8",
+      "input_diff_rms": 0.0,
+      "output_diff_rms": 0.172254164060603,
+      "output_diff_max_abs": 9.683826446533203,
+      "max_abs_token": 7,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0,
+          "rms": 0.0,
+          "l2_norm": null,
+          "max_abs_diff": 0.0,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 4095
+          },
+          "per_token_max_mse": 0.0,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 4095
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0017620845600987423,
+          "rms": 0.172254164060603,
+          "l2_norm": 31.181334398687355,
+          "max_abs_diff": 9.683826446533203,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.033620192989878575,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 5,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.2927727395086589,
+      "output_diff_rms": 0.3310368129384535,
+      "output_diff_max_abs": 24.462188720703125,
+      "max_abs_token": 1,
+      "max_abs_hidden": 3994,
+      "failure_class": "numeric_drift",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.14948322724160334,
+          "rms": 0.2927727395086589,
+          "l2_norm": 52.99752690000265,
+          "max_abs_diff": 18.845571517944336,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.12797700658054578,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0013642564614819719,
+          "rms": 0.3310368129384535,
+          "l2_norm": 59.92406406429775,
+          "max_abs_diff": 24.462188720703125,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.201557398461991,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 5,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.29277267756639347,
+      "output_diff_rms": 0.33103682004941315,
+      "output_diff_max_abs": 24.46222686767578,
+      "max_abs_token": 1,
+      "max_abs_hidden": 3994,
+      "failure_class": "numeric_drift",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.14948322849593154,
+          "rms": 0.29277267756639347,
+          "l2_norm": 52.9975156872549,
+          "max_abs_diff": 18.845596313476562,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.1279769794997883,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0013642579038588565,
+          "rms": 0.33103682004941315,
+          "l2_norm": 59.92406535151895,
+          "max_abs_diff": 24.46222686767578,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.20155786590791788,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 5,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "4..8",
+      "input_diff_rms": 0.17225418428789635,
+      "output_diff_rms": 0.21500241633824646,
+      "output_diff_max_abs": 11.25866985321045,
+      "max_abs_token": 6,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.08508937715589582,
+          "rms": 0.17225418428789635,
+          "l2_norm": 31.181338060218565,
+          "max_abs_diff": 9.683818817138672,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03362017083029893,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.002005469259628967,
+          "rms": 0.21500241633824646,
+          "l2_norm": 38.919594640452466,
+          "max_abs_diff": 11.25866985321045,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.057316669047730785,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 5,
+      "device_backend": "0/cpu",
+      "run_mode": "golden_before_each_layer",
+      "range": "4..8",
+      "input_diff_rms": 0.17225418428789635,
+      "output_diff_rms": 0.14525324149188756,
+      "output_diff_max_abs": 7.194999694824219,
+      "max_abs_token": 6,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.08508937715589582,
+          "rms": 0.17225418428789635,
+          "l2_norm": 31.181338060218565,
+          "max_abs_diff": 9.683818817138672,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.03362017083029893,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0017942901425378466,
+          "rms": 0.14525324149188756,
+          "l2_norm": 26.293645324349665,
+          "max_abs_diff": 7.194999694824219,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.029424047364056946,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 5,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "4..8",
+      "input_diff_rms": 0.172254164060603,
+      "output_diff_rms": 0.21500239219221617,
+      "output_diff_max_abs": 11.258665084838867,
+      "max_abs_token": 6,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0850893702245088,
+          "rms": 0.172254164060603,
+          "l2_norm": 31.181334398687355,
+          "max_abs_diff": 9.683826446533203,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.033620192989878575,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.002005469139106708,
+          "rms": 0.21500239219221617,
+          "l2_norm": 38.91959026955409,
+          "max_abs_diff": 11.258665084838867,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.05731668340609711,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 5,
+      "device_backend": "2/hip",
+      "run_mode": "golden_before_each_layer",
+      "range": "4..8",
+      "input_diff_rms": 0.172254164060603,
+      "output_diff_rms": 0.14525325760880922,
+      "output_diff_max_abs": 7.195010185241699,
+      "max_abs_token": 6,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0850893702245088,
+          "rms": 0.172254164060603,
+          "l2_norm": 31.181334398687355,
+          "max_abs_diff": 9.683826446533203,
+          "max_abs_diff_location": {
+            "token": 7,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.033620192989878575,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0017942910812109858,
+          "rms": 0.14525325760880922,
+          "l2_norm": 26.293648241824123,
+          "max_abs_diff": 7.195010185241699,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.029424095470569404,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 6,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.3310368129384535,
+      "output_diff_rms": 0.5144601750223666,
+      "output_diff_max_abs": 44.618324279785156,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "numeric_drift",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.16563006696500437,
+          "rms": 0.3310368129384535,
+          "l2_norm": 59.92406406429775,
+          "max_abs_diff": 24.462188720703125,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.201557398461991,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0044355750016009665,
+          "rms": 0.5144601750223666,
+          "l2_norm": 93.12723927263579,
+          "max_abs_diff": 44.618324279785156,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 1.038341467834043,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 6,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.33103682004941315,
+      "output_diff_rms": 0.5144601868328423,
+      "output_diff_max_abs": 44.61832809448242,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "numeric_drift",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.1656300728407416,
+          "rms": 0.33103682004941315,
+          "l2_norm": 59.92406535151895,
+          "max_abs_diff": 24.46222686767578,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.20155786590791788,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.004435576579950862,
+          "rms": 0.5144601868328423,
+          "l2_norm": 93.12724141056026,
+          "max_abs_diff": 44.61832809448242,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 1.0383415576303274,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 6,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "4..8",
+      "input_diff_rms": 0.21500241633824646,
+      "output_diff_rms": 0.3959194142031893,
+      "output_diff_max_abs": 32.01405334472656,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.11689892630506904,
+          "rms": 0.21500241633824646,
+          "l2_norm": 38.919594640452466,
+          "max_abs_diff": 11.25866985321045,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.057316669047730785,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0049395664518314675,
+          "rms": 0.3959194142031893,
+          "l2_norm": 71.66906946213905,
+          "max_abs_diff": 32.01405334472656,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6762197067335117,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 6,
+      "device_backend": "0/cpu",
+      "run_mode": "golden_before_each_layer",
+      "range": "4..8",
+      "input_diff_rms": 0.14525324149188756,
+      "output_diff_rms": 0.2961299369776409,
+      "output_diff_max_abs": 25.146648406982422,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.08450861521219011,
+          "rms": 0.14525324149188756,
+          "l2_norm": 26.293645324349665,
+          "max_abs_diff": 7.194999694824219,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.029424047364056946,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.003019005802286756,
+          "rms": 0.2961299369776409,
+          "l2_norm": 53.60524455660411,
+          "max_abs_diff": 25.146648406982422,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.4850402578726103,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 1,
+            "3456": 1,
+            "3842": 1,
+            "3986": 1,
+            "2862": 1,
+            "207": 1,
+            "2504": 1,
+            "56": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 6,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "4..8",
+      "input_diff_rms": 0.21500239219221617,
+      "output_diff_rms": 0.3959194163011823,
+      "output_diff_max_abs": 32.014060974121094,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.11689892143158431,
+          "rms": 0.21500239219221617,
+          "l2_norm": 38.91959026955409,
+          "max_abs_diff": 11.258665084838867,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.05731668340609711,
+          "per_token_max_mse_location": {
+            "token": 1,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.004939566693359154,
+          "rms": 0.3959194163011823,
+          "l2_norm": 71.66906984191634,
+          "max_abs_diff": 32.014060974121094,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6762198268436542,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 6,
+      "device_backend": "2/hip",
+      "run_mode": "golden_before_each_layer",
+      "range": "4..8",
+      "input_diff_rms": 0.14525325760880922,
+      "output_diff_rms": 0.2961299373598139,
+      "output_diff_max_abs": 25.146648406982422,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.0845086108576254,
+          "rms": 0.14525325760880922,
+          "l2_norm": 26.293648241824123,
+          "max_abs_diff": 7.195010185241699,
+          "max_abs_diff_location": {
+            "token": 6,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.029424095470569404,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0030190058408479103,
+          "rms": 0.2961299373598139,
+          "l2_norm": 53.60524462578482,
+          "max_abs_diff": 25.146648406982422,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.48504025848705923,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 1,
+            "3456": 1,
+            "3842": 1,
+            "3986": 1,
+            "2862": 1,
+            "207": 1,
+            "2504": 1,
+            "56": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 7,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.5144601750223666,
+      "output_diff_rms": 0.4881210088260178,
+      "output_diff_max_abs": 31.469402313232422,
+      "max_abs_token": 1,
+      "max_abs_hidden": 3994,
+      "failure_class": "numeric_drift",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.22872787478024037,
+          "rms": 0.5144601750223666,
+          "l2_norm": 93.12723927263579,
+          "max_abs_diff": 44.618324279785156,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 1.038341467834043,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0027708383793338953,
+          "rms": 0.4881210088260178,
+          "l2_norm": 88.35934089740692,
+          "max_abs_diff": 31.469402313232422,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6677869199856894,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 7,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "0..8",
+      "input_diff_rms": 0.5144601868328423,
+      "output_diff_rms": 0.4881210106442326,
+      "output_diff_max_abs": 31.469440460205078,
+      "max_abs_token": 1,
+      "max_abs_hidden": 3994,
+      "failure_class": "numeric_drift",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.22872787857275512,
+          "rms": 0.5144601868328423,
+          "l2_norm": 93.12724141056026,
+          "max_abs_diff": 44.61832809448242,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 1.0383415576303274,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.002770841439556193,
+          "rms": 0.4881210106442326,
+          "l2_norm": 88.35934122653896,
+          "max_abs_diff": 31.469440460205078,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6677869756812725,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 7,
+      "device_backend": "0/cpu",
+      "run_mode": "actual_prefix",
+      "range": "4..8",
+      "input_diff_rms": 0.3959194142031893,
+      "output_diff_rms": 0.3625806070514162,
+      "output_diff_max_abs": 19.880502700805664,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3456,
+      "failure_class": "numeric_drift",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.1892110525747981,
+          "rms": 0.3959194142031893,
+          "l2_norm": 71.66906946213905,
+          "max_abs_diff": 32.01405334472656,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6762197067335117,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0022446356855994054,
+          "rms": 0.3625806070514162,
+          "l2_norm": 65.63410072903459,
+          "max_abs_diff": 19.880502700805664,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3456
+          },
+          "per_token_max_mse": 0.39756867733009654,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3456
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 7,
+      "device_backend": "0/cpu",
+      "run_mode": "golden_before_each_layer",
+      "range": "4..8",
+      "input_diff_rms": 0.2961299369776409,
+      "output_diff_rms": 0.14910680872443385,
+      "output_diff_max_abs": 5.71348762512207,
+      "max_abs_token": 1,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.14363730687611564,
+          "rms": 0.2961299369776409,
+          "l2_norm": 53.60524455660411,
+          "max_abs_diff": 25.146648406982422,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.4850402578726103,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0003116134444525187,
+          "rms": 0.14910680872443385,
+          "l2_norm": 26.99121550595396,
+          "max_abs_diff": 5.71348762512207,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.031142432450467213,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    },
+    {
+      "layer": 7,
+      "device_backend": "2/hip",
+      "run_mode": "actual_prefix",
+      "range": "4..8",
+      "input_diff_rms": 0.3959194163011823,
+      "output_diff_rms": 0.36258059059031805,
+      "output_diff_max_abs": 19.880502700805664,
+      "max_abs_token": 0,
+      "max_abs_hidden": 3456,
+      "failure_class": "numeric_drift",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.1892110500598747,
+          "rms": 0.3959194163011823,
+          "l2_norm": 71.66906984191634,
+          "max_abs_diff": 32.014060974121094,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.6762198268436542,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.002244637074397815,
+          "rms": 0.36258059059031805,
+          "l2_norm": 65.63409774925752,
+          "max_abs_diff": 19.880502700805664,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3456
+          },
+          "per_token_max_mse": 0.39756869246558535,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3456
+          },
+          "top_hidden_counts": {
+            "3994": 7,
+            "3456": 1
+          }
+        }
+      }
+    },
+    {
+      "layer": 7,
+      "device_backend": "2/hip",
+      "run_mode": "golden_before_each_layer",
+      "range": "4..8",
+      "input_diff_rms": 0.2961299373598139,
+      "output_diff_rms": 0.1491067966307119,
+      "output_diff_max_abs": 5.713481903076172,
+      "max_abs_token": 1,
+      "max_abs_hidden": 3994,
+      "failure_class": "possible_quantization_error",
+      "summary": {
+        "input_distribution": {
+          "mean": 0.1436373066491754,
+          "rms": 0.2961299373598139,
+          "l2_norm": 53.60524462578482,
+          "max_abs_diff": 25.146648406982422,
+          "max_abs_diff_location": {
+            "token": 0,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.48504025848705923,
+          "per_token_max_mse_location": {
+            "token": 0,
+            "hidden": 3994
+          }
+        },
+        "output_distribution": {
+          "mean": -0.0003116100327673621,
+          "rms": 0.1491067966307119,
+          "l2_norm": 26.99121331675644,
+          "max_abs_diff": 5.713481903076172,
+          "max_abs_diff_location": {
+            "token": 1,
+            "hidden": 3994
+          },
+          "per_token_max_mse": 0.031142430561018966,
+          "per_token_max_mse_location": {
+            "token": 2,
+            "hidden": 3994
+          },
+          "top_hidden_counts": {
+            "3994": 8
+          }
+        }
+      }
+    }
+  ],
+  "markdown": "| layer | device/backend | run_mode | range | input_diff_rms | output_diff_rms | output_diff_max_abs | max_abs_token | max_abs_hidden | failure_class |\n| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |\n| 0 | 0/cpu | actual_prefix | 0..8 | 0.000000 | 0.085193 | 5.489427 | 0 | 3994 | possible_quantization_error |\n| 0 | 2/hip | actual_prefix | 0..8 | 0.000000 | 0.085193 | 5.489425 | 0 | 3994 | possible_quantization_error |\n| 1 | 0/cpu | actual_prefix | 0..8 | 0.085193 | 0.112214 | 9.846384 | 0 | 3994 | possible_quantization_error |\n| 1 | 2/hip | actual_prefix | 0..8 | 0.085193 | 0.112214 | 9.846382 | 0 | 3994 | possible_quantization_error |\n| 2 | 0/cpu | actual_prefix | 0..8 | 0.112214 | 0.161178 | 15.920773 | 0 | 3994 | possible_quantization_error |\n| 2 | 2/hip | actual_prefix | 0..8 | 0.112214 | 0.161178 | 15.920772 | 0 | 3994 | possible_quantization_error |\n| 3 | 0/cpu | actual_prefix | 0..8 | 0.161178 | 0.189997 | 14.526961 | 0 | 3994 | possible_quantization_error |\n| 3 | 2/hip | actual_prefix | 0..8 | 0.161178 | 0.189997 | 14.526959 | 0 | 3994 | possible_quantization_error |\n| 4 | 0/cpu | actual_prefix | 0..8 | 0.189997 | 0.292773 | 18.845572 | 1 | 3994 | possible_quantization_error |\n| 4 | 2/hip | actual_prefix | 0..8 | 0.189997 | 0.292773 | 18.845596 | 1 | 3994 | possible_quantization_error |\n| 4 | 0/cpu | actual_prefix | 4..8 | 0.000000 | 0.172254 | 9.683819 | 7 | 3994 | possible_quantization_error |\n| 4 | 0/cpu | golden_before_each_layer | 4..8 | 0.000000 | 0.172254 | 9.683819 | 7 | 3994 | possible_quantization_error |\n| 4 | 2/hip | actual_prefix | 4..8 | 0.000000 | 0.172254 | 9.683826 | 7 | 3994 | possible_quantization_error |\n| 4 | 2/hip | golden_before_each_layer | 4..8 | 0.000000 | 0.172254 | 9.683826 | 7 | 3994 | possible_quantization_error |\n| 5 | 0/cpu | actual_prefix | 0..8 | 0.292773 | 0.331037 | 24.462189 | 1 | 3994 | numeric_drift |\n| 5 | 2/hip | actual_prefix | 0..8 | 0.292773 | 0.331037 | 24.462227 | 1 | 3994 | numeric_drift |\n| 5 | 0/cpu | actual_prefix | 4..8 | 0.172254 | 0.215002 | 11.258670 | 6 | 3994 | possible_quantization_error |\n| 5 | 0/cpu | golden_before_each_layer | 4..8 | 0.172254 | 0.145253 | 7.195000 | 6 | 3994 | possible_quantization_error |\n| 5 | 2/hip | actual_prefix | 4..8 | 0.172254 | 0.215002 | 11.258665 | 6 | 3994 | possible_quantization_error |\n| 5 | 2/hip | golden_before_each_layer | 4..8 | 0.172254 | 0.145253 | 7.195010 | 6 | 3994 | possible_quantization_error |\n| 6 | 0/cpu | actual_prefix | 0..8 | 0.331037 | 0.514460 | 44.618324 | 0 | 3994 | numeric_drift |\n| 6 | 2/hip | actual_prefix | 0..8 | 0.331037 | 0.514460 | 44.618328 | 0 | 3994 | numeric_drift |\n| 6 | 0/cpu | actual_prefix | 4..8 | 0.215002 | 0.395919 | 32.014053 | 0 | 3994 | possible_quantization_error |\n| 6 | 0/cpu | golden_before_each_layer | 4..8 | 0.145253 | 0.296130 | 25.146648 | 0 | 3994 | possible_quantization_error |\n| 6 | 2/hip | actual_prefix | 4..8 | 0.215002 | 0.395919 | 32.014061 | 0 | 3994 | possible_quantization_error |\n| 6 | 2/hip | golden_before_each_layer | 4..8 | 0.145253 | 0.296130 | 25.146648 | 0 | 3994 | possible_quantization_error |\n| 7 | 0/cpu | actual_prefix | 0..8 | 0.514460 | 0.488121 | 31.469402 | 1 | 3994 | numeric_drift |\n| 7 | 2/hip | actual_prefix | 0..8 | 0.514460 | 0.488121 | 31.469440 | 1 | 3994 | numeric_drift |\n| 7 | 0/cpu | actual_prefix | 4..8 | 0.395919 | 0.362581 | 19.880503 | 0 | 3456 | numeric_drift |\n| 7 | 0/cpu | golden_before_each_layer | 4..8 | 0.296130 | 0.149107 | 5.713488 | 1 | 3994 | possible_quantization_error |\n| 7 | 2/hip | actual_prefix | 4..8 | 0.395919 | 0.362581 | 19.880503 | 0 | 3456 | numeric_drift |\n| 7 | 2/hip | golden_before_each_layer | 4..8 | 0.296130 | 0.149107 | 5.713482 | 1 | 3994 | possible_quantization_error |"
+}

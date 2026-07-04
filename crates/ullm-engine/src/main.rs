@@ -12115,6 +12115,8 @@ fn package_golden_prefix_smoke_impl(
             .map(|(actual, expected)| actual - expected)
             .collect::<Vec<_>>();
         let input_failure_class = package_golden_prefix_failure_class(&input_metrics);
+        let input_distribution =
+            package_hidden_distribution(&current_hidden, &expected_before, sequence_len, hidden)?;
 
         let layer_input = match run_mode {
             PackageGoldenPrefixRunMode::ActualPrefix => current_hidden,
@@ -12316,6 +12318,11 @@ fn package_golden_prefix_smoke_impl(
             .map(|(actual, expected)| actual - expected)
             .collect::<Vec<_>>();
         let failure_class = package_golden_prefix_failure_class(&metrics);
+        let mut details = details;
+        let output_distribution =
+            package_hidden_distribution(&actual, &expected_after, sequence_len, hidden)?;
+        insert_json_detail(&mut details, "input_distribution", input_distribution);
+        insert_json_detail(&mut details, "output_distribution", output_distribution);
         append_package_golden_prefix_report_entry(
             &mut report_entries,
             path,
@@ -12516,6 +12523,238 @@ fn package_runtime_line_metric_key(key: &str) -> bool {
         || key.ends_with("_mse")
         || key.ends_with("_mean_abs_diff")
         || key.ends_with("_cosine_similarity")
+}
+
+fn package_hidden_distribution(
+    actual: &[f32],
+    expected: &[f32],
+    sequence_len: usize,
+    hidden: usize,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let expected_elements = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "hidden distribution element count overflows".to_string())?;
+    if actual.len() != expected_elements || expected.len() != expected_elements {
+        return Err(format!(
+            "hidden distribution length mismatch: actual={} expected={} expected_elements={expected_elements}",
+            actual.len(),
+            expected.len()
+        ));
+    }
+
+    let diff = actual
+        .iter()
+        .zip(expected.iter())
+        .map(|(actual, expected)| actual - expected)
+        .collect::<Vec<_>>();
+    let max_abs_diff = diff
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| {
+            left.abs()
+                .partial_cmp(&right.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(index, value)| {
+            serde_json::json!({
+                "flat_index": index,
+                "token_index": index / hidden,
+                "hidden_index": index % hidden,
+                "actual": actual[index],
+                "expected": expected[index],
+                "diff": *value,
+                "abs_diff": value.abs(),
+            })
+        })
+        .unwrap_or_else(|| serde_json::json!(null));
+
+    let per_token = (0..sequence_len)
+        .map(|token_index| {
+            let start = token_index * hidden;
+            let end = start + hidden;
+            let token_actual = &actual[start..end];
+            let token_expected = &expected[start..end];
+            let token_diff = &diff[start..end];
+            let metrics = compare_f32_slices(token_actual, token_expected)?;
+            Ok(serde_json::json!({
+                "token_index": token_index,
+                "mse": metrics.mse,
+                "mean_abs_diff": metrics.mean_abs_diff,
+                "max_abs_diff": metrics.max_abs_diff,
+                "cosine_similarity": metrics.cosine_similarity,
+                "actual_rms": package_slice_rms(token_actual),
+                "expected_rms": package_slice_rms(token_expected),
+                "diff_rms": package_slice_rms(token_diff),
+                "diff_max_abs_location": package_slice_max_abs_location(
+                    token_diff,
+                    Some(token_actual),
+                    Some(token_expected),
+                    token_index,
+                ),
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut distribution = serde_json::Map::new();
+    insert_json_detail(
+        &mut distribution,
+        "actual_stats",
+        package_slice_distribution_stats(actual),
+    );
+    insert_json_detail(
+        &mut distribution,
+        "expected_stats",
+        package_slice_distribution_stats(expected),
+    );
+    insert_json_detail(
+        &mut distribution,
+        "diff_stats",
+        package_slice_distribution_stats(&diff),
+    );
+    insert_json_detail(&mut distribution, "max_abs_diff_location", max_abs_diff);
+    insert_json_detail(
+        &mut distribution,
+        "top_abs_diff_locations",
+        package_top_abs_diff_locations(&diff, actual, expected, hidden, 8),
+    );
+    insert_json_detail(&mut distribution, "per_token", per_token);
+    Ok(distribution)
+}
+
+fn package_slice_rms(values: &[f32]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let square_sum = values
+        .iter()
+        .map(|value| {
+            let value = f64::from(*value);
+            value * value
+        })
+        .sum::<f64>();
+    (square_sum / values.len() as f64).sqrt()
+}
+
+fn package_slice_distribution_stats(values: &[f32]) -> serde_json::Map<String, serde_json::Value> {
+    let mut finite_count = 0_usize;
+    let mut nonfinite_count = 0_usize;
+    let mut sum = 0.0_f64;
+    let mut square_sum = 0.0_f64;
+    let mut abs_sum = 0.0_f64;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    let mut max_abs = 0.0_f64;
+    let mut max_abs_index = 0_usize;
+
+    for (index, value) in values.iter().enumerate() {
+        let value = f64::from(*value);
+        if !value.is_finite() {
+            nonfinite_count += 1;
+            continue;
+        }
+        finite_count += 1;
+        sum += value;
+        square_sum += value * value;
+        abs_sum += value.abs();
+        min = min.min(value);
+        max = max.max(value);
+        if value.abs() > max_abs {
+            max_abs = value.abs();
+            max_abs_index = index;
+        }
+    }
+
+    let mean = if finite_count == 0 {
+        0.0
+    } else {
+        sum / finite_count as f64
+    };
+    let mean_square = if finite_count == 0 {
+        0.0
+    } else {
+        square_sum / finite_count as f64
+    };
+    let variance = (mean_square - mean * mean).max(0.0);
+    let mut stats = serde_json::Map::new();
+    insert_json_detail(&mut stats, "count", values.len());
+    insert_json_detail(&mut stats, "finite_count", finite_count);
+    insert_json_detail(&mut stats, "nonfinite_count", nonfinite_count);
+    insert_json_detail(&mut stats, "mean", mean);
+    insert_json_detail(
+        &mut stats,
+        "abs_mean",
+        if finite_count == 0 {
+            0.0
+        } else {
+            abs_sum / finite_count as f64
+        },
+    );
+    insert_json_detail(&mut stats, "variance", variance);
+    insert_json_detail(&mut stats, "stddev", variance.sqrt());
+    insert_json_detail(&mut stats, "rms", mean_square.sqrt());
+    insert_json_detail(&mut stats, "l2_norm", square_sum.sqrt());
+    insert_json_detail(&mut stats, "min", if finite_count == 0 { 0.0 } else { min });
+    insert_json_detail(&mut stats, "max", if finite_count == 0 { 0.0 } else { max });
+    insert_json_detail(&mut stats, "max_abs", max_abs);
+    insert_json_detail(&mut stats, "max_abs_index", max_abs_index);
+    stats
+}
+
+fn package_slice_max_abs_location(
+    diff: &[f32],
+    actual: Option<&[f32]>,
+    expected: Option<&[f32]>,
+    token_index: usize,
+) -> serde_json::Value {
+    diff.iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| {
+            left.abs()
+                .partial_cmp(&right.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(hidden_index, value)| {
+            serde_json::json!({
+                "token_index": token_index,
+                "hidden_index": hidden_index,
+                "actual": actual.and_then(|values| values.get(hidden_index)).copied(),
+                "expected": expected.and_then(|values| values.get(hidden_index)).copied(),
+                "diff": *value,
+                "abs_diff": value.abs(),
+            })
+        })
+        .unwrap_or_else(|| serde_json::json!(null))
+}
+
+fn package_top_abs_diff_locations(
+    diff: &[f32],
+    actual: &[f32],
+    expected: &[f32],
+    hidden: usize,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let mut indexed = diff.iter().enumerate().collect::<Vec<_>>();
+    indexed.sort_by(|(_, left), (_, right)| {
+        right
+            .abs()
+            .partial_cmp(&left.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    indexed
+        .into_iter()
+        .take(limit)
+        .map(|(index, value)| {
+            serde_json::json!({
+                "flat_index": index,
+                "token_index": index / hidden,
+                "hidden_index": index % hidden,
+                "actual": actual[index],
+                "expected": expected[index],
+                "diff": *value,
+                "abs_diff": value.abs(),
+            })
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
