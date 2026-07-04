@@ -267,6 +267,7 @@ fn main() -> ExitCode {
             env::args().nth(10),
             env::args().nth(11),
             env::args().nth(12),
+            env::args().nth(13),
         ),
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
@@ -11926,6 +11927,7 @@ fn package_golden_prefix_smoke(
     position_offset: Option<String>,
     report_path: Option<String>,
     run_mode: Option<String>,
+    row_scale_overrides_path: Option<String>,
 ) -> ExitCode {
     let Some(path) = path else {
         eprintln!("package-golden-prefix-smoke requires a .ullm.d path");
@@ -12004,6 +12006,14 @@ fn package_golden_prefix_smoke(
         Ok(value) => value,
         Err(code) => return code,
     };
+    let row_scale_overrides =
+        match load_package_row_scale_overrides(row_scale_overrides_path.as_deref()) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(2);
+            }
+        };
 
     match package_golden_prefix_smoke_impl(
         &path,
@@ -12018,6 +12028,7 @@ fn package_golden_prefix_smoke(
         position_offset,
         report_path.as_deref(),
         run_mode,
+        row_scale_overrides.as_ref(),
     ) {
         Ok(line) => {
             println!("{line}");
@@ -12044,6 +12055,7 @@ fn package_golden_prefix_smoke_impl(
     position_offset: usize,
     report_path: Option<&str>,
     run_mode: PackageGoldenPrefixRunMode,
+    row_scale_overrides: Option<&PackageRowScaleOverrides>,
 ) -> Result<String, String> {
     let golden_layers = fixture.select_contiguous_layers(layer_start, layer_end_exclusive)?;
     let sequence_len = fixture.metadata().sequence_len;
@@ -12360,12 +12372,27 @@ fn package_golden_prefix_smoke_impl(
                     layer_index,
                     sequence_len,
                     layer_input,
+                    row_scale_overrides,
                 )?;
                 let mut details = serde_json::Map::new();
                 insert_json_detail(&mut details, "runtime_line", &run.line);
                 let runtime_metrics = package_runtime_line_metrics(&run.line);
                 if !runtime_metrics.is_empty() {
                     insert_json_detail(&mut details, "runtime_metrics", runtime_metrics);
+                }
+                if let Some(overrides) = row_scale_overrides {
+                    insert_json_detail(
+                        &mut details,
+                        "row_scale_override_source",
+                        &overrides.source_path,
+                    );
+                }
+                if !run.applied_row_scale_overrides.is_empty() {
+                    insert_json_detail(
+                        &mut details,
+                        "applied_row_scale_overrides",
+                        &run.applied_row_scale_overrides,
+                    );
                 }
                 let extra_hot_input_vectors = [
                     (
@@ -12559,7 +12586,7 @@ fn package_golden_prefix_smoke_impl(
     }
 
     Ok(format!(
-        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} run_mode={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
+        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} run_mode={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} row_scale_overrides={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
         path,
         fixture_path,
         layer_start,
@@ -12576,6 +12603,9 @@ fn package_golden_prefix_smoke_impl(
             .unwrap_or_else(|| "none".to_string()),
         position_offset,
         rope_base,
+        row_scale_overrides
+            .map(|overrides| overrides.source_path.as_str())
+            .unwrap_or("none"),
         info.backend,
         device_index,
         info.name,
@@ -19653,12 +19683,210 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
         layer_index,
         sequence_len,
         residual_sequence,
+        None,
     )?;
     Ok(run.line)
 }
 
+const PACKAGE_ROW_SCALE_OVERRIDES_SCHEMA_VERSION: &str = "package-row-scale-overrides-v0.1";
+
+#[derive(Debug, Clone)]
+struct PackageRowScaleOverrides {
+    source_path: String,
+    overrides: Vec<PackageRowScaleOverride>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct PackageRowScaleOverridesFile {
+    schema_version: String,
+    overrides: Vec<PackageRowScaleOverride>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct PackageRowScaleOverride {
+    layer_index: usize,
+    tensor_suffix: String,
+    row_index: usize,
+    scale: f32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct AppliedPackageRowScaleOverride {
+    layer_index: usize,
+    tensor_name: String,
+    tensor_suffix: String,
+    row_index: usize,
+    scale: f32,
+    rows: usize,
+    cols: usize,
+}
+
+fn load_package_row_scale_overrides(
+    path: Option<&str>,
+) -> Result<Option<PackageRowScaleOverrides>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if path.is_empty() || path == "none" {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read row scale overrides JSON {path}: {err}"))?;
+    let parsed: PackageRowScaleOverridesFile = serde_json::from_str(&raw)
+        .map_err(|err| format!("failed to parse row scale overrides JSON {path}: {err}"))?;
+    if parsed.schema_version != PACKAGE_ROW_SCALE_OVERRIDES_SCHEMA_VERSION {
+        return Err(format!(
+            "row scale overrides schema_version must be {}, got {}",
+            PACKAGE_ROW_SCALE_OVERRIDES_SCHEMA_VERSION, parsed.schema_version
+        ));
+    }
+
+    let mut seen = std::collections::BTreeSet::<(usize, String, usize)>::new();
+    for override_entry in &parsed.overrides {
+        validate_package_row_scale_override(override_entry)?;
+        let key = (
+            override_entry.layer_index,
+            override_entry.tensor_suffix.clone(),
+            override_entry.row_index,
+        );
+        if !seen.insert(key) {
+            return Err(format!(
+                "duplicate row scale override: layer={} tensor_suffix={} row={}",
+                override_entry.layer_index, override_entry.tensor_suffix, override_entry.row_index
+            ));
+        }
+    }
+
+    Ok(Some(PackageRowScaleOverrides {
+        source_path: path.to_string(),
+        overrides: parsed.overrides,
+    }))
+}
+
+fn validate_package_row_scale_override(
+    override_entry: &PackageRowScaleOverride,
+) -> Result<(), String> {
+    if !matches!(
+        override_entry.tensor_suffix.as_str(),
+        "linear_attn.out_proj.weight" | "mlp.down_proj.weight"
+    ) {
+        return Err(format!(
+            "unsupported row scale override tensor_suffix={}; expected linear_attn.out_proj.weight or mlp.down_proj.weight",
+            override_entry.tensor_suffix
+        ));
+    }
+    if !override_entry.scale.is_finite() || override_entry.scale <= 0.0 {
+        return Err(format!(
+            "row scale override must be finite and positive: layer={} tensor_suffix={} row={} scale={}",
+            override_entry.layer_index,
+            override_entry.tensor_suffix,
+            override_entry.row_index,
+            override_entry.scale
+        ));
+    }
+    Ok(())
+}
+
+fn matching_package_row_scale_overrides(
+    row_scale_overrides: Option<&PackageRowScaleOverrides>,
+    layer_index: usize,
+    tensor_suffix: &str,
+) -> Vec<PackageRowScaleOverride> {
+    row_scale_overrides
+        .map(|overrides| {
+            overrides
+                .overrides
+                .iter()
+                .filter(|override_entry| {
+                    override_entry.layer_index == layer_index
+                        && override_entry.tensor_suffix == tensor_suffix
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn apply_package_row_scale_overrides_to_matrix(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    matrix: &mut ullm_runtime_sys::RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    tensor_name: &str,
+    overrides: &[PackageRowScaleOverride],
+) -> Result<Vec<AppliedPackageRowScaleOverride>, String> {
+    if overrides.is_empty() {
+        return Ok(Vec::new());
+    }
+    if rows == 0 || cols == 0 {
+        return Err(format!(
+            "cannot apply row scale overrides to empty matrix {tensor_name}: rows={rows} cols={cols}"
+        ));
+    }
+    let matrix_bytes_len = rows
+        .checked_mul(cols)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| {
+            format!("row scale override matrix byte size overflows for {tensor_name}")
+        })?;
+    let mut matrix_bytes = vec![0_u8; matrix_bytes_len];
+    matrix
+        .copy_to_host(0, &mut matrix_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {tensor_name} for row scale overrides: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {tensor_name} override copy: {err}"))?;
+
+    let mut applied = Vec::with_capacity(overrides.len());
+    for override_entry in overrides {
+        if override_entry.row_index >= rows {
+            return Err(format!(
+                "row scale override row out of range for {tensor_name}: row={} rows={rows}",
+                override_entry.row_index
+            ));
+        }
+        let row_start = override_entry
+            .row_index
+            .checked_mul(cols)
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| format!("row scale override row offset overflows for {tensor_name}"))?;
+        let row_end = row_start
+            .checked_add(
+                cols.checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        format!("row scale override row byte size overflows for {tensor_name}")
+                    })?,
+            )
+            .ok_or_else(|| format!("row scale override row end overflows for {tensor_name}"))?;
+        for offset in (row_start..row_end).step_by(std::mem::size_of::<f32>()) {
+            let mut raw = [0_u8; 4];
+            raw.copy_from_slice(&matrix_bytes[offset..offset + 4]);
+            let scaled = f32::from_le_bytes(raw) * override_entry.scale;
+            matrix_bytes[offset..offset + 4].copy_from_slice(&scaled.to_le_bytes());
+        }
+        applied.push(AppliedPackageRowScaleOverride {
+            layer_index: override_entry.layer_index,
+            tensor_name: tensor_name.to_string(),
+            tensor_suffix: override_entry.tensor_suffix.clone(),
+            row_index: override_entry.row_index,
+            scale: override_entry.scale,
+            rows,
+            cols,
+        });
+    }
+
+    matrix
+        .copy_from_host(0, &matrix_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy row-scaled {tensor_name} back to runtime: {err}"))?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize after row-scaled {tensor_name} copy back: {err}")
+    })?;
+    Ok(applied)
+}
+
 struct PackageLinearAttnMlpBlockSequenceRun {
     line: String,
+    applied_row_scale_overrides: Vec<AppliedPackageRowScaleOverride>,
     attention_input_normed: Vec<f32>,
     attention_qkv_projection: Vec<f32>,
     attention_qkv_projection_dim: usize,
@@ -19694,6 +19922,7 @@ fn package_linear_attn_mlp_block_sequence_run(
     layer_index: usize,
     sequence_len: usize,
     residual_sequence: Vec<f32>,
+    row_scale_overrides: Option<&PackageRowScaleOverrides>,
 ) -> Result<PackageLinearAttnMlpBlockSequenceRun, String> {
     let key_heads = 16_usize;
     let value_heads = 32_usize;
@@ -19836,6 +20065,7 @@ fn package_linear_attn_mlp_block_sequence_run(
     let dt_bias_bytes = encode_f32_to_bytes(&dt_bias.values);
     let attn_norm_weight_bytes = encode_f32_to_bytes(&attn_norm.values);
     let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm_weight_values);
+    let mut applied_row_scale_overrides = Vec::new();
 
     let mut input_buffer = context
         .alloc_buffer(hidden_bytes)
@@ -19961,7 +20191,7 @@ fn package_linear_attn_mlp_block_sequence_run(
             &z_tensor,
             chunk_bytes,
         )?;
-        let (out_rows, out_cols, out_matrix) = materialize_selected_aq4_matrix(
+        let (out_rows, out_cols, mut out_matrix) = materialize_selected_aq4_matrix(
             &mut context,
             &mut stream,
             &mut registry,
@@ -19984,6 +20214,19 @@ fn package_linear_attn_mlp_block_sequence_run(
                 "z/out shape must be [{hidden},{hidden}], got z=[{z_rows},{z_cols}] out=[{out_rows},{out_cols}]"
             ));
         }
+        let out_row_scale_overrides = matching_package_row_scale_overrides(
+            row_scale_overrides,
+            layer_index,
+            "linear_attn.out_proj.weight",
+        );
+        applied_row_scale_overrides.extend(apply_package_row_scale_overrides_to_matrix(
+            &mut stream,
+            &mut out_matrix,
+            out_rows,
+            out_cols,
+            &out_tensor,
+            &out_row_scale_overrides,
+        )?);
 
         let mut qkv_step_buffer = context
             .alloc_buffer(qkv_step_bytes)
@@ -20693,7 +20936,7 @@ fn package_linear_attn_mlp_block_sequence_run(
             &up_tensor,
             chunk_bytes,
         )?;
-        let (down_rows, down_cols, down_matrix) = materialize_selected_aq4_matrix(
+        let (down_rows, down_cols, mut down_matrix) = materialize_selected_aq4_matrix(
             &mut context,
             &mut stream,
             &mut registry,
@@ -20711,6 +20954,19 @@ fn package_linear_attn_mlp_block_sequence_run(
                 "MLP down shape mismatch: expected [{hidden},{gate_rows}], got [{down_rows},{down_cols}]"
             ));
         }
+        let down_row_scale_overrides = matching_package_row_scale_overrides(
+            row_scale_overrides,
+            layer_index,
+            "mlp.down_proj.weight",
+        );
+        applied_row_scale_overrides.extend(apply_package_row_scale_overrides_to_matrix(
+            &mut stream,
+            &mut down_matrix,
+            down_rows,
+            down_cols,
+            &down_tensor,
+            &down_row_scale_overrides,
+        )?);
         let intermediate = gate_rows;
         let intermediate_bytes = intermediate
             .checked_mul(std::mem::size_of::<f32>())
@@ -20867,7 +21123,7 @@ fn package_linear_attn_mlp_block_sequence_run(
     };
 
     let line = format!(
-        "package-linear-attn-mlp-block-smoke package={} layer={} input_norm_tensor=\"{}\" qkv_tensor=\"{}\" conv_tensor=\"{}\" a_tensor=\"{}\" b_tensor=\"{}\" a_log_tensor=\"{}\" dt_bias_tensor=\"{}\" z_tensor=\"{}\" norm_tensor=\"{}\" out_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} key_heads={} value_heads={} key_dim={} value_dim={} sequence_len={} kernel_size={} qk_l2_norm={} q_scale={q_scale:.9} input_norm_dtype={} conv_dtype={} a_log_dtype={} dt_bias_dtype={} norm_dtype={} post_norm_dtype={} backend={} device_index={} name=\"{}\" residual_preview={} attention_output_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} conv_max_abs_diff={conv_max_abs_diff:.9} gate_beta_max_abs_diff={gate_beta_max_abs_diff:.9} recurrent_max_abs_diff={recurrent_max_abs_diff:.9} attn_norm_max_abs_diff={attn_norm_max_abs_diff:.9} attn_activation_max_abs_diff={attn_activation_max_abs_diff:.9} attn_output_max_abs_diff={attn_output_max_abs_diff:.9} attn_block_max_abs_diff={attn_block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} layer_block_max_abs_diff={layer_block_max_abs_diff:.9} verified=true",
+        "package-linear-attn-mlp-block-smoke package={} layer={} input_norm_tensor=\"{}\" qkv_tensor=\"{}\" conv_tensor=\"{}\" a_tensor=\"{}\" b_tensor=\"{}\" a_log_tensor=\"{}\" dt_bias_tensor=\"{}\" z_tensor=\"{}\" norm_tensor=\"{}\" out_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} key_heads={} value_heads={} key_dim={} value_dim={} sequence_len={} kernel_size={} qk_l2_norm={} q_scale={q_scale:.9} input_norm_dtype={} conv_dtype={} a_log_dtype={} dt_bias_dtype={} norm_dtype={} post_norm_dtype={} row_scale_overrides={} backend={} device_index={} name=\"{}\" residual_preview={} attention_output_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} conv_max_abs_diff={conv_max_abs_diff:.9} gate_beta_max_abs_diff={gate_beta_max_abs_diff:.9} recurrent_max_abs_diff={recurrent_max_abs_diff:.9} attn_norm_max_abs_diff={attn_norm_max_abs_diff:.9} attn_activation_max_abs_diff={attn_activation_max_abs_diff:.9} attn_output_max_abs_diff={attn_output_max_abs_diff:.9} attn_block_max_abs_diff={attn_block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} layer_block_max_abs_diff={layer_block_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         input_norm_tensor,
@@ -20898,6 +21154,7 @@ fn package_linear_attn_mlp_block_sequence_run(
         dt_bias.dtype,
         attn_norm.dtype,
         post_norm.dtype,
+        applied_row_scale_overrides.len(),
         info.backend,
         device_index,
         info.name,
@@ -20910,6 +21167,7 @@ fn package_linear_attn_mlp_block_sequence_run(
     );
     Ok(PackageLinearAttnMlpBlockSequenceRun {
         line,
+        applied_row_scale_overrides,
         attention_input_normed: input_normed,
         attention_qkv_projection: qkv_output,
         attention_qkv_projection_dim: qkv_rows_expected,
@@ -21962,7 +22220,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
