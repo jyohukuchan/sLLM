@@ -6,14 +6,16 @@ use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
-use ullm_engine::decode_runner::{Qwen3SelfAttnDecodeBatchInput, Qwen3SelfAttnRequestDecodeRunner};
+use ullm_engine::decode_runner::{
+    Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerRequestDecodeRunner,
+    Qwen3SelfAttnDecodeBatchInput, Qwen3SelfAttnRequestDecodeRunner,
+};
 use ullm_engine::decoder::{
     PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntimeWeights,
-    Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnRuntimePreparedSequence,
-    Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode, Qwen3SelfAttnRuntimeShape,
-    Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
-    qwen3_causal_attn_to_host_f32, qwen3_decoder_layer_sequence_to_host_f32,
-    qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
+    Qwen3DecoderLayerSequenceOutput, Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights,
+    Qwen3SelfAttnRuntimePreparedSequence, Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode,
+    Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
+    qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
     qwen3_self_attn_block_sequence_to_host_f32,
     qwen3_self_attn_prepare_sequence_for_paged_decode_f32, qwen3_self_attn_runtime_shape,
     split_qwen3_self_attn_q_projection,
@@ -8071,6 +8073,235 @@ fn qwen3_self_attn_prepare_sequence_smoke(
     })
 }
 
+struct Qwen3DecoderLayerRequestSequenceRun {
+    output: Qwen3DecoderLayerSequenceOutput,
+    scheduler_request_id: RequestId,
+    scheduler_prefill_tokens: usize,
+    scheduler_max_new_tokens: usize,
+    scheduler_cached_tokens: usize,
+    scheduler_generated_tokens: usize,
+    scheduler_active_len: usize,
+}
+
+fn push_decoder_layer_step_output(
+    output: &mut Qwen3DecoderLayerSequenceOutput,
+    step: ullm_engine::decode_runner::Qwen3DecoderLayerDecodeBatchOutput,
+) {
+    output
+        .attention_output
+        .extend_from_slice(&step.attention_output);
+    output
+        .attention_projection_input
+        .extend_from_slice(&step.attention_projection_input);
+    output
+        .projected_output
+        .extend_from_slice(&step.projected_output);
+    output.block_output.extend_from_slice(&step.block_output);
+    output.post_normed.extend_from_slice(&step.post_normed);
+    output.mlp_output.extend_from_slice(&step.mlp_output);
+    output.layer_output.extend_from_slice(&step.layer_output);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qwen3_decoder_layer_request_sequence_to_host_f32(
+    layer_weights: &Qwen3DecoderLayerRuntimeWeights,
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    shape: PagedDecodeShape,
+    expected_block_table: &[u32],
+    softmax_scale: f32,
+    mlp_epsilon: f32,
+    q_sequence: &[f32],
+    k_sequence: &[f32],
+    v_sequence: &[f32],
+    output_gate_sequence: Option<&[f32]>,
+    residual_sequence: &[f32],
+    sequence_len: usize,
+) -> Result<Qwen3DecoderLayerRequestSequenceRun, String> {
+    if sequence_len == 0 {
+        return Err("Qwen3 decoder layer request sequence length must be greater than zero".into());
+    }
+    let prepared_scheduler = prepare_fragmented_paged_decode_state(sequence_len, shape.block_size)?;
+    if prepared_scheduler.block_table != expected_block_table {
+        return Err(format!(
+            "Qwen3 decoder layer request runner block table {:?} does not match prepared self-attn block table {:?}",
+            prepared_scheduler.block_table, expected_block_table
+        ));
+    }
+    if prepared_scheduler.cache_blocks != shape.cache_blocks {
+        return Err(format!(
+            "Qwen3 decoder layer request runner cache_blocks {} does not match shape cache_blocks {}",
+            prepared_scheduler.cache_blocks, shape.cache_blocks
+        ));
+    }
+
+    let q_token_elements = shape.q_elements()?;
+    let k_token_elements = shape.k_token_elements()?;
+    let v_token_elements = shape.v_token_elements()?;
+    let attention_elements = shape.output_elements()?;
+    let hidden = layer_weights.post_attention.hidden;
+    let expected_q_len = sequence_len
+        .checked_mul(q_token_elements)
+        .ok_or_else(|| "Qwen3 decoder layer request q length overflows".to_string())?;
+    let expected_k_len = sequence_len
+        .checked_mul(k_token_elements)
+        .ok_or_else(|| "Qwen3 decoder layer request k length overflows".to_string())?;
+    let expected_v_len = sequence_len
+        .checked_mul(v_token_elements)
+        .ok_or_else(|| "Qwen3 decoder layer request v length overflows".to_string())?;
+    let expected_residual_len = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "Qwen3 decoder layer request residual length overflows".to_string())?;
+    if q_sequence.len() != expected_q_len
+        || k_sequence.len() != expected_k_len
+        || v_sequence.len() != expected_v_len
+        || residual_sequence.len() != expected_residual_len
+    {
+        return Err(format!(
+            "Qwen3 decoder layer request sequence length mismatch: q={} expected_q={} k={} expected_k={} v={} expected_v={} residual={} expected_residual={}",
+            q_sequence.len(),
+            expected_q_len,
+            k_sequence.len(),
+            expected_k_len,
+            v_sequence.len(),
+            expected_v_len,
+            residual_sequence.len(),
+            expected_residual_len
+        ));
+    }
+    if let Some(gate) = output_gate_sequence {
+        let expected_gate_len = sequence_len
+            .checked_mul(attention_elements)
+            .ok_or_else(|| {
+                "Qwen3 decoder layer request output gate length overflows".to_string()
+            })?;
+        if gate.len() != expected_gate_len {
+            return Err(format!(
+                "Qwen3 decoder layer request output gate length {} does not match expected {}",
+                gate.len(),
+                expected_gate_len
+            ));
+        }
+    }
+
+    let mut scheduler = prepared_scheduler.scheduler;
+    let request_id = prepared_scheduler.request_id;
+    let mut runner = Qwen3DecoderLayerRequestDecodeRunner::new();
+    runner.insert_request(
+        context,
+        stream,
+        request_id,
+        layer_weights,
+        shape,
+        prepared_scheduler.block_table.clone(),
+        softmax_scale,
+        mlp_epsilon,
+    )?;
+
+    let mut output = Qwen3DecoderLayerSequenceOutput {
+        attention_output: Vec::with_capacity(sequence_len * attention_elements),
+        attention_projection_input: Vec::with_capacity(sequence_len * attention_elements),
+        projected_output: Vec::with_capacity(sequence_len * hidden),
+        block_output: Vec::with_capacity(sequence_len * hidden),
+        post_normed: Vec::with_capacity(sequence_len * hidden),
+        mlp_output: Vec::with_capacity(sequence_len * hidden),
+        layer_output: Vec::with_capacity(sequence_len * hidden),
+        paged_cache: PagedKvCacheReadback {
+            k: Vec::new(),
+            v: Vec::new(),
+        },
+    };
+
+    for timestep in 0..prepared_scheduler.prefill_tokens {
+        let q_start = timestep * q_token_elements;
+        let k_start = timestep * k_token_elements;
+        let v_start = timestep * v_token_elements;
+        let gate_start = timestep * attention_elements;
+        let residual_start = timestep * hidden;
+        let step = runner.run_prefill_step(
+            stream,
+            Qwen3DecoderLayerDecodeBatchInput {
+                request_id,
+                q: &q_sequence[q_start..q_start + q_token_elements],
+                k: &k_sequence[k_start..k_start + k_token_elements],
+                v: &v_sequence[v_start..v_start + v_token_elements],
+                output_gate: output_gate_sequence
+                    .map(|gate| &gate[gate_start..gate_start + attention_elements]),
+                residual: &residual_sequence[residual_start..residual_start + hidden],
+            },
+        )?;
+        if step.cache_position != timestep || step.cache_len != timestep + 1 {
+            return Err(format!(
+                "Qwen3 decoder layer prefill step returned cache_position={} cache_len={} for timestep {}",
+                step.cache_position, step.cache_len, timestep
+            ));
+        }
+        push_decoder_layer_step_output(&mut output, step);
+    }
+
+    scheduler
+        .complete_prefill(request_id)
+        .map_err(|err| format!("failed to complete Qwen3 decoder layer request prefill: {err}"))?;
+
+    for timestep in prepared_scheduler.prefill_tokens..sequence_len {
+        let ready = scheduler
+            .ready_decode_batch(1)
+            .map_err(|err| format!("failed to ready Qwen3 decoder layer request batch: {err}"))?;
+        let request = ready.first().ok_or_else(|| {
+            format!("expected one ready Qwen3 decoder layer request at timestep {timestep}")
+        })?;
+        if request.request.id != request_id || request.cache_position != timestep {
+            return Err(format!(
+                "Qwen3 decoder layer ready request {:?} cache_position {} does not match request {:?} timestep {}",
+                request.request.id, request.cache_position, request_id, timestep
+            ));
+        }
+        let q_start = timestep * q_token_elements;
+        let k_start = timestep * k_token_elements;
+        let v_start = timestep * v_token_elements;
+        let gate_start = timestep * attention_elements;
+        let residual_start = timestep * hidden;
+        let mut steps = runner.run_ready_batch(
+            stream,
+            &mut scheduler,
+            &ready,
+            &[Qwen3DecoderLayerDecodeBatchInput {
+                request_id,
+                q: &q_sequence[q_start..q_start + q_token_elements],
+                k: &k_sequence[k_start..k_start + k_token_elements],
+                v: &v_sequence[v_start..v_start + v_token_elements],
+                output_gate: output_gate_sequence
+                    .map(|gate| &gate[gate_start..gate_start + attention_elements]),
+                residual: &residual_sequence[residual_start..residual_start + hidden],
+            }],
+        )?;
+        let step = steps.pop().ok_or_else(|| {
+            format!("Qwen3 decoder layer request runner produced no output at timestep {timestep}")
+        })?;
+        if step.request_id != request_id {
+            return Err(format!(
+                "Qwen3 decoder layer request runner output request {:?} does not match {:?}",
+                step.request_id, request_id
+            ));
+        }
+        push_decoder_layer_step_output(&mut output, step);
+    }
+
+    output.paged_cache = runner.read_cache_to_host(request_id, stream)?;
+    let active = scheduler
+        .active_request(request_id)
+        .ok_or_else(|| "Qwen3 decoder layer request is not active after run".to_string())?;
+    Ok(Qwen3DecoderLayerRequestSequenceRun {
+        output,
+        scheduler_request_id: request_id,
+        scheduler_prefill_tokens: prepared_scheduler.prefill_tokens,
+        scheduler_max_new_tokens: prepared_scheduler.max_new_tokens,
+        scheduler_cached_tokens: active.cached_tokens,
+        scheduler_generated_tokens: active.generated_tokens,
+        scheduler_active_len: scheduler.active_len(),
+    })
+}
+
 #[allow(clippy::too_many_arguments, dead_code)]
 fn run_self_attn_block_sequence_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
@@ -8824,7 +9055,7 @@ fn package_self_attn_mlp_block_smoke_impl(
             head_dim: self_attn.head_dim,
             value_dim: self_attn.value_dim,
         };
-        let layer_sequence_output = qwen3_decoder_layer_sequence_to_host_f32(
+        let layer_sequence_run = qwen3_decoder_layer_request_sequence_to_host_f32(
             &layer_weights,
             &mut context,
             &mut stream,
@@ -8839,6 +9070,30 @@ fn package_self_attn_mlp_block_smoke_impl(
             &self_attn.residual_sequence,
             sequence_len,
         )?;
+        if layer_sequence_run.scheduler_request_id != self_attn.scheduler_request_id
+            || layer_sequence_run.scheduler_prefill_tokens != self_attn.scheduler_prefill_tokens
+            || layer_sequence_run.scheduler_max_new_tokens != self_attn.scheduler_max_new_tokens
+            || layer_sequence_run.scheduler_cached_tokens != self_attn.scheduler_cached_tokens
+            || layer_sequence_run.scheduler_generated_tokens != self_attn.scheduler_generated_tokens
+            || layer_sequence_run.scheduler_active_len != self_attn.scheduler_active_len
+        {
+            return Err(format!(
+                "package-self-attn-mlp-block-smoke layer request runner scheduler progress mismatch: runner request={} prefill={} max_new={} cached={} generated={} active={} self_attn request={} prefill={} max_new={} cached={} generated={} active={}",
+                layer_sequence_run.scheduler_request_id.0,
+                layer_sequence_run.scheduler_prefill_tokens,
+                layer_sequence_run.scheduler_max_new_tokens,
+                layer_sequence_run.scheduler_cached_tokens,
+                layer_sequence_run.scheduler_generated_tokens,
+                layer_sequence_run.scheduler_active_len,
+                self_attn.scheduler_request_id.0,
+                self_attn.scheduler_prefill_tokens,
+                self_attn.scheduler_max_new_tokens,
+                self_attn.scheduler_cached_tokens,
+                self_attn.scheduler_generated_tokens,
+                self_attn.scheduler_active_len
+            ));
+        }
+        let layer_sequence_output = layer_sequence_run.output;
         let attention_output = layer_sequence_output.attention_output;
         let attention_projection_input = layer_sequence_output.attention_projection_input;
         let attn_projected = layer_sequence_output.projected_output;
