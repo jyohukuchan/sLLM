@@ -118,6 +118,16 @@ fn main() -> ExitCode {
             env::args().nth(4),
             env::args().nth(5),
         ),
+        Some("package-self-attn-rope-smoke") => package_self_attn_rope_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+        ),
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -4453,6 +4463,344 @@ fn package_self_attn_qk_norm_smoke(
         format_f32_preview(&k_projected[..8.min(k_projected.len())]),
         format_f32_preview(&q_normed[..8.min(q_normed.len())]),
         format_f32_preview(&k_normed[..8.min(k_normed.len())]),
+    );
+    ExitCode::SUCCESS
+}
+
+fn package_self_attn_rope_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-self-attn-rope-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 3, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 2, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 3, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+
+    let q_norm = match read_named_passthrough_f32(&path, &q_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let k_norm = match read_named_passthrough_f32(&path, &k_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let q_head_dim = q_norm.values.len();
+    let k_head_dim = k_norm.values.len();
+    if q_head_dim == 0 || k_head_dim == 0 {
+        eprintln!("self-attn q/k norm weights must not be empty");
+        return ExitCode::from(1);
+    }
+    if q_head_dim != k_head_dim {
+        eprintln!(
+            "self-attn q/k head dims differ: q_head_dim={q_head_dim}, k_head_dim={k_head_dim}"
+        );
+        return ExitCode::from(1);
+    }
+    let default_rotary_dim = {
+        let candidate = if q_head_dim >= 4 {
+            q_head_dim / 4
+        } else {
+            q_head_dim
+        };
+        candidate - (candidate % 2)
+    };
+    if default_rotary_dim == 0 {
+        eprintln!("default rotary_dim is zero for q_head_dim={q_head_dim}");
+        return ExitCode::from(1);
+    }
+    let rotary_dim = match parse_optional_usize(rotary_dim, default_rotary_dim, "rotary dim") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    if rotary_dim == 0 || rotary_dim > q_head_dim || !rotary_dim.is_multiple_of(2) {
+        eprintln!(
+            "rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim}, head_dim={q_head_dim}"
+        );
+        return ExitCode::from(2);
+    }
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut registry = WeightRegistry::new();
+    let (q_rows, q_cols, q_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &q_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {q_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (k_rows, k_cols, k_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &k_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {k_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if q_cols != k_cols {
+        eprintln!("self-attn q/k projection hidden sizes differ: q_cols={q_cols}, k_cols={k_cols}");
+        return ExitCode::from(1);
+    }
+    if q_rows % q_head_dim != 0 {
+        eprintln!(
+            "q projection rows must be a multiple of q_head_dim: rows={q_rows}, q_head_dim={q_head_dim}"
+        );
+        return ExitCode::from(1);
+    }
+    if k_rows % k_head_dim != 0 {
+        eprintln!(
+            "k projection rows must be a multiple of k_head_dim: rows={k_rows}, k_head_dim={k_head_dim}"
+        );
+        return ExitCode::from(1);
+    }
+    let q_heads = q_rows / q_head_dim;
+    let k_heads = k_rows / k_head_dim;
+
+    let hidden_bytes = match q_cols.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("hidden input byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let base_input = deterministic_f32_vector(q_cols);
+    let mut input_buffer = match context.alloc_buffer(hidden_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate self-attn rope input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut q_projected = Vec::with_capacity(sequence_len * q_rows);
+    let mut k_projected = Vec::with_capacity(sequence_len * k_rows);
+    for timestep in 0..sequence_len {
+        let step_input = linear_attn_step_input(&base_input, timestep);
+        let step_input_bytes = encode_f32_to_bytes(&step_input);
+        if let Err(err) = input_buffer.copy_from_host(0, &step_input_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy self-attn rope timestep {timestep} input: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!(
+                "failed to synchronize after self-attn rope timestep {timestep} input copy: {err}"
+            );
+            return ExitCode::from(1);
+        }
+        let q_step = match runtime_matvec_to_host_f32(
+            &mut context,
+            &mut stream,
+            &q_matrix,
+            &input_buffer,
+            q_rows,
+            q_cols,
+            "self-attn rope q projection",
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+        let k_step = match runtime_matvec_to_host_f32(
+            &mut context,
+            &mut stream,
+            &k_matrix,
+            &input_buffer,
+            k_rows,
+            k_cols,
+            "self-attn rope k projection",
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+        q_projected.extend(q_step);
+        k_projected.extend(k_step);
+    }
+
+    let epsilon = 1e-5_f32;
+    let (q_normed, q_norm_max_abs_diff) = match runtime_headwise_rmsnorm_verify(
+        &mut context,
+        &mut stream,
+        &q_projected,
+        &q_norm.values,
+        epsilon,
+        "package-self-attn-rope-smoke q_norm",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (k_normed, k_norm_max_abs_diff) = match runtime_headwise_rmsnorm_verify(
+        &mut context,
+        &mut stream,
+        &k_projected,
+        &k_norm.values,
+        epsilon,
+        "package-self-attn-rope-smoke k_norm",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (q_rope, q_rope_max_abs_diff) = match runtime_rope_verify(
+        &mut context,
+        &mut stream,
+        &q_normed,
+        sequence_len,
+        q_heads,
+        q_head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        "package-self-attn-rope-smoke q_rope",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (k_rope, k_rope_max_abs_diff) = match runtime_rope_verify(
+        &mut context,
+        &mut stream,
+        &k_normed,
+        sequence_len,
+        k_heads,
+        k_head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        "package-self-attn-rope-smoke k_rope",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    println!(
+        "package-self-attn-rope-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} sequence_len={} q_rows={} k_rows={} q_heads={} k_heads={} head_dim={} rotary_dim={} position_offset={} rope_base={} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" q_norm_preview={} k_norm_preview={} q_rope_preview={} k_rope_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} verified=true",
+        path,
+        layer_index,
+        q_tensor,
+        k_tensor,
+        q_norm_tensor,
+        k_norm_tensor,
+        q_cols,
+        sequence_len,
+        q_rows,
+        k_rows,
+        q_heads,
+        k_heads,
+        q_head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        q_norm.dtype,
+        k_norm.dtype,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(&q_normed[..8.min(q_normed.len())]),
+        format_f32_preview(&k_normed[..8.min(k_normed.len())]),
+        format_f32_preview(&q_rope[..8.min(q_rope.len())]),
+        format_f32_preview(&k_rope[..8.min(k_rope.len())]),
     );
     ExitCode::SUCCESS
 }
@@ -11481,6 +11829,79 @@ fn runtime_headwise_rmsnorm_verify(
     Ok((output, max_abs_diff))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn runtime_rope_verify(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    input: &[f32],
+    sequence_len: usize,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    position_offset: usize,
+    rope_base: f32,
+    label: &str,
+) -> Result<(Vec<f32>, f32), String> {
+    if input.len() != sequence_len * heads * head_dim {
+        return Err(format!(
+            "{label} input length {} does not match sequence_len={sequence_len} heads={heads} head_dim={head_dim}",
+            input.len()
+        ));
+    }
+    let bytes = input
+        .len()
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| format!("{label} byte size overflows"))?;
+    let input_bytes = encode_f32_to_bytes(input);
+    let mut input_buffer = context
+        .alloc_buffer(bytes)
+        .map_err(|err| format!("failed to allocate {label} input buffer: {err}"))?;
+    let mut output_buffer = context
+        .alloc_buffer(bytes)
+        .map_err(|err| format!("failed to allocate {label} output buffer: {err}"))?;
+    input_buffer
+        .copy_from_host(0, &input_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} input: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} input copy: {err}"))?;
+    ullm_runtime_sys::rope_f32(
+        &input_buffer,
+        sequence_len,
+        heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        &mut output_buffer,
+        Some(stream),
+    )
+    .map_err(|err| format!("failed to run {label} RoPE: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} RoPE: {err}"))?;
+
+    let mut output_bytes = vec![0_u8; bytes];
+    output_buffer
+        .copy_to_host(0, &mut output_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} output: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} output copy: {err}"))?;
+    let output = decode_f32_le_values(&output_bytes);
+    let expected = runtime_host_rope_f32(
+        input,
+        sequence_len,
+        heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    );
+    let max_abs_diff = verify_f32_close(label, &output, &expected, 1e-4_f32, 1e-4_f32)?;
+    Ok((output, max_abs_diff))
+}
+
 fn verify_f32_close(
     label: &str,
     actual: &[f32],
@@ -11700,7 +12121,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
@@ -11820,6 +12241,23 @@ fn parse_optional_usize(
     match value {
         Some(value) => match value.parse::<usize>() {
             Ok(value) => Ok(value),
+            Err(err) => {
+                eprintln!("invalid {label}: {err}");
+                Err(ExitCode::from(2))
+            }
+        },
+        None => Ok(default),
+    }
+}
+
+fn parse_optional_f32(value: Option<String>, default: f32, label: &str) -> Result<f32, ExitCode> {
+    match value {
+        Some(value) => match value.parse::<f32>() {
+            Ok(value) if value.is_finite() => Ok(value),
+            Ok(_) => {
+                eprintln!("invalid {label}: value must be finite");
+                Err(ExitCode::from(2))
+            }
             Err(err) => {
                 eprintln!("invalid {label}: {err}");
                 Err(ExitCode::from(2))
