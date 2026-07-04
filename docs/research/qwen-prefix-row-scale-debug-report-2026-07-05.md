@@ -26,6 +26,7 @@ Input summary:
 
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-multi-fixture-summary.json`
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-candidate-gates.md`
+- `benchmarks/results/2026-07-05/engine/qwen-prefix-extracted-candidate-gates.md`
 
 Gate settings:
 
