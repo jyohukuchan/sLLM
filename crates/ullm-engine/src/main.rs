@@ -9,7 +9,8 @@ use std::time::Instant;
 use ullm_engine::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntime, Qwen3DecoderLayerRuntimeWeights,
     Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnBlockStepState,
-    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimeWeights, split_qwen3_self_attn_q_projection,
+    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights,
+    qwen3_self_attn_runtime_shape, split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -7594,17 +7595,21 @@ fn qwen3_self_attn_prepare_sequence_smoke(
     k_norm: &PassthroughF32Data,
     label: &str,
 ) -> Result<Qwen3SelfAttnPreparedSequence, String> {
+    let Qwen3SelfAttnRuntimeShape {
+        hidden,
+        q_heads: shape_q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        attention_width: _,
+        q_projection_layout,
+    } = qwen3_self_attn_runtime_shape(self_attn_weights)?;
     let q_rows = self_attn_weights.q_rows;
-    let q_cols = self_attn_weights.q_cols;
     let k_rows = self_attn_weights.k_rows;
     let v_rows = self_attn_weights.v_rows;
-    let o_rows = self_attn_weights.o_rows;
-    let o_cols = self_attn_weights.o_cols;
-    let head_dim = self_attn_weights.head_dim;
-    let kv_heads = self_attn_weights.kv_heads;
-    let value_dim = self_attn_weights.value_dim;
+    let q_cols = hidden;
 
-    let hidden_bytes = q_cols
+    let hidden_bytes = hidden
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| "hidden input byte size overflows".to_string())?;
 
@@ -7660,19 +7665,15 @@ fn qwen3_self_attn_prepare_sequence_smoke(
 
     let q_projection_split =
         split_qwen3_self_attn_q_projection(&q_projected, sequence_len, q_rows, q_cols, head_dim)?;
+    if q_projection_split.layout != q_projection_layout {
+        return Err("self-attn q projection layout changed between helper and split".to_string());
+    }
+    if q_projection_split.q_heads != shape_q_heads {
+        return Err(
+            "self-attn q projection head count changed between helper and split".to_string(),
+        );
+    }
     let q_heads = q_projection_split.q_heads;
-    if !q_heads.is_multiple_of(kv_heads) {
-        return Err(format!(
-            "q_heads must be a multiple of kv_heads: q_heads={q_heads}, kv_heads={kv_heads}"
-        ));
-    }
-    if o_cols != q_heads * value_dim || o_rows != q_cols {
-        return Err(format!(
-            "o projection shape mismatch: o_rows={o_rows}, o_cols={o_cols}, hidden={q_cols}, attention_width={}",
-            q_heads * value_dim
-        ));
-    }
-    let q_projection_layout = q_projection_split.layout;
     let q_gate = q_projection_split.gate;
     let q_gate_elements = q_gate.as_ref().map_or(0, Vec::len);
     let q_projected = q_projection_split.query;

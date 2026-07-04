@@ -123,6 +123,116 @@ pub struct Qwen3SelfAttnRuntimeWeights {
     pub o_matrix: RuntimeBuffer,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Qwen3SelfAttnRuntimeShape {
+    pub hidden: usize,
+    pub q_heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub value_dim: usize,
+    pub attention_width: usize,
+    pub q_projection_layout: &'static str,
+}
+
+pub fn qwen3_self_attn_runtime_shape(
+    weights: &Qwen3SelfAttnRuntimeWeights,
+) -> Result<Qwen3SelfAttnRuntimeShape, String> {
+    let hidden = weights.q_cols;
+    if hidden == 0 || weights.q_rows == 0 || weights.k_rows == 0 || weights.v_rows == 0 {
+        return Err("self-attn runtime shape has zero dimension".to_string());
+    }
+    if weights.head_dim == 0 || weights.kv_heads == 0 || weights.value_dim == 0 {
+        return Err(
+            "self-attn runtime shape head_dim, kv_heads, and value_dim must be greater than zero"
+                .to_string(),
+        );
+    }
+
+    let two_head_dim = weights
+        .head_dim
+        .checked_mul(2)
+        .ok_or_else(|| "self-attn q projection layout check overflows".to_string())?;
+    let two_hidden_rows = weights
+        .q_cols
+        .checked_mul(2)
+        .ok_or_else(|| "self-attn q projection layout check overflows".to_string())?;
+    let q_projection_layout = if weights.q_rows == two_hidden_rows
+        && weights.q_rows.is_multiple_of(two_head_dim)
+    {
+        "qwen3.5-gated"
+    } else if weights.q_rows.is_multiple_of(weights.head_dim) {
+        "plain"
+    } else {
+        return Err(format!(
+            "self-attn q rows must indicate plain or qwen3.5-gated layout: q_rows={}, head_dim={}, hidden={}",
+            weights.q_rows, weights.head_dim, hidden
+        ));
+    };
+
+    let q_heads = match q_projection_layout {
+        "qwen3.5-gated" => weights
+            .q_rows
+            .checked_div(two_head_dim)
+            .ok_or_else(|| "self-attn q projection division overflow".to_string())?,
+        "plain" => weights
+            .q_rows
+            .checked_div(weights.head_dim)
+            .ok_or_else(|| "self-attn q projection division overflow".to_string())?,
+        _ => return Err("self-attn q projection layout is unknown".to_string()),
+    };
+    if q_heads == 0 {
+        return Err("self-attn q projection has zero heads".to_string());
+    }
+
+    let k_rows = weights
+        .kv_heads
+        .checked_mul(weights.head_dim)
+        .ok_or_else(|| "self-attn k rows multiplication overflows".to_string())?;
+    if weights.k_rows != k_rows {
+        return Err(format!(
+            "self-attn k rows mismatch: k_rows={}, kv_heads={}, head_dim={}",
+            weights.k_rows, weights.kv_heads, weights.head_dim
+        ));
+    }
+
+    let v_rows = weights
+        .kv_heads
+        .checked_mul(weights.value_dim)
+        .ok_or_else(|| "self-attn v rows multiplication overflows".to_string())?;
+    if weights.v_rows != v_rows {
+        return Err(format!(
+            "self-attn v rows must equal kv_heads * value_dim: v_rows={}, kv_heads={}, value_dim={}",
+            weights.v_rows, weights.kv_heads, weights.value_dim
+        ));
+    }
+
+    let attention_width = q_heads
+        .checked_mul(weights.value_dim)
+        .ok_or_else(|| "self-attn attention_width multiplication overflows".to_string())?;
+    if !q_heads.is_multiple_of(weights.kv_heads) {
+        return Err(format!(
+            "self-attn q projection heads must be multiple of kv_heads: q_heads={q_heads}, kv_heads={}",
+            weights.kv_heads
+        ));
+    }
+    if weights.o_rows != hidden || weights.o_cols != attention_width {
+        return Err(format!(
+            "self-attn o projection shape mismatch: o_rows={}, o_cols={}, hidden={}, attention_width={attention_width}",
+            weights.o_rows, weights.o_cols, hidden
+        ));
+    }
+
+    Ok(Qwen3SelfAttnRuntimeShape {
+        hidden,
+        q_heads,
+        kv_heads: weights.kv_heads,
+        head_dim: weights.head_dim,
+        value_dim: weights.value_dim,
+        attention_width,
+        q_projection_layout,
+    })
+}
+
 #[derive(Debug)]
 pub struct Qwen3SelfAttnQProjectionSplit {
     pub query: Vec<f32>,
@@ -1822,6 +1932,91 @@ mod tests {
         assert_eq!(split.layout, "qwen3.5-gated");
         assert_eq!(split.gate.as_deref(), Some(expected_gate.as_slice()));
         assert_eq!(split.query, expected_query);
+    }
+
+    fn make_qwen3_self_attn_runtime_weights(
+        context: &mut RuntimeContext,
+        q_rows: usize,
+        q_cols: usize,
+        head_dim: usize,
+        kv_heads: usize,
+        value_dim: usize,
+        o_cols: usize,
+    ) -> Qwen3SelfAttnRuntimeWeights {
+        let k_rows = kv_heads
+            .checked_mul(head_dim)
+            .expect("test k_rows multiplication overflow");
+        let v_rows = kv_heads
+            .checked_mul(value_dim)
+            .expect("test v_rows multiplication overflow");
+        let q_matrix = context.alloc_buffer(0).unwrap();
+        let k_matrix = context.alloc_buffer(0).unwrap();
+        let v_matrix = context.alloc_buffer(0).unwrap();
+        let o_matrix = context.alloc_buffer(0).unwrap();
+
+        Qwen3SelfAttnRuntimeWeights {
+            q_rows,
+            q_cols,
+            k_rows,
+            v_rows,
+            o_rows: q_cols,
+            o_cols,
+            head_dim,
+            kv_heads,
+            value_dim,
+            q_matrix,
+            k_matrix,
+            v_matrix,
+            o_matrix,
+        }
+    }
+
+    #[test]
+    fn qwen3_self_attn_runtime_shape_plain() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let weights = make_qwen3_self_attn_runtime_weights(&mut context, 24, 16, 4, 2, 3, 18);
+
+        let shape = qwen3_self_attn_runtime_shape(&weights).unwrap();
+
+        assert_eq!(shape.hidden, 16);
+        assert_eq!(shape.q_heads, 6);
+        assert_eq!(shape.kv_heads, 2);
+        assert_eq!(shape.head_dim, 4);
+        assert_eq!(shape.value_dim, 3);
+        assert_eq!(shape.attention_width, 18);
+        assert_eq!(shape.q_projection_layout, "plain");
+    }
+
+    #[test]
+    fn qwen3_self_attn_runtime_shape_qwen35_gated() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let weights = make_qwen3_self_attn_runtime_weights(&mut context, 16, 8, 4, 1, 5, 10);
+
+        let shape = qwen3_self_attn_runtime_shape(&weights).unwrap();
+
+        assert_eq!(shape.q_heads, 2);
+        assert_eq!(shape.kv_heads, 1);
+        assert_eq!(shape.value_dim, 5);
+        assert_eq!(shape.q_projection_layout, "qwen3.5-gated");
+        assert_eq!(shape.attention_width, 10);
+    }
+
+    #[test]
+    fn qwen3_self_attn_runtime_shape_rejects_non_multiple_heads() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let weights = make_qwen3_self_attn_runtime_weights(&mut context, 24, 16, 4, 4, 3, 18);
+
+        let err = qwen3_self_attn_runtime_shape(&weights).unwrap_err();
+        assert!(err.contains("multiple of kv_heads"));
+    }
+
+    #[test]
+    fn qwen3_self_attn_runtime_shape_rejects_o_projection_shape_mismatch() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let weights = make_qwen3_self_attn_runtime_weights(&mut context, 16, 16, 4, 2, 3, 11);
+
+        let err = qwen3_self_attn_runtime_shape(&weights).unwrap_err();
+        assert!(err.contains("o projection shape mismatch"));
     }
 
     #[test]
