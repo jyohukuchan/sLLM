@@ -21,6 +21,7 @@ Generated artifacts:
 - `qwen-module-trace-comparison-actual-input-layers7-9-11-hidden3994-layer6-layer10-p4p46-inproj.md`
 - `qwen-self-attention-propagation-layer7-actual-input-token8-feature503-hidden3994-p4p46-inproj.json`
 - `qwen-self-attention-propagation-layer7-actual-input-token8-feature503-hidden3994-p4p46-inproj.md`
+- `package-golden-prefix-cpu-actual-prefix-layer0-8-causal-attn-diag-layer7-p4p46-inproj.jsonl`
 
 ## Local package error with actual-prefix inputs
 
@@ -105,8 +106,44 @@ runtime causal attention output against a pure host reference on the exact
 layer `7` actual-prefix q/k/v tensors, or dump the full package prepared q/k/v
 and raw attention vectors for that token.
 
+## Layer 7 Rust causal attention diagnostic
+
+`package-golden-prefix-smoke` now emits
+`causal_attention_runtime_diagnostic` for self-attention layers. Re-running
+layers `0..8` reproduces the prior layer `7` max diff (`0.756856918`), so this
+uses the same accumulated actual-prefix condition as the earlier JSONL.
+
+For layer `7`, token `8`, feature `503`:
+
+| value | result |
+| --- | ---: |
+| prepared attention output | 1.810265899 |
+| layer attention output | 1.810265899 |
+| host causal attention output | 1.810265899 |
+| q gate | 0.502882540 |
+| sigmoid(q gate) | 0.623136520 |
+| prepared projection input | 1.128042817 |
+| layer projection input | 1.128042817 |
+| host projection input | 1.128042817 |
+
+The full-vector max diffs are all `0` for:
+
+- prepared attention vs pure host causal attention
+- layer paged attention vs pure host causal attention
+- layer paged attention vs prepared causal attention
+- layer projection input vs host projection input
+- layer projection input vs prepared projection input
+- layer projection input vs replayed sigmoid gate application
+
+So the Rust runtime causal attention path and gate application reproduce the
+package value exactly. The discrepancy is now between the Python dequantized
+package replay (`o_input = 0.629811943`) and Rust's prepared q/k/v attention
+path (`attention_projection_input = 1.128042817`), not between Rust paged
+attention and a host reference.
+
 Next useful target:
 
-- Add a Rust-side actual-input self-attention diagnostic for layer `7` that
-  compares runtime causal attention with `runtime_host_causal_attn_f32` and
-  records token `8`, feature `503`.
+- Dump or compare Rust prepared `q_rope` / `k_rope` / `v_projected` against the
+  Python replay tensors for layer `7`, token `8`, especially the head containing
+  feature `503`. The likely remaining mismatch is tensor layout, RoPE placement,
+  or q/k/v projection expansion in the Python replay.

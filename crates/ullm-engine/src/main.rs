@@ -12317,6 +12317,22 @@ fn package_golden_prefix_smoke_impl(
                     &layer_input_for_delta,
                     sequence_len,
                 )?;
+                let causal_attention_runtime_diagnostic =
+                    package_self_attn_causal_attention_runtime_diagnostic(
+                        &attention_output,
+                        &layer_output.attention_output,
+                        &layer_output.attention_projection_input,
+                        &q_rope,
+                        &k_rope,
+                        &v_projected,
+                        q_gate.as_deref(),
+                        sequence_len,
+                        shape.q_heads,
+                        shape.kv_heads,
+                        shape.head_dim,
+                        shape.value_dim,
+                        softmax_scale,
+                    )?;
                 let candidate_ids = package_layer_candidate_ids(path, &layer);
                 let mut details = serde_json::Map::new();
                 insert_json_detail(&mut details, "candidate_ids", candidate_ids);
@@ -12369,6 +12385,11 @@ fn package_golden_prefix_smoke_impl(
                         &applied_row_scale_overrides,
                     );
                 }
+                insert_json_detail(
+                    &mut details,
+                    "causal_attention_runtime_diagnostic",
+                    causal_attention_runtime_diagnostic,
+                );
                 let extra_hot_input_vectors = [
                     (
                         "attention_input_normed",
@@ -12823,6 +12844,282 @@ fn package_runtime_line_metric_key(key: &str) -> bool {
         || key.ends_with("_mse")
         || key.ends_with("_mean_abs_diff")
         || key.ends_with("_cosine_similarity")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_self_attn_causal_attention_runtime_diagnostic(
+    prepared_attention_output: &[f32],
+    layer_attention_output: &[f32],
+    layer_attention_projection_input: &[f32],
+    q_rope: &[f32],
+    k_rope: &[f32],
+    v_projected: &[f32],
+    q_gate: Option<&[f32]>,
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let attention_width = q_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "self-attn diagnostic attention width overflows".to_string())?;
+    let expected_attention_elements = sequence_len
+        .checked_mul(attention_width)
+        .ok_or_else(|| "self-attn diagnostic attention element count overflows".to_string())?;
+    let expected_q_elements = sequence_len
+        .checked_mul(q_heads)
+        .and_then(|value| value.checked_mul(head_dim))
+        .ok_or_else(|| "self-attn diagnostic q element count overflows".to_string())?;
+    let expected_k_elements = sequence_len
+        .checked_mul(kv_heads)
+        .and_then(|value| value.checked_mul(head_dim))
+        .ok_or_else(|| "self-attn diagnostic k element count overflows".to_string())?;
+    let expected_v_elements = sequence_len
+        .checked_mul(kv_heads)
+        .and_then(|value| value.checked_mul(value_dim))
+        .ok_or_else(|| "self-attn diagnostic v element count overflows".to_string())?;
+    for (label, values, expected) in [
+        (
+            "prepared_attention_output",
+            prepared_attention_output,
+            expected_attention_elements,
+        ),
+        (
+            "layer_attention_output",
+            layer_attention_output,
+            expected_attention_elements,
+        ),
+        (
+            "layer_attention_projection_input",
+            layer_attention_projection_input,
+            expected_attention_elements,
+        ),
+        ("q_rope", q_rope, expected_q_elements),
+        ("k_rope", k_rope, expected_k_elements),
+        ("v_projected", v_projected, expected_v_elements),
+    ] {
+        if values.len() != expected {
+            return Err(format!(
+                "self-attn diagnostic {label} length mismatch: got {} expected {expected}",
+                values.len()
+            ));
+        }
+    }
+    if let Some(gate) = q_gate {
+        if gate.len() != expected_attention_elements {
+            return Err(format!(
+                "self-attn diagnostic q_gate length mismatch: got {} expected {expected_attention_elements}",
+                gate.len()
+            ));
+        }
+    }
+
+    let host_attention_output = runtime_host_causal_attn_f32(
+        q_rope,
+        k_rope,
+        v_projected,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+    );
+    if host_attention_output.len() != expected_attention_elements {
+        return Err(format!(
+            "self-attn diagnostic host attention length mismatch: got {} expected {expected_attention_elements}",
+            host_attention_output.len()
+        ));
+    }
+
+    let prepared_projection_input = package_attention_projection_input_from_gate(
+        q_gate,
+        prepared_attention_output,
+        expected_attention_elements,
+        "prepared",
+    )?;
+    let layer_projection_input_from_attention = package_attention_projection_input_from_gate(
+        q_gate,
+        layer_attention_output,
+        expected_attention_elements,
+        "layer",
+    )?;
+    let host_projection_input = package_attention_projection_input_from_gate(
+        q_gate,
+        &host_attention_output,
+        expected_attention_elements,
+        "host",
+    )?;
+
+    let mut diagnostic = serde_json::Map::new();
+    insert_json_detail(&mut diagnostic, "sequence_len", sequence_len);
+    insert_json_detail(&mut diagnostic, "attention_width", attention_width);
+    insert_json_detail(&mut diagnostic, "q_heads", q_heads);
+    insert_json_detail(&mut diagnostic, "kv_heads", kv_heads);
+    insert_json_detail(&mut diagnostic, "head_dim", head_dim);
+    insert_json_detail(&mut diagnostic, "value_dim", value_dim);
+    insert_json_detail(&mut diagnostic, "softmax_scale", softmax_scale);
+    insert_json_detail(&mut diagnostic, "has_q_gate", q_gate.is_some());
+    insert_json_detail(
+        &mut diagnostic,
+        "prepared_attention_vs_host_causal",
+        package_hidden_distribution(
+            prepared_attention_output,
+            &host_attention_output,
+            sequence_len,
+            attention_width,
+        )?,
+    );
+    insert_json_detail(
+        &mut diagnostic,
+        "layer_attention_vs_host_causal",
+        package_hidden_distribution(
+            layer_attention_output,
+            &host_attention_output,
+            sequence_len,
+            attention_width,
+        )?,
+    );
+    insert_json_detail(
+        &mut diagnostic,
+        "layer_attention_vs_prepared_attention",
+        package_hidden_distribution(
+            layer_attention_output,
+            prepared_attention_output,
+            sequence_len,
+            attention_width,
+        )?,
+    );
+    insert_json_detail(
+        &mut diagnostic,
+        "layer_projection_input_vs_host_projection_input",
+        package_hidden_distribution(
+            layer_attention_projection_input,
+            &host_projection_input,
+            sequence_len,
+            attention_width,
+        )?,
+    );
+    insert_json_detail(
+        &mut diagnostic,
+        "layer_projection_input_vs_prepared_projection_input",
+        package_hidden_distribution(
+            layer_attention_projection_input,
+            &prepared_projection_input,
+            sequence_len,
+            attention_width,
+        )?,
+    );
+    insert_json_detail(
+        &mut diagnostic,
+        "layer_projection_input_vs_layer_attention_gate_replay",
+        package_hidden_distribution(
+            layer_attention_projection_input,
+            &layer_projection_input_from_attention,
+            sequence_len,
+            attention_width,
+        )?,
+    );
+    insert_json_detail(
+        &mut diagnostic,
+        "sample_locations",
+        package_self_attn_causal_attention_sample_locations(
+            prepared_attention_output,
+            layer_attention_output,
+            &host_attention_output,
+            &prepared_projection_input,
+            layer_attention_projection_input,
+            &host_projection_input,
+            q_gate,
+            attention_width,
+        ),
+    );
+    Ok(diagnostic)
+}
+
+fn package_attention_projection_input_from_gate(
+    q_gate: Option<&[f32]>,
+    attention_output: &[f32],
+    expected_attention_elements: usize,
+    label: &str,
+) -> Result<Vec<f32>, String> {
+    if attention_output.len() != expected_attention_elements {
+        return Err(format!(
+            "self-attn diagnostic {label} attention length mismatch: got {} expected {expected_attention_elements}",
+            attention_output.len()
+        ));
+    }
+    match q_gate {
+        Some(gate) => {
+            if gate.len() != expected_attention_elements {
+                return Err(format!(
+                    "self-attn diagnostic {label} gate length mismatch: got {} expected {expected_attention_elements}",
+                    gate.len()
+                ));
+            }
+            let gated = runtime_host_sigmoid_mul_f32(gate, attention_output);
+            if gated.len() != expected_attention_elements {
+                return Err(format!(
+                    "self-attn diagnostic {label} gated output length mismatch: got {} expected {expected_attention_elements}",
+                    gated.len()
+                ));
+            }
+            Ok(gated)
+        }
+        None => Ok(attention_output.to_vec()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_self_attn_causal_attention_sample_locations(
+    prepared_attention_output: &[f32],
+    layer_attention_output: &[f32],
+    host_attention_output: &[f32],
+    prepared_projection_input: &[f32],
+    layer_projection_input: &[f32],
+    host_projection_input: &[f32],
+    q_gate: Option<&[f32]>,
+    attention_width: usize,
+) -> Vec<serde_json::Value> {
+    let sample_targets = [(8_usize, 503_usize)];
+    sample_targets
+        .into_iter()
+        .filter_map(|(token_index, feature_index)| {
+            if feature_index >= attention_width {
+                return None;
+            }
+            let flat_index = token_index.checked_mul(attention_width)?.checked_add(feature_index)?;
+            let prepared_attention = *prepared_attention_output.get(flat_index)?;
+            let layer_attention = *layer_attention_output.get(flat_index)?;
+            let host_attention = *host_attention_output.get(flat_index)?;
+            let prepared_projection = *prepared_projection_input.get(flat_index)?;
+            let layer_projection = *layer_projection_input.get(flat_index)?;
+            let host_projection = *host_projection_input.get(flat_index)?;
+            let q_gate_value = q_gate.and_then(|gate| gate.get(flat_index)).copied();
+            let q_gate_sigmoid =
+                q_gate_value.map(|gate| 1.0_f32 / (1.0_f32 + (-gate).exp()));
+            Some(serde_json::json!({
+                "token_index": token_index,
+                "feature_index": feature_index,
+                "flat_index": flat_index,
+                "prepared_attention_output": prepared_attention,
+                "layer_attention_output": layer_attention,
+                "host_attention_output": host_attention,
+                "layer_attention_minus_host_attention": layer_attention - host_attention,
+                "prepared_attention_minus_host_attention": prepared_attention - host_attention,
+                "layer_attention_minus_prepared_attention": layer_attention - prepared_attention,
+                "q_gate": q_gate_value,
+                "q_gate_sigmoid": q_gate_sigmoid,
+                "prepared_projection_input": prepared_projection,
+                "layer_projection_input": layer_projection,
+                "host_projection_input": host_projection,
+                "layer_projection_minus_host_projection": layer_projection - host_projection,
+                "layer_projection_minus_prepared_projection": layer_projection - prepared_projection,
+            }))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
