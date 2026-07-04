@@ -170,6 +170,189 @@ pub struct Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode {
     pub paged_cache_blocks: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen3SelfAttnBlockSequenceOutput {
+    pub attention_output: Vec<f32>,
+    pub attention_projection_input: Vec<f32>,
+    pub projected_output: Vec<f32>,
+    pub block_output: Vec<f32>,
+    pub paged_cache: PagedKvCacheReadback,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn qwen3_self_attn_block_sequence_to_host_f32(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    shape: PagedDecodeShape,
+    block_table: &[u32],
+    hidden: usize,
+    softmax_scale: f32,
+    o_projection_matrix: &RuntimeBuffer,
+    q_sequence: &[f32],
+    k_sequence: &[f32],
+    v_sequence: &[f32],
+    output_gate_sequence: Option<&[f32]>,
+    residual_sequence: &[f32],
+    sequence_len: usize,
+) -> Result<Qwen3SelfAttnBlockSequenceOutput, String> {
+    shape.validate()?;
+    if sequence_len == 0 {
+        return Err("self-attn block sequence length must be greater than zero".to_string());
+    }
+    if hidden == 0 {
+        return Err("self-attn block hidden size must be greater than zero".to_string());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "self-attn block softmax_scale must be finite and greater than zero".to_string(),
+        );
+    }
+
+    let q_token_elements = shape.q_elements()?;
+    let k_token_elements = shape.k_token_elements()?;
+    let v_token_elements = shape.v_token_elements()?;
+    let attention_elements = shape.output_elements()?;
+
+    let expected_q_len = q_token_elements
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "self-attn block q sequence length overflows".to_string())?;
+    let expected_k_len = k_token_elements
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "self-attn block k sequence length overflows".to_string())?;
+    let expected_v_len = v_token_elements
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "self-attn block v sequence length overflows".to_string())?;
+    let expected_residual_len = hidden
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "self-attn block residual sequence length overflows".to_string())?;
+    let expected_attention_len = attention_elements
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "self-attn block attention sequence length overflows".to_string())?;
+    if q_sequence.len() != expected_q_len {
+        return Err(format!(
+            "self-attn block q sequence length {} does not match sequence_len={sequence_len} q_token_elements={q_token_elements}",
+            q_sequence.len()
+        ));
+    }
+    if k_sequence.len() != expected_k_len {
+        return Err(format!(
+            "self-attn block k sequence length {} does not match sequence_len={sequence_len} k_token_elements={k_token_elements}",
+            k_sequence.len()
+        ));
+    }
+    if v_sequence.len() != expected_v_len {
+        return Err(format!(
+            "self-attn block v sequence length {} does not match sequence_len={sequence_len} v_token_elements={v_token_elements}",
+            v_sequence.len()
+        ));
+    }
+    if residual_sequence.len() != expected_residual_len {
+        return Err(format!(
+            "self-attn block residual sequence length {} does not match sequence_len={sequence_len} hidden={hidden}",
+            residual_sequence.len()
+        ));
+    }
+    if let Some(gate_sequence) = output_gate_sequence {
+        if gate_sequence.len() != expected_attention_len {
+            return Err(format!(
+                "self-attn block output gate length {} does not match sequence_len={sequence_len} attention_elements={attention_elements}",
+                gate_sequence.len()
+            ));
+        }
+    }
+
+    let mut state = Qwen3SelfAttnBlockStepState::new(
+        context,
+        stream,
+        shape,
+        block_table.to_vec(),
+        hidden,
+        softmax_scale,
+    )
+    .map_err(|err| format!("failed to create self-attn block sequence state: {err}"))?;
+
+    let mut attention_output = Vec::with_capacity(expected_attention_len);
+    let mut attention_projection_input = Vec::with_capacity(expected_attention_len);
+    let mut projected_output = Vec::with_capacity(expected_residual_len);
+    let mut block_output = Vec::with_capacity(expected_residual_len);
+
+    for timestep in 0..sequence_len {
+        let q_start = timestep
+            .checked_mul(q_token_elements)
+            .ok_or_else(|| "self-attn block q slice start overflows".to_string())?;
+        let q_end = q_start
+            .checked_add(q_token_elements)
+            .ok_or_else(|| "self-attn block q slice end overflows".to_string())?;
+        let k_start = timestep
+            .checked_mul(k_token_elements)
+            .ok_or_else(|| "self-attn block k slice start overflows".to_string())?;
+        let k_end = k_start
+            .checked_add(k_token_elements)
+            .ok_or_else(|| "self-attn block k slice end overflows".to_string())?;
+        let v_start = timestep
+            .checked_mul(v_token_elements)
+            .ok_or_else(|| "self-attn block v slice start overflows".to_string())?;
+        let v_end = v_start
+            .checked_add(v_token_elements)
+            .ok_or_else(|| "self-attn block v slice end overflows".to_string())?;
+        let residual_start = timestep
+            .checked_mul(hidden)
+            .ok_or_else(|| "self-attn block residual slice start overflows".to_string())?;
+        let residual_end = residual_start
+            .checked_add(hidden)
+            .ok_or_else(|| "self-attn block residual slice end overflows".to_string())?;
+        let output_gate = output_gate_sequence.map(|gate| {
+            let gate_start = timestep * attention_elements;
+            let gate_end = gate_start + attention_elements;
+            &gate[gate_start..gate_end]
+        });
+
+        let step = state
+            .step(
+                stream,
+                o_projection_matrix,
+                &q_sequence[q_start..q_end],
+                &k_sequence[k_start..k_end],
+                &v_sequence[v_start..v_end],
+                output_gate,
+                &residual_sequence[residual_start..residual_end],
+            )
+            .map_err(|err| {
+                format!("failed to run self-attn block sequence step {timestep}: {err}")
+            })?;
+        if step.cache_position != timestep {
+            return Err(format!(
+                "self-attn block sequence step wrote position {}, expected {timestep}",
+                step.cache_position
+            ));
+        }
+        if step.cache_len != timestep + 1 {
+            return Err(format!(
+                "self-attn block sequence step reported cache_len {}, expected {}",
+                step.cache_len,
+                timestep + 1
+            ));
+        }
+
+        attention_output.extend_from_slice(&step.attention_output);
+        attention_projection_input.extend_from_slice(&step.attention_projection_input);
+        projected_output.extend_from_slice(&step.projected_output);
+        block_output.extend_from_slice(&step.block_output);
+    }
+
+    let paged_cache = state
+        .read_cache_to_host(stream)
+        .map_err(|err| format!("failed to read self-attn block sequence paged cache: {err}"))?;
+
+    Ok(Qwen3SelfAttnBlockSequenceOutput {
+        attention_output,
+        attention_projection_input,
+        projected_output,
+        block_output,
+        paged_cache,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn qwen3_self_attn_prepare_sequence_runtime_f32(
     context: &mut RuntimeContext,
@@ -2670,6 +2853,138 @@ mod tests {
             assert_f32s_close(&step.block_output, &expected_block, 1e-5);
         }
         assert_eq!(state.written_len(), cache_len);
+    }
+
+    #[test]
+    fn qwen3_self_attn_block_sequence_to_host_f32_runs_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 3,
+            value_dim: 2,
+        };
+        let hidden = 4_usize;
+        let block_table = vec![1_u32, 0_u32];
+        let sequence_len = 3_usize;
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        let attention_elements = shape.output_elements().unwrap();
+        let q_token_elements = shape.q_elements().unwrap();
+        let k_token_elements = shape.k_token_elements().unwrap();
+        let v_token_elements = shape.v_token_elements().unwrap();
+
+        let o_matrix = (0..hidden * attention_elements)
+            .map(|index| ((index * 7) as f32 - 13.0) / 23.0)
+            .collect::<Vec<_>>();
+        let mut o_matrix_buffer = context.alloc_buffer(f32_bytes(o_matrix.len())).unwrap();
+        o_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&o_matrix), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let q_sequence = (0..sequence_len * q_token_elements)
+            .map(|index| ((index * 5) as f32 - 11.0) / 19.0)
+            .collect::<Vec<_>>();
+        let k_sequence = (0..sequence_len * k_token_elements)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_sequence = (0..sequence_len * v_token_elements)
+            .map(|index| ((index * 9) as f32 - 17.0) / 29.0)
+            .collect::<Vec<_>>();
+        let residual_sequence = (0..sequence_len * hidden)
+            .map(|index| ((index * 11) as f32 - 5.0) / 31.0)
+            .collect::<Vec<_>>();
+        let output_gate_sequence = (0..sequence_len * attention_elements)
+            .map(|index| ((index * 13) as f32 - 17.0) / 37.0)
+            .collect::<Vec<_>>();
+
+        let output = qwen3_self_attn_block_sequence_to_host_f32(
+            &mut context,
+            &mut stream,
+            shape,
+            &block_table,
+            hidden,
+            softmax_scale,
+            &o_matrix_buffer,
+            &q_sequence,
+            &k_sequence,
+            &v_sequence,
+            Some(&output_gate_sequence),
+            &residual_sequence,
+            sequence_len,
+        )
+        .unwrap();
+
+        let mut expected_attention_output = Vec::with_capacity(sequence_len * attention_elements);
+        let mut expected_attention_projection_input =
+            Vec::with_capacity(sequence_len * attention_elements);
+        let mut expected_projected = Vec::with_capacity(sequence_len * hidden);
+        let mut expected_block = Vec::with_capacity(sequence_len * hidden);
+        for timestep in 0..sequence_len {
+            let q_start = timestep * q_token_elements;
+            let q_end = q_start + q_token_elements;
+            let gate_end = (timestep + 1) * attention_elements;
+            let residual_end = (timestep + 1) * hidden;
+            let k_end = (timestep + 1) * k_token_elements;
+            let v_end = (timestep + 1) * v_token_elements;
+
+            let packed = pack_paged_kv_for_test(
+                &k_sequence[..k_end],
+                &v_sequence[..v_end],
+                &block_table,
+                timestep + 1,
+                shape,
+            );
+            let expected_attention = expected_paged_decode_attn(
+                &q_sequence[q_start..q_end],
+                &packed.0,
+                &packed.1,
+                &block_table,
+                timestep + 1,
+                shape,
+                softmax_scale,
+            );
+            let gate_start = timestep * attention_elements;
+            let gate_slice = &output_gate_sequence[gate_start..gate_end];
+            let expected_projection_input = sigmoid_mul_for_test(gate_slice, &expected_attention);
+            let expected_step_projected = matvec_for_test(
+                &o_matrix,
+                &expected_projection_input,
+                hidden,
+                attention_elements,
+            );
+            let residual_start = timestep * hidden;
+            let residual_slice = &residual_sequence[residual_start..residual_end];
+            let expected_step_block = add_for_test(&residual_slice, &expected_step_projected);
+
+            expected_attention_output.extend_from_slice(&expected_attention);
+            expected_attention_projection_input.extend_from_slice(&expected_projection_input);
+            expected_projected.extend_from_slice(&expected_step_projected);
+            expected_block.extend_from_slice(&expected_step_block);
+        }
+
+        let expected_cache = pack_paged_kv_cache_for_block_table(
+            &k_sequence,
+            &v_sequence,
+            &block_table,
+            sequence_len,
+            shape,
+        )
+        .unwrap();
+
+        assert_f32s_close(&output.attention_output, &expected_attention_output, 1e-5);
+        assert_f32s_close(
+            &output.attention_projection_input,
+            &expected_attention_projection_input,
+            1e-5,
+        );
+        assert_f32s_close(&output.projected_output, &expected_projected, 1e-5);
+        assert_f32s_close(&output.block_output, &expected_block, 1e-5);
+        assert_f32s_close(&output.paged_cache.k, &expected_cache.k, 1e-6);
+        assert_f32s_close(&output.paged_cache.v, &expected_cache.v, 1e-6);
     }
 
     #[test]

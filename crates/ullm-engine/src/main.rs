@@ -9,10 +9,11 @@ use std::time::Instant;
 use ullm_engine::decoder::{
     PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntime,
     Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights,
-    Qwen3SelfAttnBlockStepState, Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimePreparedSequence,
+    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimePreparedSequence,
     Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode, Qwen3SelfAttnRuntimeShape,
     Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
     qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
+    qwen3_self_attn_block_sequence_to_host_f32,
     qwen3_self_attn_prepare_sequence_for_paged_decode_f32, qwen3_self_attn_runtime_shape,
     split_qwen3_self_attn_q_projection,
 };
@@ -7831,7 +7832,7 @@ fn run_self_attn_block_sequence_smoke(
         k_rope,
         v_projected,
         q_gate,
-        attention_output,
+        attention_output: prepared_attention_output,
         expected_paged_k_cache,
         expected_paged_v_cache,
         hidden,
@@ -7877,75 +7878,35 @@ fn run_self_attn_block_sequence_smoke(
         head_dim,
         value_dim,
     };
-    let mut qwen_step_state = Qwen3SelfAttnBlockStepState::new(
+    let q_token_elements = q_heads * head_dim;
+    let attention_elements = q_heads * value_dim;
+    let block_sequence_output = qwen3_self_attn_block_sequence_to_host_f32(
         context,
         stream,
         decode_shape,
-        paged_block_table.clone(),
+        &paged_block_table,
         hidden,
         softmax_scale,
-    )?;
-    let q_token_elements = q_heads * head_dim;
-    let k_token_elements = kv_heads * head_dim;
-    let v_token_elements = kv_heads * value_dim;
-    let attention_elements = q_heads * value_dim;
-    if let Some(gate) = q_gate.as_ref() {
-        if gate.len() != sequence_len * attention_elements {
-            return Err(format!(
-                "Qwen3.5 output gate length {} does not match sequence_len={sequence_len} attention_elements={attention_elements}",
-                gate.len()
-            ));
-        }
-    }
-    let mut paged_step_attention_output = Vec::with_capacity(sequence_len * attention_elements);
-    let mut attention_projection_input = Vec::with_capacity(sequence_len * attention_elements);
-    let mut attn_projected = Vec::with_capacity(sequence_len * o_rows);
-    let mut block_output = Vec::with_capacity(sequence_len * hidden);
-    let mut paged_step_attention_max_abs_diff = 0.0_f32;
-    let mut output_gate_max_abs_diff = 0.0_f32;
-    let mut o_proj_max_abs_diff = 0.0_f32;
-    let mut block_max_abs_diff = 0.0_f32;
+        &self_attn_weights.o_matrix,
+        &q_rope,
+        &k_rope,
+        &v_projected,
+        q_gate.as_deref(),
+        &residual_sequence,
+        sequence_len,
+    )
+    .map_err(|err| format!("failed to run {label} Qwen3 self-attn block sequence: {err}"))?;
+    let attention_output = block_sequence_output.attention_output;
+    let attention_projection_input = block_sequence_output.attention_projection_input;
+    let attn_projected = block_sequence_output.projected_output;
+    let block_output = block_sequence_output.block_output;
+    let paged_cache = block_sequence_output.paged_cache;
 
+    let mut expected_paged_step_attention_output =
+        Vec::with_capacity(sequence_len * attention_elements);
     for timestep in 0..sequence_len {
         let q_start = timestep * q_token_elements;
         let q_end = q_start + q_token_elements;
-        let k_start = timestep * k_token_elements;
-        let k_end = k_start + k_token_elements;
-        let v_start = timestep * v_token_elements;
-        let v_end = v_start + v_token_elements;
-        let attention_start = timestep * attention_elements;
-        let attention_end = attention_start + attention_elements;
-        let residual_start = timestep * hidden;
-        let residual_end = residual_start + hidden;
-        let gate_step = q_gate
-            .as_ref()
-            .map(|gate| &gate[attention_start..attention_end]);
-        let step = qwen_step_state
-            .step(
-                stream,
-                &self_attn_weights.o_matrix,
-                &q_rope[q_start..q_end],
-                &k_rope[k_start..k_end],
-                &v_projected[v_start..v_end],
-                gate_step,
-                &residual_sequence[residual_start..residual_end],
-            )
-            .map_err(|err| {
-                format!("failed to run {label} Qwen3 self-attn step {timestep}: {err}")
-            })?;
-        if step.cache_position != timestep {
-            return Err(format!(
-                "{label} Qwen3 self-attn step wrote position {}, expected {timestep}",
-                step.cache_position
-            ));
-        }
-        if step.cache_len != timestep + 1 {
-            return Err(format!(
-                "{label} Qwen3 self-attn step reported cache_len {}, expected {}",
-                step.cache_len,
-                timestep + 1
-            ));
-        }
         let expected_step_output = runtime_host_paged_decode_attn_f32(
             &q_rope[q_start..q_end],
             &expected_paged_k_cache,
@@ -7959,66 +7920,55 @@ fn run_self_attn_block_sequence_smoke(
             value_dim,
             softmax_scale,
         );
-        let step_attention_diff = verify_f32_close(
-            &format!("{label} Qwen3 self-attn step {timestep} attention"),
-            &step.attention_output,
-            &expected_step_output,
-            1e-4,
-            1e-4,
-        )?;
-        paged_step_attention_max_abs_diff =
-            paged_step_attention_max_abs_diff.max(step_attention_diff);
-
-        let expected_projection_input = if let Some(gate) = gate_step {
-            runtime_host_sigmoid_mul_f32(gate, &step.attention_output)
-        } else {
-            step.attention_output.clone()
-        };
-        let gate_diff = verify_f32_close(
-            &format!("{label} Qwen3 self-attn step {timestep} output gate"),
-            &step.attention_projection_input,
-            &expected_projection_input,
-            1e-5,
-            1e-6,
-        )?;
-        output_gate_max_abs_diff = output_gate_max_abs_diff.max(gate_diff);
-
-        let expected_projected = runtime_host_matvec_f32(
+        expected_paged_step_attention_output.extend_from_slice(&expected_step_output);
+    }
+    let expected_paged_projection_input = if let Some(gate) = q_gate.as_ref() {
+        runtime_host_sigmoid_mul_f32(gate, &attention_output)
+    } else {
+        attention_output.clone()
+    };
+    let mut expected_paged_attn_projected = Vec::with_capacity(sequence_len * o_rows);
+    for timestep in 0..sequence_len {
+        let input_start = timestep * attention_elements;
+        let input_end = input_start + attention_elements;
+        expected_paged_attn_projected.extend(runtime_host_matvec_f32(
             &o_matrix_host,
-            &step.attention_projection_input,
+            &expected_paged_projection_input[input_start..input_end],
             o_rows,
             o_cols,
-        );
-        let projected_diff = verify_f32_close(
-            &format!("{label} Qwen3 self-attn step {timestep} o projection"),
-            &step.projected_output,
-            &expected_projected,
-            1e-4,
-            1e-5,
-        )?;
-        o_proj_max_abs_diff = o_proj_max_abs_diff.max(projected_diff);
-
-        let expected_block_step = runtime_host_add_f32(
-            &residual_sequence[residual_start..residual_end],
-            &step.projected_output,
-        );
-        let block_diff = verify_f32_close(
-            &format!("{label} Qwen3 self-attn step {timestep} residual add"),
-            &step.block_output,
-            &expected_block_step,
-            1e-5,
-            1e-6,
-        )?;
-        block_max_abs_diff = block_max_abs_diff.max(block_diff);
-
-        paged_step_attention_output.extend_from_slice(&step.attention_output);
-        attention_projection_input.extend_from_slice(&step.attention_projection_input);
-        attn_projected.extend_from_slice(&step.projected_output);
-        block_output.extend_from_slice(&step.block_output);
+        ));
     }
-    let paged_cache = qwen_step_state
-        .read_cache_to_host(stream)
-        .map_err(|err| format!("failed to read {label} Qwen3 self-attn paged cache: {err}"))?;
+    let expected_runtime_block_output = runtime_host_add_f32(&residual_sequence, &attn_projected);
+
+    let paged_step_attention_max_abs_diff = verify_f32_close(
+        &format!("{label} Qwen3 self-attn step"),
+        &attention_output,
+        &expected_paged_step_attention_output,
+        1e-4,
+        1e-4,
+    )?;
+    let output_gate_max_abs_diff = verify_f32_close(
+        &format!("{label} Qwen3 self-attn output gate"),
+        &attention_projection_input,
+        &expected_paged_projection_input,
+        1e-5,
+        1e-6,
+    )?;
+    let o_proj_max_abs_diff = verify_f32_close(
+        &format!("{label} Qwen3 self-attn o projection"),
+        &attn_projected,
+        &expected_paged_attn_projected,
+        1e-4,
+        1e-5,
+    )?;
+    let block_max_abs_diff = verify_f32_close(
+        &format!("{label} Qwen3 self-attn residual add"),
+        &block_output,
+        &expected_runtime_block_output,
+        1e-5,
+        1e-6,
+    )?;
+
     let paged_kv_write_k_max_abs_diff = verify_f32_close(
         &format!("{label} Qwen3 self-attn paged k cache write"),
         &paged_cache.k,
@@ -8035,20 +7985,20 @@ fn run_self_attn_block_sequence_smoke(
     )?;
     let causal_paged_step_attention_max_abs_diff = verify_f32_close(
         &format!("{label} causal-vs-paged-step-attention"),
-        &paged_step_attention_output,
         &attention_output,
+        &prepared_attention_output,
         1e-4,
         1e-4,
     )?;
     let causal_attention_projection_input = if let Some(gate) = q_gate.as_ref() {
-        runtime_host_sigmoid_mul_f32(gate, &attention_output)
+        runtime_host_sigmoid_mul_f32(gate, &prepared_attention_output)
     } else {
-        attention_output.clone()
+        prepared_attention_output.clone()
     };
     let mut causal_attn_projected = Vec::with_capacity(sequence_len * o_rows);
     for timestep in 0..sequence_len {
-        let input_start = timestep * o_cols;
-        let input_end = input_start + o_cols;
+        let input_start = timestep * attention_elements;
+        let input_end = input_start + attention_elements;
         causal_attn_projected.extend(runtime_host_matvec_f32(
             &o_matrix_host,
             &causal_attention_projection_input[input_start..input_end],
@@ -8056,7 +8006,6 @@ fn run_self_attn_block_sequence_smoke(
             o_cols,
         ));
     }
-
     let expected_causal_block_output =
         runtime_host_add_f32(&residual_sequence, &causal_attn_projected);
     let causal_paged_block_max_abs_diff = verify_f32_close(
