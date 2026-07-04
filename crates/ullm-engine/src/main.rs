@@ -6942,10 +6942,6 @@ fn package_self_attn_block_smoke(
         Err(code) => return code,
     };
 
-    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
-    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
-    let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
-    let o_tensor = format!("model.language_model.layers.{layer_index}.self_attn.o_proj.weight");
     let q_norm_tensor =
         format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
     let k_norm_tensor =
@@ -6997,512 +6993,90 @@ fn package_self_attn_block_smoke(
         return ExitCode::from(2);
     }
 
-    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
-        Ok(context) => context,
-        Err(err) => {
-            eprintln!("failed to create runtime context: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let info = match context.device_info() {
-        Ok(info) => info,
-        Err(err) => {
-            eprintln!("failed to query runtime context device: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let mut stream = match context.create_stream() {
-        Ok(stream) => stream,
-        Err(err) => {
-            eprintln!("failed to create runtime stream: {err}");
-            return ExitCode::from(1);
-        }
-    };
+    let result = package_self_attn_block_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        sequence_len,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        q_norm,
+        k_norm,
+    );
 
-    let mut registry = WeightRegistry::new();
-    let (q_rows, q_cols, q_matrix) = match materialize_selected_aq4_matrix(
+    match result {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_self_attn_block_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    sequence_len: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    position_offset: usize,
+    q_norm: PassthroughF32Data,
+    k_norm: PassthroughF32Data,
+) -> Result<String, String> {
+    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
+    let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
+    let o_tensor = format!("model.language_model.layers.{layer_index}.self_attn.o_proj.weight");
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let self_attn_weights = qwen3_self_attn_runtime_weights_from_package(
         &mut context,
         &mut stream,
-        &mut registry,
-        &path,
+        path,
+        chunk_bytes,
         &q_tensor,
-        chunk_bytes,
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("failed to materialize tensor {q_tensor}: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let (k_rows, k_cols, k_matrix) = match materialize_selected_aq4_matrix(
-        &mut context,
-        &mut stream,
-        &mut registry,
-        &path,
         &k_tensor,
-        chunk_bytes,
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("failed to materialize tensor {k_tensor}: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let (v_rows, v_cols, v_matrix) = match materialize_selected_aq4_matrix(
-        &mut context,
-        &mut stream,
-        &mut registry,
-        &path,
         &v_tensor,
-        chunk_bytes,
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("failed to materialize tensor {v_tensor}: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let (o_rows, o_cols, o_matrix) = match materialize_selected_aq4_matrix(
-        &mut context,
-        &mut stream,
-        &mut registry,
-        &path,
         &o_tensor,
-        chunk_bytes,
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("failed to materialize tensor {o_tensor}: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    if q_cols != k_cols || q_cols != v_cols {
-        eprintln!(
-            "self-attn q/k/v projection hidden sizes differ: q_cols={q_cols}, k_cols={k_cols}, v_cols={v_cols}"
-        );
-        return ExitCode::from(1);
-    }
-    if k_rows % head_dim != 0 {
-        eprintln!("k rows must be a multiple of head_dim: k_rows={k_rows}, head_dim={head_dim}");
-        return ExitCode::from(1);
-    }
-    let kv_heads = k_rows / head_dim;
-    if kv_heads == 0 {
-        eprintln!("kv_heads must be greater than zero");
-        return ExitCode::from(1);
-    }
-    if v_rows % kv_heads != 0 {
-        eprintln!("v rows must be a multiple of kv_heads: v_rows={v_rows}, kv_heads={kv_heads}");
-        return ExitCode::from(1);
-    }
-    let value_dim = v_rows / kv_heads;
+        &q_norm,
+        &k_norm,
+    )?;
 
-    let hidden_bytes = match q_cols.checked_mul(std::mem::size_of::<f32>()) {
-        Some(value) => value,
-        None => {
-            eprintln!("hidden input byte size overflows");
-            return ExitCode::from(1);
-        }
-    };
-
-    let base_input = deterministic_f32_vector(q_cols);
-    let mut residual_sequence = Vec::with_capacity(sequence_len * q_cols);
-    let mut input_buffer = match context.alloc_buffer(hidden_bytes) {
-        Ok(buffer) => buffer,
-        Err(err) => {
-            eprintln!("failed to allocate self-attn block input buffer: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let mut q_projected = Vec::with_capacity(sequence_len * q_rows);
-    let mut k_projected = Vec::with_capacity(sequence_len * k_rows);
-    let mut v_projected = Vec::with_capacity(sequence_len * v_rows);
-    for timestep in 0..sequence_len {
-        let step_input = linear_attn_step_input(&base_input, timestep);
-        residual_sequence.extend_from_slice(&step_input);
-        let step_input_bytes = encode_f32_to_bytes(&step_input);
-        if let Err(err) = input_buffer.copy_from_host(0, &step_input_bytes, Some(&mut stream)) {
-            eprintln!("failed to copy self-attn block timestep {timestep} input: {err}");
-            return ExitCode::from(1);
-        }
-        if let Err(err) = stream.synchronize() {
-            eprintln!(
-                "failed to synchronize after self-attn block timestep {timestep} input copy: {err}"
-            );
-            return ExitCode::from(1);
-        }
-        let q_step = match runtime_matvec_to_host_f32(
-            &mut context,
-            &mut stream,
-            &q_matrix,
-            &input_buffer,
-            q_rows,
-            q_cols,
-            "self-attn block q projection",
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("{err}");
-                return ExitCode::from(1);
-            }
-        };
-        let k_step = match runtime_matvec_to_host_f32(
-            &mut context,
-            &mut stream,
-            &k_matrix,
-            &input_buffer,
-            k_rows,
-            k_cols,
-            "self-attn block k projection",
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("{err}");
-                return ExitCode::from(1);
-            }
-        };
-        let v_step = match runtime_matvec_to_host_f32(
-            &mut context,
-            &mut stream,
-            &v_matrix,
-            &input_buffer,
-            v_rows,
-            v_cols,
-            "self-attn block v projection",
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("{err}");
-                return ExitCode::from(1);
-            }
-        };
-        q_projected.extend(q_step);
-        k_projected.extend(k_step);
-        v_projected.extend(v_step);
-    }
-    let q_projection_split = match split_qwen3_self_attn_q_projection(
-        &q_projected,
+    let self_attn = run_self_attn_block_sequence_smoke(
+        &mut context,
+        &mut stream,
+        &self_attn_weights,
         sequence_len,
-        q_rows,
-        q_cols,
-        head_dim,
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let q_heads = q_projection_split.q_heads;
-    if !q_heads.is_multiple_of(kv_heads) {
-        eprintln!("q_heads must be a multiple of kv_heads: q_heads={q_heads}, kv_heads={kv_heads}");
-        return ExitCode::from(1);
-    }
-    if o_cols != q_heads * value_dim || o_rows != q_cols {
-        eprintln!(
-            "o projection shape mismatch: o_rows={o_rows}, o_cols={o_cols}, hidden={q_cols}, attention_width={}",
-            q_heads * value_dim
-        );
-        return ExitCode::from(1);
-    }
-    let q_projection_layout = q_projection_split.layout;
-    let q_gate = q_projection_split.gate;
-    let q_gate_elements = q_gate.as_ref().map_or(0, Vec::len);
-    let q_projected = q_projection_split.query;
-
-    let epsilon = 1e-5_f32;
-    let (q_normed, q_norm_max_abs_diff) = match runtime_headwise_rmsnorm_verify(
-        &mut context,
-        &mut stream,
-        &q_projected,
-        &q_norm.values,
-        epsilon,
-        "package-self-attn-block-smoke q_norm",
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let (k_normed, k_norm_max_abs_diff) = match runtime_headwise_rmsnorm_verify(
-        &mut context,
-        &mut stream,
-        &k_projected,
-        &k_norm.values,
-        epsilon,
-        "package-self-attn-block-smoke k_norm",
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let (q_rope, q_rope_max_abs_diff) = match runtime_rope_verify(
-        &mut context,
-        &mut stream,
-        &q_normed,
-        sequence_len,
-        q_heads,
-        head_dim,
         rotary_dim,
-        position_offset,
         rope_base,
-        "package-self-attn-block-smoke q_rope",
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let (k_rope, k_rope_max_abs_diff) = match runtime_rope_verify(
-        &mut context,
-        &mut stream,
-        &k_normed,
-        sequence_len,
-        kv_heads,
-        head_dim,
-        rotary_dim,
         position_offset,
-        rope_base,
-        "package-self-attn-block-smoke k_rope",
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
-    let (attention_output, attention_max_abs_diff) = match runtime_causal_attn_verify(
-        &mut context,
-        &mut stream,
-        &q_rope,
-        &k_rope,
-        &v_projected,
-        sequence_len,
-        q_heads,
-        kv_heads,
-        head_dim,
-        value_dim,
-        softmax_scale,
-        "package-self-attn-block-smoke attention",
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-    let (attention_projection_input, output_gate_layout, output_gate_max_abs_diff) = match q_gate
-        .as_ref()
-    {
-        Some(gate) => {
-            let expected_gated_attention = runtime_host_sigmoid_mul_f32(&gate, &attention_output);
-            if expected_gated_attention.is_empty() {
-                eprintln!(
-                    "failed to apply Qwen3.5 self-attn output gate: gate_elements={} attention_elements={}",
-                    gate.len(),
-                    attention_output.len()
-                );
-                return ExitCode::from(1);
-            }
-            let gate_bytes = encode_f32_to_bytes(&gate);
-            let attention_bytes = encode_f32_to_bytes(&attention_output);
-            let output_gate_bytes_len = attention_bytes.len();
-            let mut gate_buffer = match context.alloc_buffer(gate_bytes.len()) {
-                Ok(buffer) => buffer,
-                Err(err) => {
-                    eprintln!("failed to allocate self-attn output gate buffer: {err}");
-                    return ExitCode::from(1);
-                }
-            };
-            let mut attention_buffer = match context.alloc_buffer(output_gate_bytes_len) {
-                Ok(buffer) => buffer,
-                Err(err) => {
-                    eprintln!("failed to allocate self-attn output gate input buffer: {err}");
-                    return ExitCode::from(1);
-                }
-            };
-            let mut gated_attention_buffer = match context.alloc_buffer(output_gate_bytes_len) {
-                Ok(buffer) => buffer,
-                Err(err) => {
-                    eprintln!("failed to allocate self-attn gated attention buffer: {err}");
-                    return ExitCode::from(1);
-                }
-            };
-            if let Err(err) = gate_buffer.copy_from_host(0, &gate_bytes, Some(&mut stream)) {
-                eprintln!("failed to copy self-attn output gate into runtime buffer: {err}");
-                return ExitCode::from(1);
-            }
-            if let Err(err) =
-                attention_buffer.copy_from_host(0, &attention_bytes, Some(&mut stream))
-            {
-                eprintln!("failed to copy self-attn attention into runtime gate input: {err}");
-                return ExitCode::from(1);
-            }
-            if let Err(err) = stream.synchronize() {
-                eprintln!("failed to synchronize after self-attn output gate input copy: {err}");
-                return ExitCode::from(1);
-            }
-            if let Err(err) = ullm_runtime_sys::sigmoid_mul_f32(
-                &gate_buffer,
-                &attention_buffer,
-                attention_output.len(),
-                &mut gated_attention_buffer,
-                Some(&mut stream),
-            ) {
-                eprintln!("failed to run self-attn output gate sigmoid_mul_f32: {err}");
-                return ExitCode::from(1);
-            }
-            if let Err(err) = stream.synchronize() {
-                eprintln!("failed to synchronize after self-attn output gate sigmoid_mul: {err}");
-                return ExitCode::from(1);
-            }
-            let mut gated_attention_raw = vec![0_u8; output_gate_bytes_len];
-            if let Err(err) =
-                gated_attention_buffer.copy_to_host(0, &mut gated_attention_raw, Some(&mut stream))
-            {
-                eprintln!("failed to copy self-attn gated attention output: {err}");
-                return ExitCode::from(1);
-            }
-            if let Err(err) = stream.synchronize() {
-                eprintln!("failed to synchronize after self-attn gated attention copy: {err}");
-                return ExitCode::from(1);
-            }
-            let gated_attention = decode_f32_le_values(&gated_attention_raw);
-            let output_gate_max_abs_diff = match verify_f32_close(
-                "package-self-attn-block-smoke output gate",
-                &gated_attention,
-                &expected_gated_attention,
-                1e-5,
-                1e-6,
-            ) {
-                Ok(value) => value,
-                Err(err) => {
-                    eprintln!("{err}");
-                    return ExitCode::from(1);
-                }
-            };
-            (gated_attention, "runtime-sigmoid", output_gate_max_abs_diff)
-        }
-        None => (attention_output.clone(), "none", 0.0_f32),
-    };
-    let o_matrix_bytes = match o_rows
-        .checked_mul(o_cols)
-        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
-    {
-        Some(value) => value,
-        None => {
-            eprintln!("o projection matrix byte size overflows");
-            return ExitCode::from(1);
-        }
-    };
-    let mut o_matrix_raw = vec![0_u8; o_matrix_bytes];
-    if let Err(err) = o_matrix.copy_to_host(0, &mut o_matrix_raw, Some(&mut stream)) {
-        eprintln!("failed to copy materialized o projection to host: {err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = stream.synchronize() {
-        eprintln!("failed to synchronize after o projection host copy: {err}");
-        return ExitCode::from(1);
-    }
-    let o_matrix_host = decode_f32_le_values(&o_matrix_raw);
-    let (attn_projected, o_proj_max_abs_diff) = match runtime_matvec_sequence_to_host_f32(
-        &mut context,
-        &mut stream,
-        &o_matrix,
-        &o_matrix_host,
-        &attention_projection_input,
-        sequence_len,
-        o_rows,
-        o_cols,
-        "package-self-attn-block-smoke o projection",
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
+        &q_norm,
+        &k_norm,
+        "package-self-attn-block-smoke",
+    )?;
 
-    let residual_bytes = encode_f32_to_bytes(&residual_sequence);
-    let attn_projected_bytes = encode_f32_to_bytes(&attn_projected);
-    let block_bytes_len = residual_bytes.len();
-    let mut residual_buffer = match context.alloc_buffer(block_bytes_len) {
-        Ok(buffer) => buffer,
-        Err(err) => {
-            eprintln!("failed to allocate self-attn residual buffer: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let mut attn_projected_buffer = match context.alloc_buffer(block_bytes_len) {
-        Ok(buffer) => buffer,
-        Err(err) => {
-            eprintln!("failed to allocate self-attn projected buffer: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let mut block_buffer = match context.alloc_buffer(block_bytes_len) {
-        Ok(buffer) => buffer,
-        Err(err) => {
-            eprintln!("failed to allocate self-attn block output buffer: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    if let Err(err) = residual_buffer.copy_from_host(0, &residual_bytes, Some(&mut stream)) {
-        eprintln!("failed to copy residual sequence into runtime buffer: {err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) =
-        attn_projected_buffer.copy_from_host(0, &attn_projected_bytes, Some(&mut stream))
-    {
-        eprintln!("failed to copy attention projection into runtime buffer: {err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = ullm_runtime_sys::add_f32(
-        &residual_buffer,
-        &attn_projected_buffer,
-        residual_sequence.len(),
-        &mut block_buffer,
-        Some(&mut stream),
-    ) {
-        eprintln!("failed to run self-attn residual add: {err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = stream.synchronize() {
-        eprintln!("failed to synchronize after self-attn residual add: {err}");
-        return ExitCode::from(1);
-    }
-    let mut block_raw = vec![0_u8; block_bytes_len];
-    if let Err(err) = block_buffer.copy_to_host(0, &mut block_raw, Some(&mut stream)) {
-        eprintln!("failed to copy self-attn block output: {err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = stream.synchronize() {
-        eprintln!("failed to synchronize after self-attn block output copy: {err}");
-        return ExitCode::from(1);
-    }
-    let block_output = decode_f32_le_values(&block_raw);
-    let expected_block_output = runtime_host_add_f32(&residual_sequence, &attn_projected);
-    let block_max_abs_diff = match verify_f32_close(
-        "package-self-attn-block-smoke residual add",
-        &block_output,
-        &expected_block_output,
-        1e-5,
-        1e-6,
-    ) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(1);
-        }
-    };
-
-    println!(
-        "package-self-attn-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} sequence_len={} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" attention_preview={} gated_attention_preview={} projected_preview={} block_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} output_gate_max_abs_diff={output_gate_max_abs_diff:.9} o_proj_max_abs_diff={o_proj_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} verified=true",
+    Ok(format!(
+        "package-self-attn-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} sequence_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" attention_preview={} gated_attention_preview={} projected_preview={} block_preview={} q_norm_max_abs_diff={:.9} k_norm_max_abs_diff={:.9} q_rope_max_abs_diff={:.9} k_rope_max_abs_diff={:.9} attention_max_abs_diff={:.9} paged_kv_write_k_max_abs_diff={:.9} paged_kv_write_v_max_abs_diff={:.9} paged_step_attention_max_abs_diff={:.9} causal_paged_step_attention_max_abs_diff={:.9} output_gate_max_abs_diff={:.9} o_proj_max_abs_diff={:.9} block_max_abs_diff={:.9} causal_paged_block_max_abs_diff={:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -7511,29 +7085,48 @@ fn package_self_attn_block_smoke(
         o_tensor,
         q_norm_tensor,
         k_norm_tensor,
-        q_cols,
+        self_attn.hidden,
         sequence_len,
-        q_projection_layout,
-        q_gate_elements,
-        output_gate_layout,
-        q_heads,
-        kv_heads,
-        head_dim,
-        value_dim,
+        self_attn.paged_block_size,
+        self_attn.paged_cache_blocks,
+        self_attn.paged_block_table,
+        self_attn.q_projection_layout,
+        self_attn.q_gate_elements,
+        self_attn.output_gate_layout,
+        self_attn.q_heads,
+        self_attn.kv_heads,
+        self_attn.head_dim,
+        self_attn.value_dim,
         rotary_dim,
         position_offset,
         rope_base,
+        self_attn.softmax_scale,
         q_norm.dtype,
         k_norm.dtype,
         info.backend,
         device_index,
         info.name,
-        format_f32_preview(&attention_output[..8.min(attention_output.len())]),
-        format_f32_preview(&attention_projection_input[..8.min(attention_projection_input.len())]),
-        format_f32_preview(&attn_projected[..8.min(attn_projected.len())]),
-        format_f32_preview(&block_output[..8.min(block_output.len())]),
-    );
-    ExitCode::SUCCESS
+        format_f32_preview(&self_attn.attention_output[..8.min(self_attn.attention_output.len())]),
+        format_f32_preview(
+            &self_attn.attention_projection_input
+                [..8.min(self_attn.attention_projection_input.len())],
+        ),
+        format_f32_preview(&self_attn.attn_projected[..8.min(self_attn.attn_projected.len())]),
+        format_f32_preview(&self_attn.block_output[..8.min(self_attn.block_output.len())]),
+        self_attn.q_norm_max_abs_diff,
+        self_attn.k_norm_max_abs_diff,
+        self_attn.q_rope_max_abs_diff,
+        self_attn.k_rope_max_abs_diff,
+        self_attn.attention_max_abs_diff,
+        self_attn.paged_kv_write_k_max_abs_diff,
+        self_attn.paged_kv_write_v_max_abs_diff,
+        self_attn.paged_step_attention_max_abs_diff,
+        self_attn.causal_paged_step_attention_max_abs_diff,
+        self_attn.output_gate_max_abs_diff,
+        self_attn.o_proj_max_abs_diff,
+        self_attn.block_max_abs_diff,
+        self_attn.causal_paged_block_max_abs_diff,
+    ))
 }
 
 struct Qwen3SelfAttnPreparedSequence {
@@ -16335,77 +15928,6 @@ fn runtime_paged_kv_write_decode_verify(
         k_write_max_abs_diff,
         v_write_max_abs_diff,
     })
-}
-
-fn runtime_matvec_sequence_to_host_f32(
-    context: &mut ullm_runtime_sys::RuntimeContext,
-    stream: &mut ullm_runtime_sys::RuntimeStream,
-    matrix: &ullm_runtime_sys::RuntimeBuffer,
-    matrix_host: &[f32],
-    input_sequence: &[f32],
-    sequence_len: usize,
-    rows: usize,
-    cols: usize,
-    label: &str,
-) -> Result<(Vec<f32>, f32), String> {
-    if input_sequence.len() != sequence_len * cols {
-        return Err(format!(
-            "{label} input sequence length {} does not match sequence_len={sequence_len} cols={cols}",
-            input_sequence.len()
-        ));
-    }
-    if matrix_host.len() != rows * cols {
-        return Err(format!(
-            "{label} host matrix length {} does not match rows={rows} cols={cols}",
-            matrix_host.len()
-        ));
-    }
-    let input_bytes = cols
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} input byte size overflows"))?;
-    let output_bytes = rows
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} output byte size overflows"))?;
-    let mut input_buffer = context
-        .alloc_buffer(input_bytes)
-        .map_err(|err| format!("failed to allocate {label} input buffer: {err}"))?;
-    let mut output_buffer = context
-        .alloc_buffer(output_bytes)
-        .map_err(|err| format!("failed to allocate {label} output buffer: {err}"))?;
-    let mut output = Vec::with_capacity(sequence_len * rows);
-    let mut expected = Vec::with_capacity(sequence_len * rows);
-    let mut output_step_bytes = vec![0_u8; output_bytes];
-    for timestep in 0..sequence_len {
-        let element_start = timestep * cols;
-        let element_end = element_start + cols;
-        let step_input = &input_sequence[element_start..element_end];
-        let step_input_bytes = encode_f32_to_bytes(step_input);
-        input_buffer
-            .copy_from_host(0, &step_input_bytes, Some(stream))
-            .map_err(|err| format!("failed to copy {label} timestep {timestep} input: {err}"))?;
-        ullm_runtime_sys::matvec_f32(
-            matrix,
-            &input_buffer,
-            rows,
-            cols,
-            &mut output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} timestep {timestep} matvec: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after {label} timestep {timestep}: {err}")
-        })?;
-        output_buffer
-            .copy_to_host(0, &mut output_step_bytes, Some(stream))
-            .map_err(|err| format!("failed to copy {label} timestep {timestep} output: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after {label} timestep {timestep} output copy: {err}")
-        })?;
-        output.extend(decode_f32_le_values(&output_step_bytes));
-        expected.extend(runtime_host_matvec_f32(matrix_host, step_input, rows, cols));
-    }
-    let max_abs_diff = verify_f32_close(label, &output, &expected, 3e-3_f32, 2e-5_f32)?;
-    Ok((output, max_abs_diff))
 }
 
 fn verify_f32_close(
