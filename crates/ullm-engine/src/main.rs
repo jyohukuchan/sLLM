@@ -265,6 +265,7 @@ fn main() -> ExitCode {
             env::args().nth(9),
             env::args().nth(10),
             env::args().nth(11),
+            env::args().nth(12),
         ),
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
@@ -11899,6 +11900,7 @@ fn package_golden_prefix_smoke(
     rope_base: Option<String>,
     position_offset: Option<String>,
     report_path: Option<String>,
+    run_mode: Option<String>,
 ) -> ExitCode {
     let Some(path) = path else {
         eprintln!("package-golden-prefix-smoke requires a .ullm.d path");
@@ -11973,6 +11975,10 @@ fn package_golden_prefix_smoke(
             Ok(value) => value,
             Err(code) => return code,
         };
+    let run_mode = match parse_package_golden_prefix_run_mode(run_mode.as_deref()) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
 
     match package_golden_prefix_smoke_impl(
         &path,
@@ -11986,6 +11992,7 @@ fn package_golden_prefix_smoke(
         rope_base,
         position_offset,
         report_path.as_deref(),
+        run_mode,
     ) {
         Ok(line) => {
             println!("{line}");
@@ -12011,6 +12018,7 @@ fn package_golden_prefix_smoke_impl(
     rope_base: f32,
     position_offset: usize,
     report_path: Option<&str>,
+    run_mode: PackageGoldenPrefixRunMode,
 ) -> Result<String, String> {
     let golden_layers = fixture.select_contiguous_layers(layer_start, layer_end_exclusive)?;
     let sequence_len = fixture.metadata().sequence_len;
@@ -12087,6 +12095,31 @@ fn package_golden_prefix_smoke_impl(
                 expected_after.len()
             ));
         }
+        let expected_before = fixture.read_layer_before_f32(layer_index)?;
+        if expected_before.len() != expected_hidden_elements {
+            return Err(format!(
+                "golden prefix layer {} before payload element mismatch: got {} expected {expected_hidden_elements}",
+                layer_index,
+                expected_before.len()
+            ));
+        }
+
+        let input_metrics = compare_f32_slices(&current_hidden, &expected_before)?;
+        let input_preview_len = 8.min(current_hidden.len()).min(expected_before.len());
+        let input_expected_preview = expected_before[..input_preview_len].to_vec();
+        let input_actual_preview = current_hidden[..input_preview_len].to_vec();
+        let input_diff_preview = current_hidden
+            .iter()
+            .zip(expected_before.iter())
+            .take(input_preview_len)
+            .map(|(actual, expected)| actual - expected)
+            .collect::<Vec<_>>();
+        let input_failure_class = package_golden_prefix_failure_class(&input_metrics);
+
+        let layer_input = match run_mode {
+            PackageGoldenPrefixRunMode::ActualPrefix => current_hidden,
+            PackageGoldenPrefixRunMode::GoldenBeforeEachLayer => expected_before,
+        };
 
         let layer_kind = package_decoder_layer_kind(path, layer_index)?;
         let (actual, details) = match layer_kind {
@@ -12118,7 +12151,7 @@ fn package_golden_prefix_smoke_impl(
                     &mut context,
                     &mut stream,
                     &layer.weights.self_attn,
-                    current_hidden,
+                    layer_input,
                     sequence_len,
                     &layer.q_norm.values,
                     &layer.k_norm.values,
@@ -12222,10 +12255,14 @@ fn package_golden_prefix_smoke_impl(
                     chunk_bytes,
                     layer_index,
                     sequence_len,
-                    current_hidden,
+                    layer_input,
                 )?;
                 let mut details = serde_json::Map::new();
-                insert_json_detail(&mut details, "runtime_line", line);
+                insert_json_detail(&mut details, "runtime_line", &line);
+                let runtime_metrics = package_runtime_line_metrics(&line);
+                if !runtime_metrics.is_empty() {
+                    insert_json_detail(&mut details, "runtime_metrics", runtime_metrics);
+                }
                 insert_json_detail(
                     &mut details,
                     "candidate_ids",
@@ -12294,6 +12331,12 @@ fn package_golden_prefix_smoke_impl(
             layer_end_exclusive,
             sequence_len,
             hidden,
+            run_mode,
+            &input_metrics,
+            input_failure_class,
+            input_expected_preview,
+            input_actual_preview,
+            input_diff_preview,
             &metrics,
             failure_class,
             expected_preview,
@@ -12310,7 +12353,7 @@ fn package_golden_prefix_smoke_impl(
     }
 
     Ok(format!(
-        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
+        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} run_mode={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
         path,
         fixture_path,
         layer_start,
@@ -12318,6 +12361,7 @@ fn package_golden_prefix_smoke_impl(
         golden_layers.len(),
         sequence_len,
         hidden,
+        run_mode.as_str(),
         block_size,
         cache_blocks,
         block_table,
@@ -12434,6 +12478,46 @@ fn insert_json_detail<T: serde::Serialize>(
     details.insert(key.to_string(), serde_json::json!(value));
 }
 
+fn package_runtime_line_metrics(line: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut metrics = serde_json::Map::new();
+    for token in line.split_whitespace() {
+        let Some((key, raw_value)) = token.split_once('=') else {
+            continue;
+        };
+        if !package_runtime_line_metric_key(key) {
+            continue;
+        }
+        let value = raw_value.trim_matches('"').trim_end_matches(',');
+        if value == "true" || value == "false" {
+            insert_json_detail(&mut metrics, key, value == "true");
+        } else if let Ok(value) = value.parse::<i64>() {
+            insert_json_detail(&mut metrics, key, value);
+        } else if let Ok(value) = value.parse::<f64>() {
+            insert_json_detail(&mut metrics, key, value);
+        }
+    }
+    metrics
+}
+
+fn package_runtime_line_metric_key(key: &str) -> bool {
+    matches!(
+        key,
+        "hidden"
+            | "key_heads"
+            | "value_heads"
+            | "key_dim"
+            | "value_dim"
+            | "sequence_len"
+            | "kernel_size"
+            | "q_scale"
+            | "device_index"
+            | "verified"
+    ) || key.ends_with("_max_abs_diff")
+        || key.ends_with("_mse")
+        || key.ends_with("_mean_abs_diff")
+        || key.ends_with("_cosine_similarity")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_package_golden_prefix_report_entry(
     report_entries: &mut Vec<serde_json::Value>,
@@ -12450,6 +12534,12 @@ fn append_package_golden_prefix_report_entry(
     layer_end_exclusive: usize,
     sequence_len: usize,
     hidden: usize,
+    run_mode: PackageGoldenPrefixRunMode,
+    input_metrics: &ullm_engine::golden::GoldenComparisonMetrics,
+    input_failure_class: &str,
+    input_expected_preview: Vec<f32>,
+    input_actual_preview: Vec<f32>,
+    input_diff_preview: Vec<f32>,
     metrics: &ullm_engine::golden::GoldenComparisonMetrics,
     failure_class: &str,
     expected_preview: Vec<f32>,
@@ -12472,6 +12562,23 @@ fn append_package_golden_prefix_report_entry(
     insert_json_detail(&mut entry, "layer_end_exclusive", layer_end_exclusive);
     insert_json_detail(&mut entry, "sequence_len", sequence_len);
     insert_json_detail(&mut entry, "hidden_size", hidden);
+    insert_json_detail(&mut entry, "run_mode", run_mode.as_str());
+    insert_json_detail(&mut entry, "input_mse", input_metrics.mse);
+    insert_json_detail(
+        &mut entry,
+        "input_mean_abs_diff",
+        input_metrics.mean_abs_diff,
+    );
+    insert_json_detail(&mut entry, "input_max_abs_diff", input_metrics.max_abs_diff);
+    insert_json_detail(
+        &mut entry,
+        "input_cosine_similarity",
+        input_metrics.cosine_similarity,
+    );
+    insert_json_detail(&mut entry, "input_failure_class", input_failure_class);
+    insert_json_detail(&mut entry, "input_expected_preview", input_expected_preview);
+    insert_json_detail(&mut entry, "input_actual_preview", input_actual_preview);
+    insert_json_detail(&mut entry, "input_diff_preview", input_diff_preview);
     insert_json_detail(&mut entry, "mse", metrics.mse);
     insert_json_detail(&mut entry, "mean_abs_diff", metrics.mean_abs_diff);
     insert_json_detail(&mut entry, "max_abs_diff", metrics.max_abs_diff);
@@ -12483,6 +12590,39 @@ fn append_package_golden_prefix_report_entry(
     insert_json_detail(&mut entry, "verified", true);
     entry.extend(details);
     report_entries.push(serde_json::Value::Object(entry));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageGoldenPrefixRunMode {
+    ActualPrefix,
+    GoldenBeforeEachLayer,
+}
+
+impl PackageGoldenPrefixRunMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ActualPrefix => "actual_prefix",
+            Self::GoldenBeforeEachLayer => "golden_before_each_layer",
+        }
+    }
+}
+
+fn parse_package_golden_prefix_run_mode(
+    run_mode: Option<&str>,
+) -> Result<PackageGoldenPrefixRunMode, ExitCode> {
+    match run_mode {
+        Some(raw) => match raw {
+            "actual_prefix" => Ok(PackageGoldenPrefixRunMode::ActualPrefix),
+            "golden_before_each_layer" => Ok(PackageGoldenPrefixRunMode::GoldenBeforeEachLayer),
+            _ => {
+                eprintln!(
+                    "invalid run_mode: {raw}; expected actual_prefix or golden_before_each_layer"
+                );
+                Err(ExitCode::from(2))
+            }
+        },
+        None => Ok(PackageGoldenPrefixRunMode::ActualPrefix),
+    }
 }
 
 fn package_golden_prefix_failure_class(
@@ -20784,7 +20924,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
