@@ -202,6 +202,18 @@ fn main() -> ExitCode {
             env::args().nth(8),
             env::args().nth(9),
         ),
+        Some("package-self-attn-mlp-block-scheduler-smoke") => {
+            package_self_attn_mlp_block_scheduler_smoke(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+                env::args().nth(8),
+                env::args().nth(9),
+            )
+        }
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -1967,7 +1979,7 @@ struct SyntheticSchedulerPagedDecodeRun {
     v_cache_max_abs_diff: f32,
 }
 
-struct SyntheticSchedulerLayerDecodeRun {
+struct SchedulerLayerDecodeRun {
     request_id: RequestId,
     prompt_tokens: usize,
     max_new_tokens: usize,
@@ -1976,7 +1988,7 @@ struct SyntheticSchedulerLayerDecodeRun {
     q_sequence: Vec<f32>,
     k_sequence: Vec<f32>,
     v_sequence: Vec<f32>,
-    gate_sequence: Vec<f32>,
+    output_gate_sequence: Option<Vec<f32>>,
     residual_sequence: Vec<f32>,
     expected: Qwen3DecoderLayerSequenceOutput,
     decode_steps: usize,
@@ -2010,17 +2022,17 @@ fn synthetic_scheduler_decode_values(
     values
 }
 
-fn synthetic_scheduler_layer_decode_run(
-    runs: &[SyntheticSchedulerLayerDecodeRun],
+fn scheduler_layer_decode_run(
+    runs: &[SchedulerLayerDecodeRun],
     request_id: RequestId,
-) -> Option<&SyntheticSchedulerLayerDecodeRun> {
+) -> Option<&SchedulerLayerDecodeRun> {
     runs.iter().find(|run| run.request_id == request_id)
 }
 
-fn synthetic_scheduler_layer_decode_run_mut(
-    runs: &mut [SyntheticSchedulerLayerDecodeRun],
+fn scheduler_layer_decode_run_mut(
+    runs: &mut [SchedulerLayerDecodeRun],
     request_id: RequestId,
-) -> Option<&mut SyntheticSchedulerLayerDecodeRun> {
+) -> Option<&mut SchedulerLayerDecodeRun> {
     runs.iter_mut().find(|run| run.request_id == request_id)
 }
 
@@ -2272,9 +2284,9 @@ fn synthetic_layer_expected_slice<'a>(
         .ok_or_else(|| format!("{label} slice {start}..{end} is out of bounds"))
 }
 
-fn verify_synthetic_layer_step_output(
+fn verify_scheduler_layer_step_output(
     label: &str,
-    run: &mut SyntheticSchedulerLayerDecodeRun,
+    run: &mut SchedulerLayerDecodeRun,
     step: &ullm_engine::decode_runner::Qwen3DecoderLayerDecodeBatchOutput,
     hidden: usize,
     attention_elements: usize,
@@ -2385,10 +2397,10 @@ fn verify_synthetic_layer_step_output(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_synthetic_scheduler_layer_prefill_step(
+fn run_scheduler_layer_prefill_step(
     runner: &mut Qwen3DecoderLayerRequestDecodeRunner<'_>,
     stream: &mut ullm_runtime_sys::RuntimeStream,
-    run: &mut SyntheticSchedulerLayerDecodeRun,
+    run: &mut SchedulerLayerDecodeRun,
     timestep: usize,
     q_token_elements: usize,
     k_token_elements: usize,
@@ -2412,6 +2424,10 @@ fn run_synthetic_scheduler_layer_prefill_step(
     let residual_start = timestep
         .checked_mul(hidden)
         .ok_or_else(|| format!("{label} residual slice start overflows"))?;
+    let output_gate = run
+        .output_gate_sequence
+        .as_ref()
+        .map(|gate| &gate[gate_start..gate_start + attention_elements]);
     let step = runner.run_prefill_step(
         stream,
         Qwen3DecoderLayerDecodeBatchInput {
@@ -2419,7 +2435,7 @@ fn run_synthetic_scheduler_layer_prefill_step(
             q: &run.q_sequence[q_start..q_start + q_token_elements],
             k: &run.k_sequence[k_start..k_start + k_token_elements],
             v: &run.v_sequence[v_start..v_start + v_token_elements],
-            output_gate: Some(&run.gate_sequence[gate_start..gate_start + attention_elements]),
+            output_gate,
             residual: &run.residual_sequence[residual_start..residual_start + hidden],
         },
     )?;
@@ -2429,7 +2445,7 @@ fn run_synthetic_scheduler_layer_prefill_step(
             run.request_id, step.cache_position
         ));
     }
-    verify_synthetic_layer_step_output(label, run, &step, hidden, attention_elements)
+    verify_scheduler_layer_step_output(label, run, &step, hidden, attention_elements)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2606,10 +2622,10 @@ fn run_synthetic_scheduler_ready_batch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_synthetic_scheduler_layer_ready_batch(
+fn run_scheduler_layer_ready_batch(
     runner: &mut Qwen3DecoderLayerRequestDecodeRunner<'_>,
     scheduler: &mut SchedulerState,
-    runs: &mut [SyntheticSchedulerLayerDecodeRun],
+    runs: &mut [SchedulerLayerDecodeRun],
     stream: &mut ullm_runtime_sys::RuntimeStream,
     expected_ids: &[RequestId],
     max_requests: usize,
@@ -2635,7 +2651,7 @@ fn run_synthetic_scheduler_layer_ready_batch(
     }
 
     for request in &ready {
-        let run = synthetic_scheduler_layer_decode_run(runs, request.request.id)
+        let run = scheduler_layer_decode_run(runs, request.request.id)
             .ok_or_else(|| format!("{label} request {:?} has no layer run", request.request.id))?;
         let expected_cache_position =
             run.prompt_tokens
@@ -2679,14 +2695,12 @@ fn run_synthetic_scheduler_layer_ready_batch(
     let outputs = {
         let mut inputs = Vec::with_capacity(ready.len());
         for request in &ready {
-            let run = synthetic_scheduler_layer_decode_run(runs, request.request.id).ok_or_else(
-                || {
-                    format!(
-                        "{label} request {:?} disappeared while preparing decode input",
-                        request.request.id
-                    )
-                },
-            )?;
+            let run = scheduler_layer_decode_run(runs, request.request.id).ok_or_else(|| {
+                format!(
+                    "{label} request {:?} disappeared while preparing decode input",
+                    request.request.id
+                )
+            })?;
             let q_start = request
                 .cache_position
                 .checked_mul(q_token_elements)
@@ -2707,12 +2721,16 @@ fn run_synthetic_scheduler_layer_ready_batch(
                 .cache_position
                 .checked_mul(hidden)
                 .ok_or_else(|| format!("{label} residual slice start overflows"))?;
+            let output_gate = run
+                .output_gate_sequence
+                .as_ref()
+                .map(|gate| &gate[gate_start..gate_start + attention_elements]);
             inputs.push(Qwen3DecoderLayerDecodeBatchInput {
                 request_id: request.request.id,
                 q: &run.q_sequence[q_start..q_start + q_token_elements],
                 k: &run.k_sequence[k_start..k_start + k_token_elements],
                 v: &run.v_sequence[v_start..v_start + v_token_elements],
-                output_gate: Some(&run.gate_sequence[gate_start..gate_start + attention_elements]),
+                output_gate,
                 residual: &run.residual_sequence[residual_start..residual_start + hidden],
             });
         }
@@ -2720,20 +2738,19 @@ fn run_synthetic_scheduler_layer_ready_batch(
     };
 
     for output in outputs {
-        let run =
-            synthetic_scheduler_layer_decode_run_mut(runs, output.request_id).ok_or_else(|| {
-                format!(
-                    "{label} advanced request {:?} disappeared",
-                    output.request_id
-                )
-            })?;
+        let run = scheduler_layer_decode_run_mut(runs, output.request_id).ok_or_else(|| {
+            format!(
+                "{label} advanced request {:?} disappeared",
+                output.request_id
+            )
+        })?;
         run.decode_steps = run.decode_steps.checked_add(1).ok_or_else(|| {
             format!(
                 "{label} request {:?} decode step count overflows",
                 run.request_id
             )
         })?;
-        verify_synthetic_layer_step_output(label, run, &output, hidden, attention_elements)?;
+        verify_scheduler_layer_step_output(label, run, &output, hidden, attention_elements)?;
     }
     Ok(expected_ids.len())
 }
@@ -3162,7 +3179,7 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
             softmax_scale,
             mlp_epsilon,
         )?;
-        let mut run = SyntheticSchedulerLayerDecodeRun {
+        let mut run = SchedulerLayerDecodeRun {
             request_id: request.id,
             prompt_tokens: request.prompt_tokens,
             max_new_tokens: request.max_new_tokens,
@@ -3171,7 +3188,7 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
             q_sequence,
             k_sequence,
             v_sequence,
-            gate_sequence,
+            output_gate_sequence: Some(gate_sequence),
             residual_sequence,
             expected,
             decode_steps: 0,
@@ -3186,7 +3203,7 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
             v_cache_max_abs_diff: 0.0,
         };
         for timestep in 0..run.prompt_tokens {
-            run_synthetic_scheduler_layer_prefill_step(
+            run_scheduler_layer_prefill_step(
                 &mut runner,
                 &mut stream,
                 &mut run,
@@ -3208,7 +3225,7 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
         runs.push(run);
     }
 
-    let first_batch_ready = run_synthetic_scheduler_layer_ready_batch(
+    let first_batch_ready = run_scheduler_layer_ready_batch(
         &mut runner,
         &mut scheduler,
         &mut runs,
@@ -3222,7 +3239,7 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
         hidden,
         "runtime scheduler layer decode first batch",
     )?;
-    let second_batch_ready = run_synthetic_scheduler_layer_ready_batch(
+    let second_batch_ready = run_scheduler_layer_ready_batch(
         &mut runner,
         &mut scheduler,
         &mut runs,
@@ -10181,6 +10198,637 @@ fn package_self_attn_mlp_block_smoke_impl(
         causal_paged_block_max_abs_diff,
         post_norm_max_abs_diff,
         layer_block_max_abs_diff,
+    ))
+}
+
+fn package_self_attn_mlp_block_scheduler_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-self-attn-mlp-block-scheduler-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 3, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 3, "sequence length") {
+        Ok(value) if value >= 3 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be at least three for scheduler layer smoke");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 3, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+    let post_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+
+    let q_norm = match read_named_passthrough_f32(&path, &q_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let k_norm = match read_named_passthrough_f32(&path, &k_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let post_norm = match read_named_passthrough_f32(&path, &post_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let head_dim = q_norm.values.len();
+    if head_dim == 0 || k_norm.values.len() != head_dim {
+        eprintln!(
+            "self-attn q/k norm head dims must be nonzero and equal: q_head_dim={} k_head_dim={}",
+            head_dim,
+            k_norm.values.len()
+        );
+        return ExitCode::from(1);
+    }
+    let default_rotary_dim = {
+        let candidate = if head_dim >= 4 {
+            head_dim / 4
+        } else {
+            head_dim
+        };
+        candidate - (candidate % 2)
+    };
+    if default_rotary_dim == 0 {
+        eprintln!("default rotary_dim is zero for head_dim={head_dim}");
+        return ExitCode::from(1);
+    }
+    let rotary_dim = match parse_optional_usize(rotary_dim, default_rotary_dim, "rotary dim") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        eprintln!(
+            "rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim}, head_dim={head_dim}"
+        );
+        return ExitCode::from(2);
+    }
+
+    match package_self_attn_mlp_block_scheduler_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        sequence_len,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        q_norm,
+        k_norm,
+        post_norm,
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_self_attn_mlp_block_scheduler_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    sequence_len: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    position_offset: usize,
+    q_norm: PassthroughF32Data,
+    k_norm: PassthroughF32Data,
+    post_norm: PassthroughF32Data,
+) -> Result<String, String> {
+    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
+    let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
+    let o_tensor = format!("model.language_model.layers.{layer_index}.self_attn.o_proj.weight");
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+    let post_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let layer_weights = qwen3_decoder_layer_runtime_weights_from_package(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        &q_tensor,
+        &k_tensor,
+        &v_tensor,
+        &o_tensor,
+        &q_norm,
+        &k_norm,
+        &post_norm,
+        &gate_tensor,
+        &up_tensor,
+        &down_tensor,
+    )?;
+    let runtime_shape = qwen3_self_attn_runtime_shape(&layer_weights.self_attn)?;
+    if layer_weights.post_attention.hidden != runtime_shape.hidden {
+        return Err(format!(
+            "Qwen3 decoder layer runtime weight hidden mismatch: self_attn={} post_attention={}",
+            runtime_shape.hidden, layer_weights.post_attention.hidden
+        ));
+    }
+    if layer_weights.post_attention.mlp.gate_rows != layer_weights.post_attention.intermediate
+        || layer_weights.post_attention.mlp.gate_cols != runtime_shape.hidden
+    {
+        return Err("Qwen3 decoder layer runtime MLP gate shape is inconsistent".to_string());
+    }
+
+    let block_size = 2_usize;
+    let requests = vec![
+        Request::new(201, sequence_len - 2, 2),
+        Request::new(202, sequence_len - 1, 1),
+        Request::new(203, 1, 0),
+    ];
+    let mut required_blocks = 0_usize;
+    for request in &requests {
+        let total_tokens = request
+            .prompt_tokens
+            .checked_add(request.max_new_tokens)
+            .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
+        if total_tokens == 0 {
+            return Err(format!("request {:?} has no tokens to decode", request.id));
+        }
+        let request_blocks = (total_tokens - 1) / block_size + 1;
+        required_blocks = required_blocks
+            .checked_add(request_blocks)
+            .ok_or_else(|| "package scheduler layer required block count overflows".to_string())?;
+    }
+    let cache_blocks = required_blocks
+        .checked_add(2)
+        .ok_or_else(|| "package scheduler layer cache block count overflows".to_string())?;
+    if cache_blocks > u32::MAX as usize || block_size > u32::MAX as usize {
+        return Err(format!(
+            "package scheduler layer block layout exceeds u32 range: cache_blocks={cache_blocks} block_size={block_size}"
+        ));
+    }
+    let decode_shape = PagedDecodeShape {
+        block_size,
+        cache_blocks,
+        q_heads: runtime_shape.q_heads,
+        kv_heads: runtime_shape.kv_heads,
+        head_dim: runtime_shape.head_dim,
+        value_dim: runtime_shape.value_dim,
+    };
+    let q_token_elements = decode_shape.q_elements()?;
+    let k_token_elements = decode_shape.k_token_elements()?;
+    let v_token_elements = decode_shape.v_token_elements()?;
+    let attention_elements = decode_shape.output_elements()?;
+    let hidden = runtime_shape.hidden;
+    let intermediate = layer_weights.post_attention.intermediate;
+    let softmax_scale = 1.0_f32 / (runtime_shape.head_dim as f32).sqrt();
+    let mlp_epsilon = 1e-5_f32;
+
+    let mut scheduler = SchedulerState::with_block_size(cache_blocks as u32, block_size as u32);
+    for request in &requests {
+        scheduler.enqueue(request.clone());
+    }
+    let mut runner = Qwen3DecoderLayerRequestDecodeRunner::new();
+    let mut allocated = scheduler
+        .pop_prefill_batch_with_allocation(usize::MAX)
+        .map_err(|err| format!("failed to allocate package scheduler layer batch: {err}"))?;
+    if allocated.len() != requests.len() {
+        return Err(format!(
+            "package scheduler layer selected {} requests, expected {}",
+            allocated.len(),
+            requests.len()
+        ));
+    }
+
+    let mut runs = Vec::with_capacity(allocated.len());
+    let mut request_position_offsets = Vec::with_capacity(allocated.len());
+    let mut q_gate_elements = Vec::with_capacity(allocated.len());
+    let mut q_norm_max_abs_diff = 0.0_f32;
+    let mut k_norm_max_abs_diff = 0.0_f32;
+    let mut q_rope_max_abs_diff = 0.0_f32;
+    let mut k_rope_max_abs_diff = 0.0_f32;
+    let mut causal_attention_max_abs_diff = 0.0_f32;
+    let mut q_projection_layout = None;
+    let mut output_gate_layout = None;
+
+    for (request_index, scheduled) in allocated.drain(..).enumerate() {
+        let request = scheduled.request;
+        let block_table = scheduled.allocation.blocks;
+        let total_tokens = request
+            .prompt_tokens
+            .checked_add(request.max_new_tokens)
+            .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
+        let request_position_offset = position_offset
+            .checked_add(request_index.checked_mul(sequence_len).ok_or_else(|| {
+                "package scheduler layer request position offset multiplier overflows".to_string()
+            })?)
+            .ok_or_else(|| {
+                "package scheduler layer request position offset overflows".to_string()
+            })?;
+        request_position_offsets.push(request_position_offset);
+
+        let prepared = qwen3_self_attn_prepare_sequence_smoke(
+            &mut context,
+            &mut stream,
+            &layer_weights.self_attn,
+            total_tokens,
+            rotary_dim,
+            rope_base,
+            request_position_offset,
+            &q_norm,
+            &k_norm,
+            &format!(
+                "package-self-attn-mlp-block-scheduler-smoke request {:?}",
+                request.id
+            ),
+        )?;
+        if prepared.hidden != hidden
+            || prepared.q_heads != runtime_shape.q_heads
+            || prepared.kv_heads != runtime_shape.kv_heads
+            || prepared.head_dim != runtime_shape.head_dim
+            || prepared.value_dim != runtime_shape.value_dim
+        {
+            return Err(format!(
+                "package scheduler layer prepared shape mismatch for {:?}: hidden={} q_heads={} kv_heads={} head_dim={} value_dim={}",
+                request.id,
+                prepared.hidden,
+                prepared.q_heads,
+                prepared.kv_heads,
+                prepared.head_dim,
+                prepared.value_dim
+            ));
+        }
+        if let Some(layout) = q_projection_layout {
+            if layout != prepared.q_projection_layout {
+                return Err(format!(
+                    "package scheduler layer q projection layout changed: {layout} vs {}",
+                    prepared.q_projection_layout
+                ));
+            }
+        } else {
+            q_projection_layout = Some(prepared.q_projection_layout);
+        }
+        if let Some(layout) = output_gate_layout {
+            if layout != prepared.output_gate_layout {
+                return Err(format!(
+                    "package scheduler layer output gate layout changed: {layout} vs {}",
+                    prepared.output_gate_layout
+                ));
+            }
+        } else {
+            output_gate_layout = Some(prepared.output_gate_layout);
+        }
+        q_gate_elements.push(prepared.q_gate_elements);
+        q_norm_max_abs_diff = q_norm_max_abs_diff.max(prepared.q_norm_max_abs_diff);
+        k_norm_max_abs_diff = k_norm_max_abs_diff.max(prepared.k_norm_max_abs_diff);
+        q_rope_max_abs_diff = q_rope_max_abs_diff.max(prepared.q_rope_max_abs_diff);
+        k_rope_max_abs_diff = k_rope_max_abs_diff.max(prepared.k_rope_max_abs_diff);
+        causal_attention_max_abs_diff =
+            causal_attention_max_abs_diff.max(prepared.attention_max_abs_diff);
+
+        let expected = qwen3_decoder_layer_sequence_to_host_f32(
+            &layer_weights,
+            &mut context,
+            &mut stream,
+            decode_shape,
+            &block_table,
+            softmax_scale,
+            mlp_epsilon,
+            &prepared.q_rope,
+            &prepared.k_rope,
+            &prepared.v_projected,
+            prepared.q_gate.as_deref(),
+            &prepared.residual_sequence,
+            total_tokens,
+        )?;
+        runner.insert_request(
+            &mut context,
+            &mut stream,
+            request.id,
+            &layer_weights,
+            decode_shape,
+            block_table.clone(),
+            softmax_scale,
+            mlp_epsilon,
+        )?;
+        let mut run = SchedulerLayerDecodeRun {
+            request_id: request.id,
+            prompt_tokens: request.prompt_tokens,
+            max_new_tokens: request.max_new_tokens,
+            total_tokens,
+            block_table,
+            q_sequence: prepared.q_rope,
+            k_sequence: prepared.k_rope,
+            v_sequence: prepared.v_projected,
+            output_gate_sequence: prepared.q_gate,
+            residual_sequence: prepared.residual_sequence,
+            expected,
+            decode_steps: 0,
+            attention_max_abs_diff: 0.0,
+            projection_input_max_abs_diff: 0.0,
+            projected_max_abs_diff: 0.0,
+            block_max_abs_diff: 0.0,
+            post_norm_max_abs_diff: 0.0,
+            mlp_max_abs_diff: 0.0,
+            layer_max_abs_diff: 0.0,
+            k_cache_max_abs_diff: 0.0,
+            v_cache_max_abs_diff: 0.0,
+        };
+        for timestep in 0..run.prompt_tokens {
+            run_scheduler_layer_prefill_step(
+                &mut runner,
+                &mut stream,
+                &mut run,
+                timestep,
+                q_token_elements,
+                k_token_elements,
+                v_token_elements,
+                attention_elements,
+                hidden,
+                "package scheduler layer prefill",
+            )?;
+        }
+        scheduler.complete_prefill(run.request_id).map_err(|err| {
+            format!(
+                "failed to complete package scheduler layer prefill {:?}: {err}",
+                run.request_id
+            )
+        })?;
+        runs.push(run);
+    }
+
+    let first_batch_ready = run_scheduler_layer_ready_batch(
+        &mut runner,
+        &mut scheduler,
+        &mut runs,
+        &mut stream,
+        &[RequestId(201), RequestId(202)],
+        8,
+        q_token_elements,
+        k_token_elements,
+        v_token_elements,
+        attention_elements,
+        hidden,
+        "package scheduler layer first batch",
+    )?;
+    let second_batch_ready = run_scheduler_layer_ready_batch(
+        &mut runner,
+        &mut scheduler,
+        &mut runs,
+        &mut stream,
+        &[RequestId(201)],
+        8,
+        q_token_elements,
+        k_token_elements,
+        v_token_elements,
+        attention_elements,
+        hidden,
+        "package scheduler layer second batch",
+    )?;
+    let final_ready = scheduler
+        .ready_decode_batch(8)
+        .map_err(|err| format!("failed to query package scheduler layer final ready batch: {err}"))?
+        .len();
+    if final_ready != 0 {
+        return Err(format!(
+            "package scheduler layer final ready count {final_ready}, expected 0"
+        ));
+    }
+
+    for run in &mut runs {
+        let active = scheduler.active_request(run.request_id).ok_or_else(|| {
+            format!(
+                "package scheduler layer request {:?} missing from active scheduler state",
+                run.request_id
+            )
+        })?;
+        if active.cached_tokens != run.total_tokens {
+            return Err(format!(
+                "package scheduler layer request {:?} cached_tokens {} did not match total_tokens {}",
+                run.request_id, active.cached_tokens, run.total_tokens
+            ));
+        }
+        if active.generated_tokens != run.max_new_tokens {
+            return Err(format!(
+                "package scheduler layer request {:?} generated_tokens {} did not match max_new_tokens {}",
+                run.request_id, active.generated_tokens, run.max_new_tokens
+            ));
+        }
+        let cache = runner
+            .read_cache_to_host(run.request_id, &mut stream)
+            .map_err(|err| {
+                format!(
+                    "failed to read package scheduler layer cache for {:?}: {err}",
+                    run.request_id
+                )
+            })?;
+        run.k_cache_max_abs_diff = verify_f32_close(
+            &format!(
+                "package scheduler layer request {:?} k cache",
+                run.request_id
+            ),
+            &cache.k,
+            &run.expected.paged_cache.k,
+            1e-5,
+            1e-5,
+        )?;
+        run.v_cache_max_abs_diff = verify_f32_close(
+            &format!(
+                "package scheduler layer request {:?} v cache",
+                run.request_id
+            ),
+            &cache.v,
+            &run.expected.paged_cache.v,
+            1e-5,
+            1e-5,
+        )?;
+    }
+
+    let stats = scheduler.allocator_stats();
+    let request_ids = runs.iter().map(|run| run.request_id.0).collect::<Vec<_>>();
+    let block_tables = runs
+        .iter()
+        .map(|run| run.block_table.clone())
+        .collect::<Vec<_>>();
+    let cached_tokens = runs
+        .iter()
+        .map(|run| {
+            scheduler
+                .active_request(run.request_id)
+                .map(|active| active.cached_tokens)
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let generated_tokens = runs
+        .iter()
+        .map(|run| {
+            scheduler
+                .active_request(run.request_id)
+                .map(|active| active.generated_tokens)
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let prompt_tokens = runs.iter().map(|run| run.prompt_tokens).collect::<Vec<_>>();
+    let max_new_tokens = runs
+        .iter()
+        .map(|run| run.max_new_tokens)
+        .collect::<Vec<_>>();
+    let total_tokens = runs.iter().map(|run| run.total_tokens).collect::<Vec<_>>();
+    let decode_steps = runs.iter().map(|run| run.decode_steps).collect::<Vec<_>>();
+    let attention_max_abs_diff = runs
+        .iter()
+        .map(|run| run.attention_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let projection_input_max_abs_diff = runs
+        .iter()
+        .map(|run| run.projection_input_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let projected_max_abs_diff = runs
+        .iter()
+        .map(|run| run.projected_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let block_max_abs_diff = runs
+        .iter()
+        .map(|run| run.block_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let post_norm_max_abs_diff = runs
+        .iter()
+        .map(|run| run.post_norm_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let mlp_max_abs_diff = runs
+        .iter()
+        .map(|run| run.mlp_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let layer_max_abs_diff = runs
+        .iter()
+        .map(|run| run.layer_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let k_cache_max_abs_diff = runs
+        .iter()
+        .map(|run| run.k_cache_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let v_cache_max_abs_diff = runs
+        .iter()
+        .map(|run| run.v_cache_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+
+    Ok(format!(
+        "package-self-attn-mlp-block-scheduler-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} request_position_offsets={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} final_ready={} decode_steps={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate={} q_projection_layout={} q_gate_elements={:?} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} mlp_epsilon={mlp_epsilon:.9} q_norm_dtype={} k_norm_dtype={} post_norm_dtype={} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+        path,
+        layer_index,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        o_tensor,
+        q_norm_tensor,
+        k_norm_tensor,
+        post_norm_tensor,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        sequence_len,
+        runs.len(),
+        request_ids,
+        prompt_tokens,
+        max_new_tokens,
+        total_tokens,
+        request_position_offsets,
+        block_size,
+        cache_blocks,
+        block_tables,
+        first_batch_ready,
+        second_batch_ready,
+        final_ready,
+        decode_steps,
+        cached_tokens,
+        generated_tokens,
+        scheduler.active_len(),
+        stats.free_blocks,
+        stats.allocated_blocks,
+        stats.free_runs,
+        stats.largest_free_run,
+        hidden,
+        intermediate,
+        q_projection_layout.unwrap_or("unknown"),
+        q_gate_elements,
+        output_gate_layout.unwrap_or("unknown"),
+        runtime_shape.q_heads,
+        runtime_shape.kv_heads,
+        runtime_shape.head_dim,
+        runtime_shape.value_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        q_norm.dtype,
+        k_norm.dtype,
+        post_norm.dtype,
+        info.backend,
+        device_index,
+        info.name,
     ))
 }
 
@@ -18073,7 +18721,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
