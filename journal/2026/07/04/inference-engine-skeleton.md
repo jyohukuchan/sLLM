@@ -1356,3 +1356,37 @@
 ### 次の行動
 
 - decode planの次の境界としてstack runner setupをlibrary側へ出せるかを検討する。ただし `SchedulerLayerDecodeRun` と期待値diffに依存する部分は引き続きsmoke-localに残す。
+
+## Qwen3 package model stack runner setup 抽出
+
+### 前回の要点
+
+- `Qwen3PackageModelDecodePlan` を追加し、model shapeとpaged cache設定からdecode metadataを導出する部分をlibrary側へ移した。
+- `PackageModelLoopExecutionPlan` には、まだpackage model runtimeのlayer weightをstack runnerへ登録する処理、scheduler進行、入力slice作成、期待値diff検証が残っていた。
+
+### 今回の変更点
+
+- `qwen3_loader.rs` に `Qwen3PackageModelStackRequest` と `qwen3_package_model_stack_runner` を追加した。
+- library側bridgeは、`Qwen3PackageModelRuntime`、`Qwen3PackageModelDecodePlan`、layerごとのrequest id/block table viewを受け取り、`Qwen3DecoderLayerStackRequestDecodeRunner` へresident layer weightとrequest cache stateを登録する。
+- `main.rs` の `build_package_model_loop_stack_runner` を削除し、smoke側は `SchedulerLayerDecodeRun` から一時的な `Qwen3PackageModelStackRequest` viewを作るだけにした。
+- scheduler進行、prefill/decode input slice作成、paged K/V cache readback、期待値diff集計は引き続きsmoke-localに残した。
+- `qwen3_package_model_stack_runner` がlayer request set数不一致をlayer access前に弾く単体テストを追加した。
+- `docs/words.txt` に `Qwen3 package model stack runner setup` を追加し、`package model loop execution plan` の定義を更新した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- 3-layer model-loop smoke on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with `3,7,11 3` passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`.
+- 全deviceで `decode_batch_ready_counts=[2, 1]`、`final_ready=0`、`cached_tokens=[3, 3, 1]`、`generated_tokens=[2, 1, 0]`、`verified=true`。
+- CPUは全diff `0`。R9700/V620はprepared側の最大diffが既知範囲で、runtime/cache diffはすべて `0`。
+
+### 次の行動
+
+- 次の抽出候補は、scheduler ready batchからlayer input sliceを組み立てる部分。ただし現状は `SchedulerLayerDecodeRun` の期待値系列に強く依存しているため、実runner APIとして必要な入力所有形を先に決める。

@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::decode_runner::Qwen3DecoderLayerStackRequestDecodeRunner;
 use crate::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights,
     Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights,
@@ -12,6 +13,7 @@ use crate::host_bytes::encode_f32_to_bytes;
 use crate::loader::{
     PassthroughF32Data, WeightRegistry, materialize_selected_aq4_matrix, read_named_passthrough_f32,
 };
+use crate::scheduler::RequestId;
 use ullm_runtime_sys::{RuntimeContext, RuntimeStream};
 
 pub struct Qwen3PackageDecoderLayerRuntime {
@@ -101,6 +103,54 @@ impl Qwen3PackageModelDecodePlan {
             hidden,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Qwen3PackageModelStackRequest<'a> {
+    pub request_id: RequestId,
+    pub block_table: &'a [u32],
+}
+
+pub fn qwen3_package_model_stack_runner<'weights, 'requests>(
+    model: &'weights Qwen3PackageModelRuntime,
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    decode_plan: Qwen3PackageModelDecodePlan,
+    layer_requests: &[Vec<Qwen3PackageModelStackRequest<'requests>>],
+) -> Result<Qwen3DecoderLayerStackRequestDecodeRunner<'weights>, String> {
+    if layer_requests.len() != model.layers.len() {
+        return Err(format!(
+            "Qwen3 package model stack runner setup has {} layers but {} layer request sets",
+            model.layers.len(),
+            layer_requests.len()
+        ));
+    }
+
+    let mut layer_runner = Qwen3DecoderLayerStackRequestDecodeRunner::new();
+    for (layer_position, (layer, requests)) in
+        model.layers.iter().zip(layer_requests.iter()).enumerate()
+    {
+        let stack_layer_index = layer_runner.push_layer();
+        if stack_layer_index != layer_position {
+            return Err(format!(
+                "Qwen3 package model stack layer index {stack_layer_index} did not match layer position {layer_position}"
+            ));
+        }
+        for request in requests {
+            layer_runner.insert_request(
+                stack_layer_index,
+                context,
+                stream,
+                request.request_id,
+                &layer.weights,
+                decode_plan.decode_shape,
+                request.block_table.to_vec(),
+                model.softmax_scale,
+                model.mlp_epsilon,
+            )?;
+        }
+    }
+    Ok(layer_runner)
 }
 
 impl Qwen3PackageModelRuntime {
@@ -634,6 +684,38 @@ mod tests {
         };
 
         assert!(err.contains("q_heads must be a multiple of kv_heads"));
+    }
+
+    #[test]
+    fn package_model_stack_runner_rejects_layer_request_count_mismatch_before_layer_access() {
+        let mut context = RuntimeContext::create(0).expect("create CPU runtime context");
+        let mut stream = context.create_stream().expect("create CPU runtime stream");
+        let model = Qwen3PackageModelRuntime {
+            layers: Vec::new(),
+            hidden: 1,
+            q_heads: 1,
+            kv_heads: 1,
+            head_dim: 1,
+            value_dim: 1,
+            softmax_scale: 1.0,
+            mlp_epsilon: 1e-5,
+        };
+        let decode_plan = Qwen3PackageModelDecodePlan::from_model(&model, 1, 1)
+            .expect("decode plan for empty test model metadata");
+        let layer_requests = vec![Vec::new()];
+
+        let err = match qwen3_package_model_stack_runner(
+            &model,
+            &mut context,
+            &mut stream,
+            decode_plan,
+            &layer_requests,
+        ) {
+            Ok(_) => panic!("layer request count mismatch must fail before layer access"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("0 layers but 1 layer request sets"));
     }
 
     #[test]

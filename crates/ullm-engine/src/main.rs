@@ -31,8 +31,9 @@ use ullm_engine::loader::{
 };
 use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 use ullm_engine::qwen3_loader::{
-    Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime,
-    qwen3_decoder_layer_runtime_weights_from_package, qwen3_self_attn_runtime_weights_from_package,
+    Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
+    qwen3_decoder_layer_runtime_weights_from_package, qwen3_package_model_stack_runner,
+    qwen3_self_attn_runtime_weights_from_package,
 };
 use ullm_engine::scheduler::{
     KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
@@ -11142,45 +11143,6 @@ fn parse_package_model_loop_rotary_dim(
     Ok(rotary_dim)
 }
 
-fn build_package_model_loop_stack_runner<'weights>(
-    model: &'weights Qwen3PackageModelRuntime,
-    context: &mut ullm_runtime_sys::RuntimeContext,
-    stream: &mut ullm_runtime_sys::RuntimeStream,
-    layer_runs: &[Vec<SchedulerLayerDecodeRun>],
-    decode_shape: PagedDecodeShape,
-) -> Result<Qwen3DecoderLayerStackRequestDecodeRunner<'weights>, String> {
-    if layer_runs.len() != model.layers.len() {
-        return Err(format!(
-            "model-loop stack setup has {} layers but {} layer run sets",
-            model.layers.len(),
-            layer_runs.len()
-        ));
-    }
-    let mut layer_runner = Qwen3DecoderLayerStackRequestDecodeRunner::new();
-    for (layer_position, layer) in model.layers.iter().enumerate() {
-        let stack_layer_index = layer_runner.push_layer();
-        if stack_layer_index != layer_position {
-            return Err(format!(
-                "model-loop stack layer index {stack_layer_index} did not match layer position {layer_position}"
-            ));
-        }
-        for run in &layer_runs[layer_position] {
-            layer_runner.insert_request(
-                stack_layer_index,
-                context,
-                stream,
-                run.request_id,
-                &layer.weights,
-                decode_shape,
-                run.block_table.clone(),
-                model.softmax_scale,
-                model.mlp_epsilon,
-            )?;
-        }
-    }
-    Ok(layer_runner)
-}
-
 impl PackageModelLoopRequestPlan {
     fn new(sequence_len: usize, hidden: usize, block_size: usize) -> Result<Self, String> {
         if block_size == 0 {
@@ -11515,13 +11477,21 @@ impl PackageModelLoopExecutionPlan {
         request_plan: &mut PackageModelLoopRequestPlan,
         layer_run_plan: &mut PackageModelLoopLayerRunPlan,
     ) -> Result<PackageModelLoopExecutionSummary, String> {
-        let mut layer_runner = build_package_model_loop_stack_runner(
-            model,
-            context,
-            stream,
-            &layer_run_plan.runs_by_layer,
-            self.decode.decode_shape,
-        )?;
+        let mut layer_runner = {
+            let layer_requests = layer_run_plan
+                .runs_by_layer
+                .iter()
+                .map(|runs| {
+                    runs.iter()
+                        .map(|run| Qwen3PackageModelStackRequest {
+                            request_id: run.request_id,
+                            block_table: &run.block_table,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            qwen3_package_model_stack_runner(model, context, stream, self.decode, &layer_requests)?
+        };
 
         for layer_position in 0..layer_runner.layer_count() {
             for run in &mut layer_run_plan.runs_by_layer[layer_position] {
