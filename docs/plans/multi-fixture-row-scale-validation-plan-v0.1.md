@@ -61,10 +61,33 @@ Initial tolerances:
    - Start from layer11 token13 hidden3994 traces.
    - Do not promote single-fixture layer11 candidates without cross-fixture validation.
 
+## Progress 2026-07-05
+
+Implemented:
+
+- `tools/summarize-qwen-prefix-smokes.py`
+  - Generated `benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-multi-fixture-summary.json`
+  - Generated `benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-multi-fixture-summary.md`
+- `tools/extract-qwen-row-scale-candidates.py`
+  - Generated candidate, manifest-schema, smoke-schema, and markdown outputs from available v0.10 traces.
+- `tools/evaluate-qwen-prefix-candidate-gates.py`
+  - Generated `benchmarks/results/2026-07-05/engine/qwen-prefix-candidate-gates.json`
+  - Generated `benchmarks/results/2026-07-05/engine/qwen-prefix-candidate-gates.md`
+
+Current gate result:
+
+| condition | decision | fixtures | median improvement | max regression | reason |
+| --- | --- | ---: | ---: | ---: | --- |
+| `layer6` | reject | 3 | 0.0081653595 | 0.00455665588 | tokens201 regression exceeds `0.001` |
+| `combined` | needs_more_fixtures | 1 | 0.0343608856 | 0 | only one paired fixture |
+
+Interpretation: layer6 hidden3994 remains a real local compensation candidate, but it should not be promoted unconditionally under the initial multi-fixture gate.
+
 ## Deliverables
 
 - `tools/summarize-qwen-prefix-smokes.py`
 - `tools/extract-qwen-row-scale-candidates.py`
+- `tools/evaluate-qwen-prefix-candidate-gates.py`
 - `benchmarks/results/2026-07-05/engine/qwen-row-scale-multi-fixture-summary.md`
 - Updated manifest row-scale candidate JSON files.
 - A final decision table marking each candidate as accepted, rejected, or needs-more-fixtures.
