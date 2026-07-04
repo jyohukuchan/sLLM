@@ -1230,3 +1230,34 @@
 ### 次の行動
 
 - `qwen3_self_attn_runtime_weights_from_package`、`qwen3_post_attention_runtime_weights_from_package`、`qwen3_decoder_layer_runtime_weights_from_package` を `main.rs` からlibrary側へ移し、package-loaded layer weightsをsmoke以外のrunnerから使える形へ寄せる。
+
+## Qwen3 package runtime weight loader 抽出
+
+### 前回の要点
+
+- `host_bytes` moduleを追加し、package-loaded weight builderをlibrary側へ移すために必要なf32/u32 little-endian byte変換を `main.rs` から分離した。
+- `PassthroughF32Data`、AQ4 materialize helper、host byte helpersがlibrary側に揃ったため、Qwen3/Qwen3.5のresident runtime weights構築だけを切り出せる状態になった。
+
+### 今回の変更点
+
+- `crates/ullm-engine/src/qwen3_loader.rs` を追加し、`qwen3_self_attn_runtime_weights_from_package`、`qwen3_post_attention_runtime_weights_from_package`、`qwen3_decoder_layer_runtime_weights_from_package` を `main.rs` から移した。
+- `lib.rs` で `qwen3_loader` moduleを公開し、`main.rs` はQwen3 package runtime weight loaderをimportして既存smokeから呼ぶ形にした。
+- 低レベル `decoder.rs` にはpackage/loader依存を入れず、`.ullm.d` packageからresident runtime weightsを組み立てる責務を `qwen3_loader.rs` 側へ寄せた。
+- q/k norm長不一致とpost RMSNorm長不一致を、package I/O前に弾く単体テストを追加した。
+- `docs/words.txt` に `Qwen3 package runtime weight loader` を追加した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- `package-self-attn-block-smoke`、`package-self-attn-mlp-block-smoke`、`package-self-attn-mlp-block-scheduler-smoke`、`package-self-attn-mlp-block-model-loop-smoke` を `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` で確認した。CPU `0`、R9700/RDNA4 `2`、V620/RDNA2 `1` のすべてで `verified=true`。
+- scheduler/model-loop系は全deviceで `cached_tokens=[3, 3, 1]`、`generated_tokens=[2, 1, 0]`、`final_ready=0`。3-layer model-loopは `decode_batch_ready_counts=[2, 1]`。runtime/cache diffsはすべて `0` のまま。
+
+### 次の行動
+
+- `PackageModelLoopLayerSmoke` / `PackageModelLoopSmokeModel::load` 周辺を、Qwen3 package runtime weight loaderを使うlibrary側の薄いmodel-loader境界へ寄せる。
