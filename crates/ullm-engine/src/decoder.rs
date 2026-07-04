@@ -25,6 +25,13 @@ pub struct PagedKvCacheReadback {
     pub v: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PagedDecodeStepOutput {
+    pub cache_position: usize,
+    pub cache_len: usize,
+    pub output: Vec<f32>,
+}
+
 #[derive(Debug)]
 pub struct PagedDecodeState {
     shape: PagedDecodeShape,
@@ -261,6 +268,25 @@ impl PagedDecodeState {
         Ok(())
     }
 
+    pub fn decode_step(
+        &mut self,
+        stream: &mut RuntimeStream,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        softmax_scale: f32,
+    ) -> Result<PagedDecodeStepOutput, String> {
+        self.validate_decode_input(q, softmax_scale)?;
+        let cache_position = self.write_token(stream, k, v)?;
+        let cache_len = self.written_len;
+        let output = self.decode(stream, q, cache_len, softmax_scale)?;
+        Ok(PagedDecodeStepOutput {
+            cache_position,
+            cache_len,
+            output,
+        })
+    }
+
     pub fn decode_written(
         &mut self,
         stream: &mut RuntimeStream,
@@ -278,18 +304,7 @@ impl PagedDecodeState {
         softmax_scale: f32,
     ) -> Result<Vec<f32>, String> {
         self.validate_cache_len(cache_len)?;
-        if q.len() != self.shape.q_elements()? {
-            return Err(format!(
-                "paged decoder q length {} does not match expected {}",
-                q.len(),
-                self.shape.q_elements()?
-            ));
-        }
-        if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
-            return Err(
-                "paged decoder softmax_scale must be finite and greater than zero".to_string(),
-            );
-        }
+        self.validate_decode_input(q, softmax_scale)?;
 
         self.q_buffer
             .copy_from_host(0, &f32s_to_le_bytes(q), Some(stream))
@@ -328,6 +343,22 @@ impl PagedDecodeState {
         let k = read_f32_buffer(&self.k_cache_buffer, stream, self.shape.k_cache_elements()?)?;
         let v = read_f32_buffer(&self.v_cache_buffer, stream, self.shape.v_cache_elements()?)?;
         Ok(PagedKvCacheReadback { k, v })
+    }
+
+    fn validate_decode_input(&self, q: &[f32], softmax_scale: f32) -> Result<(), String> {
+        if q.len() != self.shape.q_elements()? {
+            return Err(format!(
+                "paged decoder q length {} does not match expected {}",
+                q.len(),
+                self.shape.q_elements()?
+            ));
+        }
+        if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+            return Err(
+                "paged decoder softmax_scale must be finite and greater than zero".to_string(),
+            );
+        }
+        Ok(())
     }
 
     fn validate_cache_position(&self, cache_position: usize) -> Result<(), String> {
@@ -512,6 +543,71 @@ mod tests {
             softmax_scale,
         );
         assert_f32s_close(&output, &expected, 1e-5);
+    }
+
+    #[test]
+    fn paged_decode_state_decode_step_matches_prefix_decode_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 3,
+            value_dim: 2,
+        };
+        let block_table = vec![3_u32, 0_u32];
+        let mut state =
+            PagedDecodeState::new(&mut context, &mut stream, shape, block_table.clone()).unwrap();
+        let cache_len = 3_usize;
+        let logical_q = (0..cache_len * shape.q_heads * shape.head_dim)
+            .map(|index| ((index * 7) as f32 - 11.0) / 19.0)
+            .collect::<Vec<_>>();
+        let logical_k = (0..cache_len * shape.kv_heads * shape.head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let logical_v = (0..cache_len * shape.kv_heads * shape.value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        for timestep in 0..cache_len {
+            let q_start = timestep * shape.q_elements().unwrap();
+            let q_end = q_start + shape.q_elements().unwrap();
+            let k_start = timestep * shape.k_token_elements().unwrap();
+            let k_end = k_start + shape.k_token_elements().unwrap();
+            let v_start = timestep * shape.v_token_elements().unwrap();
+            let v_end = v_start + shape.v_token_elements().unwrap();
+            let step = state
+                .decode_step(
+                    &mut stream,
+                    &logical_q[q_start..q_end],
+                    &logical_k[k_start..k_end],
+                    &logical_v[v_start..v_end],
+                    softmax_scale,
+                )
+                .unwrap();
+            assert_eq!(step.cache_position, timestep);
+            assert_eq!(step.cache_len, timestep + 1);
+            let (expected_k, expected_v) = pack_paged_kv_for_test(
+                &logical_k[..k_end],
+                &logical_v[..v_end],
+                &block_table,
+                timestep + 1,
+                shape,
+            );
+            let expected = expected_paged_decode_attn(
+                &logical_q[q_start..q_end],
+                &expected_k,
+                &expected_v,
+                &block_table,
+                timestep + 1,
+                shape,
+                softmax_scale,
+            );
+            assert_f32s_close(&step.output, &expected, 1e-5);
+        }
+        assert_eq!(state.written_len(), cache_len);
     }
 
     #[test]

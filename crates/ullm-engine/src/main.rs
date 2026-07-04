@@ -6733,7 +6733,7 @@ fn package_self_attn_decode_smoke(
     let paged_decode = match runtime_paged_kv_write_decode_verify(
         &mut context,
         &mut stream,
-        decode_q,
+        &q_rope,
         &k_rope,
         &v_projected,
         &paged_block_table,
@@ -6798,9 +6798,23 @@ fn package_self_attn_decode_smoke(
     let paged_kv_write_k_max_abs_diff = paged_decode.k_write_max_abs_diff;
     let paged_kv_write_v_max_abs_diff = paged_decode.v_write_max_abs_diff;
     let paged_decode_max_abs_diff = paged_decode.output_max_abs_diff;
+    let paged_step_decode_max_abs_diff = paged_decode.step_output_max_abs_diff;
+    let causal_paged_step_decode_max_abs_diff = match verify_f32_close(
+        "package-self-attn-decode-smoke causal-vs-paged-step-decode",
+        &paged_decode.step_outputs,
+        &attention_output,
+        1e-4,
+        1e-4,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
 
     println!(
-        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} paged_allocator_free_blocks={} paged_allocator_allocated_blocks={} paged_allocator_free_runs={} paged_allocator_largest_free_run={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} paged_k_cache_preview={} paged_v_cache_preview={} causal_last_preview={} decode_preview={} paged_decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} paged_kv_write_k_max_abs_diff={paged_kv_write_k_max_abs_diff:.9} paged_kv_write_v_max_abs_diff={paged_kv_write_v_max_abs_diff:.9} paged_decode_max_abs_diff={paged_decode_max_abs_diff:.9} decode_paged_max_abs_diff={decode_paged_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} causal_paged_decode_max_abs_diff={causal_paged_decode_max_abs_diff:.9} verified=true",
+        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} paged_allocator_free_blocks={} paged_allocator_allocated_blocks={} paged_allocator_free_runs={} paged_allocator_largest_free_run={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} paged_k_cache_preview={} paged_v_cache_preview={} causal_last_preview={} decode_preview={} paged_decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} paged_kv_write_k_max_abs_diff={paged_kv_write_k_max_abs_diff:.9} paged_kv_write_v_max_abs_diff={paged_kv_write_v_max_abs_diff:.9} paged_decode_max_abs_diff={paged_decode_max_abs_diff:.9} paged_step_decode_max_abs_diff={paged_step_decode_max_abs_diff:.9} decode_paged_max_abs_diff={decode_paged_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} causal_paged_decode_max_abs_diff={causal_paged_decode_max_abs_diff:.9} causal_paged_step_decode_max_abs_diff={causal_paged_step_decode_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -15841,7 +15855,9 @@ fn runtime_paged_decode_attn_verify(
 
 struct RuntimePagedKvWriteDecodeResult {
     output: Vec<f32>,
+    step_outputs: Vec<f32>,
     output_max_abs_diff: f32,
+    step_output_max_abs_diff: f32,
     k_cache: Vec<f32>,
     v_cache: Vec<f32>,
     k_write_max_abs_diff: f32,
@@ -15852,7 +15868,7 @@ struct RuntimePagedKvWriteDecodeResult {
 fn runtime_paged_kv_write_decode_verify(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
-    q: &[f32],
+    q_sequence: &[f32],
     logical_k_cache: &[f32],
     logical_v_cache: &[f32],
     block_table: &[u32],
@@ -15866,10 +15882,10 @@ fn runtime_paged_kv_write_decode_verify(
     softmax_scale: f32,
     label: &str,
 ) -> Result<RuntimePagedKvWriteDecodeResult, String> {
-    if q.len() != q_heads * head_dim {
+    if q_sequence.len() != cache_len * q_heads * head_dim {
         return Err(format!(
-            "{label} q length {} does not match q_heads={q_heads} head_dim={head_dim}",
-            q.len()
+            "{label} q sequence length {} does not match cache_len={cache_len} q_heads={q_heads} head_dim={head_dim}",
+            q_sequence.len()
         ));
     }
     if logical_k_cache.len() != cache_len * kv_heads * head_dim {
@@ -15905,26 +15921,64 @@ fn runtime_paged_kv_write_decode_verify(
     };
     let mut state = PagedDecodeState::new(context, stream, shape, block_table.to_vec())
         .map_err(|err| format!("failed to create {label} paged decode state: {err}"))?;
+    let q_token_elements = q_heads * head_dim;
     let k_token_elements = kv_heads * head_dim;
     let v_token_elements = kv_heads * value_dim;
+    let output_elements = q_heads * value_dim;
+    let mut step_outputs = Vec::with_capacity(cache_len * output_elements);
+    let mut step_output_max_abs_diff = 0.0_f32;
 
     for timestep in 0..cache_len {
+        let q_start = timestep * q_token_elements;
+        let q_end = q_start + q_token_elements;
         let k_start = timestep * k_token_elements;
         let k_end = k_start + k_token_elements;
         let v_start = timestep * v_token_elements;
         let v_end = v_start + v_token_elements;
-        let written_position = state
-            .write_token(
+        let step = state
+            .decode_step(
                 stream,
+                &q_sequence[q_start..q_end],
                 &logical_k_cache[k_start..k_end],
                 &logical_v_cache[v_start..v_end],
+                softmax_scale,
             )
-            .map_err(|err| format!("failed to write {label} timestep {timestep}: {err}"))?;
-        if written_position != timestep {
+            .map_err(|err| format!("failed to run {label} timestep {timestep}: {err}"))?;
+        if step.cache_position != timestep {
             return Err(format!(
-                "{label} paged decode state wrote position {written_position}, expected {timestep}"
+                "{label} paged decode state wrote position {}, expected {timestep}",
+                step.cache_position
             ));
         }
+        if step.cache_len != timestep + 1 {
+            return Err(format!(
+                "{label} paged decode state reported cache_len {}, expected {}",
+                step.cache_len,
+                timestep + 1
+            ));
+        }
+        let expected_step_output = runtime_host_paged_decode_attn_f32(
+            &q_sequence[q_start..q_end],
+            &expected_k_cache,
+            &expected_v_cache,
+            block_table,
+            timestep + 1,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+        let step_max_abs_diff = verify_f32_close(
+            &format!("{label} timestep {timestep} paged decode step"),
+            &step.output,
+            &expected_step_output,
+            1e-4_f32,
+            1e-4_f32,
+        )?;
+        step_output_max_abs_diff = step_output_max_abs_diff.max(step_max_abs_diff);
+        step_outputs.extend_from_slice(&step.output);
     }
 
     let readback = state
@@ -15945,11 +15999,11 @@ fn runtime_paged_kv_write_decode_verify(
         1e-5_f32,
     )?;
 
-    let output = state
-        .decode_written(stream, q, softmax_scale)
-        .map_err(|err| format!("failed to decode {label}: {err}"))?;
+    let output_start = (cache_len - 1) * output_elements;
+    let output_end = output_start + output_elements;
+    let output = step_outputs[output_start..output_end].to_vec();
     let expected_output = runtime_host_paged_decode_attn_f32(
-        q,
+        &q_sequence[(cache_len - 1) * q_token_elements..cache_len * q_token_elements],
         &expected_k_cache,
         &expected_v_cache,
         block_table,
@@ -15966,7 +16020,9 @@ fn runtime_paged_kv_write_decode_verify(
 
     Ok(RuntimePagedKvWriteDecodeResult {
         output,
+        step_outputs,
         output_max_abs_diff,
+        step_output_max_abs_diff,
         k_cache: readback.k,
         v_cache: readback.v,
         k_write_max_abs_diff,

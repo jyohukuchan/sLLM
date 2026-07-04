@@ -67,6 +67,7 @@ runtime decode attention smoke:runtime buffer上の1-token f32 qとprefill済み
 runtime paged decode attention smoke:runtime buffer上の1-token f32 q、物理block配置のf32 K/V cache、u32 block tableからGQA対応のdecode attentionを実行し、paged KV cache参照境界をCPU/HIP kernelで確認するsmoke。allocatorやscheduler全体はまだ含まない
 runtime paged KV write smoke:runtime buffer上の1-token f32 K/Vとu32 block tableから、指定cache positionに対応する物理paged K/V cache slotへK/Vを書き込む境界をCPU/HIP kernelで確認するsmoke
 paged decode state:runtime buffer上のblock table、paged K/V cache、1-token K/V scratch、q/output scratch、written_lenをまとめて保持し、runtime paged KV writeとruntime paged decode attentionを接続するdecoder step用state。cache readbackは論理順ではなく物理cache layoutを返す
+paged decode step:1 token分のq/k/vを受け取り、k/vをpaged K/V cacheへ書き込んだ後、その時点のprefix長でpaged decode attentionを実行するdecoder step
 runtime KV paged decode smoke:Rust側のKvBlockAllocatorで非連続block tableを作り、そのblock tableとhost側で検証用にpackした物理paged K/V cacheをruntime paged decode attentionへ渡すsmoke。scheduler管理とruntime kernel境界の最小接続を確認する
 depthwise conv1d:channelごとに独立した1次元畳み込み。linear attentionのconv1d.weightでは入力系列の各channelに同じchannelのkernelだけを適用する
 runtime depthwise conv1d smoke:runtime buffer上のf32系列とf32 weightからcausal depthwise conv1dを実行し、CPU/HIP kernel境界を確認するsmoke
