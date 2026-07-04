@@ -1,0 +1,23 @@
+{
+  "entries": [
+    {
+      "row_index": 3994,
+      "scale": 0.9923165483832161,
+      "source": "qwen-layer-module-trace-scale-fit:tokens101-layer6:attention_out_proj",
+      "tensor_name": "model.language_model.layers.6.linear_attn.out_proj.weight"
+    },
+    {
+      "row_index": 3994,
+      "scale": 1.0233830958654118,
+      "source": "qwen-layer-module-trace-scale-fit:tokens101-layer6:mlp_down_proj",
+      "tensor_name": "model.language_model.layers.6.mlp.down_proj.weight"
+    },
+    {
+      "row_index": 3994,
+      "scale": 0.9849548526270905,
+      "source": "qwen-layer-module-trace-scale-fit:tokens201-layer11:self_attention_o_proj",
+      "tensor_name": "model.language_model.layers.11.self_attn.o_proj.weight"
+    }
+  ],
+  "schema_version": "row-scale-overrides-v0.1"
+}
