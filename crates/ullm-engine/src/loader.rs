@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::package::{
-    PackageSummary, ReferencedFile, ReferencedFileRole, TensorPayloadBundle,
-    list_tensor_payload_bundles,
+    PackageSummary, PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole,
+    TensorPayloadBundle, TensorSelector, list_tensor_payload_bundles,
+    select_passthrough_payload_bundle,
 };
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -54,6 +55,13 @@ pub struct LoadedTensorBundle {
     pub index: LoadedPayload,
     pub scale: LoadedPayload,
     pub codebook: LoadedPayload,
+}
+
+#[derive(Debug, Clone)]
+pub struct PassthroughF32Data {
+    pub values: Vec<f32>,
+    pub dtype: String,
+    pub shape: Vec<u64>,
 }
 
 #[derive(Debug)]
@@ -129,6 +137,214 @@ pub fn load_package_tensor_prefix(
         registry_indices,
         registry,
     })
+}
+
+pub fn read_named_passthrough_f32(
+    package_path: impl AsRef<Path>,
+    tensor_name: &str,
+    chunk_bytes: usize,
+) -> Result<PassthroughF32Data, String> {
+    let selector = TensorSelector::Name(tensor_name.to_string());
+    let bundle = select_passthrough_payload_bundle(package_path, &selector).map_err(|err| {
+        format!("failed to select package passthrough tensor {tensor_name}: {err}")
+    })?;
+    validate_passthrough_shape_elements(&bundle)
+        .map_err(|err| format!("invalid passthrough shape for {tensor_name}: {err}"))?;
+    let dtype = resolve_passthrough_dtype(&bundle, tensor_name)?.to_string();
+    let values = read_passthrough_payload_f32_bytes(&bundle, chunk_bytes, &dtype)
+        .map_err(|err| format!("failed to read passthrough payload for {tensor_name}: {err}"))?;
+    let expected_elements = usize::try_from(bundle.elements)
+        .map_err(|_| format!("passthrough tensor {tensor_name} is too large for this host"))?;
+    if values.len() != expected_elements {
+        return Err(format!(
+            "passthrough tensor element count mismatch for {tensor_name}: expected {} got {}",
+            expected_elements,
+            values.len()
+        ));
+    }
+    Ok(PassthroughF32Data {
+        values,
+        dtype,
+        shape: bundle.shape,
+    })
+}
+
+pub fn resolve_passthrough_dtype<'a>(
+    bundle: &'a PassthroughPayloadBundle,
+    tensor_name: &str,
+) -> Result<&'a str, String> {
+    if let Some(dtype) = bundle.dtype.as_deref() {
+        return match dtype {
+            "BF16" | "F32" => Ok(dtype),
+            _ => Err(format!(
+                "unsupported passthrough dtype \"{dtype}\" for tensor {tensor_name}"
+            )),
+        };
+    }
+
+    let payload_bytes = if bundle.payload_bytes == 0 {
+        bundle.payload_file.bytes
+    } else {
+        bundle.payload_bytes
+    };
+    let bf16_bytes = bundle.elements.checked_mul(2).ok_or_else(|| {
+        format!("passthrough tensor {tensor_name} element count overflow while inferring dtype")
+    })?;
+    let f32_bytes = bundle.elements.checked_mul(4).ok_or_else(|| {
+        format!("passthrough tensor {tensor_name} element count overflow while inferring dtype")
+    })?;
+    if payload_bytes == bf16_bytes {
+        Ok("BF16")
+    } else if payload_bytes == f32_bytes {
+        Ok("F32")
+    } else {
+        Err(format!(
+            "could not infer passthrough dtype for tensor {tensor_name}; declare dtype in manifest"
+        ))
+    }
+}
+
+pub fn validate_passthrough_shape_elements(
+    bundle: &PassthroughPayloadBundle,
+) -> Result<(), String> {
+    if bundle.shape.is_empty() {
+        return Ok(());
+    }
+    let mut product = 1_u64;
+    for dimension in &bundle.shape {
+        if *dimension == 0 {
+            return Err("shape contains zero".to_string());
+        }
+        product = product
+            .checked_mul(*dimension)
+            .ok_or_else(|| "shape element count overflows u64".to_string())?;
+    }
+    if product != bundle.elements {
+        return Err(format!(
+            "shape product {} does not match element count {}",
+            product, bundle.elements
+        ));
+    }
+    Ok(())
+}
+
+pub fn read_passthrough_payload_f32_bytes(
+    bundle: &PassthroughPayloadBundle,
+    chunk_bytes: usize,
+    dtype: &str,
+) -> Result<Vec<f32>, String> {
+    let mut file = File::open(&bundle.payload_file.absolute_path).map_err(|err| {
+        format!(
+            "failed to open {}: {err}",
+            bundle.payload_file.absolute_path.display()
+        )
+    })?;
+    let payload_bytes = if bundle.payload_bytes == 0 {
+        bundle.payload_file.bytes
+    } else {
+        bundle.payload_bytes
+    };
+    if payload_bytes != bundle.payload_file.bytes {
+        return Err(format!(
+            "passthrough tensor {} payload bytes mismatch: declared {} actual {}",
+            bundle.tensor_name, payload_bytes, bundle.payload_file.bytes
+        ));
+    }
+    let element_size = match dtype {
+        "BF16" => 2_usize,
+        "F32" => 4_usize,
+        _ => {
+            return Err(format!(
+                "unsupported passthrough dtype {dtype} for tensor {}",
+                bundle.tensor_name
+            ));
+        }
+    };
+    if chunk_bytes == 0 {
+        return Err("chunk bytes must be greater than zero".to_string());
+    }
+    let expected_bytes = usize::try_from(payload_bytes)
+        .map_err(|_| "passthrough payload is too large for this host".to_string())?;
+    let expected_elements = usize::try_from(bundle.elements)
+        .map_err(|_| "payload element count too large".to_string())?;
+    if !expected_bytes.is_multiple_of(element_size) {
+        return Err(format!(
+            "passthrough tensor {} payload is not aligned to {element_size}-byte elements",
+            bundle.tensor_name
+        ));
+    }
+    if expected_bytes / element_size != expected_elements {
+        return Err(format!(
+            "passthrough tensor {} payload has {} elements, expected {}",
+            bundle.tensor_name,
+            expected_bytes / element_size,
+            expected_elements
+        ));
+    }
+
+    let mut values = Vec::with_capacity(expected_elements);
+    let mut scratch = vec![0_u8; chunk_bytes];
+    let mut read_bytes = 0_usize;
+    let mut carry = Vec::with_capacity(element_size - 1);
+    let mut merge = Vec::with_capacity(chunk_bytes + element_size);
+    loop {
+        let read = file.read(&mut scratch).map_err(|err| {
+            format!(
+                "failed to read {}: {err}",
+                bundle.payload_file.absolute_path.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        read_bytes = read_bytes.saturating_add(read);
+        if read_bytes > expected_bytes {
+            return Err(format!(
+                "passthrough tensor {} payload is larger than declared bytes {}",
+                bundle.tensor_name, expected_bytes
+            ));
+        }
+
+        merge.clear();
+        if carry.is_empty() {
+            merge.extend_from_slice(&scratch[..read]);
+        } else {
+            merge.extend_from_slice(&carry);
+            carry.clear();
+            merge.extend_from_slice(&scratch[..read]);
+        }
+
+        let decode_end = (merge.len() / element_size) * element_size;
+        for bytes in merge[..decode_end].chunks_exact(element_size) {
+            let value = match dtype {
+                "BF16" => {
+                    let raw = u16::from_le_bytes([bytes[0], bytes[1]]);
+                    f32::from_bits(u32::from(raw) << 16)
+                }
+                "F32" => f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                _ => unreachable!(),
+            };
+            values.push(value);
+        }
+        if decode_end < merge.len() {
+            carry.extend_from_slice(&merge[decode_end..]);
+        }
+    }
+    if read_bytes != expected_bytes {
+        return Err(format!(
+            "passthrough tensor {} payload bytes mismatch while reading file: expected {} got {}",
+            bundle.tensor_name, expected_bytes, read_bytes
+        ));
+    }
+    if values.len() != expected_elements {
+        return Err(format!(
+            "passthrough tensor {} payload elements mismatch: expected {} got {}",
+            bundle.tensor_name,
+            expected_elements,
+            values.len()
+        ));
+    }
+    Ok(values)
 }
 
 #[derive(Debug, Default)]
@@ -572,6 +788,62 @@ mod tests {
         assert_eq!(loaded1.index.chunks, 1);
         assert_eq!(loaded1.scale.chunks, 1);
         assert_eq!(loaded1.codebook.chunks, 2);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_named_passthrough_f32_decodes_bf16_and_f32_payloads() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-passthrough-f32-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("passthrough")).unwrap();
+        fs::write(
+            root.join("passthrough/bf16.raw"),
+            [0x80_u8, 0x3f, 0x00, 0xc0],
+        )
+        .unwrap();
+        fs::write(
+            root.join("passthrough/f32.raw"),
+            [1.25_f32.to_le_bytes(), (-0.5_f32).to_le_bytes()].concat(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "passthrough_tensors": [{
+                "name": "model.layers.0.input_layernorm.weight",
+                "shape": [2],
+                "elements": 2,
+                "payload_bytes": 4,
+                "payload_file": "passthrough/bf16.raw"
+              }, {
+                "name": "model.layers.0.linear_attn.dt_bias",
+                "dtype": "F32",
+                "shape": [2],
+                "elements": 2,
+                "payload_bytes": 8,
+                "payload_file": "passthrough/f32.raw"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let bf16 =
+            read_named_passthrough_f32(&root, "model.layers.0.input_layernorm.weight", 3).unwrap();
+        assert_eq!(bf16.dtype, "BF16");
+        assert_eq!(bf16.shape, vec![2]);
+        assert_eq!(bf16.values, vec![1.0_f32, -2.0_f32]);
+
+        let f32 =
+            read_named_passthrough_f32(&root, "model.layers.0.linear_attn.dt_bias", 3).unwrap();
+        assert_eq!(f32.dtype, "F32");
+        assert_eq!(f32.shape, vec![2]);
+        assert_eq!(f32.values, vec![1.25_f32, -0.5_f32]);
 
         fs::remove_dir_all(root).unwrap();
     }
