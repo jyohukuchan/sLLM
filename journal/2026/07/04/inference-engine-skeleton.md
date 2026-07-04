@@ -8,6 +8,13 @@
 ## 今回の変更点
 
 - goal再開後の当面scopeを、手元で検証できるRDNA2/V620とRDNA4/R9700に限定した。モデルアーキテクチャ対応も、まずはQwen3.5/Qwen3系の一部decoder経路だけで進める。
+- Commit `1f00a13 Add Qwen3 decoder layer runtime weights` で `Qwen3DecoderLayerRuntimeWeights` と `Qwen3MlpRuntimeWeights` を追加した。
+- `qwen3_decoder_layer_runtime_weights_from_package` はpost RMSNorm weightをruntime bufferへ転送し、MLP gate/up/down AQ4 tensorをmaterializeして、hidden/intermediate shapeを検証する。
+- `package-self-attn-mlp-block-smoke` はpost RMSNorm/MLP weightのmaterializeとshape検証をsmoke-local loopから外し、`Qwen3DecoderLayerRuntimeWeights` を `Qwen3DecoderLayerStepState::step` へ渡すようにした。
+- 期待値計算より前にruntime weight setを作る順序にして、post RMSNorm長やMLP shapeの不整合を先に明確なエラーにするようにした。
+- `docs/words.txt` に `Qwen3 decoder layer runtime weights` を追加し、`package self attention MLP block smoke` がruntime weight setをlayer step stateへ渡すことを明記した。
+- 検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` を通した。
+- `package-self-attn-mlp-block-smoke` はCPU `0`、R9700/RDNA4 `2`、V620/RDNA2 `1`/`3` で通した。CPUは全diff `0`、RDNA2/RDNA4は `paged_step_attention_max_abs_diff=0.000000119`、`output_gate_max_abs_diff=0.000000119`、`o_proj_max_abs_diff=0.000005722`、`post_norm_max_abs_diff=0.000001907`、`layer_block_max_abs_diff=0`。
 - Commit `6a99672 Add Qwen3 decoder layer step state` で `Qwen3DecoderLayerStepState` と `Qwen3DecoderLayerStepOutput` を追加した。
 - `Qwen3DecoderLayerStepState` は `Qwen3SelfAttnBlockStepState` を内部に持ち、paged decode attention、Qwen3.5 output gate、o projection、residual add、post RMSNorm、MLP gate/up/down、SiLU-mul、final residual addまでを1 token分ずつ接続する。
 - `package-self-attn-mlp-block-smoke` はpost RMSNorm、MLP、final residual addの手動runtime loopをやめ、`Qwen3DecoderLayerStepState::step` の逐次出力を使うようにした。
@@ -699,13 +706,14 @@
 - `f570e74 Use paged decode steps in self attention MLP smoke`
 - `cd87b05 Add Qwen3 self attention block step state`
 - `6a99672 Add Qwen3 decoder layer step state`
+- `1f00a13 Add Qwen3 decoder layer runtime weights`
 
 ## 次の行動
 
 - 当面はRDNA2/V620とRDNA4/R9700のCI相当smokeを優先し、広いhardware対応やfull model architecture対応は後回しにする。
-- `Qwen3DecoderLayerStepState` でpaged decode attention、output gate、o projection、residual add、post RMSNorm、MLP、final residual addまでのnarrow layer step APIを作り、CPU、R9700/RDNA4、V620/RDNA2で通した。次はweight registryからlayer step stateへ渡すweight setを整理し、smoke専用のhost vector受け渡しを減らす。
+- `Qwen3DecoderLayerStepState` でpaged decode attention、output gate、o projection、residual add、post RMSNorm、MLP、final residual addまでのnarrow layer step APIを作り、CPU、R9700/RDNA4、V620/RDNA2で通した。post RMSNorm/MLP側のruntime weight setも入ったので、次はself-attention側q/k/v/oとq/k normも含めたlayer resident weightsへ広げ、smoke専用のhost vector受け渡しをさらに減らす。
 - Runtime paged KV writeはCPU、R9700/RDNA4、V620/RDNA2で通り、package self-attn decode smokeとpackage self-attn MLP block smokeでも `decode_step` 経由に置き換え済み。
 - Paged decode attentionのruntime境界はCPU、R9700/RDNA4、V620/RDNA2で通っており、package self-attn decode smokeからも呼べる状態になった。
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、paged decode state/step、Qwen3 self-attn block step state、Qwen3 decoder layer step state、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。Qwen3.5 self-attn MLP block smokeではpaged decode step出力をlayer-level partial decoder経路へ渡せるようになった。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、paged decode state/step、Qwen3 self-attn block step state、Qwen3 decoder layer step state、Qwen3 decoder layer runtime weights、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。Qwen3.5 self-attn MLP block smokeではpaged decode step出力をlayer-level partial decoder経路へ渡せるようになった。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
