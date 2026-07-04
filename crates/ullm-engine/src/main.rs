@@ -24,6 +24,7 @@ fn main() -> ExitCode {
         Some("runtime-silu-mul-smoke") => runtime_silu_mul_smoke(env::args().nth(2)),
         Some("runtime-add-smoke") => runtime_add_smoke(env::args().nth(2)),
         Some("runtime-rope-smoke") => runtime_rope_smoke(env::args().nth(2)),
+        Some("runtime-causal-attn-smoke") => runtime_causal_attn_smoke(env::args().nth(2)),
         Some("runtime-depthwise-conv1d-smoke") => {
             runtime_depthwise_conv1d_smoke(env::args().nth(2))
         }
@@ -950,6 +951,177 @@ fn runtime_rope_smoke(device_index: Option<String>) -> ExitCode {
         rotary_dim,
         position_offset,
         rope_base,
+        format_f32_preview(&output)
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_causal_attn_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let sequence_len = 3_usize;
+    let q_heads = 4_usize;
+    let kv_heads = 2_usize;
+    let head_dim = 3_usize;
+    let value_dim = 2_usize;
+    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let q = (0..sequence_len * q_heads * head_dim)
+        .map(|index| (index as f32 - 8.0) / 11.0)
+        .collect::<Vec<_>>();
+    let k = (0..sequence_len * kv_heads * head_dim)
+        .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+        .collect::<Vec<_>>();
+    let v = (0..sequence_len * kv_heads * value_dim)
+        .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+        .collect::<Vec<_>>();
+    let expected = runtime_host_causal_attn_f32(
+        &q,
+        &k,
+        &v,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+    );
+    let q_bytes = encode_f32_to_bytes(&q);
+    let k_bytes = encode_f32_to_bytes(&k);
+    let v_bytes = encode_f32_to_bytes(&v);
+    let output_bytes = expected.len() * std::mem::size_of::<f32>();
+
+    let mut q_buffer = match context.alloc_buffer(q_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate q runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut k_buffer = match context.alloc_buffer(k_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate k runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut v_buffer = match context.alloc_buffer(v_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate v runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut output_buffer = match context.alloc_buffer(output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate causal attention output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = q_buffer.copy_from_host(0, &q_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy causal attention q input: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = k_buffer.copy_from_host(0, &k_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy causal attention k input: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = v_buffer.copy_from_host(0, &v_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy causal attention v input: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!(
+            "failed to synchronize runtime stream after causal attention input copies: {err}"
+        );
+        return ExitCode::from(1);
+    }
+
+    if let Err(err) = ullm_runtime_sys::causal_attn_f32(
+        &q_buffer,
+        &k_buffer,
+        &v_buffer,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime causal_attn_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after causal_attn_f32: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_raw = vec![0_u8; output_bytes];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_raw, Some(&mut stream)) {
+        eprintln!("failed to copy causal_attn_f32 result back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after causal attention output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let output = decode_f32_le_values(&output_raw);
+    let tolerance = if info.backend == "cpu" {
+        1e-5_f32
+    } else {
+        1e-4_f32
+    };
+    let max_abs_diff = match verify_f32_close(
+        "runtime causal attention smoke",
+        &output,
+        &expected,
+        tolerance,
+        tolerance,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}; output={output:?} expected={expected:?}");
+            return ExitCode::from(1);
+        }
+    };
+
+    println!(
+        "runtime-causal-attn-smoke backend={} device_index={} name=\"{}\" sequence_len={} q_heads={} kv_heads={} head_dim={} value_dim={} softmax_scale={softmax_scale:.9} output={} max_abs_diff={max_abs_diff:.9} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
         format_f32_preview(&output)
     );
     ExitCode::SUCCESS
@@ -12121,7 +12293,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
@@ -12494,6 +12666,68 @@ fn runtime_host_rope_f32(
             }
             output[base + rotary_dim..base + head_dim]
                 .copy_from_slice(&input[base + rotary_dim..base + head_dim]);
+        }
+    }
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_host_causal_attn_f32(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+) -> Vec<f32> {
+    if sequence_len == 0
+        || q_heads == 0
+        || kv_heads == 0
+        || head_dim == 0
+        || value_dim == 0
+        || !q_heads.is_multiple_of(kv_heads)
+        || q.len() != sequence_len * q_heads * head_dim
+        || k.len() != sequence_len * kv_heads * head_dim
+        || v.len() != sequence_len * kv_heads * value_dim
+    {
+        return Vec::new();
+    }
+    let mut output = vec![0.0_f32; sequence_len * q_heads * value_dim];
+    let q_per_kv = q_heads / kv_heads;
+    for timestep in 0..sequence_len {
+        for q_head in 0..q_heads {
+            let kv_head = q_head / q_per_kv;
+            let q_base = (timestep * q_heads + q_head) * head_dim;
+            let mut scores = Vec::with_capacity(timestep + 1);
+            for source_timestep in 0..=timestep {
+                let k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                let score = (0..head_dim)
+                    .map(|dim| q[q_base + dim] * k[k_base + dim])
+                    .sum::<f32>()
+                    * softmax_scale;
+                scores.push(score);
+            }
+            let max_score = scores
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, |max, score| max.max(score));
+            let weights = scores
+                .iter()
+                .map(|score| (*score - max_score).exp())
+                .collect::<Vec<_>>();
+            let denominator = weights.iter().sum::<f32>();
+            let output_base = (timestep * q_heads + q_head) * value_dim;
+            for value in 0..value_dim {
+                let mut weighted = 0.0_f32;
+                for (source_timestep, weight) in weights.iter().enumerate() {
+                    let v_index = (source_timestep * kv_heads + kv_head) * value_dim + value;
+                    weighted += *weight * v[v_index];
+                }
+                output[output_base + value] = weighted / denominator;
+            }
         }
     }
     output
