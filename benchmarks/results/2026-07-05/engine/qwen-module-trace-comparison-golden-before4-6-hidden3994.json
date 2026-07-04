@@ -1,0 +1,89 @@
+{
+  "row_count": 3,
+  "rows": [
+    {
+      "actual_delta_error": -9.683818817138672,
+      "attention_error": -3.7045905590057373,
+      "expected_delta": 1.875,
+      "fullref_actual_delta": 1.875,
+      "fullref_attention_output": 2.34375,
+      "fullref_fixture_max_abs_diff": 0.00390625,
+      "fullref_mlp_output": -0.5234375,
+      "hidden_index": 3994,
+      "layer_index": 4,
+      "layer_kind": "linear_attention",
+      "mlp_error": -5.9245405197143555,
+      "package_actual_delta": -7.808818817138672,
+      "package_attention_output": -1.3608405590057373,
+      "package_mlp_output": -6.4479780197143555,
+      "package_output_diff": -9.683818817138672,
+      "run_mode": "golden_before_each_layer",
+      "token_index": 7
+    },
+    {
+      "actual_delta_error": -7.194999694824219,
+      "attention_error": -2.7021575048565865,
+      "expected_delta": 1.6875,
+      "fullref_actual_delta": 1.6875,
+      "fullref_attention_output": 2.8125,
+      "fullref_fixture_max_abs_diff": 0.0078125,
+      "fullref_mlp_output": -1.109375,
+      "hidden_index": 3994,
+      "layer_index": 5,
+      "layer_kind": "linear_attention",
+      "mlp_error": -4.508467197418213,
+      "package_actual_delta": -5.507499694824219,
+      "package_attention_output": 0.11034249514341354,
+      "package_mlp_output": -5.617842197418213,
+      "package_output_diff": -7.194999694824219,
+      "run_mode": "golden_before_each_layer",
+      "token_index": 6
+    },
+    {
+      "actual_delta_error": -25.146647453308105,
+      "attention_error": -10.888602152466774,
+      "expected_delta": 25.25,
+      "fullref_actual_delta": 25.25,
+      "fullref_attention_output": 10.875,
+      "fullref_fixture_max_abs_diff": 0.0078125,
+      "fullref_mlp_output": 14.5,
+      "hidden_index": 3994,
+      "layer_index": 6,
+      "layer_kind": "linear_attention",
+      "mlp_error": -14.383045308291912,
+      "package_actual_delta": 0.10335254669189453,
+      "package_attention_output": -0.013602152466773987,
+      "package_mlp_output": 0.11695469170808792,
+      "package_output_diff": -25.146648406982422,
+      "run_mode": "golden_before_each_layer",
+      "token_index": 0
+    }
+  ],
+  "run_mode": "golden_before_each_layer",
+  "schema_version": "qwen-module-trace-comparison-v0.1",
+  "skipped": [
+    {
+      "layer_index": 7,
+      "reason": "missing_full_reference"
+    }
+  ],
+  "worst_actual_delta_error": {
+    "actual_delta_error": -25.146647453308105,
+    "attention_error": -10.888602152466774,
+    "expected_delta": 25.25,
+    "fullref_actual_delta": 25.25,
+    "fullref_attention_output": 10.875,
+    "fullref_fixture_max_abs_diff": 0.0078125,
+    "fullref_mlp_output": 14.5,
+    "hidden_index": 3994,
+    "layer_index": 6,
+    "layer_kind": "linear_attention",
+    "mlp_error": -14.383045308291912,
+    "package_actual_delta": 0.10335254669189453,
+    "package_attention_output": -0.013602152466773987,
+    "package_mlp_output": 0.11695469170808792,
+    "package_output_diff": -25.146648406982422,
+    "run_mode": "golden_before_each_layer",
+    "token_index": 0
+  }
+}
