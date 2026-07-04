@@ -7,6 +7,10 @@
 
 ## 今回の変更点
 
+- Commit `1b0cd56 Add package self attention MLP block smoke` で `ullm-engine package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]` を追加した。
+- 新CLIは、実 `.ullm.d` の `self_attn.q/k/v/o_proj.weight`、`self_attn.q_norm/k_norm.weight`、`post_attention_layernorm.weight`、`mlp.gate/up/down_proj.weight` を使い、Qwen3.5 self-attention block出力からpost RMSNorm、MLP、final residual addまでを接続する。
+- self-attn側のmaterialized q/k/v/o matrixはhelperスコープ内に閉じ、MLP materialize前にdropされるようにした。現段階ではKV cacheやpaged decodeは含めない。
+- `docs/words.txt` に `package self attention MLP block smoke` を追加した。
 - `NOTICE` を追加し、最低限の著作権表示とreference sourceの扱いを明文化した。
 - `docs/decisions/0002-inference-engine-language-boundary.md` を追加し、Rust control plane / C++20 runtime / C ABI境界を決めた。
 - `docs/research/inference-engine-reference-notes-v0.1.md` を追加し、llama.cpp、vLLM、SGLang、ATOM、AITER、TensorRT-LLMの参照ファイル候補を記録した。
@@ -89,6 +93,14 @@
 
 ## 実測・検証
 
+- `target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 2`
+  - CPU fallbackでQwen3.5 layer3、seq2のself-attn block -> post RMSNorm -> MLP -> final residual addが成功した。
+  - final layer previewは `[0.4800197,0.8975260,0.8388433,0.6933283,-0.2060216,-0.6192650,0.1600223,0.6590981]`、全境界max diffは `0`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 target/debug/ullm-engine package-self-attn-mlp-block-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 3 2`
+  - R9700/RDNA4で成功した。
+- 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でも成功した。
+- RDNA2/RDNA4のpackage max diffsは `q_norm=0.000000715`、`k_norm=0.000000238`、`q_rope=0.000000119`、`k_rope=0.000000238`、`attention=0.000000119`、`output_gate=0.000000119`、`o_proj=0.000005722`、`block=0`、`post_norm=0.000001907`、`layer_block=0`。
+- 追加後の検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
 - `cargo run -p ullm-engine -- inspect-devices`
   - CPU fallback 1件とHIP device 3件を検出した。
   - HIP側は V620、R9700、V620 の3件として表示された。
