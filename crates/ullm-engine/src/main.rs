@@ -129,6 +129,16 @@ fn main() -> ExitCode {
             env::args().nth(8),
             env::args().nth(9),
         ),
+        Some("package-self-attn-attention-smoke") => package_self_attn_attention_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+        ),
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -4973,6 +4983,399 @@ fn package_self_attn_rope_smoke(
         format_f32_preview(&k_normed[..8.min(k_normed.len())]),
         format_f32_preview(&q_rope[..8.min(q_rope.len())]),
         format_f32_preview(&k_rope[..8.min(k_rope.len())]),
+    );
+    ExitCode::SUCCESS
+}
+
+fn package_self_attn_attention_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-self-attn-attention-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 3, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 2, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 3, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
+    let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+
+    let q_norm = match read_named_passthrough_f32(&path, &q_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let k_norm = match read_named_passthrough_f32(&path, &k_norm_tensor, chunk_bytes) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let head_dim = q_norm.values.len();
+    if head_dim == 0 || k_norm.values.len() != head_dim {
+        eprintln!(
+            "self-attn q/k norm head dims must be nonzero and equal: q_head_dim={} k_head_dim={}",
+            head_dim,
+            k_norm.values.len()
+        );
+        return ExitCode::from(1);
+    }
+    let default_rotary_dim = {
+        let candidate = if head_dim >= 4 {
+            head_dim / 4
+        } else {
+            head_dim
+        };
+        candidate - (candidate % 2)
+    };
+    if default_rotary_dim == 0 {
+        eprintln!("default rotary_dim is zero for head_dim={head_dim}");
+        return ExitCode::from(1);
+    }
+    let rotary_dim = match parse_optional_usize(rotary_dim, default_rotary_dim, "rotary dim") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        eprintln!(
+            "rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim}, head_dim={head_dim}"
+        );
+        return ExitCode::from(2);
+    }
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut registry = WeightRegistry::new();
+    let (q_rows, q_cols, q_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &q_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {q_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (k_rows, k_cols, k_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &k_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {k_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (v_rows, v_cols, v_matrix) = match materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        &path,
+        &v_tensor,
+        chunk_bytes,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize tensor {v_tensor}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if q_cols != k_cols || q_cols != v_cols {
+        eprintln!(
+            "self-attn q/k/v projection hidden sizes differ: q_cols={q_cols}, k_cols={k_cols}, v_cols={v_cols}"
+        );
+        return ExitCode::from(1);
+    }
+    if q_rows % head_dim != 0 || k_rows % head_dim != 0 {
+        eprintln!(
+            "q/k rows must be multiples of head_dim: q_rows={q_rows}, k_rows={k_rows}, head_dim={head_dim}"
+        );
+        return ExitCode::from(1);
+    }
+    let q_heads = q_rows / head_dim;
+    let kv_heads = k_rows / head_dim;
+    if kv_heads == 0 || !q_heads.is_multiple_of(kv_heads) {
+        eprintln!("q_heads must be a multiple of kv_heads: q_heads={q_heads}, kv_heads={kv_heads}");
+        return ExitCode::from(1);
+    }
+    if v_rows % kv_heads != 0 {
+        eprintln!("v rows must be a multiple of kv_heads: v_rows={v_rows}, kv_heads={kv_heads}");
+        return ExitCode::from(1);
+    }
+    let value_dim = v_rows / kv_heads;
+
+    let hidden_bytes = match q_cols.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("hidden input byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let base_input = deterministic_f32_vector(q_cols);
+    let mut input_buffer = match context.alloc_buffer(hidden_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate self-attn attention input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut q_projected = Vec::with_capacity(sequence_len * q_rows);
+    let mut k_projected = Vec::with_capacity(sequence_len * k_rows);
+    let mut v_projected = Vec::with_capacity(sequence_len * v_rows);
+    for timestep in 0..sequence_len {
+        let step_input = linear_attn_step_input(&base_input, timestep);
+        let step_input_bytes = encode_f32_to_bytes(&step_input);
+        if let Err(err) = input_buffer.copy_from_host(0, &step_input_bytes, Some(&mut stream)) {
+            eprintln!("failed to copy self-attn attention timestep {timestep} input: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!(
+                "failed to synchronize after self-attn attention timestep {timestep} input copy: {err}"
+            );
+            return ExitCode::from(1);
+        }
+        let q_step = match runtime_matvec_to_host_f32(
+            &mut context,
+            &mut stream,
+            &q_matrix,
+            &input_buffer,
+            q_rows,
+            q_cols,
+            "self-attn attention q projection",
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+        let k_step = match runtime_matvec_to_host_f32(
+            &mut context,
+            &mut stream,
+            &k_matrix,
+            &input_buffer,
+            k_rows,
+            k_cols,
+            "self-attn attention k projection",
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+        let v_step = match runtime_matvec_to_host_f32(
+            &mut context,
+            &mut stream,
+            &v_matrix,
+            &input_buffer,
+            v_rows,
+            v_cols,
+            "self-attn attention v projection",
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+        q_projected.extend(q_step);
+        k_projected.extend(k_step);
+        v_projected.extend(v_step);
+    }
+
+    let epsilon = 1e-5_f32;
+    let (q_normed, q_norm_max_abs_diff) = match runtime_headwise_rmsnorm_verify(
+        &mut context,
+        &mut stream,
+        &q_projected,
+        &q_norm.values,
+        epsilon,
+        "package-self-attn-attention-smoke q_norm",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (k_normed, k_norm_max_abs_diff) = match runtime_headwise_rmsnorm_verify(
+        &mut context,
+        &mut stream,
+        &k_projected,
+        &k_norm.values,
+        epsilon,
+        "package-self-attn-attention-smoke k_norm",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (q_rope, q_rope_max_abs_diff) = match runtime_rope_verify(
+        &mut context,
+        &mut stream,
+        &q_normed,
+        sequence_len,
+        q_heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        "package-self-attn-attention-smoke q_rope",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (k_rope, k_rope_max_abs_diff) = match runtime_rope_verify(
+        &mut context,
+        &mut stream,
+        &k_normed,
+        sequence_len,
+        kv_heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        "package-self-attn-attention-smoke k_rope",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let (attention_output, attention_max_abs_diff) = match runtime_causal_attn_verify(
+        &mut context,
+        &mut stream,
+        &q_rope,
+        &k_rope,
+        &v_projected,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        "package-self-attn-attention-smoke attention",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    println!(
+        "package-self-attn-attention-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} sequence_len={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" q_rope_preview={} k_rope_preview={} v_preview={} attention_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} verified=true",
+        path,
+        layer_index,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        q_norm_tensor,
+        k_norm_tensor,
+        q_cols,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        q_norm.dtype,
+        k_norm.dtype,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(&q_rope[..8.min(q_rope.len())]),
+        format_f32_preview(&k_rope[..8.min(k_rope.len())]),
+        format_f32_preview(&v_projected[..8.min(v_projected.len())]),
+        format_f32_preview(&attention_output[..8.min(attention_output.len())]),
     );
     ExitCode::SUCCESS
 }
@@ -12074,6 +12477,110 @@ fn runtime_rope_verify(
     Ok((output, max_abs_diff))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn runtime_causal_attn_verify(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    label: &str,
+) -> Result<(Vec<f32>, f32), String> {
+    if q.len() != sequence_len * q_heads * head_dim {
+        return Err(format!(
+            "{label} q length {} does not match sequence_len={sequence_len} q_heads={q_heads} head_dim={head_dim}",
+            q.len()
+        ));
+    }
+    if k.len() != sequence_len * kv_heads * head_dim {
+        return Err(format!(
+            "{label} k length {} does not match sequence_len={sequence_len} kv_heads={kv_heads} head_dim={head_dim}",
+            k.len()
+        ));
+    }
+    if v.len() != sequence_len * kv_heads * value_dim {
+        return Err(format!(
+            "{label} v length {} does not match sequence_len={sequence_len} kv_heads={kv_heads} value_dim={value_dim}",
+            v.len()
+        ));
+    }
+    let q_bytes = encode_f32_to_bytes(q);
+    let k_bytes = encode_f32_to_bytes(k);
+    let v_bytes = encode_f32_to_bytes(v);
+    let output_elements = sequence_len * q_heads * value_dim;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| format!("{label} output byte size overflows"))?;
+    let mut q_buffer = context
+        .alloc_buffer(q_bytes.len())
+        .map_err(|err| format!("failed to allocate {label} q buffer: {err}"))?;
+    let mut k_buffer = context
+        .alloc_buffer(k_bytes.len())
+        .map_err(|err| format!("failed to allocate {label} k buffer: {err}"))?;
+    let mut v_buffer = context
+        .alloc_buffer(v_bytes.len())
+        .map_err(|err| format!("failed to allocate {label} v buffer: {err}"))?;
+    let mut output_buffer = context
+        .alloc_buffer(output_bytes)
+        .map_err(|err| format!("failed to allocate {label} output buffer: {err}"))?;
+    q_buffer
+        .copy_from_host(0, &q_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} q input: {err}"))?;
+    k_buffer
+        .copy_from_host(0, &k_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} k input: {err}"))?;
+    v_buffer
+        .copy_from_host(0, &v_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} v input: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} input copies: {err}"))?;
+    ullm_runtime_sys::causal_attn_f32(
+        &q_buffer,
+        &k_buffer,
+        &v_buffer,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        &mut output_buffer,
+        Some(stream),
+    )
+    .map_err(|err| format!("failed to run {label} causal attention: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} causal attention: {err}"))?;
+    let mut output_bytes_host = vec![0_u8; output_bytes];
+    output_buffer
+        .copy_to_host(0, &mut output_bytes_host, Some(stream))
+        .map_err(|err| format!("failed to copy {label} output: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} output copy: {err}"))?;
+    let output = decode_f32_le_values(&output_bytes_host);
+    let expected = runtime_host_causal_attn_f32(
+        q,
+        k,
+        v,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+    );
+    let max_abs_diff = verify_f32_close(label, &output, &expected, 1e-4_f32, 1e-4_f32)?;
+    Ok((output, max_abs_diff))
+}
+
 fn verify_f32_close(
     label: &str,
     actual: &[f32],
@@ -12293,7 +12800,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
