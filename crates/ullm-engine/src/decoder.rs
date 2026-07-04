@@ -1163,6 +1163,148 @@ impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
     }
 }
 
+pub fn pack_paged_kv_cache_for_block_table(
+    logical_k_cache: &[f32],
+    logical_v_cache: &[f32],
+    block_table: &[u32],
+    cache_len: usize,
+    shape: PagedDecodeShape,
+) -> Result<PagedKvCacheReadback, String> {
+    shape.validate()?;
+    if cache_len == 0 {
+        return Err("paged decode cache_len must be greater than zero".to_string());
+    }
+    if shape.block_size == 0 {
+        return Err("paged decode block_size must be greater than zero".to_string());
+    }
+    if shape.kv_heads == 0 || shape.head_dim == 0 || shape.value_dim == 0 {
+        return Err(format!(
+            "paged decode dimensions must be nonzero: kv_heads={} head_dim={} value_dim={}",
+            shape.kv_heads, shape.head_dim, shape.value_dim
+        ));
+    }
+    if shape.cache_blocks == 0 {
+        return Err("paged decode cache_blocks must be greater than zero".to_string());
+    }
+
+    let k_token_elements = shape
+        .kv_heads
+        .checked_mul(shape.head_dim)
+        .ok_or_else(|| "paged decode k token element count overflows".to_string())?;
+    let v_token_elements = shape
+        .kv_heads
+        .checked_mul(shape.value_dim)
+        .ok_or_else(|| "paged decode v token element count overflows".to_string())?;
+    let expected_k_len = cache_len
+        .checked_mul(k_token_elements)
+        .ok_or_else(|| "paged decode logical k cache length overflows".to_string())?;
+    let expected_v_len = cache_len
+        .checked_mul(v_token_elements)
+        .ok_or_else(|| "paged decode logical v cache length overflows".to_string())?;
+
+    if logical_k_cache.len() != expected_k_len {
+        return Err(format!(
+            "logical k cache length {} does not match cache_len={cache_len} kv_heads={} head_dim={} (expected={expected_k_len})",
+            logical_k_cache.len(),
+            shape.kv_heads,
+            shape.head_dim
+        ));
+    }
+    if logical_v_cache.len() != expected_v_len {
+        return Err(format!(
+            "logical v cache length {} does not match cache_len={cache_len} kv_heads={} value_dim={} (expected={expected_v_len})",
+            logical_v_cache.len(),
+            shape.kv_heads,
+            shape.value_dim
+        ));
+    }
+
+    let block_table_entries = (cache_len - 1) / shape.block_size + 1;
+    if block_table.len() < block_table_entries {
+        return Err(format!(
+            "paged decode block table length {} is shorter than expected entries {}",
+            block_table.len(),
+            block_table_entries
+        ));
+    }
+    if block_table.is_empty() {
+        return Err("paged decode block table must not be empty".to_string());
+    }
+    for (index, block_id) in block_table.iter().copied().enumerate() {
+        if block_id as usize >= shape.cache_blocks {
+            return Err(format!(
+                "paged decode block_table[{index}]={block_id} exceeds cache_blocks={}",
+                shape.cache_blocks
+            ));
+        }
+    }
+
+    let physical_tokens = shape
+        .cache_blocks
+        .checked_mul(shape.block_size)
+        .ok_or_else(|| "paged decode physical token count overflows".to_string())?;
+    let physical_k_elements = physical_tokens
+        .checked_mul(k_token_elements)
+        .ok_or_else(|| "paged decode physical k element count overflows".to_string())?;
+    let physical_v_elements = physical_tokens
+        .checked_mul(v_token_elements)
+        .ok_or_else(|| "paged decode physical v element count overflows".to_string())?;
+
+    let mut physical_k_cache = vec![0.0_f32; physical_k_elements];
+    let mut physical_v_cache = vec![0.0_f32; physical_v_elements];
+
+    for timestep in 0..cache_len {
+        let logical_block = timestep / shape.block_size;
+        let block_offset = timestep - logical_block * shape.block_size;
+        let physical_block = block_table[logical_block] as usize;
+        let physical_timestep = physical_block
+            .checked_mul(shape.block_size)
+            .and_then(|base| base.checked_add(block_offset))
+            .ok_or_else(|| "paged decode physical timestep index overflows".to_string())?;
+        if physical_timestep >= physical_tokens {
+            return Err(format!(
+                "paged decode physical timestep {physical_timestep} exceeds physical token count {physical_tokens}"
+            ));
+        }
+
+        let logical_k_start = timestep
+            .checked_mul(k_token_elements)
+            .ok_or_else(|| "paged decode logical k start index overflows".to_string())?;
+        let logical_v_start = timestep
+            .checked_mul(v_token_elements)
+            .ok_or_else(|| "paged decode logical v start index overflows".to_string())?;
+        let physical_k_start = physical_timestep
+            .checked_mul(k_token_elements)
+            .ok_or_else(|| "paged decode physical k start index overflows".to_string())?;
+        let physical_v_start = physical_timestep
+            .checked_mul(v_token_elements)
+            .ok_or_else(|| "paged decode physical v start index overflows".to_string())?;
+
+        let logical_k_end = logical_k_start
+            .checked_add(k_token_elements)
+            .ok_or_else(|| "paged decode logical k end index overflows".to_string())?;
+        let logical_v_end = logical_v_start
+            .checked_add(v_token_elements)
+            .ok_or_else(|| "paged decode logical v end index overflows".to_string())?;
+        let physical_k_end = physical_k_start
+            .checked_add(k_token_elements)
+            .ok_or_else(|| "paged decode physical k end index overflows".to_string())?;
+        let physical_v_end = physical_v_start
+            .checked_add(v_token_elements)
+            .ok_or_else(|| "paged decode physical v end index overflows".to_string())?;
+
+        physical_k_cache[physical_k_start..physical_k_end]
+            .copy_from_slice(&logical_k_cache[logical_k_start..logical_k_end]);
+        physical_v_cache[physical_v_start..physical_v_end]
+            .copy_from_slice(&logical_v_cache[logical_v_start..logical_v_end]);
+    }
+
+    Ok(PagedKvCacheReadback {
+        k: physical_k_cache,
+        v: physical_v_cache,
+    })
+}
+
 impl PagedDecodeShape {
     pub fn validate(&self) -> Result<(), String> {
         if self.block_size == 0 {
@@ -3354,7 +3496,57 @@ mod tests {
         assert!(err.contains("greater than zero"));
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[test]
+    fn pack_paged_kv_cache_for_block_table_packs_expected_layout() {
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 3,
+        };
+        let logical_k = vec![1.0_f32, 1.1, 2.0, 2.1, 3.0, 3.1];
+        let logical_v = vec![10.0_f32, 10.1, 10.2, 20.0, 20.1, 20.2, 30.0, 30.1, 30.2];
+
+        let readback =
+            pack_paged_kv_cache_for_block_table(&logical_k, &logical_v, &[3_u32, 0_u32], 3, shape)
+                .unwrap();
+
+        let mut expected_k = vec![0.0_f32; shape.k_cache_elements().unwrap()];
+        let mut expected_v = vec![0.0_f32; shape.v_cache_elements().unwrap()];
+        expected_k[12..14].copy_from_slice(&[1.0, 1.1]);
+        expected_k[14..16].copy_from_slice(&[2.0, 2.1]);
+        expected_k[0..2].copy_from_slice(&[3.0, 3.1]);
+        expected_v[18..21].copy_from_slice(&[10.0, 10.1, 10.2]);
+        expected_v[21..24].copy_from_slice(&[20.0, 20.1, 20.2]);
+        expected_v[0..3].copy_from_slice(&[30.0, 30.1, 30.2]);
+
+        assert_eq!(readback.k, expected_k);
+        assert_eq!(readback.v, expected_v);
+    }
+
+    #[test]
+    fn pack_paged_kv_cache_for_block_table_rejects_invalid_block_table() {
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 3,
+            value_dim: 2,
+        };
+        let logical_k = vec![0.0_f32; shape.kv_heads * shape.head_dim * 3];
+        let logical_v = vec![0.0_f32; shape.kv_heads * shape.value_dim * 3];
+        let err = pack_paged_kv_cache_for_block_table(&logical_k, &logical_v, &[4_u32], 3, shape)
+            .unwrap_err();
+        assert!(err.contains("block table length"));
+        let err =
+            pack_paged_kv_cache_for_block_table(&logical_k, &logical_v, &[0_u32, 4_u32], 3, shape)
+                .unwrap_err();
+        assert!(err.contains("exceeds cache_blocks"));
+    }
+
     fn pack_paged_kv_for_test(
         logical_k: &[f32],
         logical_v: &[f32],
@@ -3362,24 +3554,15 @@ mod tests {
         cache_len: usize,
         shape: PagedDecodeShape,
     ) -> (Vec<f32>, Vec<f32>) {
-        let physical_tokens = shape.physical_tokens().unwrap();
-        let mut k_cache = vec![0.0_f32; physical_tokens * shape.kv_heads * shape.head_dim];
-        let mut v_cache = vec![0.0_f32; physical_tokens * shape.kv_heads * shape.value_dim];
-        for timestep in 0..cache_len {
-            let logical_block = timestep / shape.block_size;
-            let block_offset = timestep - logical_block * shape.block_size;
-            let physical_timestep =
-                block_table[logical_block] as usize * shape.block_size + block_offset;
-            let k_src = timestep * shape.kv_heads * shape.head_dim;
-            let k_dst = physical_timestep * shape.kv_heads * shape.head_dim;
-            k_cache[k_dst..k_dst + shape.kv_heads * shape.head_dim]
-                .copy_from_slice(&logical_k[k_src..k_src + shape.kv_heads * shape.head_dim]);
-            let v_src = timestep * shape.kv_heads * shape.value_dim;
-            let v_dst = physical_timestep * shape.kv_heads * shape.value_dim;
-            v_cache[v_dst..v_dst + shape.kv_heads * shape.value_dim]
-                .copy_from_slice(&logical_v[v_src..v_src + shape.kv_heads * shape.value_dim]);
-        }
-        (k_cache, v_cache)
+        let readback = pack_paged_kv_cache_for_block_table(
+            logical_k,
+            logical_v,
+            block_table,
+            cache_len,
+            shape,
+        )
+        .expect("pack_paged_kv_cache_for_block_table helper");
+        (readback.k, readback.v)
     }
 
     fn expected_paged_decode_attn(

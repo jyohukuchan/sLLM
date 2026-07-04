@@ -7,13 +7,13 @@ use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
 use ullm_engine::decoder::{
-    PagedDecodeShape, Qwen3DecoderLayerRuntime, Qwen3DecoderLayerRuntimeWeights,
-    Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnBlockStepState,
-    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimePreparedSequence, Qwen3SelfAttnRuntimeShape,
-    Qwen3SelfAttnRuntimeWeights, qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32,
-    qwen3_rope_to_host_f32, qwen3_self_attn_prepare_sequence_runtime_f32,
-    qwen3_self_attn_project_sequence_to_host_f32, qwen3_self_attn_runtime_shape,
-    split_qwen3_self_attn_q_projection,
+    PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntime,
+    Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights,
+    Qwen3SelfAttnBlockStepState, Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimePreparedSequence,
+    Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
+    qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
+    qwen3_self_attn_prepare_sequence_runtime_f32, qwen3_self_attn_project_sequence_to_host_f32,
+    qwen3_self_attn_runtime_shape, split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -1727,16 +1727,23 @@ fn runtime_paged_kv_write_smoke(device_index: Option<String>) -> ExitCode {
     let logical_v = (0..cache_len * kv_heads * value_dim)
         .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
         .collect::<Vec<_>>();
-    let (expected_k_cache, expected_v_cache) = match pack_paged_decode_kv_cache_for_block_table(
+    let shape = PagedDecodeShape {
+        block_size,
+        cache_blocks,
+        q_heads: kv_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+    };
+    let PagedKvCacheReadback {
+        k: expected_k_cache,
+        v: expected_v_cache,
+    } = match pack_paged_kv_cache_for_block_table(
         &logical_k,
         &logical_v,
         &block_table,
         cache_len,
-        block_size,
-        cache_blocks,
-        kv_heads,
-        head_dim,
-        value_dim,
+        shape,
     ) {
         Ok(value) => value,
         Err(err) => {
@@ -1984,16 +1991,23 @@ fn runtime_kv_paged_decode_attn_smoke(device_index: Option<String>) -> ExitCode 
     let logical_v = (0..cache_len * kv_heads * value_dim)
         .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
         .collect::<Vec<_>>();
-    let (paged_k_cache, paged_v_cache) = match pack_paged_decode_kv_cache_for_block_table(
+    let decode_shape = PagedDecodeShape {
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+    };
+    let PagedKvCacheReadback {
+        k: paged_k_cache,
+        v: paged_v_cache,
+    } = match pack_paged_kv_cache_for_block_table(
         &logical_k,
         &logical_v,
         &block_table,
         cache_len,
-        block_size,
-        cache_blocks,
-        kv_heads,
-        head_dim,
-        value_dim,
+        decode_shape,
     ) {
         Ok(value) => value,
         Err(err) => {
@@ -7751,18 +7765,24 @@ fn qwen3_self_attn_prepare_sequence_smoke(
     let paged_block_size = 2_usize;
     let (paged_block_table, paged_cache_blocks, _) =
         allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size)?;
-    let (expected_paged_k_cache, expected_paged_v_cache) =
-        pack_paged_decode_kv_cache_for_block_table(
-            &k_rope,
-            &prepared_v_projected,
-            &paged_block_table,
-            sequence_len,
-            paged_block_size,
-            paged_cache_blocks,
-            kv_heads,
-            head_dim,
-            value_dim,
-        )?;
+    let packed_shape = PagedDecodeShape {
+        block_size: paged_block_size,
+        cache_blocks: paged_cache_blocks,
+        q_heads: shape.q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+    };
+    let PagedKvCacheReadback {
+        k: expected_paged_k_cache,
+        v: expected_paged_v_cache,
+    } = pack_paged_kv_cache_for_block_table(
+        &k_rope,
+        &prepared_v_projected,
+        &paged_block_table,
+        sequence_len,
+        packed_shape,
+    )?;
 
     Ok(Qwen3SelfAttnPreparedSequence {
         residual_sequence,
@@ -8626,18 +8646,24 @@ fn package_self_attn_mlp_block_smoke_impl(
             layer_output.extend_from_slice(&step.layer_output);
         }
 
-        let (expected_paged_k_cache, expected_paged_v_cache) =
-            pack_paged_decode_kv_cache_for_block_table(
-                &self_attn.k_rope,
-                &self_attn.v_projected,
-                &self_attn.paged_block_table,
-                sequence_len,
-                self_attn.paged_block_size,
-                self_attn.paged_cache_blocks,
-                self_attn.kv_heads,
-                self_attn.head_dim,
-                self_attn.value_dim,
-            )?;
+        let packed_shape = PagedDecodeShape {
+            block_size: self_attn.paged_block_size,
+            cache_blocks: self_attn.paged_cache_blocks,
+            q_heads: self_attn.q_heads,
+            kv_heads: self_attn.kv_heads,
+            head_dim: self_attn.head_dim,
+            value_dim: self_attn.value_dim,
+        };
+        let PagedKvCacheReadback {
+            k: expected_paged_k_cache,
+            v: expected_paged_v_cache,
+        } = pack_paged_kv_cache_for_block_table(
+            &self_attn.k_rope,
+            &self_attn.v_projected,
+            &self_attn.paged_block_table,
+            sequence_len,
+            packed_shape,
+        )?;
         let layer_cache = layer_runtime
             .read_cache_to_host(&mut stream)
             .map_err(|err| format!("failed to read Qwen3 decoder layer paged cache: {err}"))?;
@@ -16135,16 +16161,23 @@ fn runtime_paged_kv_write_decode_verify(
             logical_v_cache.len()
         ));
     }
-    let (expected_k_cache, expected_v_cache) = pack_paged_decode_kv_cache_for_block_table(
+    let readback_shape = PagedDecodeShape {
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+    };
+    let PagedKvCacheReadback {
+        k: expected_k_cache,
+        v: expected_v_cache,
+    } = pack_paged_kv_cache_for_block_table(
         logical_k_cache,
         logical_v_cache,
         block_table,
         cache_len,
-        block_size,
-        cache_blocks,
-        kv_heads,
-        head_dim,
-        value_dim,
+        readback_shape,
     )?;
     let shape = PagedDecodeShape {
         block_size,
@@ -17154,82 +17187,6 @@ fn runtime_host_paged_decode_attn_f32(
         }
     }
     output
-}
-
-#[allow(clippy::too_many_arguments)]
-fn pack_paged_decode_kv_cache_for_block_table(
-    logical_k_cache: &[f32],
-    logical_v_cache: &[f32],
-    block_table: &[u32],
-    cache_len: usize,
-    block_size: usize,
-    cache_blocks: usize,
-    kv_heads: usize,
-    head_dim: usize,
-    value_dim: usize,
-) -> Result<(Vec<f32>, Vec<f32>), String> {
-    if cache_len == 0 {
-        return Err("paged decode cache_len must be greater than zero".to_string());
-    }
-    if block_size == 0 {
-        return Err("paged decode block_size must be greater than zero".to_string());
-    }
-    if kv_heads == 0 || head_dim == 0 || value_dim == 0 {
-        return Err(format!(
-            "paged decode dimensions must be nonzero: kv_heads={kv_heads} head_dim={head_dim} value_dim={value_dim}"
-        ));
-    }
-    if logical_k_cache.len() != cache_len * kv_heads * head_dim {
-        return Err(format!(
-            "logical k cache length {} does not match cache_len={cache_len} kv_heads={kv_heads} head_dim={head_dim}",
-            logical_k_cache.len()
-        ));
-    }
-    if logical_v_cache.len() != cache_len * kv_heads * value_dim {
-        return Err(format!(
-            "logical v cache length {} does not match cache_len={cache_len} kv_heads={kv_heads} value_dim={value_dim}",
-            logical_v_cache.len()
-        ));
-    }
-    let block_table_entries = (cache_len - 1) / block_size + 1;
-    if block_table.len() != block_table_entries {
-        return Err(format!(
-            "paged decode block table length {} does not match expected entries {block_table_entries}",
-            block_table.len()
-        ));
-    }
-    let physical_tokens = cache_blocks
-        .checked_mul(block_size)
-        .ok_or_else(|| "paged decode physical token count overflows".to_string())?;
-    let mut physical_k_cache = vec![0.0_f32; physical_tokens * kv_heads * head_dim];
-    let mut physical_v_cache = vec![0.0_f32; physical_tokens * kv_heads * value_dim];
-    for (index, block_id) in block_table.iter().copied().enumerate() {
-        if block_id as usize >= cache_blocks {
-            return Err(format!(
-                "paged decode block_table[{index}]={block_id} exceeds cache_blocks={cache_blocks}"
-            ));
-        }
-    }
-    for timestep in 0..cache_len {
-        let logical_block = timestep / block_size;
-        let block_offset = timestep - logical_block * block_size;
-        let physical_block = block_table[logical_block] as usize;
-        let physical_timestep = physical_block * block_size + block_offset;
-        let logical_k_start = timestep * kv_heads * head_dim;
-        let logical_k_end = logical_k_start + kv_heads * head_dim;
-        let physical_k_start = physical_timestep * kv_heads * head_dim;
-        let physical_k_end = physical_k_start + kv_heads * head_dim;
-        physical_k_cache[physical_k_start..physical_k_end]
-            .copy_from_slice(&logical_k_cache[logical_k_start..logical_k_end]);
-
-        let logical_v_start = timestep * kv_heads * value_dim;
-        let logical_v_end = logical_v_start + kv_heads * value_dim;
-        let physical_v_start = physical_timestep * kv_heads * value_dim;
-        let physical_v_end = physical_v_start + kv_heads * value_dim;
-        physical_v_cache[physical_v_start..physical_v_end]
-            .copy_from_slice(&logical_v_cache[logical_v_start..logical_v_end]);
-    }
-    Ok((physical_k_cache, physical_v_cache))
 }
 
 fn allocate_fragmented_paged_decode_blocks(
