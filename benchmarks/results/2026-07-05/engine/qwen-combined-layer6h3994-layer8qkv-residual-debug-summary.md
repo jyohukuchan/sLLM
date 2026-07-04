@@ -80,16 +80,35 @@
   - The layer10 MLP local error is real, but this single gate cell is not a good end-to-end correction.
   - It likely removes one local projection error while disturbing compensating effects through the nonlinear MLP path.
 
+## Rejected Layer10 MLP Down Row-Scale Probe
+
+- All-token LS scale for `mlp.down_proj.weight[3994]` on the combined actual-input trace:
+  - scale: `0.9639810684228307`
+  - row-dot RMSE: `0.073699112 -> 0.043323898`
+- Override:
+  - `package-row-scale-overrides-layer6h3994-layer10h3994-mlp-down-p4p46-inproj.json`
+- Report:
+  - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-combined-layer6h3994-layer10h3994-row-scale-layer8qkv-p4p46-inproj.jsonl`
+- Result:
+  - current best without layer10 row-scale: `0.610977173`
+  - with layer10 row-scale: `0.616283417`
+  - layer10 overall max moved from `0.463138580` at token `1`, hidden `3994` to `0.437673450` at token `13`, hidden `2479`
+  - layer10 token `7`, hidden `3994` worsened from `0.362197876` to `0.368671417`
+  - layer11 token `7`, hidden `3994` worsened from `0.610977173` to `0.616283417`
+- Interpretation:
+  - The row-scale improves the layer10 down-row dot fit, but it does not improve the end-to-end residual path.
+  - The current fixture is sensitive to compensation between inherited state drift and layer10/layer11 transformations.
+
 ## Debugging Judgment
 
 This remains worth debugging. The residual is not backend noise, and the current max has a traceable path:
 
 1. Layer6 row-scale and layer8 QKV cell probes are complementary and improved the full prefix max from `0.645338058` to `0.610977173`.
 2. Layer11 is mostly propagation, not a local implementation bug at the current input state.
-3. Layer10 has a meaningful local MLP error (`0.137802124`), but the first single-cell gate correction worsened the full-prefix objective.
+3. Layer10 has a meaningful local MLP error (`0.137802124`), but both the first single-cell gate correction and the all-token down-row scale worsened the full-prefix objective.
 
 The next useful step is not another isolated single-cell restore by default. Better candidates are:
 
-- Trace layer10 MLP over several tokens/features and test a row/group-level policy instead of one gate cell.
+- Trace layer10 MLP over several tokens/features and test a broader group-level policy instead of one gate cell or one down row.
 - Re-run the current best across additional fixtures to separate general quantization bias from prompt-specific compensation.
 - Promote only corrections that improve both local fullref comparison and full-prefix objective across more than one fixture.
