@@ -1520,3 +1520,32 @@
 ### 次の行動
 
 - 次は、smoke-localのlayer run planからさらに実runner向けの所有入力状態を切り出すか、先にprefill/decodeをまたぐmodel-loop runner境界を作るかを判断する。現状では検証用期待値は分離できたので、次の抽出は実行APIの形を壊さない小さい境界から進める。
+
+## Package model-loop stack request view 抽出
+
+### 前回の要点
+
+- `SchedulerLayerDecodeSmokeChecks` を分離し、`SchedulerLayerDecodeRun` は入力・進行状態、`checks` はsmoke期待値・diff状態という役割に寄せた。
+- `PackageModelLoopExecutionPlan::execute` には、stack runner setupへ渡す `Qwen3PackageModelStackRequest` view構築が直書きで残っていた。
+
+### 今回の変更点
+
+- `PackageModelLoopLayerRunPlan::stack_requests()` を追加し、layerごとのrequest idとblock table viewを作る処理をlayer run plan側へ寄せた。
+- `PackageModelLoopExecutionPlan::execute` は `layer_run_plan.stack_requests()` を呼んで `qwen3_package_model_stack_runner` へ渡すだけになった。
+- これは挙動変更ではなく、次にrunner所有状態やmodel-loop runner境界を作るときの依存点を小さくするための整理。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- `package-self-attn-mlp-block-model-loop-smoke` with layers `3,7,11`, sequence len `3`, passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; all reported `decode_batch_ready_counts=[2, 1]`, `final_ready=0`, `decode_steps_by_layer=[[2, 1, 0], [2, 1, 0], [2, 1, 0]]`, `verified=true`。
+
+### 次の行動
+
+- 次は `PackageModelLoopExecutionPlan::execute` 内のprefill loop、decode loop、cache verifyをそれぞれ小さいprivate methodへ出すか、`SchedulerLayerDecodeRun` の入力・進行状態をさらに独立型へ切り出すかを選ぶ。実runner APIに近いのは前者だが、所有権設計の見通しが必要。

@@ -11377,6 +11377,20 @@ impl PackageModelLoopLayerRunPlan {
         }
     }
 
+    fn stack_requests(&self) -> Vec<Vec<Qwen3PackageModelStackRequest<'_>>> {
+        self.runs_by_layer
+            .iter()
+            .map(|runs| {
+                runs.iter()
+                    .map(|run| Qwen3PackageModelStackRequest {
+                        request_id: run.request_id,
+                        block_table: &run.block_table,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    }
+
     fn max_run_diff<F>(&self, select: F) -> f32
     where
         F: Fn(&SchedulerLayerDecodeRun) -> f32,
@@ -11413,18 +11427,7 @@ impl PackageModelLoopExecutionPlan {
         layer_run_plan: &mut PackageModelLoopLayerRunPlan,
     ) -> Result<PackageModelLoopExecutionSummary, String> {
         let mut layer_runner = {
-            let layer_requests = layer_run_plan
-                .runs_by_layer
-                .iter()
-                .map(|runs| {
-                    runs.iter()
-                        .map(|run| Qwen3PackageModelStackRequest {
-                            request_id: run.request_id,
-                            block_table: &run.block_table,
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
+            let layer_requests = layer_run_plan.stack_requests();
             qwen3_package_model_stack_runner(model, context, stream, self.decode, &layer_requests)?
         };
 
