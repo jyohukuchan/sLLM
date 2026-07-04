@@ -6,7 +6,9 @@ use std::fs::File;
 use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
-use ullm_engine::decoder::{PagedDecodeShape, PagedDecodeState};
+use ullm_engine::decoder::{
+    PagedDecodeShape, Qwen3SelfAttnBlockStepState, Qwen3SelfAttnDecodeState,
+};
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
 };
@@ -7749,101 +7751,18 @@ fn run_self_attn_block_sequence_smoke(
     let paged_block_size = 2_usize;
     let (paged_block_table, paged_cache_blocks, _) =
         allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size)?;
-    let paged_decode = runtime_paged_kv_write_decode_verify(
-        context,
-        stream,
-        &q_rope,
-        &k_rope,
-        &v_projected,
-        &paged_block_table,
-        sequence_len,
-        paged_block_size,
-        paged_cache_blocks,
-        q_heads,
-        kv_heads,
-        head_dim,
-        value_dim,
-        softmax_scale,
-        &format!("{label} paged decode step"),
-    )?;
-    let causal_paged_step_attention_max_abs_diff = verify_f32_close(
-        &format!("{label} causal-vs-paged-step-attention"),
-        &paged_decode.step_outputs,
-        &attention_output,
-        1e-4,
-        1e-4,
-    )?;
-    let paged_step_attention_output = paged_decode.step_outputs;
-
-    let (attention_projection_input, output_gate_layout, output_gate_max_abs_diff) = match q_gate
-        .as_ref()
-    {
-        Some(gate) => {
-            let expected_gated_attention =
-                runtime_host_sigmoid_mul_f32(&gate, &paged_step_attention_output);
-            if expected_gated_attention.is_empty() {
-                return Err(format!(
-                    "failed to apply Qwen3.5 self-attn output gate: gate_elements={} attention_elements={}",
-                    gate.len(),
-                    paged_step_attention_output.len()
-                ));
-            }
-            let gate_bytes = encode_f32_to_bytes(&gate);
-            let attention_bytes = encode_f32_to_bytes(&paged_step_attention_output);
-            let output_gate_bytes_len = attention_bytes.len();
-            let mut gate_buffer = context
-                .alloc_buffer(gate_bytes.len())
-                .map_err(|err| format!("failed to allocate {label} output gate buffer: {err}"))?;
-            let mut attention_buffer =
-                context.alloc_buffer(output_gate_bytes_len).map_err(|err| {
-                    format!("failed to allocate {label} output gate input buffer: {err}")
-                })?;
-            let mut gated_attention_buffer =
-                context.alloc_buffer(output_gate_bytes_len).map_err(|err| {
-                    format!("failed to allocate {label} gated attention buffer: {err}")
-                })?;
-            gate_buffer
-                .copy_from_host(0, &gate_bytes, Some(stream))
-                .map_err(|err| format!("failed to copy {label} output gate: {err}"))?;
-            attention_buffer
-                .copy_from_host(0, &attention_bytes, Some(stream))
-                .map_err(|err| {
-                    format!("failed to copy {label} attention into gate input: {err}")
-                })?;
-            stream.synchronize().map_err(|err| {
-                format!("failed to synchronize after {label} output gate input copy: {err}")
-            })?;
-            ullm_runtime_sys::sigmoid_mul_f32(
-                &gate_buffer,
-                &attention_buffer,
-                paged_step_attention_output.len(),
-                &mut gated_attention_buffer,
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to run {label} output gate sigmoid_mul_f32: {err}"))?;
-            stream.synchronize().map_err(|err| {
-                format!("failed to synchronize after {label} output gate sigmoid_mul: {err}")
-            })?;
-            let mut gated_attention_raw = vec![0_u8; output_gate_bytes_len];
-            gated_attention_buffer
-                .copy_to_host(0, &mut gated_attention_raw, Some(stream))
-                .map_err(|err| format!("failed to copy {label} gated attention output: {err}"))?;
-            stream.synchronize().map_err(|err| {
-                format!("failed to synchronize after {label} gated attention copy: {err}")
-            })?;
-            let gated_attention = decode_f32_le_values(&gated_attention_raw);
-            let output_gate_max_abs_diff = verify_f32_close(
-                &format!("{label} output gate"),
-                &gated_attention,
-                &expected_gated_attention,
-                1e-5,
-                1e-6,
-            )?;
-            (gated_attention, "runtime-sigmoid", output_gate_max_abs_diff)
-        }
-        None => (paged_step_attention_output.clone(), "none", 0.0_f32),
-    };
-
+    let (expected_paged_k_cache, expected_paged_v_cache) =
+        pack_paged_decode_kv_cache_for_block_table(
+            &k_rope,
+            &v_projected,
+            &paged_block_table,
+            sequence_len,
+            paged_block_size,
+            paged_cache_blocks,
+            kv_heads,
+            head_dim,
+            value_dim,
+        )?;
     let o_matrix_bytes = o_rows
         .checked_mul(o_cols)
         .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
@@ -7856,17 +7775,183 @@ fn run_self_attn_block_sequence_smoke(
         .synchronize()
         .map_err(|err| format!("failed to synchronize after o projection host copy: {err}"))?;
     let o_matrix_host = decode_f32_le_values(&o_matrix_raw);
-    let (attn_projected, o_proj_max_abs_diff) = runtime_matvec_sequence_to_host_f32(
+
+    let decode_shape = PagedDecodeShape {
+        block_size: paged_block_size,
+        cache_blocks: paged_cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+    };
+    let mut qwen_step_state = Qwen3SelfAttnBlockStepState::new(
         context,
         stream,
-        &o_matrix,
-        &o_matrix_host,
-        &attention_projection_input,
-        sequence_len,
-        o_rows,
-        o_cols,
-        &format!("{label} o projection"),
+        decode_shape,
+        paged_block_table.clone(),
+        q_cols,
+        softmax_scale,
     )?;
+    let q_token_elements = q_heads * head_dim;
+    let k_token_elements = kv_heads * head_dim;
+    let v_token_elements = kv_heads * value_dim;
+    let attention_elements = q_heads * value_dim;
+    if let Some(gate) = q_gate.as_ref() {
+        if gate.len() != sequence_len * attention_elements {
+            return Err(format!(
+                "Qwen3.5 output gate length {} does not match sequence_len={sequence_len} attention_elements={attention_elements}",
+                gate.len()
+            ));
+        }
+    }
+    let mut paged_step_attention_output = Vec::with_capacity(sequence_len * attention_elements);
+    let mut attention_projection_input = Vec::with_capacity(sequence_len * attention_elements);
+    let mut attn_projected = Vec::with_capacity(sequence_len * o_rows);
+    let mut block_output = Vec::with_capacity(sequence_len * q_cols);
+    let mut paged_step_attention_max_abs_diff = 0.0_f32;
+    let mut output_gate_max_abs_diff = 0.0_f32;
+    let mut o_proj_max_abs_diff = 0.0_f32;
+    let mut block_max_abs_diff = 0.0_f32;
+
+    for timestep in 0..sequence_len {
+        let q_start = timestep * q_token_elements;
+        let q_end = q_start + q_token_elements;
+        let k_start = timestep * k_token_elements;
+        let k_end = k_start + k_token_elements;
+        let v_start = timestep * v_token_elements;
+        let v_end = v_start + v_token_elements;
+        let attention_start = timestep * attention_elements;
+        let attention_end = attention_start + attention_elements;
+        let residual_start = timestep * q_cols;
+        let residual_end = residual_start + q_cols;
+        let gate_step = q_gate
+            .as_ref()
+            .map(|gate| &gate[attention_start..attention_end]);
+        let step = qwen_step_state
+            .step(
+                stream,
+                &o_matrix,
+                &q_rope[q_start..q_end],
+                &k_rope[k_start..k_end],
+                &v_projected[v_start..v_end],
+                gate_step,
+                &residual_sequence[residual_start..residual_end],
+            )
+            .map_err(|err| {
+                format!("failed to run {label} Qwen3 self-attn step {timestep}: {err}")
+            })?;
+        if step.cache_position != timestep {
+            return Err(format!(
+                "{label} Qwen3 self-attn step wrote position {}, expected {timestep}",
+                step.cache_position
+            ));
+        }
+        if step.cache_len != timestep + 1 {
+            return Err(format!(
+                "{label} Qwen3 self-attn step reported cache_len {}, expected {}",
+                step.cache_len,
+                timestep + 1
+            ));
+        }
+        let expected_step_output = runtime_host_paged_decode_attn_f32(
+            &q_rope[q_start..q_end],
+            &expected_paged_k_cache,
+            &expected_paged_v_cache,
+            &paged_block_table,
+            timestep + 1,
+            paged_block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+        let step_attention_diff = verify_f32_close(
+            &format!("{label} Qwen3 self-attn step {timestep} attention"),
+            &step.attention_output,
+            &expected_step_output,
+            1e-4,
+            1e-4,
+        )?;
+        paged_step_attention_max_abs_diff =
+            paged_step_attention_max_abs_diff.max(step_attention_diff);
+
+        let expected_projection_input = if let Some(gate) = gate_step {
+            runtime_host_sigmoid_mul_f32(gate, &step.attention_output)
+        } else {
+            step.attention_output.clone()
+        };
+        let gate_diff = verify_f32_close(
+            &format!("{label} Qwen3 self-attn step {timestep} output gate"),
+            &step.attention_projection_input,
+            &expected_projection_input,
+            1e-5,
+            1e-6,
+        )?;
+        output_gate_max_abs_diff = output_gate_max_abs_diff.max(gate_diff);
+
+        let expected_projected = runtime_host_matvec_f32(
+            &o_matrix_host,
+            &step.attention_projection_input,
+            o_rows,
+            o_cols,
+        );
+        let projected_diff = verify_f32_close(
+            &format!("{label} Qwen3 self-attn step {timestep} o projection"),
+            &step.projected_output,
+            &expected_projected,
+            1e-4,
+            1e-5,
+        )?;
+        o_proj_max_abs_diff = o_proj_max_abs_diff.max(projected_diff);
+
+        let expected_block_step = runtime_host_add_f32(
+            &residual_sequence[residual_start..residual_end],
+            &step.projected_output,
+        );
+        let block_diff = verify_f32_close(
+            &format!("{label} Qwen3 self-attn step {timestep} residual add"),
+            &step.block_output,
+            &expected_block_step,
+            1e-5,
+            1e-6,
+        )?;
+        block_max_abs_diff = block_max_abs_diff.max(block_diff);
+
+        paged_step_attention_output.extend_from_slice(&step.attention_output);
+        attention_projection_input.extend_from_slice(&step.attention_projection_input);
+        attn_projected.extend_from_slice(&step.projected_output);
+        block_output.extend_from_slice(&step.block_output);
+    }
+    let paged_cache = qwen_step_state
+        .read_cache_to_host(stream)
+        .map_err(|err| format!("failed to read {label} Qwen3 self-attn paged cache: {err}"))?;
+    let paged_kv_write_k_max_abs_diff = verify_f32_close(
+        &format!("{label} Qwen3 self-attn paged k cache write"),
+        &paged_cache.k,
+        &expected_paged_k_cache,
+        1e-5,
+        1e-5,
+    )?;
+    let paged_kv_write_v_max_abs_diff = verify_f32_close(
+        &format!("{label} Qwen3 self-attn paged v cache write"),
+        &paged_cache.v,
+        &expected_paged_v_cache,
+        1e-5,
+        1e-5,
+    )?;
+    let causal_paged_step_attention_max_abs_diff = verify_f32_close(
+        &format!("{label} causal-vs-paged-step-attention"),
+        &paged_step_attention_output,
+        &attention_output,
+        1e-4,
+        1e-4,
+    )?;
+    let output_gate_layout = if q_gate.is_some() {
+        "runtime-sigmoid"
+    } else {
+        "none"
+    };
     let causal_attention_projection_input = if let Some(gate) = q_gate.as_ref() {
         runtime_host_sigmoid_mul_f32(gate, &attention_output)
     } else {
@@ -7884,51 +7969,6 @@ fn run_self_attn_block_sequence_smoke(
         ));
     }
 
-    let residual_bytes = encode_f32_to_bytes(&residual_sequence);
-    let attn_projected_bytes = encode_f32_to_bytes(&attn_projected);
-    let block_bytes_len = residual_bytes.len();
-    let mut residual_buffer = context
-        .alloc_buffer(block_bytes_len)
-        .map_err(|err| format!("failed to allocate {label} residual buffer: {err}"))?;
-    let mut attn_projected_buffer = context
-        .alloc_buffer(block_bytes_len)
-        .map_err(|err| format!("failed to allocate {label} projected buffer: {err}"))?;
-    let mut block_buffer = context
-        .alloc_buffer(block_bytes_len)
-        .map_err(|err| format!("failed to allocate {label} block output buffer: {err}"))?;
-    residual_buffer
-        .copy_from_host(0, &residual_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} residual sequence: {err}"))?;
-    attn_projected_buffer
-        .copy_from_host(0, &attn_projected_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} attention projection: {err}"))?;
-    ullm_runtime_sys::add_f32(
-        &residual_buffer,
-        &attn_projected_buffer,
-        residual_sequence.len(),
-        &mut block_buffer,
-        Some(stream),
-    )
-    .map_err(|err| format!("failed to run {label} residual add: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} residual add: {err}"))?;
-    let mut block_raw = vec![0_u8; block_bytes_len];
-    block_buffer
-        .copy_to_host(0, &mut block_raw, Some(stream))
-        .map_err(|err| format!("failed to copy {label} block output: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} block output copy: {err}"))?;
-    let block_output = decode_f32_le_values(&block_raw);
-    let expected_block_output = runtime_host_add_f32(&residual_sequence, &attn_projected);
-    let block_max_abs_diff = verify_f32_close(
-        &format!("{label} residual add"),
-        &block_output,
-        &expected_block_output,
-        1e-5,
-        1e-6,
-    )?;
     let expected_causal_block_output =
         runtime_host_add_f32(&residual_sequence, &causal_attn_projected);
     let causal_paged_block_max_abs_diff = verify_f32_close(
@@ -7962,9 +8002,9 @@ fn run_self_attn_block_sequence_smoke(
         q_rope_max_abs_diff,
         k_rope_max_abs_diff,
         attention_max_abs_diff,
-        paged_kv_write_k_max_abs_diff: paged_decode.k_write_max_abs_diff,
-        paged_kv_write_v_max_abs_diff: paged_decode.v_write_max_abs_diff,
-        paged_step_attention_max_abs_diff: paged_decode.step_output_max_abs_diff,
+        paged_kv_write_k_max_abs_diff,
+        paged_kv_write_v_max_abs_diff,
+        paged_step_attention_max_abs_diff,
         causal_paged_step_attention_max_abs_diff,
         output_gate_max_abs_diff,
         o_proj_max_abs_diff,
@@ -16001,8 +16041,11 @@ fn runtime_paged_kv_write_decode_verify(
         head_dim,
         value_dim,
     };
-    let mut state = PagedDecodeState::new(context, stream, shape, block_table.to_vec())
-        .map_err(|err| format!("failed to create {label} paged decode state: {err}"))?;
+    let mut state =
+        Qwen3SelfAttnDecodeState::new(context, stream, shape, block_table.to_vec(), softmax_scale)
+            .map_err(|err| {
+                format!("failed to create {label} Qwen3 self-attn decode state: {err}")
+            })?;
     let q_token_elements = q_heads * head_dim;
     let k_token_elements = kv_heads * head_dim;
     let v_token_elements = kv_heads * value_dim;
@@ -16018,12 +16061,11 @@ fn runtime_paged_kv_write_decode_verify(
         let v_start = timestep * v_token_elements;
         let v_end = v_start + v_token_elements;
         let step = state
-            .decode_step(
+            .step(
                 stream,
                 &q_sequence[q_start..q_end],
                 &logical_k_cache[k_start..k_end],
                 &logical_v_cache[v_start..v_end],
-                softmax_scale,
             )
             .map_err(|err| format!("failed to run {label} timestep {timestep}: {err}"))?;
         if step.cache_position != timestep {
@@ -16054,13 +16096,13 @@ fn runtime_paged_kv_write_decode_verify(
         );
         let step_max_abs_diff = verify_f32_close(
             &format!("{label} timestep {timestep} paged decode step"),
-            &step.output,
+            &step.attention_output,
             &expected_step_output,
             1e-4_f32,
             1e-4_f32,
         )?;
         step_output_max_abs_diff = step_output_max_abs_diff.max(step_max_abs_diff);
-        step_outputs.extend_from_slice(&step.output);
+        step_outputs.extend_from_slice(&step.attention_output);
     }
 
     let readback = state

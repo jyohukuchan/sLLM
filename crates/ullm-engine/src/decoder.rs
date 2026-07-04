@@ -32,6 +32,23 @@ pub struct PagedDecodeStepOutput {
     pub output: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen3SelfAttnDecodeStepOutput {
+    pub cache_position: usize,
+    pub cache_len: usize,
+    pub attention_output: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen3SelfAttnBlockStepOutput {
+    pub cache_position: usize,
+    pub cache_len: usize,
+    pub attention_output: Vec<f32>,
+    pub attention_projection_input: Vec<f32>,
+    pub projected_output: Vec<f32>,
+    pub block_output: Vec<f32>,
+}
+
 #[derive(Debug)]
 pub struct PagedDecodeState {
     shape: PagedDecodeShape,
@@ -44,6 +61,25 @@ pub struct PagedDecodeState {
     k_cache_buffer: RuntimeBuffer,
     v_cache_buffer: RuntimeBuffer,
     output_buffer: RuntimeBuffer,
+}
+
+#[derive(Debug)]
+pub struct Qwen3SelfAttnDecodeState {
+    state: PagedDecodeState,
+    softmax_scale: f32,
+}
+
+#[derive(Debug)]
+pub struct Qwen3SelfAttnBlockStepState {
+    decode: Qwen3SelfAttnDecodeState,
+    hidden: usize,
+    attention_elements: usize,
+    attention_buffer: RuntimeBuffer,
+    gate_buffer: RuntimeBuffer,
+    projection_input_buffer: RuntimeBuffer,
+    projected_buffer: RuntimeBuffer,
+    residual_buffer: RuntimeBuffer,
+    block_buffer: RuntimeBuffer,
 }
 
 impl PagedDecodeShape {
@@ -399,6 +435,267 @@ impl PagedDecodeState {
     }
 }
 
+impl Qwen3SelfAttnDecodeState {
+    pub fn new(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        shape: PagedDecodeShape,
+        block_table: Vec<u32>,
+        softmax_scale: f32,
+    ) -> Result<Self, String> {
+        if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+            return Err(
+                "Qwen3 self-attn softmax_scale must be finite and greater than zero".to_string(),
+            );
+        }
+        let state = PagedDecodeState::new(context, stream, shape, block_table)?;
+        Ok(Self {
+            state,
+            softmax_scale,
+        })
+    }
+
+    pub fn step(
+        &mut self,
+        stream: &mut RuntimeStream,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+    ) -> Result<Qwen3SelfAttnDecodeStepOutput, String> {
+        let step = self
+            .state
+            .decode_step(stream, q, k, v, self.softmax_scale)?;
+        Ok(Qwen3SelfAttnDecodeStepOutput {
+            cache_position: step.cache_position,
+            cache_len: step.cache_len,
+            attention_output: step.output,
+        })
+    }
+
+    pub fn shape(&self) -> PagedDecodeShape {
+        self.state.shape()
+    }
+
+    pub fn written_len(&self) -> usize {
+        self.state.written_len()
+    }
+
+    pub fn block_table(&self) -> &[u32] {
+        self.state.block_table()
+    }
+
+    pub fn softmax_scale(&self) -> f32 {
+        self.softmax_scale
+    }
+
+    pub fn reset(&mut self, stream: &mut RuntimeStream) -> Result<(), String> {
+        self.state.reset(stream)
+    }
+
+    pub fn read_cache_to_host(
+        &self,
+        stream: &mut RuntimeStream,
+    ) -> Result<PagedKvCacheReadback, String> {
+        self.state.read_cache_to_host(stream)
+    }
+}
+
+impl Qwen3SelfAttnBlockStepState {
+    pub fn new(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        shape: PagedDecodeShape,
+        block_table: Vec<u32>,
+        hidden: usize,
+        softmax_scale: f32,
+    ) -> Result<Self, String> {
+        if hidden == 0 {
+            return Err("Qwen3 self-attn block hidden size must be greater than zero".to_string());
+        }
+        shape.validate()?;
+        let attention_elements = shape.output_elements()?;
+        let attention_bytes = f32_bytes(attention_elements);
+        let hidden_bytes = f32_bytes(hidden);
+        let decode =
+            Qwen3SelfAttnDecodeState::new(context, stream, shape, block_table, softmax_scale)?;
+        let mut attention_buffer = context
+            .alloc_buffer(attention_bytes)
+            .map_err(|err| format!("failed to allocate Qwen3 self-attn attention buffer: {err}"))?;
+        let mut gate_buffer = context
+            .alloc_buffer(attention_bytes)
+            .map_err(|err| format!("failed to allocate Qwen3 self-attn gate buffer: {err}"))?;
+        let mut projection_input_buffer = context.alloc_buffer(attention_bytes).map_err(|err| {
+            format!("failed to allocate Qwen3 self-attn projection input buffer: {err}")
+        })?;
+        let mut projected_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate Qwen3 self-attn projected buffer: {err}"))?;
+        let mut residual_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate Qwen3 self-attn residual buffer: {err}"))?;
+        let mut block_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate Qwen3 self-attn block buffer: {err}"))?;
+        zero_buffer(&mut attention_buffer, Some(stream))?;
+        zero_buffer(&mut gate_buffer, Some(stream))?;
+        zero_buffer(&mut projection_input_buffer, Some(stream))?;
+        zero_buffer(&mut projected_buffer, Some(stream))?;
+        zero_buffer(&mut residual_buffer, Some(stream))?;
+        zero_buffer(&mut block_buffer, Some(stream))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize Qwen3 self-attn block setup: {err}"))?;
+        Ok(Self {
+            decode,
+            hidden,
+            attention_elements,
+            attention_buffer,
+            gate_buffer,
+            projection_input_buffer,
+            projected_buffer,
+            residual_buffer,
+            block_buffer,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step(
+        &mut self,
+        stream: &mut RuntimeStream,
+        o_projection_matrix: &RuntimeBuffer,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output_gate: Option<&[f32]>,
+        residual: &[f32],
+    ) -> Result<Qwen3SelfAttnBlockStepOutput, String> {
+        if let Some(gate) = output_gate {
+            if gate.len() != self.attention_elements {
+                return Err(format!(
+                    "Qwen3 self-attn output gate length {} does not match expected {}",
+                    gate.len(),
+                    self.attention_elements
+                ));
+            }
+        }
+        if residual.len() != self.hidden {
+            return Err(format!(
+                "Qwen3 self-attn residual length {} does not match hidden {}",
+                residual.len(),
+                self.hidden
+            ));
+        }
+
+        let decode_step = self.decode.step(stream, q, k, v)?;
+        let attention_bytes = f32s_to_le_bytes(&decode_step.attention_output);
+        self.attention_buffer
+            .copy_from_host(0, &attention_bytes, Some(stream))
+            .map_err(|err| format!("failed to copy Qwen3 self-attn attention output: {err}"))?;
+        if let Some(gate) = output_gate {
+            self.gate_buffer
+                .copy_from_host(0, &f32s_to_le_bytes(gate), Some(stream))
+                .map_err(|err| format!("failed to copy Qwen3 self-attn output gate: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize Qwen3 self-attn output gate input: {err}")
+            })?;
+            ullm_runtime_sys::sigmoid_mul_f32(
+                &self.gate_buffer,
+                &self.attention_buffer,
+                self.attention_elements,
+                &mut self.projection_input_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run Qwen3 self-attn output gate: {err}"))?;
+        } else {
+            self.projection_input_buffer
+                .copy_from_host(0, &attention_bytes, Some(stream))
+                .map_err(|err| format!("failed to copy Qwen3 self-attn projection input: {err}"))?;
+        }
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 self-attn projection input: {err}")
+        })?;
+
+        ullm_runtime_sys::matvec_f32(
+            o_projection_matrix,
+            &self.projection_input_buffer,
+            self.hidden,
+            self.attention_elements,
+            &mut self.projected_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run Qwen3 self-attn o projection: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize Qwen3 self-attn o projection: {err}"))?;
+
+        self.residual_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(residual), Some(stream))
+            .map_err(|err| format!("failed to copy Qwen3 self-attn residual: {err}"))?;
+        ullm_runtime_sys::add_f32(
+            &self.residual_buffer,
+            &self.projected_buffer,
+            self.hidden,
+            &mut self.block_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run Qwen3 self-attn residual add: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize Qwen3 self-attn residual add: {err}"))?;
+
+        let attention_projection_input = read_f32_buffer(
+            &self.projection_input_buffer,
+            stream,
+            self.attention_elements,
+        )?;
+        let projected_output = read_f32_buffer(&self.projected_buffer, stream, self.hidden)?;
+        let block_output = read_f32_buffer(&self.block_buffer, stream, self.hidden)?;
+        Ok(Qwen3SelfAttnBlockStepOutput {
+            cache_position: decode_step.cache_position,
+            cache_len: decode_step.cache_len,
+            attention_output: decode_step.attention_output,
+            attention_projection_input,
+            projected_output,
+            block_output,
+        })
+    }
+
+    pub fn shape(&self) -> PagedDecodeShape {
+        self.decode.shape()
+    }
+
+    pub fn hidden(&self) -> usize {
+        self.hidden
+    }
+
+    pub fn attention_elements(&self) -> usize {
+        self.attention_elements
+    }
+
+    pub fn written_len(&self) -> usize {
+        self.decode.written_len()
+    }
+
+    pub fn block_table(&self) -> &[u32] {
+        self.decode.block_table()
+    }
+
+    pub fn softmax_scale(&self) -> f32 {
+        self.decode.softmax_scale()
+    }
+
+    pub fn reset(&mut self, stream: &mut RuntimeStream) -> Result<(), String> {
+        self.decode.reset(stream)
+    }
+
+    pub fn read_cache_to_host(
+        &self,
+        stream: &mut RuntimeStream,
+    ) -> Result<PagedKvCacheReadback, String> {
+        self.decode.read_cache_to_host(stream)
+    }
+}
+
 fn validate_block_table(block_table: &[u32], cache_blocks: usize) -> Result<(), String> {
     if block_table.is_empty() {
         return Err("paged decoder block table must not be empty".to_string());
@@ -611,6 +908,199 @@ mod tests {
     }
 
     #[test]
+    fn qwen3_self_attn_decode_step_state_step_is_thin_alias() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 3,
+            value_dim: 2,
+        };
+        let block_table = vec![3_u32, 0_u32];
+        let mut state = Qwen3SelfAttnDecodeState::new(
+            &mut context,
+            &mut stream,
+            shape,
+            block_table.clone(),
+            1.0_f32 / (3.0_f32).sqrt(),
+        )
+        .unwrap();
+        let cache_len = 3_usize;
+        let softmax_scale = state.softmax_scale();
+        let logical_q = (0..cache_len * shape.q_heads * shape.head_dim)
+            .map(|index| ((index * 7) as f32 - 11.0) / 19.0)
+            .collect::<Vec<_>>();
+        let logical_k = (0..cache_len * shape.kv_heads * shape.head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let logical_v = (0..cache_len * shape.kv_heads * shape.value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        for timestep in 0..cache_len {
+            let q_start = timestep * shape.q_elements().unwrap();
+            let q_end = q_start + shape.q_elements().unwrap();
+            let k_start = timestep * shape.k_token_elements().unwrap();
+            let k_end = k_start + shape.k_token_elements().unwrap();
+            let v_start = timestep * shape.v_token_elements().unwrap();
+            let v_end = v_start + shape.v_token_elements().unwrap();
+            let step = state
+                .step(
+                    &mut stream,
+                    &logical_q[q_start..q_end],
+                    &logical_k[k_start..k_end],
+                    &logical_v[v_start..v_end],
+                )
+                .unwrap();
+            assert_eq!(step.cache_position, timestep);
+            assert_eq!(step.cache_len, timestep + 1);
+
+            let (expected_k, expected_v) = pack_paged_kv_for_test(
+                &logical_k[..k_end],
+                &logical_v[..v_end],
+                &block_table,
+                timestep + 1,
+                shape,
+            );
+            let expected = expected_paged_decode_attn(
+                &logical_q[q_start..q_end],
+                &expected_k,
+                &expected_v,
+                &block_table,
+                timestep + 1,
+                shape,
+                softmax_scale,
+            );
+            assert_f32s_close(&step.attention_output, &expected, 1e-5);
+        }
+        assert_eq!(state.written_len(), cache_len);
+
+        let readback = state.read_cache_to_host(&mut stream).unwrap();
+        let (expected_k, expected_v) =
+            pack_paged_kv_for_test(&logical_k, &logical_v, &block_table, cache_len, shape);
+        assert_f32s_close(&readback.k, &expected_k, 1e-6);
+        assert_f32s_close(&readback.v, &expected_v, 1e-6);
+    }
+
+    #[test]
+    fn qwen3_self_attn_block_step_state_runs_gate_projection_and_residual_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 1,
+            cache_blocks: 2,
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        let hidden = 3_usize;
+        let block_table = vec![1_u32, 0_u32];
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        let mut state = Qwen3SelfAttnBlockStepState::new(
+            &mut context,
+            &mut stream,
+            shape,
+            block_table.clone(),
+            hidden,
+            softmax_scale,
+        )
+        .unwrap();
+        let attention_elements = shape.output_elements().unwrap();
+        let o_matrix = (0..hidden * attention_elements)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let mut o_matrix_buffer = context.alloc_buffer(f32_bytes(o_matrix.len())).unwrap();
+        o_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&o_matrix), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let cache_len = 2_usize;
+        let logical_q = (0..cache_len * shape.q_elements().unwrap())
+            .map(|index| ((index * 7) as f32 - 11.0) / 19.0)
+            .collect::<Vec<_>>();
+        let logical_k = (0..cache_len * shape.k_token_elements().unwrap())
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let logical_v = (0..cache_len * shape.v_token_elements().unwrap())
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let gate_sequence = (0..cache_len * attention_elements)
+            .map(|index| ((index * 11) as f32 - 13.0) / 23.0)
+            .collect::<Vec<_>>();
+        let residual_sequence = (0..cache_len * hidden)
+            .map(|index| ((index * 13) as f32 - 17.0) / 29.0)
+            .collect::<Vec<_>>();
+
+        for timestep in 0..cache_len {
+            let q_start = timestep * shape.q_elements().unwrap();
+            let q_end = q_start + shape.q_elements().unwrap();
+            let k_start = timestep * shape.k_token_elements().unwrap();
+            let k_end = k_start + shape.k_token_elements().unwrap();
+            let v_start = timestep * shape.v_token_elements().unwrap();
+            let v_end = v_start + shape.v_token_elements().unwrap();
+            let gate_start = timestep * attention_elements;
+            let gate_end = gate_start + attention_elements;
+            let residual_start = timestep * hidden;
+            let residual_end = residual_start + hidden;
+            let step = state
+                .step(
+                    &mut stream,
+                    &o_matrix_buffer,
+                    &logical_q[q_start..q_end],
+                    &logical_k[k_start..k_end],
+                    &logical_v[v_start..v_end],
+                    Some(&gate_sequence[gate_start..gate_end]),
+                    &residual_sequence[residual_start..residual_end],
+                )
+                .unwrap();
+            assert_eq!(step.cache_position, timestep);
+            assert_eq!(step.cache_len, timestep + 1);
+
+            let (expected_k, expected_v) = pack_paged_kv_for_test(
+                &logical_k[..k_end],
+                &logical_v[..v_end],
+                &block_table,
+                timestep + 1,
+                shape,
+            );
+            let expected_attention = expected_paged_decode_attn(
+                &logical_q[q_start..q_end],
+                &expected_k,
+                &expected_v,
+                &block_table,
+                timestep + 1,
+                shape,
+                softmax_scale,
+            );
+            let expected_projection_input =
+                sigmoid_mul_for_test(&gate_sequence[gate_start..gate_end], &expected_attention);
+            let expected_projected = matvec_for_test(
+                &o_matrix,
+                &expected_projection_input,
+                hidden,
+                attention_elements,
+            );
+            let expected_block = add_for_test(
+                &residual_sequence[residual_start..residual_end],
+                &expected_projected,
+            );
+            assert_f32s_close(&step.attention_output, &expected_attention, 1e-5);
+            assert_f32s_close(
+                &step.attention_projection_input,
+                &expected_projection_input,
+                1e-5,
+            );
+            assert_f32s_close(&step.projected_output, &expected_projected, 1e-5);
+            assert_f32s_close(&step.block_output, &expected_block, 1e-5);
+        }
+        assert_eq!(state.written_len(), cache_len);
+    }
+
+    #[test]
     fn paged_decode_state_rejects_short_block_table() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -750,5 +1240,25 @@ mod tests {
                 "index {index}: actual={actual} expected={expected}"
             );
         }
+    }
+
+    fn sigmoid_mul_for_test(gate: &[f32], input: &[f32]) -> Vec<f32> {
+        gate.iter()
+            .zip(input)
+            .map(|(gate, input)| (1.0_f32 / (1.0_f32 + (-gate).exp())) * input)
+            .collect()
+    }
+
+    fn matvec_for_test(matrix: &[f32], input: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let mut output = vec![0.0_f32; rows];
+        for row in 0..rows {
+            let base = row * cols;
+            output[row] = (0..cols).map(|col| matrix[base + col] * input[col]).sum();
+        }
+        output
+    }
+
+    fn add_for_test(lhs: &[f32], rhs: &[f32]) -> Vec<f32> {
+        lhs.iter().zip(rhs).map(|(lhs, rhs)| lhs + rhs).collect()
     }
 }
