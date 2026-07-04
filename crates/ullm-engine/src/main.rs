@@ -9,10 +9,11 @@ use std::time::Instant;
 use ullm_engine::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntime, Qwen3DecoderLayerRuntimeWeights,
     Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnBlockStepState,
-    Qwen3SelfAttnDecodeState, Qwen3SelfAttnProjectedSequence, Qwen3SelfAttnRuntimeShape,
+    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimePreparedSequence, Qwen3SelfAttnRuntimeShape,
     Qwen3SelfAttnRuntimeWeights, qwen3_causal_attn_to_host_f32, qwen3_headwise_rmsnorm_to_host_f32,
-    qwen3_rope_to_host_f32, qwen3_self_attn_project_sequence_to_host_f32,
-    qwen3_self_attn_runtime_shape, split_qwen3_self_attn_q_projection,
+    qwen3_rope_to_host_f32, qwen3_self_attn_prepare_sequence_runtime_f32,
+    qwen3_self_attn_project_sequence_to_host_f32, qwen3_self_attn_runtime_shape,
+    split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -7607,7 +7608,6 @@ fn qwen3_self_attn_prepare_sequence_smoke(
         q_projection_layout,
     } = qwen3_self_attn_runtime_shape(self_attn_weights)?;
     let q_cols = hidden;
-    let q_rows = self_attn_weights.q_rows;
 
     let base_input = deterministic_f32_vector(q_cols);
     let mut residual_sequence = Vec::with_capacity(sequence_len * q_cols);
@@ -7615,11 +7615,7 @@ fn qwen3_self_attn_prepare_sequence_smoke(
         let step_input = linear_attn_step_input(&base_input, timestep);
         residual_sequence.extend_from_slice(&step_input);
     }
-    let Qwen3SelfAttnProjectedSequence {
-        q_projected,
-        k_projected,
-        v_projected,
-    } = qwen3_self_attn_project_sequence_to_host_f32(
+    let projected = qwen3_self_attn_project_sequence_to_host_f32(
         context,
         stream,
         self_attn_weights,
@@ -7627,84 +7623,138 @@ fn qwen3_self_attn_prepare_sequence_smoke(
         sequence_len,
     )?;
 
-    let q_projection_split =
-        split_qwen3_self_attn_q_projection(&q_projected, sequence_len, q_rows, q_cols, head_dim)?;
-    if q_projection_split.layout != q_projection_layout {
-        return Err("self-attn q projection layout changed between helper and split".to_string());
-    }
-    if q_projection_split.q_heads != shape_q_heads {
+    let prepared = qwen3_self_attn_prepare_sequence_runtime_f32(
+        context,
+        stream,
+        self_attn_weights,
+        projected,
+        sequence_len,
+        &q_norm.values,
+        &k_norm.values,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    )?;
+
+    if q_projection_layout != prepared.q_projection_layout {
         return Err(
-            "self-attn q projection head count changed between helper and split".to_string(),
+            "self-attn q projection layout changed between helper and runtime prepare".to_string(),
         );
     }
-    let q_heads = q_projection_split.q_heads;
-    let q_gate = q_projection_split.gate;
-    let q_gate_elements = q_gate.as_ref().map_or(0, Vec::len);
-    let q_projected = q_projection_split.query;
 
+    let Qwen3SelfAttnRuntimePreparedSequence {
+        q_query,
+        k_projected,
+        q_normed,
+        k_normed,
+        q_rope,
+        k_rope,
+        v_projected: prepared_v_projected,
+        q_gate,
+        attention_output,
+        shape,
+        softmax_scale,
+        q_projection_layout,
+        q_gate_elements,
+        output_gate_layout,
+    } = prepared;
+
+    if shape.q_heads != shape_q_heads {
+        return Err(
+            "self-attn q projection head count changed between helper and runtime prepare"
+                .to_string(),
+        );
+    }
     let epsilon = 1e-5_f32;
-    let (q_normed, q_norm_max_abs_diff) = runtime_headwise_rmsnorm_verify(
-        context,
-        stream,
-        &q_projected,
-        &q_norm.values,
-        epsilon,
+    let mut expected_q_normed = Vec::with_capacity(q_query.len());
+    for head_input in q_query.chunks_exact(shape.head_dim) {
+        expected_q_normed.extend(runtime_host_rmsnorm_f32(
+            head_input,
+            &q_norm.values,
+            epsilon,
+        ));
+    }
+    let q_norm_max_abs_diff = verify_f32_close(
         &format!("{label} q_norm"),
+        &q_normed,
+        &expected_q_normed,
+        1e-4_f32,
+        1e-4_f32,
     )?;
-    let (k_normed, k_norm_max_abs_diff) = runtime_headwise_rmsnorm_verify(
-        context,
-        stream,
-        &k_projected,
-        &k_norm.values,
-        epsilon,
+    let mut expected_k_normed = Vec::with_capacity(k_normed.len());
+    for head_input in k_projected.chunks_exact(shape.head_dim) {
+        expected_k_normed.extend(runtime_host_rmsnorm_f32(
+            head_input,
+            &k_norm.values,
+            epsilon,
+        ));
+    }
+    let k_norm_max_abs_diff = verify_f32_close(
         &format!("{label} k_norm"),
+        &k_normed,
+        &expected_k_normed,
+        1e-4_f32,
+        1e-4_f32,
     )?;
-    let (q_rope, q_rope_max_abs_diff) = runtime_rope_verify(
-        context,
-        stream,
+    let expected_q_rope = runtime_host_rope_f32(
         &q_normed,
         sequence_len,
-        q_heads,
-        head_dim,
+        shape.q_heads,
+        shape.head_dim,
         rotary_dim,
         position_offset,
         rope_base,
+    );
+    let q_rope_max_abs_diff = verify_f32_close(
         &format!("{label} q_rope"),
+        &q_rope,
+        &expected_q_rope,
+        1e-4_f32,
+        1e-4_f32,
     )?;
-    let (k_rope, k_rope_max_abs_diff) = runtime_rope_verify(
-        context,
-        stream,
+    let expected_k_rope = runtime_host_rope_f32(
         &k_normed,
         sequence_len,
-        kv_heads,
-        head_dim,
+        shape.kv_heads,
+        shape.head_dim,
         rotary_dim,
         position_offset,
         rope_base,
+    );
+    let k_rope_max_abs_diff = verify_f32_close(
         &format!("{label} k_rope"),
+        &k_rope,
+        &expected_k_rope,
+        1e-4_f32,
+        1e-4_f32,
     )?;
-    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
-    let (attention_output, attention_max_abs_diff) = runtime_causal_attn_verify(
-        context,
-        stream,
+
+    let expected_attention = runtime_host_causal_attn_f32(
         &q_rope,
         &k_rope,
-        &v_projected,
+        &prepared_v_projected,
         sequence_len,
-        q_heads,
-        kv_heads,
-        head_dim,
-        value_dim,
+        shape.q_heads,
+        shape.kv_heads,
+        shape.head_dim,
+        shape.value_dim,
         softmax_scale,
+    );
+    let attention_max_abs_diff = verify_f32_close(
         &format!("{label} attention"),
+        &attention_output,
+        &expected_attention,
+        1e-4_f32,
+        1e-4_f32,
     )?;
+
     let paged_block_size = 2_usize;
     let (paged_block_table, paged_cache_blocks, _) =
         allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size)?;
     let (expected_paged_k_cache, expected_paged_v_cache) =
         pack_paged_decode_kv_cache_for_block_table(
             &k_rope,
-            &v_projected,
+            &prepared_v_projected,
             &paged_block_table,
             sequence_len,
             paged_block_size,
@@ -7713,23 +7763,18 @@ fn qwen3_self_attn_prepare_sequence_smoke(
             head_dim,
             value_dim,
         )?;
-    let output_gate_layout = if q_gate.is_some() {
-        "runtime-sigmoid"
-    } else {
-        "none"
-    };
 
     Ok(Qwen3SelfAttnPreparedSequence {
         residual_sequence,
         q_rope,
         k_rope,
-        v_projected,
+        v_projected: prepared_v_projected,
         q_gate,
         attention_output,
         expected_paged_k_cache,
         expected_paged_v_cache,
         hidden: q_cols,
-        q_heads,
+        q_heads: shape.q_heads,
         kv_heads,
         head_dim,
         value_dim,
