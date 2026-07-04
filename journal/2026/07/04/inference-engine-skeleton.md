@@ -7,6 +7,10 @@
 
 ## 今回の変更点
 
+- Commit `1b6d1da Add package self attention paged decode smoke` で `package-self-attn-decode-smoke` にruntime paged decode attention検証を追加した。
+- 既存のcontiguous K/V cache decode検証に加えて、同じRoPE済みK cacheとV cacheを物理paged K/V cacheへ詰め替え、`ullm_runtime_paged_decode_attn_f32` 経由のdecode出力を検証するようにした。
+- Package smoke内のpaged配置は `paged_block_size=2`、`paged_cache_blocks=ceil(cache_len/2)+1` とし、`paged_block_table=[1,0]` のように先頭2 logical blockを入れ替える。これにより単なるcontiguous参照ではなくblock table経由の参照を実際に通す。
+- 出力ログに `paged_block_size`、`paged_cache_blocks`、`paged_block_table`、`paged_k_cache_preview`、`paged_v_cache_preview`、`paged_decode_preview`、`paged_decode_max_abs_diff`、`decode_paged_max_abs_diff`、`causal_paged_decode_max_abs_diff` を追加した。
 - Commit `e7a2969 Add runtime f32 paged decode attention` で `ullm_runtime_paged_decode_attn_f32` を追加した。
 - Paged decode attentionのruntime layoutは、`q=[q_heads, head_dim]`、物理K cache `k_cache=[cache_blocks, block_size, kv_heads, head_dim]`、物理V cache `v_cache=[cache_blocks, block_size, kv_heads, value_dim]`、`block_table=[ceil(cache_len / block_size)]` のu32配列、`output=[q_heads, value_dim]`。
 - 論理token `t` は `block_id = block_table[t / block_size]`、`block_offset = t % block_size` で物理slotを参照する。GQAは既存decode attentionと同じく `kv_head = q_head / (q_heads / kv_heads)`。
@@ -105,6 +109,12 @@
 
 ## 実測・検証
 
+- `target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 3`
+  - CPU fallbackでQwen3.5 layer3、cache_len 3のpackage self-attn decode smokeがcontiguous decodeとpaged decodeの両方で成功した。`paged_block_table=[1,0]`、`paged_decode_max_abs_diff=0`、`decode_paged_max_abs_diff=0`、`causal_paged_decode_max_abs_diff=0`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 3 3`
+  - R9700/RDNA4で成功した。`paged_decode_max_abs_diff=0.000000238`、`decode_paged_max_abs_diff=0`、`causal_paged_decode_max_abs_diff=0`。
+- 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でも成功した。各deviceで `paged_decode_max_abs_diff=0.000000238`、`decode_paged_max_abs_diff=0`、`causal_paged_decode_max_abs_diff=0`。
+- 追加後の検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
 - `target/debug/ullm-engine runtime-paged-decode-attn-smoke 0`
   - CPU fallbackで成功した。`cache_len=5`、`block_size=2`、`cache_blocks=4`、`block_table=[2,0,3]`、max diff `0`。
 - `ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine runtime-paged-decode-attn-smoke 2`
@@ -587,10 +597,12 @@
 - `8dcd8fe Add package self attention block smoke`
 - `f7173b7 Add runtime f32 sigmoid mul`
 - `e7a2969 Add runtime f32 paged decode attention`
+- `1b6d1da Add package self attention paged decode smoke`
 
 ## 次の行動
 
-- Paged decode attentionのruntime境界はCPU、R9700/RDNA4、V620/RDNA2で通った。次はpackage self-attn decode smokeへ物理paged K/V cache packingを足すか、`KvBlockAllocator` とruntime block table bufferをつなぐ狭いdecoder-step APIを作る。
+- Package self-attn decode smokeは物理paged K/V cache経由まで通った。次は `KvBlockAllocator` のblock tableをruntime bufferへ渡す狭いdecoder-step API、またはpackage self-attn MLP block smokeへdecode/paged decode state境界を統合する。
+- Paged decode attentionのruntime境界はCPU、R9700/RDNA4、V620/RDNA2で通っており、package self-attn decode smokeからも呼べる状態になった。
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
 - CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smoke、実packageの `post RMSNorm -> MLP -> residual add` block smoke、1 tokenおよびsequence length 2の実package `input RMSNorm -> linear_attn -> residual -> post RMSNorm -> MLP -> residual` layer-level partial decoder smoke、通常self-attnのq/k/v/o projection smoke、通常self-attnのq/k projection -> head-wise RMSNorm smoke、通常self-attnのq/k norm -> RoPE smoke、通常self-attnのq/k/v -> causal attention value mix smoke、Qwen3.5 gated q projectionを考慮した通常self-attnの `q/k/v -> RoPE -> causal attention -> runtime output gate -> o_proj -> residual add` block smokeまで通った。次はself-attn block outputを `post_attention_layernorm -> MLP -> residual` に接続する。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
