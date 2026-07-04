@@ -45,6 +45,9 @@ fn main() -> ExitCode {
             runtime_paged_decode_attn_smoke(env::args().nth(2))
         }
         Some("runtime-paged-kv-write-smoke") => runtime_paged_kv_write_smoke(env::args().nth(2)),
+        Some("runtime-scheduler-paged-decode-smoke") => {
+            runtime_scheduler_paged_decode_smoke(env::args().nth(2))
+        }
         Some("runtime-kv-paged-decode-smoke") => {
             runtime_kv_paged_decode_attn_smoke(env::args().nth(2))
         }
@@ -1938,6 +1941,551 @@ fn runtime_paged_kv_write_smoke(device_index: Option<String>) -> ExitCode {
         format_f32_preview(&v_cache[..8.min(v_cache.len())]),
     );
     ExitCode::SUCCESS
+}
+
+struct SyntheticSchedulerPagedDecodeRun {
+    request_id: RequestId,
+    prompt_tokens: usize,
+    max_new_tokens: usize,
+    total_tokens: usize,
+    block_table: Vec<u32>,
+    q_sequence: Vec<f32>,
+    k_sequence: Vec<f32>,
+    v_sequence: Vec<f32>,
+    expected_k_cache: Vec<f32>,
+    expected_v_cache: Vec<f32>,
+    state: Qwen3SelfAttnDecodeState,
+    decode_steps: usize,
+    attention_max_abs_diff: f32,
+    k_cache_max_abs_diff: f32,
+    v_cache_max_abs_diff: f32,
+}
+
+fn synthetic_scheduler_decode_values(
+    request_index: usize,
+    total_tokens: usize,
+    token_elements: usize,
+    salt: usize,
+) -> Vec<f32> {
+    let mut values = Vec::with_capacity(total_tokens * token_elements);
+    for token in 0..total_tokens {
+        for element in 0..token_elements {
+            let angle = (request_index as f32 + 1.0_f32) * 0.173_f32
+                + token as f32 * 0.119_f32
+                + element as f32 * 0.037_f32
+                + salt as f32 * 0.071_f32;
+            values.push(angle.sin() * 0.25_f32 + angle.cos() * 0.05_f32);
+        }
+    }
+    values
+}
+
+fn synthetic_scheduler_decode_run_mut(
+    runs: &mut [SyntheticSchedulerPagedDecodeRun],
+    request_id: RequestId,
+) -> Option<&mut SyntheticSchedulerPagedDecodeRun> {
+    runs.iter_mut().find(|run| run.request_id == request_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_synthetic_scheduler_decode_step(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    run: &mut SyntheticSchedulerPagedDecodeRun,
+    timestep: usize,
+    block_size: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    label: &str,
+) -> Result<(), String> {
+    let q_token_elements = q_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| format!("{label} q token element count overflows"))?;
+    let k_token_elements = kv_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| format!("{label} k token element count overflows"))?;
+    let v_token_elements = kv_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| format!("{label} v token element count overflows"))?;
+    let q_start = timestep
+        .checked_mul(q_token_elements)
+        .ok_or_else(|| format!("{label} q slice start overflows"))?;
+    let q_end = q_start
+        .checked_add(q_token_elements)
+        .ok_or_else(|| format!("{label} q slice end overflows"))?;
+    let k_start = timestep
+        .checked_mul(k_token_elements)
+        .ok_or_else(|| format!("{label} k slice start overflows"))?;
+    let k_end = k_start
+        .checked_add(k_token_elements)
+        .ok_or_else(|| format!("{label} k slice end overflows"))?;
+    let v_start = timestep
+        .checked_mul(v_token_elements)
+        .ok_or_else(|| format!("{label} v slice start overflows"))?;
+    let v_end = v_start
+        .checked_add(v_token_elements)
+        .ok_or_else(|| format!("{label} v slice end overflows"))?;
+
+    let step = run
+        .state
+        .step(
+            stream,
+            &run.q_sequence[q_start..q_end],
+            &run.k_sequence[k_start..k_end],
+            &run.v_sequence[v_start..v_end],
+        )
+        .map_err(|err| {
+            format!(
+                "{label} failed to run request {:?} timestep {timestep}: {err}",
+                run.request_id
+            )
+        })?;
+    if step.cache_position != timestep {
+        return Err(format!(
+            "{label} request {:?} wrote cache position {}, expected {timestep}",
+            run.request_id, step.cache_position
+        ));
+    }
+    if step.cache_len != timestep + 1 {
+        return Err(format!(
+            "{label} request {:?} reported cache_len {}, expected {}",
+            run.request_id,
+            step.cache_len,
+            timestep + 1
+        ));
+    }
+
+    let expected = runtime_host_paged_decode_attn_f32(
+        &run.q_sequence[q_start..q_end],
+        &run.expected_k_cache,
+        &run.expected_v_cache,
+        &run.block_table,
+        timestep + 1,
+        block_size,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+    );
+    let max_abs_diff = verify_f32_close(
+        &format!("{label} request {:?} timestep {timestep}", run.request_id),
+        &step.attention_output,
+        &expected,
+        1e-4,
+        1e-4,
+    )?;
+    run.attention_max_abs_diff = run.attention_max_abs_diff.max(max_abs_diff);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_synthetic_scheduler_ready_batch(
+    scheduler: &mut SchedulerState,
+    runs: &mut [SyntheticSchedulerPagedDecodeRun],
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    expected_ids: &[RequestId],
+    max_requests: usize,
+    block_size: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    label: &str,
+) -> Result<usize, String> {
+    let ready = scheduler
+        .ready_decode_batch(max_requests)
+        .map_err(|err| format!("{label} failed to prepare ready decode batch: {err}"))?;
+    let ready_ids = ready
+        .iter()
+        .map(|request| request.request.id)
+        .collect::<Vec<_>>();
+    if ready_ids != expected_ids {
+        return Err(format!(
+            "{label} ready request ids {:?} did not match expected {:?}",
+            ready_ids, expected_ids
+        ));
+    }
+
+    for request in &ready {
+        let run = synthetic_scheduler_decode_run_mut(runs, request.request.id)
+            .ok_or_else(|| format!("{label} request {:?} has no decode run", request.request.id))?;
+        let expected_cache_position =
+            run.prompt_tokens
+                .checked_add(run.decode_steps)
+                .ok_or_else(|| {
+                    format!(
+                        "{label} request {:?} cache position overflows",
+                        run.request_id
+                    )
+                })?;
+        if request.cache_position != expected_cache_position {
+            return Err(format!(
+                "{label} request {:?} cache_position {} did not match expected {}",
+                request.request.id, request.cache_position, expected_cache_position
+            ));
+        }
+        if request.next_cache_len != request.cache_position + 1 {
+            return Err(format!(
+                "{label} request {:?} next_cache_len {} did not match cache_position + 1",
+                request.request.id, request.next_cache_len
+            ));
+        }
+        let expected_remaining = run
+            .max_new_tokens
+            .checked_sub(run.decode_steps)
+            .ok_or_else(|| format!("{label} request {:?} decode step overflow", run.request_id))?;
+        if request.remaining_new_tokens != expected_remaining {
+            return Err(format!(
+                "{label} request {:?} remaining_new_tokens {} did not match expected {}",
+                request.request.id, request.remaining_new_tokens, expected_remaining
+            ));
+        }
+        if request.allocation.blocks != run.block_table {
+            return Err(format!(
+                "{label} request {:?} block table {:?} did not match run block table {:?}",
+                request.request.id, request.allocation.blocks, run.block_table
+            ));
+        }
+
+        run_synthetic_scheduler_decode_step(
+            stream,
+            run,
+            request.cache_position,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            label,
+        )?;
+    }
+
+    for request in ready {
+        scheduler
+            .advance_decode(request.request.id)
+            .map_err(|err| format!("{label} failed to advance {:?}: {err}", request.request.id))?;
+        let run =
+            synthetic_scheduler_decode_run_mut(runs, request.request.id).ok_or_else(|| {
+                format!(
+                    "{label} advanced request {:?} disappeared",
+                    request.request.id
+                )
+            })?;
+        run.decode_steps = run.decode_steps.checked_add(1).ok_or_else(|| {
+            format!(
+                "{label} request {:?} decode step count overflows",
+                run.request_id
+            )
+        })?;
+    }
+    Ok(expected_ids.len())
+}
+
+fn runtime_scheduler_paged_decode_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    match runtime_scheduler_paged_decode_smoke_impl(device_index) {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn runtime_scheduler_paged_decode_smoke_impl(device_index: u32) -> Result<String, String> {
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let block_size = 2_usize;
+    let cache_blocks = 8_usize;
+    let q_heads = 4_usize;
+    let kv_heads = 2_usize;
+    let head_dim = 3_usize;
+    let value_dim = 2_usize;
+    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let requests = vec![
+        Request::new(201, 2, 2),
+        Request::new(202, 3, 1),
+        Request::new(203, 1, 0),
+    ];
+
+    let mut scheduler = SchedulerState::with_block_size(cache_blocks as u32, block_size as u32);
+    for request in &requests {
+        scheduler.enqueue(request.clone());
+    }
+    let mut allocated = scheduler
+        .pop_prefill_batch_with_allocation(usize::MAX)
+        .map_err(|err| format!("failed to allocate synthetic scheduler decode batch: {err}"))?;
+    if allocated.len() != requests.len() {
+        return Err(format!(
+            "synthetic scheduler decode selected {} requests, expected {}",
+            allocated.len(),
+            requests.len()
+        ));
+    }
+
+    let mut runs = Vec::with_capacity(allocated.len());
+    for (request_index, scheduled) in allocated.drain(..).enumerate() {
+        let request = scheduled.request;
+        let block_table = scheduled.allocation.blocks;
+        let total_tokens = request
+            .prompt_tokens
+            .checked_add(request.max_new_tokens)
+            .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
+        if total_tokens == 0 {
+            return Err(format!("request {:?} has no tokens to decode", request.id));
+        }
+
+        let q_sequence =
+            synthetic_scheduler_decode_values(request_index, total_tokens, q_heads * head_dim, 1);
+        let k_sequence =
+            synthetic_scheduler_decode_values(request_index, total_tokens, kv_heads * head_dim, 2);
+        let v_sequence =
+            synthetic_scheduler_decode_values(request_index, total_tokens, kv_heads * value_dim, 3);
+        let shape = PagedDecodeShape {
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+        };
+        let PagedKvCacheReadback {
+            k: expected_k_cache,
+            v: expected_v_cache,
+        } = pack_paged_kv_cache_for_block_table(
+            &k_sequence,
+            &v_sequence,
+            &block_table,
+            total_tokens,
+            shape,
+        )?;
+        let state = Qwen3SelfAttnDecodeState::new(
+            &mut context,
+            &mut stream,
+            shape,
+            block_table.clone(),
+            softmax_scale,
+        )
+        .map_err(|err| {
+            format!(
+                "failed to create synthetic scheduler decode state for {:?}: {err}",
+                request.id
+            )
+        })?;
+        let mut run = SyntheticSchedulerPagedDecodeRun {
+            request_id: request.id,
+            prompt_tokens: request.prompt_tokens,
+            max_new_tokens: request.max_new_tokens,
+            total_tokens,
+            block_table,
+            q_sequence,
+            k_sequence,
+            v_sequence,
+            expected_k_cache,
+            expected_v_cache,
+            state,
+            decode_steps: 0,
+            attention_max_abs_diff: 0.0,
+            k_cache_max_abs_diff: 0.0,
+            v_cache_max_abs_diff: 0.0,
+        };
+        for timestep in 0..run.prompt_tokens {
+            run_synthetic_scheduler_decode_step(
+                &mut stream,
+                &mut run,
+                timestep,
+                block_size,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                "runtime scheduler paged decode prefill",
+            )?;
+        }
+        scheduler.complete_prefill(run.request_id).map_err(|err| {
+            format!(
+                "failed to complete synthetic prefill {:?}: {err}",
+                run.request_id
+            )
+        })?;
+        runs.push(run);
+    }
+
+    let first_batch_ready = run_synthetic_scheduler_ready_batch(
+        &mut scheduler,
+        &mut runs,
+        &mut stream,
+        &[RequestId(201), RequestId(202)],
+        8,
+        block_size,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        "runtime scheduler paged decode first batch",
+    )?;
+    let second_batch_ready = run_synthetic_scheduler_ready_batch(
+        &mut scheduler,
+        &mut runs,
+        &mut stream,
+        &[RequestId(201)],
+        8,
+        block_size,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        "runtime scheduler paged decode second batch",
+    )?;
+    let final_ready = scheduler
+        .ready_decode_batch(8)
+        .map_err(|err| format!("failed to query final ready decode batch: {err}"))?
+        .len();
+    if final_ready != 0 {
+        return Err(format!(
+            "runtime scheduler paged decode final ready count {final_ready}, expected 0"
+        ));
+    }
+
+    for run in &mut runs {
+        let active = scheduler.active_request(run.request_id).ok_or_else(|| {
+            format!(
+                "request {:?} missing from active scheduler state",
+                run.request_id
+            )
+        })?;
+        if active.cached_tokens != run.total_tokens {
+            return Err(format!(
+                "request {:?} cached_tokens {} did not match total_tokens {}",
+                run.request_id, active.cached_tokens, run.total_tokens
+            ));
+        }
+        if active.generated_tokens != run.max_new_tokens {
+            return Err(format!(
+                "request {:?} generated_tokens {} did not match max_new_tokens {}",
+                run.request_id, active.generated_tokens, run.max_new_tokens
+            ));
+        }
+        let cache = run.state.read_cache_to_host(&mut stream).map_err(|err| {
+            format!(
+                "failed to read synthetic cache for {:?}: {err}",
+                run.request_id
+            )
+        })?;
+        run.k_cache_max_abs_diff = verify_f32_close(
+            &format!(
+                "runtime scheduler paged decode request {:?} k cache",
+                run.request_id
+            ),
+            &cache.k,
+            &run.expected_k_cache,
+            1e-5,
+            1e-5,
+        )?;
+        run.v_cache_max_abs_diff = verify_f32_close(
+            &format!(
+                "runtime scheduler paged decode request {:?} v cache",
+                run.request_id
+            ),
+            &cache.v,
+            &run.expected_v_cache,
+            1e-5,
+            1e-5,
+        )?;
+    }
+
+    let stats = scheduler.allocator_stats();
+    let request_ids = runs.iter().map(|run| run.request_id.0).collect::<Vec<_>>();
+    let block_tables = runs
+        .iter()
+        .map(|run| run.block_table.clone())
+        .collect::<Vec<_>>();
+    let cached_tokens = runs
+        .iter()
+        .map(|run| {
+            scheduler
+                .active_request(run.request_id)
+                .map(|active| active.cached_tokens)
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let generated_tokens = runs
+        .iter()
+        .map(|run| {
+            scheduler
+                .active_request(run.request_id)
+                .map(|active| active.generated_tokens)
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let prompt_tokens = runs.iter().map(|run| run.prompt_tokens).collect::<Vec<_>>();
+    let max_new_tokens = runs
+        .iter()
+        .map(|run| run.max_new_tokens)
+        .collect::<Vec<_>>();
+    let decode_steps = runs.iter().map(|run| run.decode_steps).collect::<Vec<_>>();
+    let attention_max_abs_diff = runs
+        .iter()
+        .map(|run| run.attention_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let k_cache_max_abs_diff = runs
+        .iter()
+        .map(|run| run.k_cache_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let v_cache_max_abs_diff = runs
+        .iter()
+        .map(|run| run.v_cache_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+
+    Ok(format!(
+        "runtime-scheduler-paged-decode-smoke backend={} device_index={} name=\"{}\" request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} block_size={} cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} final_ready={} decode_steps={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} q_heads={} kv_heads={} head_dim={} value_dim={} softmax_scale={softmax_scale:.9} attention_max_abs_diff={attention_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        runs.len(),
+        request_ids,
+        prompt_tokens,
+        max_new_tokens,
+        block_size,
+        cache_blocks,
+        block_tables,
+        first_batch_ready,
+        second_batch_ready,
+        final_ready,
+        decode_steps,
+        cached_tokens,
+        generated_tokens,
+        scheduler.active_len(),
+        stats.free_blocks,
+        stats.allocated_blocks,
+        stats.free_runs,
+        stats.largest_free_run,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+    ))
 }
 
 fn runtime_kv_paged_decode_attn_smoke(device_index: Option<String>) -> ExitCode {
@@ -16351,7 +16899,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");

@@ -988,6 +988,68 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_state_ready_decode_batch_tracks_multi_request_progress() {
+        let mut scheduler = SchedulerState::with_block_size(8, 4);
+        scheduler.enqueue(Request::new(1, 2, 2));
+        scheduler.enqueue(Request::new(2, 3, 1));
+        scheduler.enqueue(Request::new(3, 1, 0));
+        scheduler
+            .pop_prefill_batch_with_allocation(8)
+            .expect("allocation should succeed");
+        scheduler
+            .complete_prefill(RequestId(1))
+            .expect("request 1 prefill complete");
+        scheduler
+            .complete_prefill(RequestId(2))
+            .expect("request 2 prefill complete");
+        scheduler
+            .complete_prefill(RequestId(3))
+            .expect("request 3 prefill complete");
+
+        let first = scheduler
+            .ready_decode_batch(8)
+            .expect("first ready decode batch should be generated");
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.request.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1), RequestId(2)]
+        );
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| (
+                    entry.cache_position,
+                    entry.next_cache_len,
+                    entry.remaining_new_tokens
+                ))
+                .collect::<Vec<_>>(),
+            vec![(2, 3, 2), (3, 4, 1)]
+        );
+
+        scheduler
+            .advance_decode(RequestId(1))
+            .expect("request 1 should advance");
+        scheduler
+            .advance_decode(RequestId(2))
+            .expect("request 2 should advance");
+        let second = scheduler
+            .ready_decode_batch(8)
+            .expect("second ready decode batch should be generated");
+        assert_eq!(
+            second
+                .iter()
+                .map(|entry| entry.request.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1)]
+        );
+        assert_eq!(second[0].cache_position, 3);
+        assert_eq!(second[0].next_cache_len, 4);
+        assert_eq!(second[0].remaining_new_tokens, 1);
+    }
+
+    #[test]
     fn scheduler_state_ready_decode_batch_excludes_unready_and_complete_requests() {
         let mut scheduler = SchedulerState::with_block_size(8, 8);
         scheduler.enqueue(Request::new(1, 3, 1));
