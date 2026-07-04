@@ -6323,6 +6323,59 @@ fn package_self_attn_decode_smoke(
             return ExitCode::from(1);
         }
     };
+    let paged_block_size = 2_usize;
+    let (paged_k_cache, paged_v_cache, paged_block_table, paged_cache_blocks) =
+        match pack_paged_decode_kv_cache(
+            &k_rope,
+            &v_projected,
+            sequence_len,
+            paged_block_size,
+            kv_heads,
+            head_dim,
+            value_dim,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(1);
+            }
+        };
+    let (paged_decode_output, paged_decode_max_abs_diff) = match runtime_paged_decode_attn_verify(
+        &mut context,
+        &mut stream,
+        decode_q,
+        &paged_k_cache,
+        &paged_v_cache,
+        &paged_block_table,
+        sequence_len,
+        paged_block_size,
+        paged_cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        "package-self-attn-decode-smoke paged_decode",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let decode_paged_max_abs_diff = match verify_f32_close(
+        "package-self-attn-decode-smoke decode-vs-paged-decode",
+        &paged_decode_output,
+        &decode_output,
+        1e-4,
+        1e-4,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
     let causal_last_start = (sequence_len - 1) * q_heads * value_dim;
     let causal_last_end = causal_last_start + q_heads * value_dim;
     let causal_last = &attention_output[causal_last_start..causal_last_end];
@@ -6339,9 +6392,22 @@ fn package_self_attn_decode_smoke(
             return ExitCode::from(1);
         }
     };
+    let causal_paged_decode_max_abs_diff = match verify_f32_close(
+        "package-self-attn-decode-smoke causal-vs-paged-decode",
+        &paged_decode_output,
+        causal_last,
+        1e-4,
+        1e-4,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
 
     println!(
-        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} causal_last_preview={} decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} verified=true",
+        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} paged_k_cache_preview={} paged_v_cache_preview={} causal_last_preview={} decode_preview={} paged_decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} paged_decode_max_abs_diff={paged_decode_max_abs_diff:.9} decode_paged_max_abs_diff={decode_paged_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} causal_paged_decode_max_abs_diff={causal_paged_decode_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -6351,6 +6417,9 @@ fn package_self_attn_decode_smoke(
         k_norm_tensor,
         q_cols,
         sequence_len,
+        paged_block_size,
+        paged_cache_blocks,
+        paged_block_table,
         q_projection_layout,
         q_gate_elements,
         q_heads,
@@ -6368,8 +6437,11 @@ fn package_self_attn_decode_smoke(
         format_f32_preview(&decode_q[..8.min(decode_q.len())]),
         format_f32_preview(&k_rope[..8.min(k_rope.len())]),
         format_f32_preview(&v_projected[..8.min(v_projected.len())]),
+        format_f32_preview(&paged_k_cache[..8.min(paged_k_cache.len())]),
+        format_f32_preview(&paged_v_cache[..8.min(paged_v_cache.len())]),
         format_f32_preview(&causal_last[..8.min(causal_last.len())]),
         format_f32_preview(&decode_output[..8.min(decode_output.len())]),
+        format_f32_preview(&paged_decode_output[..8.min(paged_decode_output.len())]),
     );
     ExitCode::SUCCESS
 }
@@ -15232,6 +15304,144 @@ fn runtime_decode_attn_verify(
     Ok((output, max_abs_diff))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn runtime_paged_decode_attn_verify(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    q: &[f32],
+    k_cache: &[f32],
+    v_cache: &[f32],
+    block_table: &[u32],
+    cache_len: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    label: &str,
+) -> Result<(Vec<f32>, f32), String> {
+    if cache_len == 0 {
+        return Err(format!("{label} cache_len must be greater than zero"));
+    }
+    if block_size == 0 {
+        return Err(format!("{label} block_size must be greater than zero"));
+    }
+    if cache_blocks == 0 {
+        return Err(format!("{label} cache_blocks must be greater than zero"));
+    }
+    if q.len() != q_heads * head_dim {
+        return Err(format!(
+            "{label} q length {} does not match q_heads={q_heads} head_dim={head_dim}",
+            q.len()
+        ));
+    }
+    let block_table_entries = (cache_len - 1) / block_size + 1;
+    if block_table.len() != block_table_entries {
+        return Err(format!(
+            "{label} block table length {} does not match expected entries {block_table_entries}",
+            block_table.len()
+        ));
+    }
+    let physical_tokens = cache_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| format!("{label} physical cache token count overflows"))?;
+    if k_cache.len() != physical_tokens * kv_heads * head_dim {
+        return Err(format!(
+            "{label} k cache length {} does not match cache_blocks={cache_blocks} block_size={block_size} kv_heads={kv_heads} head_dim={head_dim}",
+            k_cache.len()
+        ));
+    }
+    if v_cache.len() != physical_tokens * kv_heads * value_dim {
+        return Err(format!(
+            "{label} v cache length {} does not match cache_blocks={cache_blocks} block_size={block_size} kv_heads={kv_heads} value_dim={value_dim}",
+            v_cache.len()
+        ));
+    }
+    let q_bytes = encode_f32_to_bytes(q);
+    let k_bytes = encode_f32_to_bytes(k_cache);
+    let v_bytes = encode_f32_to_bytes(v_cache);
+    let block_table_bytes = encode_u32_to_bytes(block_table);
+    let output_elements = q_heads * value_dim;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| format!("{label} output byte size overflows"))?;
+    let mut q_buffer = context
+        .alloc_buffer(q_bytes.len())
+        .map_err(|err| format!("failed to allocate {label} q buffer: {err}"))?;
+    let mut k_buffer = context
+        .alloc_buffer(k_bytes.len())
+        .map_err(|err| format!("failed to allocate {label} paged k cache buffer: {err}"))?;
+    let mut v_buffer = context
+        .alloc_buffer(v_bytes.len())
+        .map_err(|err| format!("failed to allocate {label} paged v cache buffer: {err}"))?;
+    let mut block_table_buffer = context
+        .alloc_buffer(block_table_bytes.len())
+        .map_err(|err| format!("failed to allocate {label} block table buffer: {err}"))?;
+    let mut output_buffer = context
+        .alloc_buffer(output_bytes)
+        .map_err(|err| format!("failed to allocate {label} output buffer: {err}"))?;
+    q_buffer
+        .copy_from_host(0, &q_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} q input: {err}"))?;
+    k_buffer
+        .copy_from_host(0, &k_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} paged k cache input: {err}"))?;
+    v_buffer
+        .copy_from_host(0, &v_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} paged v cache input: {err}"))?;
+    block_table_buffer
+        .copy_from_host(0, &block_table_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} block table input: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} input copies: {err}"))?;
+    ullm_runtime_sys::paged_decode_attn_f32(
+        &q_buffer,
+        &k_buffer,
+        &v_buffer,
+        &block_table_buffer,
+        cache_len,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        &mut output_buffer,
+        Some(stream),
+    )
+    .map_err(|err| format!("failed to run {label} paged decode attention: {err}"))?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize after {label} paged decode attention: {err}")
+    })?;
+    let mut output_bytes_host = vec![0_u8; output_bytes];
+    output_buffer
+        .copy_to_host(0, &mut output_bytes_host, Some(stream))
+        .map_err(|err| format!("failed to copy {label} output: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after {label} output copy: {err}"))?;
+    let output = decode_f32_le_values(&output_bytes_host);
+    let expected = runtime_host_paged_decode_attn_f32(
+        q,
+        k_cache,
+        v_cache,
+        block_table,
+        cache_len,
+        block_size,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+    );
+    let max_abs_diff = verify_f32_close(label, &output, &expected, 1e-4_f32, 1e-4_f32)?;
+    Ok((output, max_abs_diff))
+}
+
 fn runtime_matvec_sequence_to_host_f32(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -16196,6 +16406,88 @@ fn runtime_host_paged_decode_attn_f32(
         }
     }
     output
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_paged_decode_kv_cache(
+    logical_k_cache: &[f32],
+    logical_v_cache: &[f32],
+    cache_len: usize,
+    block_size: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+) -> Result<(Vec<f32>, Vec<f32>, Vec<u32>, usize), String> {
+    if cache_len == 0 {
+        return Err("paged decode cache_len must be greater than zero".to_string());
+    }
+    if block_size == 0 {
+        return Err("paged decode block_size must be greater than zero".to_string());
+    }
+    if kv_heads == 0 || head_dim == 0 || value_dim == 0 {
+        return Err(format!(
+            "paged decode dimensions must be nonzero: kv_heads={kv_heads} head_dim={head_dim} value_dim={value_dim}"
+        ));
+    }
+    if logical_k_cache.len() != cache_len * kv_heads * head_dim {
+        return Err(format!(
+            "logical k cache length {} does not match cache_len={cache_len} kv_heads={kv_heads} head_dim={head_dim}",
+            logical_k_cache.len()
+        ));
+    }
+    if logical_v_cache.len() != cache_len * kv_heads * value_dim {
+        return Err(format!(
+            "logical v cache length {} does not match cache_len={cache_len} kv_heads={kv_heads} value_dim={value_dim}",
+            logical_v_cache.len()
+        ));
+    }
+    let block_table_entries = (cache_len - 1) / block_size + 1;
+    let cache_blocks = block_table_entries
+        .checked_add(1)
+        .ok_or_else(|| "paged decode cache_blocks overflows".to_string())?;
+    if block_table_entries > u32::MAX as usize {
+        return Err(format!(
+            "paged decode block_table_entries={block_table_entries} exceeds u32 block id range"
+        ));
+    }
+    let physical_tokens = cache_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| "paged decode physical token count overflows".to_string())?;
+    let mut physical_k_cache = vec![0.0_f32; physical_tokens * kv_heads * head_dim];
+    let mut physical_v_cache = vec![0.0_f32; physical_tokens * kv_heads * value_dim];
+    let mut block_table = (0..block_table_entries)
+        .map(|index| index as u32)
+        .collect::<Vec<_>>();
+    if block_table_entries == 1 {
+        block_table[0] = 1;
+    } else {
+        block_table.swap(0, 1);
+    }
+    for timestep in 0..cache_len {
+        let logical_block = timestep / block_size;
+        let block_offset = timestep - logical_block * block_size;
+        let physical_block = block_table[logical_block] as usize;
+        let physical_timestep = physical_block * block_size + block_offset;
+        let logical_k_start = timestep * kv_heads * head_dim;
+        let logical_k_end = logical_k_start + kv_heads * head_dim;
+        let physical_k_start = physical_timestep * kv_heads * head_dim;
+        let physical_k_end = physical_k_start + kv_heads * head_dim;
+        physical_k_cache[physical_k_start..physical_k_end]
+            .copy_from_slice(&logical_k_cache[logical_k_start..logical_k_end]);
+
+        let logical_v_start = timestep * kv_heads * value_dim;
+        let logical_v_end = logical_v_start + kv_heads * value_dim;
+        let physical_v_start = physical_timestep * kv_heads * value_dim;
+        let physical_v_end = physical_v_start + kv_heads * value_dim;
+        physical_v_cache[physical_v_start..physical_v_end]
+            .copy_from_slice(&logical_v_cache[logical_v_start..logical_v_end]);
+    }
+    Ok((
+        physical_k_cache,
+        physical_v_cache,
+        block_table,
+        cache_blocks,
+    ))
 }
 
 fn runtime_host_depthwise_conv1d_f32(
