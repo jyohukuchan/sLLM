@@ -101,6 +101,13 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_sigmoid_mul_f32(
+        gate_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        elements: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_add_f32(
         lhs_buffer: *const RawRuntimeBuffer,
         rhs_buffer: *const RawRuntimeBuffer,
@@ -492,6 +499,34 @@ pub fn silu_mul_f32(
         ullm_runtime_silu_mul_f32(
             gate_buffer.raw.as_ptr(),
             up_buffer.raw.as_ptr(),
+            elements,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn sigmoid_mul_f32(
+    gate_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    elements: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if elements == 0 {
+        return Err("f32 Sigmoid-mul elements must be greater than zero".to_string());
+    }
+    let required_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 Sigmoid-mul byte size overflows".to_string())?;
+    check_copy_range(0, required_bytes, gate_buffer.size()?)?;
+    check_copy_range(0, required_bytes, input_buffer.size()?)?;
+    check_copy_range(0, required_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_sigmoid_mul_f32(
+            gate_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
             elements,
             output_buffer.raw.as_ptr(),
             stream,
@@ -1218,6 +1253,65 @@ mod tests {
             .unwrap();
 
         let err = silu_mul_f32(&gate, &up, 4, &mut output, None).unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
+    fn cpu_sigmoid_mul_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let gate_values = [-1.0_f32, 0.0, 1.0, 2.0];
+        let input_values = [3.0_f32, -4.0, 5.0, 6.0];
+        let mut gate = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        sigmoid_mul_f32(
+            &gate,
+            &input,
+            gate_values.len(),
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; gate_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_sigmoid_mul(&gate_values, &input_values);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_sigmoid_mul_f32_rejects_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let gate = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let input = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let err = sigmoid_mul_f32(&gate, &input, 4, &mut output, None).unwrap_err();
         assert!(err.contains("out of bounds") || err.contains("output"));
     }
 
@@ -2097,6 +2191,51 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_sigmoid_mul_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let gate_values = [-1.0_f32, 0.0, 1.0, 2.0];
+        let input_values = [3.0_f32, -4.0, 5.0, 6.0];
+        let mut gate = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        sigmoid_mul_f32(
+            &gate,
+            &input,
+            gate_values.len(),
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; gate_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_sigmoid_mul(&gate_values, &input_values);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
     fn first_hip_add_f32_computes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -2602,6 +2741,16 @@ mod tests {
                 let gate = *gate;
                 let sigmoid = 1.0 / (1.0 + (-gate).exp());
                 gate * sigmoid * *up
+            })
+            .collect()
+    }
+
+    fn expected_sigmoid_mul(gate: &[f32], input: &[f32]) -> Vec<f32> {
+        gate.iter()
+            .zip(input)
+            .map(|(gate, input)| {
+                let sigmoid = 1.0 / (1.0 + (-*gate).exp());
+                sigmoid * *input
             })
             .collect()
     }

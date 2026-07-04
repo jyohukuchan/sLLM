@@ -22,6 +22,7 @@ fn main() -> ExitCode {
         Some("runtime-copy-smoke") => runtime_copy_smoke(env::args().nth(2)),
         Some("runtime-rmsnorm-smoke") => runtime_rmsnorm_smoke(env::args().nth(2)),
         Some("runtime-silu-mul-smoke") => runtime_silu_mul_smoke(env::args().nth(2)),
+        Some("runtime-sigmoid-mul-smoke") => runtime_sigmoid_mul_smoke(env::args().nth(2)),
         Some("runtime-add-smoke") => runtime_add_smoke(env::args().nth(2)),
         Some("runtime-rope-smoke") => runtime_rope_smoke(env::args().nth(2)),
         Some("runtime-causal-attn-smoke") => runtime_causal_attn_smoke(env::args().nth(2)),
@@ -704,6 +705,132 @@ fn runtime_silu_mul_smoke(device_index: Option<String>) -> ExitCode {
     }
     println!(
         "runtime-silu-mul-smoke backend={} device_index={} name=\"{}\" elements={} output={} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        elements,
+        format_f32_preview(&output)
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_sigmoid_mul_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let elements = 4_usize;
+    let epsilon = 1e-5_f32;
+    let gate = [-1.0_f32, 0.0_f32, 1.0_f32, 2.0_f32];
+    let input = [3.0_f32, -4.0_f32, 5.0_f32, 6.0_f32];
+    let expected = runtime_host_sigmoid_mul_f32(&gate, &input);
+
+    let gate_bytes = encode_f32_to_bytes(&gate);
+    let input_bytes = encode_f32_to_bytes(&input);
+    let output_bytes = elements * std::mem::size_of::<f32>();
+
+    let mut gate_buffer = match context.alloc_buffer(gate_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate gate runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = gate_buffer.copy_from_host(0, &gate_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy gate data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after gate copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut input_buffer = match context.alloc_buffer(input_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate input runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy input data into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_buffer = match context.alloc_buffer(output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate output runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = ullm_runtime_sys::sigmoid_mul_f32(
+        &gate_buffer,
+        &input_buffer,
+        elements,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime sigmoid_mul_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after sigmoid_mul: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_raw = vec![0_u8; output_bytes];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_raw, Some(&mut stream)) {
+        eprintln!("failed to copy sigmoid_mul result back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let output = decode_f32_le_values(&output_raw);
+
+    if output.len() != expected.len()
+        || expected
+            .iter()
+            .zip(output.iter())
+            .any(|(lhs, rhs)| (*lhs - *rhs).abs() > epsilon)
+    {
+        eprintln!(
+            "runtime sigmoid mul smoke produced unexpected output: output={:?} expected={:?}",
+            output, expected
+        );
+        return ExitCode::from(1);
+    }
+    println!(
+        "runtime-sigmoid-mul-smoke backend={} device_index={} name=\"{}\" elements={} output={} verified=true",
         info.backend,
         device_index,
         info.name,
@@ -5805,10 +5932,10 @@ fn package_self_attn_block_smoke(
             return ExitCode::from(1);
         }
     };
-    let (attention_projection_input, output_gate_layout) = match q_gate {
+    let (attention_projection_input, output_gate_layout, output_gate_max_abs_diff) = match q_gate {
         Some(gate) => {
-            let gated_attention = runtime_host_sigmoid_mul_f32(&gate, &attention_output);
-            if gated_attention.is_empty() {
+            let expected_gated_attention = runtime_host_sigmoid_mul_f32(&gate, &attention_output);
+            if expected_gated_attention.is_empty() {
                 eprintln!(
                     "failed to apply Qwen3.5 self-attn output gate: gate_elements={} attention_elements={}",
                     gate.len(),
@@ -5816,9 +5943,86 @@ fn package_self_attn_block_smoke(
                 );
                 return ExitCode::from(1);
             }
-            (gated_attention, "host-sigmoid")
+            let gate_bytes = encode_f32_to_bytes(&gate);
+            let attention_bytes = encode_f32_to_bytes(&attention_output);
+            let output_gate_bytes_len = attention_bytes.len();
+            let mut gate_buffer = match context.alloc_buffer(gate_bytes.len()) {
+                Ok(buffer) => buffer,
+                Err(err) => {
+                    eprintln!("failed to allocate self-attn output gate buffer: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+            let mut attention_buffer = match context.alloc_buffer(output_gate_bytes_len) {
+                Ok(buffer) => buffer,
+                Err(err) => {
+                    eprintln!("failed to allocate self-attn output gate input buffer: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+            let mut gated_attention_buffer = match context.alloc_buffer(output_gate_bytes_len) {
+                Ok(buffer) => buffer,
+                Err(err) => {
+                    eprintln!("failed to allocate self-attn gated attention buffer: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+            if let Err(err) = gate_buffer.copy_from_host(0, &gate_bytes, Some(&mut stream)) {
+                eprintln!("failed to copy self-attn output gate into runtime buffer: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) =
+                attention_buffer.copy_from_host(0, &attention_bytes, Some(&mut stream))
+            {
+                eprintln!("failed to copy self-attn attention into runtime gate input: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = stream.synchronize() {
+                eprintln!("failed to synchronize after self-attn output gate input copy: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = ullm_runtime_sys::sigmoid_mul_f32(
+                &gate_buffer,
+                &attention_buffer,
+                attention_output.len(),
+                &mut gated_attention_buffer,
+                Some(&mut stream),
+            ) {
+                eprintln!("failed to run self-attn output gate sigmoid_mul_f32: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = stream.synchronize() {
+                eprintln!("failed to synchronize after self-attn output gate sigmoid_mul: {err}");
+                return ExitCode::from(1);
+            }
+            let mut gated_attention_raw = vec![0_u8; output_gate_bytes_len];
+            if let Err(err) =
+                gated_attention_buffer.copy_to_host(0, &mut gated_attention_raw, Some(&mut stream))
+            {
+                eprintln!("failed to copy self-attn gated attention output: {err}");
+                return ExitCode::from(1);
+            }
+            if let Err(err) = stream.synchronize() {
+                eprintln!("failed to synchronize after self-attn gated attention copy: {err}");
+                return ExitCode::from(1);
+            }
+            let gated_attention = decode_f32_le_values(&gated_attention_raw);
+            let output_gate_max_abs_diff = match verify_f32_close(
+                "package-self-attn-block-smoke output gate",
+                &gated_attention,
+                &expected_gated_attention,
+                1e-5,
+                1e-6,
+            ) {
+                Ok(value) => value,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return ExitCode::from(1);
+                }
+            };
+            (gated_attention, "runtime-sigmoid", output_gate_max_abs_diff)
         }
-        None => (attention_output.clone(), "none"),
+        None => (attention_output.clone(), "none", 0.0_f32),
     };
     let o_matrix_bytes = match o_rows
         .checked_mul(o_cols)
@@ -5932,7 +6136,7 @@ fn package_self_attn_block_smoke(
     };
 
     println!(
-        "package-self-attn-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} sequence_len={} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" attention_preview={} gated_attention_preview={} projected_preview={} block_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} o_proj_max_abs_diff={o_proj_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} verified=true",
+        "package-self-attn-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} sequence_len={} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" attention_preview={} gated_attention_preview={} projected_preview={} block_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} output_gate_max_abs_diff={output_gate_max_abs_diff:.9} o_proj_max_abs_diff={o_proj_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -13457,7 +13661,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
