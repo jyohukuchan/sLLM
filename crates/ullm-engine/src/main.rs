@@ -12,7 +12,7 @@ use ullm_engine::loader::{
 use ullm_engine::package::{
     PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole, TensorSelector,
 };
-use ullm_engine::scheduler::{KvBlockAllocator, RequestId};
+use ullm_engine::scheduler::{KvBlockAllocator, KvBlockAllocatorStats, RequestId};
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -6488,22 +6488,31 @@ fn package_self_attn_decode_smoke(
         }
     };
     let paged_block_size = 2_usize;
-    let (paged_k_cache, paged_v_cache, paged_block_table, paged_cache_blocks) =
-        match pack_paged_decode_kv_cache(
-            &k_rope,
-            &v_projected,
-            sequence_len,
-            paged_block_size,
-            kv_heads,
-            head_dim,
-            value_dim,
-        ) {
+    let (paged_block_table, paged_cache_blocks, paged_allocator_stats) =
+        match allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size) {
             Ok(value) => value,
             Err(err) => {
                 eprintln!("{err}");
                 return ExitCode::from(1);
             }
         };
+    let (paged_k_cache, paged_v_cache) = match pack_paged_decode_kv_cache_for_block_table(
+        &k_rope,
+        &v_projected,
+        &paged_block_table,
+        sequence_len,
+        paged_block_size,
+        paged_cache_blocks,
+        kv_heads,
+        head_dim,
+        value_dim,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
     let (paged_decode_output, paged_decode_max_abs_diff) = match runtime_paged_decode_attn_verify(
         &mut context,
         &mut stream,
@@ -6571,7 +6580,7 @@ fn package_self_attn_decode_smoke(
     };
 
     println!(
-        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} paged_k_cache_preview={} paged_v_cache_preview={} causal_last_preview={} decode_preview={} paged_decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} paged_decode_max_abs_diff={paged_decode_max_abs_diff:.9} decode_paged_max_abs_diff={decode_paged_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} causal_paged_decode_max_abs_diff={causal_paged_decode_max_abs_diff:.9} verified=true",
+        "package-self-attn-decode-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" hidden={} cache_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} paged_allocator_free_blocks={} paged_allocator_allocated_blocks={} paged_allocator_free_runs={} paged_allocator_largest_free_run={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} q_norm_dtype={} k_norm_dtype={} backend={} device_index={} name=\"{}\" decode_q_preview={} k_cache_preview={} v_cache_preview={} paged_k_cache_preview={} paged_v_cache_preview={} causal_last_preview={} decode_preview={} paged_decode_preview={} q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} decode_max_abs_diff={decode_max_abs_diff:.9} paged_decode_max_abs_diff={paged_decode_max_abs_diff:.9} decode_paged_max_abs_diff={decode_paged_max_abs_diff:.9} causal_decode_max_abs_diff={causal_decode_max_abs_diff:.9} causal_paged_decode_max_abs_diff={causal_paged_decode_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -6584,6 +6593,10 @@ fn package_self_attn_decode_smoke(
         paged_block_size,
         paged_cache_blocks,
         paged_block_table,
+        paged_allocator_stats.free_blocks,
+        paged_allocator_stats.allocated_blocks,
+        paged_allocator_stats.free_runs,
+        paged_allocator_stats.largest_free_run,
         q_projection_layout,
         q_gate_elements,
         q_heads,
@@ -16648,56 +16661,47 @@ fn pack_paged_decode_kv_cache_for_block_table(
     Ok((physical_k_cache, physical_v_cache))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn pack_paged_decode_kv_cache(
-    logical_k_cache: &[f32],
-    logical_v_cache: &[f32],
+fn allocate_fragmented_paged_decode_blocks(
     cache_len: usize,
     block_size: usize,
-    kv_heads: usize,
-    head_dim: usize,
-    value_dim: usize,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<u32>, usize), String> {
+) -> Result<(Vec<u32>, usize, KvBlockAllocatorStats), String> {
     if cache_len == 0 {
         return Err("paged decode cache_len must be greater than zero".to_string());
     }
     if block_size == 0 {
         return Err("paged decode block_size must be greater than zero".to_string());
     }
-    let block_table_entries = (cache_len - 1) / block_size + 1;
-    let cache_blocks = block_table_entries
-        .checked_add(1)
-        .ok_or_else(|| "paged decode cache_blocks overflows".to_string())?;
-    if block_table_entries > u32::MAX as usize {
+    if block_size > u32::MAX as usize {
         return Err(format!(
-            "paged decode block_table_entries={block_table_entries} exceeds u32 block id range"
+            "paged decode block_size={block_size} exceeds u32 block size range"
         ));
     }
-    let mut block_table = (0..block_table_entries)
-        .map(|index| index as u32)
-        .collect::<Vec<_>>();
-    if block_table_entries == 1 {
-        block_table[0] = 1;
-    } else {
-        block_table.swap(0, 1);
+    let block_count = (cache_len - 1) / block_size + 1;
+    if block_count > u32::MAX as usize - 2 {
+        return Err(format!(
+            "paged decode block_count={block_count} is too large for allocator smoke"
+        ));
     }
-    let (physical_k_cache, physical_v_cache) = pack_paged_decode_kv_cache_for_block_table(
-        logical_k_cache,
-        logical_v_cache,
-        &block_table,
-        cache_len,
-        block_size,
-        cache_blocks,
-        kv_heads,
-        head_dim,
-        value_dim,
-    )?;
-    Ok((
-        physical_k_cache,
-        physical_v_cache,
-        block_table,
-        cache_blocks,
-    ))
+    let cache_blocks = block_count
+        .checked_add(2)
+        .ok_or_else(|| "paged decode cache_blocks overflows".to_string())?;
+    let mut allocator = KvBlockAllocator::with_block_size(cache_blocks as u32, block_size as u32);
+    let fragment_blocks = cache_blocks - 1;
+    let fragment = allocator
+        .allocate(RequestId(100), fragment_blocks)
+        .map_err(|err| format!("failed to allocate fragmenting KV blocks: {err}"))?;
+    let freed = allocator.free_request(fragment.request_id);
+    if freed != fragment.blocks.len() {
+        return Err(format!(
+            "freed KV block count {freed} does not match allocated fragment blocks {}",
+            fragment.blocks.len()
+        ));
+    }
+    let allocation = allocator
+        .allocate(RequestId(101), block_count)
+        .map_err(|err| format!("failed to allocate decode KV blocks: {err}"))?;
+    let stats = allocator.stats();
+    Ok((allocation.blocks, cache_blocks, stats))
 }
 
 fn runtime_host_depthwise_conv1d_f32(
