@@ -154,3 +154,5 @@ kernel-required smoke:staging fallbackを禁止し、実kernel経路だけで成
 backend:HIP、CPU、CUDA、CANN、JAX/TPUなど、runtimeが実際に演算へ使う実装単位
 backend capability:backendごとに異なる対応機能や推奨値。block-size、dtype、kernel variantなどを含む
 telemetry:実行中に記録する性能・メモリ・allocator状態などの測定値
+golden tensor fixture:参照実装から固定token id、position、layer indexに対するhidden stateなどを保存し、uLLM側のlayer単位またはlogits単位の正しさ確認に使う小さい検証用データ
+package layer golden smoke:.ullm.d内の実package weightを使って指定Qwen3 decoder layerを実行し、golden tensor fixture内の参照hidden stateとMSE、平均絶対誤差、最大絶対誤差、cosine similarityで比較するsmoke
