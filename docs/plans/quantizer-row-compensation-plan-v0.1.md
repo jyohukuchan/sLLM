@@ -194,3 +194,39 @@ Conclusion:
 - Manifest metadata reproduces the layer `10` max-abs improvement without using the smoke CLI override.
 - The improvement is backend-stable on CPU and R9700.
 - Aggregate MSE is still dominated by later layer drift, so layer `11` remains a separate debugging track.
+
+## 2026-07-05 Layer 6 + Layer 10 Probe
+
+Added layer `6`, hidden `3456` row-scale metadata using the existing row-dot sensitivity result:
+
+- `model.language_model.layers.6.linear_attn.out_proj.weight[3456]`, scale `1.032273364777375`
+- `model.language_model.layers.6.mlp.down_proj.weight[3456]`, scale `1.036585679248007`
+
+Kept the layer `10`, hidden `3456` metadata from the prototype:
+
+- `model.language_model.layers.10.linear_attn.out_proj.weight[3456]`, scale `1.0230717930961908`
+- `model.language_model.layers.10.mlp.down_proj.weight[3456]`, scale `1.0416570117172528`
+
+Validation package:
+
+- `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d`
+- Created as a hardlink copy of the p4p46-inproj package with only `manifest.json` changed.
+
+Summary artifact:
+
+- `benchmarks/results/2026-07-05/engine/package-golden-prefix-manifest-row-scale-layer6-layer10-p4p46-inproj-summary.md`
+
+Comparison against the layer `10`-only metadata package:
+
+| run | backend | layer10-only max abs | layer6+10 max abs |
+| --- | --- | ---: | ---: |
+| `golden_before_each_layer` | CPU | `0.508314133` | `0.508314133` |
+| `actual_prefix` | CPU | `0.967845917` | `0.891334534` |
+| `golden_before_each_layer` | R9700 | `0.508314133` | `0.508314133` |
+| `actual_prefix` | R9700 | `0.967796326` | `0.891326904` |
+
+Interpretation:
+
+- Layer `6` metadata removes the hidden `3456` actual-prefix drift chain that previously survived into layer `11`.
+- The improvement is real but modest; the dominant actual-prefix coordinate moves to hidden `3994`.
+- Row-scale metadata is useful for isolated scale-like rows, but a broader policy still needs a selection rule and must handle layer `11` attention-input drift separately.
