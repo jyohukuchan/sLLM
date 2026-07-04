@@ -1487,3 +1487,36 @@
 ### 次の行動
 
 - `SchedulerLayerDecodeRun` を入力/progress/sequence stateとsmoke-only expected/diff stateへ分ける。特にmodel-loopで次layer residualを `expected.layer_output` から作る箇所は、expected側の保持場所を明示する。
+
+## SchedulerLayerDecodeRun smoke checks 分離
+
+### 前回の要点
+
+- 単層scheduler layer decodeとmodel-loop stack decodeの両方で、decode_runner側のsequence view補助を使ってq/k/v/output gate/residual sliceを作るようにした。
+- `SchedulerLayerDecodeRun` にはrequest/progress/sequence stateと、smoke用の期待値系列・最大絶対誤差が混在していた。
+
+### 今回の変更点
+
+- `SchedulerLayerDecodeSmokeChecks` を追加し、`Qwen3DecoderLayerSequenceOutput` とattention/projection/block/post norm/MLP/layer/cacheの最大絶対誤差をそこへ移した。
+- `SchedulerLayerDecodeRun` は `request_id`、prompt/decode token数、block table、q/k/v/output gate/residual sequence、`decode_steps` を保持する入力・進行状態に寄せた。
+- runtime scheduler layer smoke、package scheduler layer smoke、package model-loop smokeのdiff集計とcache readback検証を `run.checks` 経由に統一した。
+- model-loopで次layer residualを作る箇所は、前layerの `run.checks.expected.layer_output` を明示して参照する形にした。
+- `docs/words.txt` に `Qwen3 scheduler layer decode smoke checks` を追加した。
+
+### 検証
+
+- `cargo fmt --all`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine decode_runner -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- `runtime-scheduler-layer-decode-smoke` passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; all reported `first_batch_ready=2`, `second_batch_ready=1`, `final_ready=0`, `verified=true`。
+- `package-self-attn-mlp-block-scheduler-smoke` on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with layer `3`, sequence len `3`, passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; runtime/cache diffはすべて `0`。
+- `package-self-attn-mlp-block-model-loop-smoke` with layers `3,7,11`, sequence len `3`, passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; all reported `decode_batch_ready_counts=[2, 1]`, `final_ready=0`, `decode_steps_by_layer=[[2, 1, 0], [2, 1, 0], [2, 1, 0]]`, `verified=true`。
+
+### 次の行動
+
+- 次は、smoke-localのlayer run planからさらに実runner向けの所有入力状態を切り出すか、先にprefill/decodeをまたぐmodel-loop runner境界を作るかを判断する。現状では検証用期待値は分離できたので、次の抽出は実行APIの形を壊さない小さい境界から進める。

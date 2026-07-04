@@ -2014,8 +2014,12 @@ struct SchedulerLayerDecodeRun {
     v_sequence: Vec<f32>,
     output_gate_sequence: Option<Vec<f32>>,
     residual_sequence: Vec<f32>,
-    expected: Qwen3DecoderLayerSequenceOutput,
+    checks: SchedulerLayerDecodeSmokeChecks,
     decode_steps: usize,
+}
+
+struct SchedulerLayerDecodeSmokeChecks {
+    expected: Qwen3DecoderLayerSequenceOutput,
     attention_max_abs_diff: f32,
     projection_input_max_abs_diff: f32,
     projected_max_abs_diff: f32,
@@ -2025,6 +2029,23 @@ struct SchedulerLayerDecodeRun {
     layer_max_abs_diff: f32,
     k_cache_max_abs_diff: f32,
     v_cache_max_abs_diff: f32,
+}
+
+impl SchedulerLayerDecodeSmokeChecks {
+    fn new(expected: Qwen3DecoderLayerSequenceOutput) -> Self {
+        Self {
+            expected,
+            attention_max_abs_diff: 0.0,
+            projection_input_max_abs_diff: 0.0,
+            projected_max_abs_diff: 0.0,
+            block_max_abs_diff: 0.0,
+            post_norm_max_abs_diff: 0.0,
+            mlp_max_abs_diff: 0.0,
+            layer_max_abs_diff: 0.0,
+            k_cache_max_abs_diff: 0.0,
+            v_cache_max_abs_diff: 0.0,
+        }
+    }
 }
 
 fn synthetic_scheduler_decode_values(
@@ -2338,29 +2359,33 @@ fn verify_scheduler_layer_step_output(
         ));
     }
     let attention_expected = synthetic_layer_expected_slice(
-        &run.expected.attention_output,
+        &run.checks.expected.attention_output,
         timestep,
         attention_elements,
         label,
     )?;
     let projection_input_expected = synthetic_layer_expected_slice(
-        &run.expected.attention_projection_input,
+        &run.checks.expected.attention_projection_input,
         timestep,
         attention_elements,
         label,
     )?;
-    let projected_expected =
-        synthetic_layer_expected_slice(&run.expected.projected_output, timestep, hidden, label)?;
+    let projected_expected = synthetic_layer_expected_slice(
+        &run.checks.expected.projected_output,
+        timestep,
+        hidden,
+        label,
+    )?;
     let block_expected =
-        synthetic_layer_expected_slice(&run.expected.block_output, timestep, hidden, label)?;
+        synthetic_layer_expected_slice(&run.checks.expected.block_output, timestep, hidden, label)?;
     let post_norm_expected =
-        synthetic_layer_expected_slice(&run.expected.post_normed, timestep, hidden, label)?;
+        synthetic_layer_expected_slice(&run.checks.expected.post_normed, timestep, hidden, label)?;
     let mlp_expected =
-        synthetic_layer_expected_slice(&run.expected.mlp_output, timestep, hidden, label)?;
+        synthetic_layer_expected_slice(&run.checks.expected.mlp_output, timestep, hidden, label)?;
     let layer_expected =
-        synthetic_layer_expected_slice(&run.expected.layer_output, timestep, hidden, label)?;
+        synthetic_layer_expected_slice(&run.checks.expected.layer_output, timestep, hidden, label)?;
 
-    run.attention_max_abs_diff = run.attention_max_abs_diff.max(verify_f32_close(
+    run.checks.attention_max_abs_diff = run.checks.attention_max_abs_diff.max(verify_f32_close(
         &format!(
             "{label} request {:?} attention timestep {timestep}",
             run.request_id
@@ -2370,17 +2395,20 @@ fn verify_scheduler_layer_step_output(
         1e-4,
         1e-4,
     )?);
-    run.projection_input_max_abs_diff = run.projection_input_max_abs_diff.max(verify_f32_close(
-        &format!(
-            "{label} request {:?} projection input timestep {timestep}",
-            run.request_id
-        ),
-        &step.attention_projection_input,
-        projection_input_expected,
-        1e-4,
-        1e-4,
-    )?);
-    run.projected_max_abs_diff = run.projected_max_abs_diff.max(verify_f32_close(
+    run.checks.projection_input_max_abs_diff =
+        run.checks
+            .projection_input_max_abs_diff
+            .max(verify_f32_close(
+                &format!(
+                    "{label} request {:?} projection input timestep {timestep}",
+                    run.request_id
+                ),
+                &step.attention_projection_input,
+                projection_input_expected,
+                1e-4,
+                1e-4,
+            )?);
+    run.checks.projected_max_abs_diff = run.checks.projected_max_abs_diff.max(verify_f32_close(
         &format!(
             "{label} request {:?} projected timestep {timestep}",
             run.request_id
@@ -2390,7 +2418,7 @@ fn verify_scheduler_layer_step_output(
         1e-4,
         1e-4,
     )?);
-    run.block_max_abs_diff = run.block_max_abs_diff.max(verify_f32_close(
+    run.checks.block_max_abs_diff = run.checks.block_max_abs_diff.max(verify_f32_close(
         &format!(
             "{label} request {:?} block timestep {timestep}",
             run.request_id
@@ -2400,7 +2428,7 @@ fn verify_scheduler_layer_step_output(
         1e-4,
         1e-4,
     )?);
-    run.post_norm_max_abs_diff = run.post_norm_max_abs_diff.max(verify_f32_close(
+    run.checks.post_norm_max_abs_diff = run.checks.post_norm_max_abs_diff.max(verify_f32_close(
         &format!(
             "{label} request {:?} post norm timestep {timestep}",
             run.request_id
@@ -2410,7 +2438,7 @@ fn verify_scheduler_layer_step_output(
         1e-4,
         1e-4,
     )?);
-    run.mlp_max_abs_diff = run.mlp_max_abs_diff.max(verify_f32_close(
+    run.checks.mlp_max_abs_diff = run.checks.mlp_max_abs_diff.max(verify_f32_close(
         &format!(
             "{label} request {:?} MLP timestep {timestep}",
             run.request_id
@@ -2420,7 +2448,7 @@ fn verify_scheduler_layer_step_output(
         1e-4,
         1e-4,
     )?);
-    run.layer_max_abs_diff = run.layer_max_abs_diff.max(verify_f32_close(
+    run.checks.layer_max_abs_diff = run.checks.layer_max_abs_diff.max(verify_f32_close(
         &format!(
             "{label} request {:?} layer timestep {timestep}",
             run.request_id
@@ -3351,17 +3379,8 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
             v_sequence,
             output_gate_sequence: Some(gate_sequence),
             residual_sequence,
-            expected,
+            checks: SchedulerLayerDecodeSmokeChecks::new(expected),
             decode_steps: 0,
-            attention_max_abs_diff: 0.0,
-            projection_input_max_abs_diff: 0.0,
-            projected_max_abs_diff: 0.0,
-            block_max_abs_diff: 0.0,
-            post_norm_max_abs_diff: 0.0,
-            mlp_max_abs_diff: 0.0,
-            layer_max_abs_diff: 0.0,
-            k_cache_max_abs_diff: 0.0,
-            v_cache_max_abs_diff: 0.0,
         };
         for timestep in 0..run.prompt_tokens {
             run_scheduler_layer_prefill_step(
@@ -3453,23 +3472,23 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
                     run.request_id
                 )
             })?;
-        run.k_cache_max_abs_diff = verify_f32_close(
+        run.checks.k_cache_max_abs_diff = verify_f32_close(
             &format!(
                 "runtime scheduler layer decode request {:?} k cache",
                 run.request_id
             ),
             &cache.k,
-            &run.expected.paged_cache.k,
+            &run.checks.expected.paged_cache.k,
             1e-5,
             1e-5,
         )?;
-        run.v_cache_max_abs_diff = verify_f32_close(
+        run.checks.v_cache_max_abs_diff = verify_f32_close(
             &format!(
                 "runtime scheduler layer decode request {:?} v cache",
                 run.request_id
             ),
             &cache.v,
-            &run.expected.paged_cache.v,
+            &run.checks.expected.paged_cache.v,
             1e-5,
             1e-5,
         )?;
@@ -3507,39 +3526,39 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
     let decode_steps = runs.iter().map(|run| run.decode_steps).collect::<Vec<_>>();
     let attention_max_abs_diff = runs
         .iter()
-        .map(|run| run.attention_max_abs_diff)
+        .map(|run| run.checks.attention_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let projection_input_max_abs_diff = runs
         .iter()
-        .map(|run| run.projection_input_max_abs_diff)
+        .map(|run| run.checks.projection_input_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let projected_max_abs_diff = runs
         .iter()
-        .map(|run| run.projected_max_abs_diff)
+        .map(|run| run.checks.projected_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let block_max_abs_diff = runs
         .iter()
-        .map(|run| run.block_max_abs_diff)
+        .map(|run| run.checks.block_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let post_norm_max_abs_diff = runs
         .iter()
-        .map(|run| run.post_norm_max_abs_diff)
+        .map(|run| run.checks.post_norm_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let mlp_max_abs_diff = runs
         .iter()
-        .map(|run| run.mlp_max_abs_diff)
+        .map(|run| run.checks.mlp_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let layer_max_abs_diff = runs
         .iter()
-        .map(|run| run.layer_max_abs_diff)
+        .map(|run| run.checks.layer_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let k_cache_max_abs_diff = runs
         .iter()
-        .map(|run| run.k_cache_max_abs_diff)
+        .map(|run| run.checks.k_cache_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let v_cache_max_abs_diff = runs
         .iter()
-        .map(|run| run.v_cache_max_abs_diff)
+        .map(|run| run.checks.v_cache_max_abs_diff)
         .fold(0.0_f32, f32::max);
 
     Ok(format!(
@@ -10743,17 +10762,8 @@ fn package_self_attn_mlp_block_scheduler_smoke_impl(
             v_sequence: prepared.v_projected,
             output_gate_sequence: prepared.q_gate,
             residual_sequence: prepared.residual_sequence,
-            expected,
+            checks: SchedulerLayerDecodeSmokeChecks::new(expected),
             decode_steps: 0,
-            attention_max_abs_diff: 0.0,
-            projection_input_max_abs_diff: 0.0,
-            projected_max_abs_diff: 0.0,
-            block_max_abs_diff: 0.0,
-            post_norm_max_abs_diff: 0.0,
-            mlp_max_abs_diff: 0.0,
-            layer_max_abs_diff: 0.0,
-            k_cache_max_abs_diff: 0.0,
-            v_cache_max_abs_diff: 0.0,
         };
         for timestep in 0..run.prompt_tokens {
             run_scheduler_layer_prefill_step(
@@ -10845,23 +10855,23 @@ fn package_self_attn_mlp_block_scheduler_smoke_impl(
                     run.request_id
                 )
             })?;
-        run.k_cache_max_abs_diff = verify_f32_close(
+        run.checks.k_cache_max_abs_diff = verify_f32_close(
             &format!(
                 "package scheduler layer request {:?} k cache",
                 run.request_id
             ),
             &cache.k,
-            &run.expected.paged_cache.k,
+            &run.checks.expected.paged_cache.k,
             1e-5,
             1e-5,
         )?;
-        run.v_cache_max_abs_diff = verify_f32_close(
+        run.checks.v_cache_max_abs_diff = verify_f32_close(
             &format!(
                 "package scheduler layer request {:?} v cache",
                 run.request_id
             ),
             &cache.v,
-            &run.expected.paged_cache.v,
+            &run.checks.expected.paged_cache.v,
             1e-5,
             1e-5,
         )?;
@@ -10900,39 +10910,39 @@ fn package_self_attn_mlp_block_scheduler_smoke_impl(
     let decode_steps = runs.iter().map(|run| run.decode_steps).collect::<Vec<_>>();
     let attention_max_abs_diff = runs
         .iter()
-        .map(|run| run.attention_max_abs_diff)
+        .map(|run| run.checks.attention_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let projection_input_max_abs_diff = runs
         .iter()
-        .map(|run| run.projection_input_max_abs_diff)
+        .map(|run| run.checks.projection_input_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let projected_max_abs_diff = runs
         .iter()
-        .map(|run| run.projected_max_abs_diff)
+        .map(|run| run.checks.projected_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let block_max_abs_diff = runs
         .iter()
-        .map(|run| run.block_max_abs_diff)
+        .map(|run| run.checks.block_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let post_norm_max_abs_diff = runs
         .iter()
-        .map(|run| run.post_norm_max_abs_diff)
+        .map(|run| run.checks.post_norm_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let mlp_max_abs_diff = runs
         .iter()
-        .map(|run| run.mlp_max_abs_diff)
+        .map(|run| run.checks.mlp_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let layer_max_abs_diff = runs
         .iter()
-        .map(|run| run.layer_max_abs_diff)
+        .map(|run| run.checks.layer_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let k_cache_max_abs_diff = runs
         .iter()
-        .map(|run| run.k_cache_max_abs_diff)
+        .map(|run| run.checks.k_cache_max_abs_diff)
         .fold(0.0_f32, f32::max);
     let v_cache_max_abs_diff = runs
         .iter()
-        .map(|run| run.v_cache_max_abs_diff)
+        .map(|run| run.checks.v_cache_max_abs_diff)
         .fold(0.0_f32, f32::max);
 
     Ok(format!(
@@ -11253,6 +11263,7 @@ impl PackageModelLoopLayerRunPlan {
                     request_plan.initial_residuals[request_index].clone()
                 } else {
                     runs_by_layer[layer_position - 1][request_index]
+                        .checks
                         .expected
                         .layer_output
                         .clone()
@@ -11327,17 +11338,8 @@ impl PackageModelLoopLayerRunPlan {
                     v_sequence: prepared.v_projected,
                     output_gate_sequence: prepared.q_gate,
                     residual_sequence: prepared.residual_sequence,
-                    expected,
+                    checks: SchedulerLayerDecodeSmokeChecks::new(expected),
                     decode_steps: 0,
-                    attention_max_abs_diff: 0.0,
-                    projection_input_max_abs_diff: 0.0,
-                    projected_max_abs_diff: 0.0,
-                    block_max_abs_diff: 0.0,
-                    post_norm_max_abs_diff: 0.0,
-                    mlp_max_abs_diff: 0.0,
-                    layer_max_abs_diff: 0.0,
-                    k_cache_max_abs_diff: 0.0,
-                    v_cache_max_abs_diff: 0.0,
                 });
             }
             q_gate_elements_by_layer.push(q_gate_elements);
@@ -11362,16 +11364,16 @@ impl PackageModelLoopLayerRunPlan {
 
     fn runtime_diffs(&self) -> PackageModelLoopRuntimeDiffs {
         PackageModelLoopRuntimeDiffs {
-            attention_max_abs_diff: self.max_run_diff(|run| run.attention_max_abs_diff),
+            attention_max_abs_diff: self.max_run_diff(|run| run.checks.attention_max_abs_diff),
             projection_input_max_abs_diff: self
-                .max_run_diff(|run| run.projection_input_max_abs_diff),
-            projected_max_abs_diff: self.max_run_diff(|run| run.projected_max_abs_diff),
-            block_max_abs_diff: self.max_run_diff(|run| run.block_max_abs_diff),
-            post_norm_max_abs_diff: self.max_run_diff(|run| run.post_norm_max_abs_diff),
-            mlp_max_abs_diff: self.max_run_diff(|run| run.mlp_max_abs_diff),
-            layer_max_abs_diff: self.max_run_diff(|run| run.layer_max_abs_diff),
-            k_cache_max_abs_diff: self.max_run_diff(|run| run.k_cache_max_abs_diff),
-            v_cache_max_abs_diff: self.max_run_diff(|run| run.v_cache_max_abs_diff),
+                .max_run_diff(|run| run.checks.projection_input_max_abs_diff),
+            projected_max_abs_diff: self.max_run_diff(|run| run.checks.projected_max_abs_diff),
+            block_max_abs_diff: self.max_run_diff(|run| run.checks.block_max_abs_diff),
+            post_norm_max_abs_diff: self.max_run_diff(|run| run.checks.post_norm_max_abs_diff),
+            mlp_max_abs_diff: self.max_run_diff(|run| run.checks.mlp_max_abs_diff),
+            layer_max_abs_diff: self.max_run_diff(|run| run.checks.layer_max_abs_diff),
+            k_cache_max_abs_diff: self.max_run_diff(|run| run.checks.k_cache_max_abs_diff),
+            v_cache_max_abs_diff: self.max_run_diff(|run| run.checks.v_cache_max_abs_diff),
         }
     }
 
@@ -11497,23 +11499,23 @@ impl PackageModelLoopExecutionPlan {
                             model.layers[layer_position].layer_index, run.request_id
                         )
                     })?;
-                run.k_cache_max_abs_diff = verify_f32_close(
+                run.checks.k_cache_max_abs_diff = verify_f32_close(
                     &format!(
                         "package model-loop layer {} request {:?} k cache",
                         model.layers[layer_position].layer_index, run.request_id
                     ),
                     &cache.k,
-                    &run.expected.paged_cache.k,
+                    &run.checks.expected.paged_cache.k,
                     1e-5,
                     1e-5,
                 )?;
-                run.v_cache_max_abs_diff = verify_f32_close(
+                run.checks.v_cache_max_abs_diff = verify_f32_close(
                     &format!(
                         "package model-loop layer {} request {:?} v cache",
                         model.layers[layer_position].layer_index, run.request_id
                     ),
                     &cache.v,
-                    &run.expected.paged_cache.v,
+                    &run.checks.expected.paged_cache.v,
                     1e-5,
                     1e-5,
                 )?;
