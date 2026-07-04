@@ -386,6 +386,84 @@ pub fn qwen3_headwise_rmsnorm_to_host_f32(
     Ok(output)
 }
 
+pub fn qwen3_rope_to_host_f32(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    input: &[f32],
+    sequence_len: usize,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    position_offset: usize,
+    rope_base: f32,
+) -> Result<Vec<f32>, String> {
+    if sequence_len == 0 {
+        return Err("Qwen3 RoPE sequence length must be greater than zero".to_string());
+    }
+    if heads == 0 {
+        return Err("Qwen3 RoPE heads must be greater than zero".to_string());
+    }
+    if head_dim == 0 {
+        return Err("Qwen3 RoPE head_dim must be greater than zero".to_string());
+    }
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        return Err("Qwen3 RoPE rotary_dim must be even and no greater than head_dim".to_string());
+    }
+    if !rope_base.is_finite() || rope_base <= 1.0 {
+        return Err("Qwen3 RoPE base must be finite and greater than one".to_string());
+    }
+    let input_elements = sequence_len
+        .checked_mul(heads)
+        .ok_or_else(|| "Qwen3 RoPE head-sequence element count overflows".to_string())?
+        .checked_mul(head_dim)
+        .ok_or_else(|| "Qwen3 RoPE element count overflows".to_string())?;
+    if input.len() != input_elements {
+        return Err(format!(
+            "Qwen3 RoPE input length {} does not match sequence_len={sequence_len} heads={heads} head_dim={head_dim}",
+            input.len()
+        ));
+    }
+    let bytes = input_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Qwen3 RoPE byte size overflows".to_string())?;
+    let input_bytes = f32s_to_le_bytes(input);
+    let mut input_buffer = context
+        .alloc_buffer(bytes)
+        .map_err(|err| format!("failed to allocate Qwen3 RoPE input buffer: {err}"))?;
+    let mut output_buffer = context
+        .alloc_buffer(bytes)
+        .map_err(|err| format!("failed to allocate Qwen3 RoPE output buffer: {err}"))?;
+    input_buffer
+        .copy_from_host(0, &input_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy Qwen3 RoPE input: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize Qwen3 RoPE input copy: {err}"))?;
+    ullm_runtime_sys::rope_f32(
+        &input_buffer,
+        sequence_len,
+        heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        &mut output_buffer,
+        Some(stream),
+    )
+    .map_err(|err| format!("failed to run Qwen3 RoPE: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize Qwen3 RoPE: {err}"))?;
+    let mut output_bytes = vec![0_u8; bytes];
+    output_buffer
+        .copy_to_host(0, &mut output_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy Qwen3 RoPE output: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize Qwen3 RoPE output copy: {err}"))?;
+    Ok(le_bytes_to_f32s(&output_bytes))
+}
+
 pub struct Qwen3MlpRuntimeWeights {
     pub gate_rows: usize,
     pub gate_cols: usize,
@@ -2083,6 +2161,56 @@ mod tests {
             expected.extend(expected_rmsnorm_for_test(head_input, &weight, epsilon));
         }
         assert_f32s_close(&output, &expected, 1e-5);
+    }
+
+    #[test]
+    fn qwen3_rope_to_host_f32_runs_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let sequence_len = 2_usize;
+        let heads = 2_usize;
+        let head_dim = 4_usize;
+        let rotary_dim = 2_usize;
+        let position_offset = 1_usize;
+        let rope_base = 10000.0_f32;
+        let input = (0..sequence_len * heads * head_dim)
+            .map(|index| (index as f32 * 3.0_f32 - 5.0_f32) / 11.0_f32)
+            .collect::<Vec<_>>();
+        let output = qwen3_rope_to_host_f32(
+            &mut context,
+            &mut stream,
+            &input,
+            sequence_len,
+            heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        )
+        .unwrap();
+
+        let mut expected = vec![0.0_f32; input.len()];
+        let half = rotary_dim / 2;
+        for timestep in 0..sequence_len {
+            let position = (position_offset + timestep) as f32;
+            for head in 0..heads {
+                let base = (timestep * heads + head) * head_dim;
+                for pair in 0..half {
+                    let exponent = (2.0_f32 * pair as f32) / rotary_dim as f32;
+                    let theta = position / rope_base.powf(exponent);
+                    let c = theta.cos();
+                    let s = theta.sin();
+                    let first = input[base + pair];
+                    let second = input[base + half + pair];
+                    expected[base + pair] = first * c - second * s;
+                    expected[base + half + pair] = second * c + first * s;
+                }
+                expected[base + rotary_dim..base + head_dim]
+                    .copy_from_slice(&input[base + rotary_dim..base + head_dim]);
+            }
+        }
+
+        assert_f32s_close(&output, &expected, 1e-6);
     }
 
     #[test]

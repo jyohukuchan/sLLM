@@ -10,7 +10,7 @@ use ullm_engine::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntime, Qwen3DecoderLayerRuntimeWeights,
     Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnBlockStepState,
     Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights,
-    qwen3_headwise_rmsnorm_to_host_f32, qwen3_self_attn_runtime_shape,
+    qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32, qwen3_self_attn_runtime_shape,
     split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
@@ -15750,53 +15750,25 @@ fn runtime_rope_verify(
     rope_base: f32,
     label: &str,
 ) -> Result<(Vec<f32>, f32), String> {
-    if input.len() != sequence_len * heads * head_dim {
-        return Err(format!(
-            "{label} input length {} does not match sequence_len={sequence_len} heads={heads} head_dim={head_dim}",
-            input.len()
-        ));
-    }
-    let bytes = input
-        .len()
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} byte size overflows"))?;
-    let input_bytes = encode_f32_to_bytes(input);
-    let mut input_buffer = context
-        .alloc_buffer(bytes)
-        .map_err(|err| format!("failed to allocate {label} input buffer: {err}"))?;
-    let mut output_buffer = context
-        .alloc_buffer(bytes)
-        .map_err(|err| format!("failed to allocate {label} output buffer: {err}"))?;
-    input_buffer
-        .copy_from_host(0, &input_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} input: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} input copy: {err}"))?;
-    ullm_runtime_sys::rope_f32(
-        &input_buffer,
+    let output = qwen3_rope_to_host_f32(
+        context,
+        stream,
+        input,
         sequence_len,
         heads,
         head_dim,
         rotary_dim,
         position_offset,
         rope_base,
-        &mut output_buffer,
-        Some(stream),
     )
     .map_err(|err| format!("failed to run {label} RoPE: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} RoPE: {err}"))?;
-
-    let mut output_bytes = vec![0_u8; bytes];
-    output_buffer
-        .copy_to_host(0, &mut output_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} output: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} output copy: {err}"))?;
-    let output = decode_f32_le_values(&output_bytes);
+    if output.len() != input.len() {
+        return Err(format!(
+            "{label} runtime output size mismatch: expected {} got {}",
+            input.len(),
+            output.len()
+        ));
+    }
     let expected = runtime_host_rope_f32(
         input,
         sequence_len,
