@@ -40,12 +40,53 @@
 | layer8 QKV V845 cell | 0.714679718 | 1.080525398 | 0.664207458 | 0.710563660 | 0.720012665 | 0.969970703 |
 | combined | 0.652941704 | 1.043153763 | 0.664464235 | 0.737066269 | 0.719606876 | 0.939382553 |
 
+## Layer6 Local Trace
+
+Additional baseline input-dump and trace artifacts:
+
+- input-dump smoke:
+  - `package-golden-prefix-cpu-actual-prefix0-12-seq16-tokens101-116-rotary64-baseline-input-dump-sample-t12-p4p46-inproj.jsonl`
+- fullref trace:
+  - `qwen-layer-module-trace-actual-input-rotary64-layer6-token12-hidden3994-tokens101-116-baseline-p4p46-inproj.jsonl`
+- comparison:
+  - `qwen-module-trace-comparison-actual-input-rotary64-layer6-token12-hidden3994-tokens101-116-baseline-p4p46-inproj.json`
+
+Layer6 token12 hidden3994 local decomposition:
+
+| component | value |
+| --- | ---: |
+| package output diff vs fixture | 0.403383 |
+| package delta | -0.405800 |
+| fullref delta on package input | -0.496683 |
+| local delta error | 0.090883 |
+| attention row-only / activation-path | 0.000485 / 0.012006 |
+| MLP row-only / activation-path | -0.011936 / 0.106516 |
+
+Layer6 `mlp.down_proj.weight[3994]` row-dot all-token fit:
+
+| fixture | scale | row-dot RMSE before | row-dot RMSE after |
+| --- | ---: | ---: | ---: |
+| original token ids 1..16 | 1.026471714 | 0.117735388 | 0.063680278 |
+| tokens101-116 | 1.023383096 | 0.131756300 | 0.061972585 |
+
+Largest tokens101-116 package-source row-dot errors for the same row:
+
+| token | package-source row-dot error |
+| ---: | ---: |
+| 0 | -0.510483047 |
+| 13 | -0.062066241 |
+| 6 | 0.056951314 |
+| 15 | 0.051798975 |
+
 ## Interpretation
 
 - The layer6 hidden3994 MLP down row-scale partially generalizes to this genuinely different token fixture:
   - overall max improves from `1.080525398` to `1.043153763`
   - layer6 max improves from `0.714679718` to `0.652941704`
   - layer7 max improves from `1.080525398` to `1.043153763`
+- The layer6 local trace supports the same direction of row compensation:
+  - tokens101-116 all-token LS scale is `1.023383096`, close to the original fixture scale `1.026471714`
+  - the largest package-source row-dot error on this row is token `0`, `-0.510483047`
 - The layer8 QKV V845 single-cell correction does not improve the overall max on this fixture:
   - overall max remains `1.080525398`
   - layer11 worsens from `0.946708679` to `0.969970703`
