@@ -77,6 +77,11 @@ pub struct Qwen3DecoderLayerRequestDecodeRunner<'weights> {
     states: BTreeMap<RequestId, Qwen3DecoderLayerRequestDecodeState<'weights>>,
 }
 
+#[derive(Default)]
+pub struct Qwen3DecoderLayerStackRequestDecodeRunner<'weights> {
+    layers: Vec<Qwen3DecoderLayerRequestDecodeRunner<'weights>>,
+}
+
 impl Qwen3SelfAttnRequestDecodeRunner {
     pub fn new() -> Self {
         Self::default()
@@ -395,44 +400,7 @@ impl<'weights> Qwen3DecoderLayerRequestDecodeRunner<'weights> {
         ready_batch: &[SchedulerDecodeRequest],
         inputs: &[Qwen3DecoderLayerDecodeBatchInput<'_>],
     ) -> Result<Vec<Qwen3DecoderLayerDecodeBatchOutput>, String> {
-        validate_layer_batch_inputs(ready_batch, inputs)?;
-        for request in ready_batch {
-            let active = scheduler
-                .active_request(request.request.id)
-                .ok_or_else(|| format!("request {:?} is not active", request.request.id))?;
-            if active.cached_tokens != request.cached_tokens
-                || active.generated_tokens != request.generated_tokens
-            {
-                return Err(format!(
-                    "ready decode request {:?} is stale: scheduler cached/generated={}/{} batch cached/generated={}/{}",
-                    request.request.id,
-                    active.cached_tokens,
-                    active.generated_tokens,
-                    request.cached_tokens,
-                    request.generated_tokens
-                ));
-            }
-            let slot = self.states.get(&request.request.id).ok_or_else(|| {
-                format!(
-                    "Qwen3 decoder layer decode runner has no request {:?}",
-                    request.request.id
-                )
-            })?;
-            if slot.block_table != request.allocation.blocks {
-                return Err(format!(
-                    "request {:?} runner block table {:?} does not match scheduler allocation {:?}",
-                    request.request.id, slot.block_table, request.allocation.blocks
-                ));
-            }
-            if slot.runtime.written_len() != request.cache_position {
-                return Err(format!(
-                    "request {:?} runner written_len {} does not match ready cache_position {}",
-                    request.request.id,
-                    slot.runtime.written_len(),
-                    request.cache_position
-                ));
-            }
-        }
+        self.validate_ready_batch_without_advance(scheduler, ready_batch, inputs)?;
 
         let mut outputs = Vec::with_capacity(ready_batch.len());
         for request in ready_batch {
@@ -479,6 +447,53 @@ impl<'weights> Qwen3DecoderLayerRequestDecodeRunner<'weights> {
         Ok(outputs)
     }
 
+    fn validate_ready_batch_without_advance(
+        &self,
+        scheduler: &SchedulerState,
+        ready_batch: &[SchedulerDecodeRequest],
+        inputs: &[Qwen3DecoderLayerDecodeBatchInput<'_>],
+    ) -> Result<(), String> {
+        validate_layer_batch_inputs(ready_batch, inputs)?;
+        for request in ready_batch {
+            let active = scheduler
+                .active_request(request.request.id)
+                .ok_or_else(|| format!("request {:?} is not active", request.request.id))?;
+            if active.cached_tokens != request.cached_tokens
+                || active.generated_tokens != request.generated_tokens
+            {
+                return Err(format!(
+                    "ready decode request {:?} is stale: scheduler cached/generated={}/{} batch cached/generated={}/{}",
+                    request.request.id,
+                    active.cached_tokens,
+                    active.generated_tokens,
+                    request.cached_tokens,
+                    request.generated_tokens
+                ));
+            }
+            let slot = self.states.get(&request.request.id).ok_or_else(|| {
+                format!(
+                    "Qwen3 decoder layer decode runner has no request {:?}",
+                    request.request.id
+                )
+            })?;
+            if slot.block_table != request.allocation.blocks {
+                return Err(format!(
+                    "request {:?} runner block table {:?} does not match scheduler allocation {:?}",
+                    request.request.id, slot.block_table, request.allocation.blocks
+                ));
+            }
+            if slot.runtime.written_len() != request.cache_position {
+                return Err(format!(
+                    "request {:?} runner written_len {} does not match ready cache_position {}",
+                    request.request.id,
+                    slot.runtime.written_len(),
+                    request.cache_position
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn read_cache_to_host(
         &self,
         request_id: RequestId,
@@ -503,6 +518,175 @@ impl<'weights> Qwen3DecoderLayerRequestDecodeRunner<'weights> {
         self.states
             .get(&request_id)
             .map(|slot| slot.block_table.as_slice())
+    }
+}
+
+impl<'weights> Qwen3DecoderLayerStackRequestDecodeRunner<'weights> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    pub fn push_layer(&mut self) -> usize {
+        let layer_index = self.layers.len();
+        self.layers
+            .push(Qwen3DecoderLayerRequestDecodeRunner::new());
+        layer_index
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_request(
+        &mut self,
+        layer_index: usize,
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        request_id: RequestId,
+        weights: &'weights Qwen3DecoderLayerRuntimeWeights,
+        shape: PagedDecodeShape,
+        block_table: Vec<u32>,
+        softmax_scale: f32,
+        mlp_epsilon: f32,
+    ) -> Result<(), String> {
+        self.layer_mut(layer_index)?
+            .insert_request(
+                context,
+                stream,
+                request_id,
+                weights,
+                shape,
+                block_table,
+                softmax_scale,
+                mlp_epsilon,
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to insert request {:?} into decoder layer {layer_index}: {err}",
+                    request_id
+                )
+            })
+    }
+
+    pub fn run_prefill_step(
+        &mut self,
+        layer_index: usize,
+        stream: &mut RuntimeStream,
+        input: Qwen3DecoderLayerDecodeBatchInput<'_>,
+    ) -> Result<Qwen3DecoderLayerDecodeBatchOutput, String> {
+        self.layer_mut(layer_index)?
+            .run_prefill_step(stream, input)
+            .map_err(|err| format!("failed to run decoder layer {layer_index} prefill: {err}"))
+    }
+
+    pub fn run_ready_batch_across_layers(
+        &mut self,
+        stream: &mut RuntimeStream,
+        scheduler: &mut SchedulerState,
+        ready_batch: &[SchedulerDecodeRequest],
+        layer_inputs: &[&[Qwen3DecoderLayerDecodeBatchInput<'_>]],
+    ) -> Result<Vec<Vec<Qwen3DecoderLayerDecodeBatchOutput>>, String> {
+        if layer_inputs.len() != self.layers.len() {
+            return Err(format!(
+                "decoder layer stack has {} layers but {} layer input batches were provided",
+                self.layers.len(),
+                layer_inputs.len()
+            ));
+        }
+        if self.layers.is_empty() && !ready_batch.is_empty() {
+            return Err(
+                "decoder layer stack cannot advance a non-empty batch with no layers".to_string(),
+            );
+        }
+
+        for (layer_index, (runner, inputs)) in
+            self.layers.iter().zip(layer_inputs.iter()).enumerate()
+        {
+            runner
+                .validate_ready_batch_without_advance(scheduler, ready_batch, inputs)
+                .map_err(|err| {
+                    format!(
+                        "decoder layer {layer_index} rejected ready batch before stack run: {err}"
+                    )
+                })?;
+        }
+
+        let mut outputs_by_layer = Vec::with_capacity(self.layers.len());
+        for (layer_index, (runner, inputs)) in
+            self.layers.iter_mut().zip(layer_inputs.iter()).enumerate()
+        {
+            let outputs = runner
+                .run_ready_batch_without_advance(stream, scheduler, ready_batch, inputs)
+                .map_err(|err| {
+                    format!("failed to run decoder layer {layer_index} ready batch: {err}")
+                })?;
+            outputs_by_layer.push(outputs);
+        }
+        scheduler
+            .advance_decode_batch(ready_batch)
+            .map_err(|err| format!("failed to advance decoder layer stack ready batch: {err}"))?;
+        Ok(outputs_by_layer)
+    }
+
+    pub fn read_layer_cache_to_host(
+        &self,
+        layer_index: usize,
+        request_id: RequestId,
+        stream: &mut RuntimeStream,
+    ) -> Result<PagedKvCacheReadback, String> {
+        self.layer(layer_index)?
+            .read_cache_to_host(request_id, stream)
+            .map_err(|err| {
+                format!(
+                    "failed to read decoder layer {layer_index} cache for {:?}: {err}",
+                    request_id
+                )
+            })
+    }
+
+    pub fn written_len(&self, layer_index: usize, request_id: RequestId) -> Result<usize, String> {
+        self.layer(layer_index)?
+            .written_len(request_id)
+            .ok_or_else(|| {
+                format!(
+                    "decoder layer {layer_index} has no written_len for request {:?}",
+                    request_id
+                )
+            })
+    }
+
+    pub fn block_table(&self, layer_index: usize, request_id: RequestId) -> Result<&[u32], String> {
+        self.layer(layer_index)?
+            .block_table(request_id)
+            .ok_or_else(|| {
+                format!(
+                    "decoder layer {layer_index} has no block table for request {:?}",
+                    request_id
+                )
+            })
+    }
+
+    fn layer(
+        &self,
+        layer_index: usize,
+    ) -> Result<&Qwen3DecoderLayerRequestDecodeRunner<'weights>, String> {
+        self.layers
+            .get(layer_index)
+            .ok_or_else(|| format!("decoder layer index {layer_index} is out of bounds"))
+    }
+
+    fn layer_mut(
+        &mut self,
+        layer_index: usize,
+    ) -> Result<&mut Qwen3DecoderLayerRequestDecodeRunner<'weights>, String> {
+        self.layers
+            .get_mut(layer_index)
+            .ok_or_else(|| format!("decoder layer index {layer_index} is out of bounds"))
     }
 }
 
@@ -1138,6 +1322,235 @@ mod tests {
             .expect("request should remain active after manual advance");
         assert_eq!(active.cached_tokens, 2);
         assert_eq!(active.generated_tokens, 1);
+    }
+
+    #[test]
+    fn qwen3_decoder_layer_stack_runner_advances_ready_batch_once_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        let hidden = 4_usize;
+        let intermediate = 3_usize;
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        let mlp_epsilon = 1e-5_f32;
+        let weights = make_layer_weights(&mut context, &mut stream, shape, hidden, intermediate);
+        let mut scheduler = SchedulerState::with_block_size(4, 2);
+        scheduler.enqueue(Request::new(41, 1, 1));
+        let mut scheduled = scheduler
+            .pop_prefill_batch_with_allocation(1)
+            .expect("allocation should succeed");
+        let allocation = scheduled.remove(0).allocation;
+
+        let mut stack = Qwen3DecoderLayerStackRequestDecodeRunner::new();
+        let first_layer = stack.push_layer();
+        let second_layer = stack.push_layer();
+        assert_eq!(stack.layer_count(), 2);
+        for layer_index in [first_layer, second_layer] {
+            stack
+                .insert_request(
+                    layer_index,
+                    &mut context,
+                    &mut stream,
+                    allocation.request_id,
+                    &weights,
+                    shape,
+                    allocation.blocks.clone(),
+                    softmax_scale,
+                    mlp_epsilon,
+                )
+                .expect("stack insert should succeed");
+        }
+
+        let q_step = shape.q_elements().unwrap();
+        let k_step = shape.k_token_elements().unwrap();
+        let v_step = shape.v_token_elements().unwrap();
+        let attention_step = shape.output_elements().unwrap();
+        let q = (0..2 * q_step)
+            .map(|index| ((index * 2) as f32 - 3.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k = (0..2 * k_step)
+            .map(|index| ((index * 5) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v = (0..2 * v_step)
+            .map(|index| ((index * 7) as f32 - 11.0) / 17.0)
+            .collect::<Vec<_>>();
+        let gate = (0..2 * attention_step)
+            .map(|index| ((index * 11) as f32 - 13.0) / 19.0)
+            .collect::<Vec<_>>();
+        let first_residual = (0..2 * hidden)
+            .map(|index| ((index * 13) as f32 - 17.0) / 23.0)
+            .collect::<Vec<_>>();
+        let second_residual = (0..2 * hidden)
+            .map(|index| ((index * 17) as f32 - 19.0) / 29.0)
+            .collect::<Vec<_>>();
+
+        for (layer_index, residual) in [
+            (first_layer, first_residual.as_slice()),
+            (second_layer, second_residual.as_slice()),
+        ] {
+            stack
+                .run_prefill_step(
+                    layer_index,
+                    &mut stream,
+                    Qwen3DecoderLayerDecodeBatchInput {
+                        request_id: RequestId(41),
+                        q: &q[..q_step],
+                        k: &k[..k_step],
+                        v: &v[..v_step],
+                        output_gate: Some(&gate[..attention_step]),
+                        residual: &residual[..hidden],
+                    },
+                )
+                .expect("stack prefill should run");
+        }
+        scheduler
+            .complete_prefill(RequestId(41))
+            .expect("prefill completion should succeed");
+        let ready = scheduler
+            .ready_decode_batch(4)
+            .expect("ready batch should be generated");
+
+        let layer_inputs = vec![
+            vec![Qwen3DecoderLayerDecodeBatchInput {
+                request_id: RequestId(41),
+                q: &q[q_step..2 * q_step],
+                k: &k[k_step..2 * k_step],
+                v: &v[v_step..2 * v_step],
+                output_gate: Some(&gate[attention_step..2 * attention_step]),
+                residual: &first_residual[hidden..2 * hidden],
+            }],
+            vec![Qwen3DecoderLayerDecodeBatchInput {
+                request_id: RequestId(41),
+                q: &q[q_step..2 * q_step],
+                k: &k[k_step..2 * k_step],
+                v: &v[v_step..2 * v_step],
+                output_gate: Some(&gate[attention_step..2 * attention_step]),
+                residual: &second_residual[hidden..2 * hidden],
+            }],
+        ];
+        let layer_input_refs = layer_inputs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let outputs = stack
+            .run_ready_batch_across_layers(&mut stream, &mut scheduler, &ready, &layer_input_refs)
+            .expect("stack ready batch should run");
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].len(), 1);
+        assert_eq!(outputs[1].len(), 1);
+        assert_eq!(outputs[0][0].cache_position, 1);
+        assert_eq!(outputs[1][0].cache_position, 1);
+        assert_eq!(stack.written_len(first_layer, RequestId(41)).unwrap(), 2);
+        assert_eq!(stack.written_len(second_layer, RequestId(41)).unwrap(), 2);
+        let active = scheduler
+            .active_request(RequestId(41))
+            .expect("request should remain active");
+        assert_eq!(active.cached_tokens, 2);
+        assert_eq!(active.generated_tokens, 1);
+    }
+
+    #[test]
+    fn qwen3_decoder_layer_stack_runner_rejects_bad_layer_input_before_mutation_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 2,
+            kv_heads: 1,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        let hidden = 4_usize;
+        let intermediate = 3_usize;
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        let mlp_epsilon = 1e-5_f32;
+        let weights = make_layer_weights(&mut context, &mut stream, shape, hidden, intermediate);
+        let mut scheduler = SchedulerState::with_block_size(4, 2);
+        scheduler.enqueue(Request::new(51, 1, 1));
+        let mut scheduled = scheduler
+            .pop_prefill_batch_with_allocation(1)
+            .expect("allocation should succeed");
+        let allocation = scheduled.remove(0).allocation;
+
+        let mut stack = Qwen3DecoderLayerStackRequestDecodeRunner::new();
+        let first_layer = stack.push_layer();
+        let second_layer = stack.push_layer();
+        for layer_index in [first_layer, second_layer] {
+            stack
+                .insert_request(
+                    layer_index,
+                    &mut context,
+                    &mut stream,
+                    allocation.request_id,
+                    &weights,
+                    shape,
+                    allocation.blocks.clone(),
+                    softmax_scale,
+                    mlp_epsilon,
+                )
+                .expect("stack insert should succeed");
+        }
+
+        let q_step = shape.q_elements().unwrap();
+        let k_step = shape.k_token_elements().unwrap();
+        let v_step = shape.v_token_elements().unwrap();
+        let attention_step = shape.output_elements().unwrap();
+        let q = vec![0.125_f32; 2 * q_step];
+        let k = vec![0.25_f32; 2 * k_step];
+        let v = vec![0.375_f32; 2 * v_step];
+        let gate = vec![0.5_f32; 2 * attention_step];
+        let residual = vec![0.625_f32; 2 * hidden];
+
+        for layer_index in [first_layer, second_layer] {
+            stack
+                .run_prefill_step(
+                    layer_index,
+                    &mut stream,
+                    Qwen3DecoderLayerDecodeBatchInput {
+                        request_id: RequestId(51),
+                        q: &q[..q_step],
+                        k: &k[..k_step],
+                        v: &v[..v_step],
+                        output_gate: Some(&gate[..attention_step]),
+                        residual: &residual[..hidden],
+                    },
+                )
+                .expect("stack prefill should run");
+        }
+        scheduler
+            .complete_prefill(RequestId(51))
+            .expect("prefill completion should succeed");
+        let ready = scheduler
+            .ready_decode_batch(4)
+            .expect("ready batch should be generated");
+        let layer_inputs = vec![
+            vec![Qwen3DecoderLayerDecodeBatchInput {
+                request_id: RequestId(51),
+                q: &q[q_step..2 * q_step],
+                k: &k[k_step..2 * k_step],
+                v: &v[v_step..2 * v_step],
+                output_gate: Some(&gate[attention_step..2 * attention_step]),
+                residual: &residual[hidden..2 * hidden],
+            }],
+            Vec::new(),
+        ];
+        let layer_input_refs = layer_inputs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let err = stack
+            .run_ready_batch_across_layers(&mut stream, &mut scheduler, &ready, &layer_input_refs)
+            .expect_err("bad second-layer input should be rejected");
+        assert!(err.contains("decoder layer 1 rejected"), "{err}");
+        let active = scheduler
+            .active_request(RequestId(51))
+            .expect("request should remain active");
+        assert_eq!(active.cached_tokens, 1);
+        assert_eq!(active.generated_tokens, 0);
+        assert_eq!(stack.written_len(first_layer, RequestId(51)).unwrap(), 1);
+        assert_eq!(stack.written_len(second_layer, RequestId(51)).unwrap(), 1);
     }
 
     #[test]

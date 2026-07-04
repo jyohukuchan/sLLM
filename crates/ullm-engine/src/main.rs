@@ -8,7 +8,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 use ullm_engine::decode_runner::{
     Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerRequestDecodeRunner,
-    Qwen3SelfAttnDecodeBatchInput, Qwen3SelfAttnRequestDecodeRunner,
+    Qwen3DecoderLayerStackRequestDecodeRunner, Qwen3SelfAttnDecodeBatchInput,
+    Qwen3SelfAttnRequestDecodeRunner,
 };
 use ullm_engine::decoder::{
     PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntimeWeights,
@@ -2462,6 +2463,60 @@ fn run_scheduler_layer_prefill_step(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn run_scheduler_layer_stack_prefill_step(
+    runner: &mut Qwen3DecoderLayerStackRequestDecodeRunner<'_>,
+    layer_index: usize,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    run: &mut SchedulerLayerDecodeRun,
+    timestep: usize,
+    q_token_elements: usize,
+    k_token_elements: usize,
+    v_token_elements: usize,
+    attention_elements: usize,
+    hidden: usize,
+    label: &str,
+) -> Result<(), String> {
+    let q_start = timestep
+        .checked_mul(q_token_elements)
+        .ok_or_else(|| format!("{label} q slice start overflows"))?;
+    let k_start = timestep
+        .checked_mul(k_token_elements)
+        .ok_or_else(|| format!("{label} k slice start overflows"))?;
+    let v_start = timestep
+        .checked_mul(v_token_elements)
+        .ok_or_else(|| format!("{label} v slice start overflows"))?;
+    let gate_start = timestep
+        .checked_mul(attention_elements)
+        .ok_or_else(|| format!("{label} gate slice start overflows"))?;
+    let residual_start = timestep
+        .checked_mul(hidden)
+        .ok_or_else(|| format!("{label} residual slice start overflows"))?;
+    let output_gate = run
+        .output_gate_sequence
+        .as_ref()
+        .map(|gate| &gate[gate_start..gate_start + attention_elements]);
+    let step = runner.run_prefill_step(
+        layer_index,
+        stream,
+        Qwen3DecoderLayerDecodeBatchInput {
+            request_id: run.request_id,
+            q: &run.q_sequence[q_start..q_start + q_token_elements],
+            k: &run.k_sequence[k_start..k_start + k_token_elements],
+            v: &run.v_sequence[v_start..v_start + v_token_elements],
+            output_gate,
+            residual: &run.residual_sequence[residual_start..residual_start + hidden],
+        },
+    )?;
+    if step.cache_position != timestep {
+        return Err(format!(
+            "{label} request {:?} wrote cache_position {}, expected {timestep}",
+            run.request_id, step.cache_position
+        ));
+    }
+    verify_scheduler_layer_step_output(label, run, &step, hidden, attention_elements)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_synthetic_scheduler_ready_batch(
     runner: &mut Qwen3SelfAttnRequestDecodeRunner,
     scheduler: &mut SchedulerState,
@@ -2769,6 +2824,164 @@ fn run_scheduler_layer_ready_batch(
             )
         })?;
         verify_scheduler_layer_step_output(label, run, &output, hidden, attention_elements)?;
+    }
+    Ok(expected_ids.len())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_scheduler_layer_stack_ready_batch(
+    runner: &mut Qwen3DecoderLayerStackRequestDecodeRunner<'_>,
+    scheduler: &mut SchedulerState,
+    runs_by_layer: &mut [Vec<SchedulerLayerDecodeRun>],
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    expected_ids: &[RequestId],
+    max_requests: usize,
+    q_token_elements: usize,
+    k_token_elements: usize,
+    v_token_elements: usize,
+    attention_elements: usize,
+    hidden: usize,
+    label: &str,
+) -> Result<usize, String> {
+    let ready = scheduler
+        .ready_decode_batch(max_requests)
+        .map_err(|err| format!("{label} failed to prepare ready decode batch: {err}"))?;
+    let ready_ids = ready
+        .iter()
+        .map(|request| request.request.id)
+        .collect::<Vec<_>>();
+    if ready_ids != expected_ids {
+        return Err(format!(
+            "{label} ready request ids {:?} did not match expected {:?}",
+            ready_ids, expected_ids
+        ));
+    }
+
+    for (layer_position, runs) in runs_by_layer.iter().enumerate() {
+        for request in &ready {
+            let run = scheduler_layer_decode_run(runs, request.request.id).ok_or_else(|| {
+                format!(
+                    "{label} layer {layer_position} request {:?} has no layer run",
+                    request.request.id
+                )
+            })?;
+            let expected_cache_position = run
+                .prompt_tokens
+                .checked_add(run.decode_steps)
+                .ok_or_else(|| {
+                    format!(
+                        "{label} layer {layer_position} request {:?} cache position overflows",
+                        run.request_id
+                    )
+                })?;
+            if request.cache_position != expected_cache_position {
+                return Err(format!(
+                    "{label} layer {layer_position} request {:?} cache_position {} did not match expected {}",
+                    request.request.id, request.cache_position, expected_cache_position
+                ));
+            }
+            if request.next_cache_len != request.cache_position + 1 {
+                return Err(format!(
+                    "{label} layer {layer_position} request {:?} next_cache_len {} did not match cache_position + 1",
+                    request.request.id, request.next_cache_len
+                ));
+            }
+            let expected_remaining = run
+                .max_new_tokens
+                .checked_sub(run.decode_steps)
+                .ok_or_else(|| {
+                    format!(
+                        "{label} layer {layer_position} request {:?} decode step overflow",
+                        run.request_id
+                    )
+                })?;
+            if request.remaining_new_tokens != expected_remaining {
+                return Err(format!(
+                    "{label} layer {layer_position} request {:?} remaining_new_tokens {} did not match expected {}",
+                    request.request.id, request.remaining_new_tokens, expected_remaining
+                ));
+            }
+            if request.allocation.blocks != run.block_table {
+                return Err(format!(
+                    "{label} layer {layer_position} request {:?} block table {:?} did not match run block table {:?}",
+                    request.request.id, request.allocation.blocks, run.block_table
+                ));
+            }
+        }
+    }
+
+    let mut layer_inputs = Vec::with_capacity(runs_by_layer.len());
+    for (layer_position, runs) in runs_by_layer.iter().enumerate() {
+        let mut inputs = Vec::with_capacity(ready.len());
+        for request in &ready {
+            let run = scheduler_layer_decode_run(runs, request.request.id).ok_or_else(|| {
+                format!(
+                    "{label} layer {layer_position} request {:?} disappeared while preparing decode input",
+                    request.request.id
+                )
+            })?;
+            let q_start = request
+                .cache_position
+                .checked_mul(q_token_elements)
+                .ok_or_else(|| format!("{label} layer {layer_position} q slice start overflows"))?;
+            let k_start = request
+                .cache_position
+                .checked_mul(k_token_elements)
+                .ok_or_else(|| format!("{label} layer {layer_position} k slice start overflows"))?;
+            let v_start = request
+                .cache_position
+                .checked_mul(v_token_elements)
+                .ok_or_else(|| format!("{label} layer {layer_position} v slice start overflows"))?;
+            let gate_start = request
+                .cache_position
+                .checked_mul(attention_elements)
+                .ok_or_else(|| {
+                    format!("{label} layer {layer_position} gate slice start overflows")
+                })?;
+            let residual_start = request.cache_position.checked_mul(hidden).ok_or_else(|| {
+                format!("{label} layer {layer_position} residual slice start overflows")
+            })?;
+            let output_gate = run
+                .output_gate_sequence
+                .as_ref()
+                .map(|gate| &gate[gate_start..gate_start + attention_elements]);
+            inputs.push(Qwen3DecoderLayerDecodeBatchInput {
+                request_id: request.request.id,
+                q: &run.q_sequence[q_start..q_start + q_token_elements],
+                k: &run.k_sequence[k_start..k_start + k_token_elements],
+                v: &run.v_sequence[v_start..v_start + v_token_elements],
+                output_gate,
+                residual: &run.residual_sequence[residual_start..residual_start + hidden],
+            });
+        }
+        layer_inputs.push(inputs);
+    }
+
+    let layer_input_refs = layer_inputs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let outputs_by_layer =
+        runner.run_ready_batch_across_layers(stream, scheduler, &ready, &layer_input_refs)?;
+    drop(layer_input_refs);
+    drop(layer_inputs);
+
+    for (layer_position, outputs) in outputs_by_layer.into_iter().enumerate() {
+        let runs = runs_by_layer
+            .get_mut(layer_position)
+            .ok_or_else(|| format!("{label} layer {layer_position} output has no run list"))?;
+        for output in outputs {
+            let run = scheduler_layer_decode_run_mut(runs, output.request_id).ok_or_else(|| {
+                format!(
+                    "{label} layer {layer_position} advanced request {:?} disappeared",
+                    output.request_id
+                )
+            })?;
+            run.decode_steps = run.decode_steps.checked_add(1).ok_or_else(|| {
+                format!(
+                    "{label} layer {layer_position} request {:?} decode step count overflows",
+                    run.request_id
+                )
+            })?;
+            verify_scheduler_layer_step_output(label, run, &output, hidden, attention_elements)?;
+        }
     }
     Ok(expected_ids.len())
 }
@@ -11532,11 +11745,17 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         layer_runs.push(runs);
     }
 
-    let mut layer_runners = Vec::with_capacity(layers.len());
+    let mut layer_runner = Qwen3DecoderLayerStackRequestDecodeRunner::new();
     for (layer_position, layer) in layers.iter().enumerate() {
-        let mut runner = Qwen3DecoderLayerRequestDecodeRunner::new();
+        let stack_layer_index = layer_runner.push_layer();
+        if stack_layer_index != layer_position {
+            return Err(format!(
+                "model-loop stack layer index {stack_layer_index} did not match layer position {layer_position}"
+            ));
+        }
         for run in &layer_runs[layer_position] {
-            runner.insert_request(
+            layer_runner.insert_request(
+                stack_layer_index,
                 &mut context,
                 &mut stream,
                 run.request_id,
@@ -11547,14 +11766,14 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
                 mlp_epsilon,
             )?;
         }
-        layer_runners.push(runner);
     }
 
-    for (layer_position, runner) in layer_runners.iter_mut().enumerate() {
+    for layer_position in 0..layer_runner.layer_count() {
         for run in &mut layer_runs[layer_position] {
             for timestep in 0..run.prompt_tokens {
-                run_scheduler_layer_prefill_step(
-                    runner,
+                run_scheduler_layer_stack_prefill_step(
+                    &mut layer_runner,
+                    layer_position,
                     &mut stream,
                     run,
                     timestep,
@@ -11581,80 +11800,36 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     }
 
     let expected_first_ids = [RequestId(201), RequestId(202)];
-    let first_ready = scheduler
-        .ready_decode_batch(8)
-        .map_err(|err| format!("failed to query model-loop first ready batch: {err}"))?;
-    let first_ready_ids = first_ready
-        .iter()
-        .map(|request| request.request.id)
-        .collect::<Vec<_>>();
-    if first_ready_ids != expected_first_ids {
-        return Err(format!(
-            "model-loop first ready ids {:?} did not match expected {:?}",
-            first_ready_ids, expected_first_ids
-        ));
-    }
-    for (layer_position, runner) in layer_runners.iter_mut().enumerate() {
-        run_scheduler_layer_ready_batch(
-            runner,
-            &mut scheduler,
-            &mut layer_runs[layer_position],
-            &mut stream,
-            &expected_first_ids,
-            8,
-            q_token_elements,
-            k_token_elements,
-            v_token_elements,
-            attention_elements,
-            hidden,
-            false,
-            &format!(
-                "package model-loop layer {} first batch",
-                layers[layer_position].layer_index
-            ),
-        )?;
-    }
-    scheduler
-        .advance_decode_batch(&first_ready)
-        .map_err(|err| format!("failed to advance model-loop first ready batch: {err}"))?;
+    let first_batch_ready = run_scheduler_layer_stack_ready_batch(
+        &mut layer_runner,
+        &mut scheduler,
+        &mut layer_runs,
+        &mut stream,
+        &expected_first_ids,
+        8,
+        q_token_elements,
+        k_token_elements,
+        v_token_elements,
+        attention_elements,
+        hidden,
+        "package model-loop first batch",
+    )?;
 
     let expected_second_ids = [RequestId(201)];
-    let second_ready = scheduler
-        .ready_decode_batch(8)
-        .map_err(|err| format!("failed to query model-loop second ready batch: {err}"))?;
-    let second_ready_ids = second_ready
-        .iter()
-        .map(|request| request.request.id)
-        .collect::<Vec<_>>();
-    if second_ready_ids != expected_second_ids {
-        return Err(format!(
-            "model-loop second ready ids {:?} did not match expected {:?}",
-            second_ready_ids, expected_second_ids
-        ));
-    }
-    for (layer_position, runner) in layer_runners.iter_mut().enumerate() {
-        run_scheduler_layer_ready_batch(
-            runner,
-            &mut scheduler,
-            &mut layer_runs[layer_position],
-            &mut stream,
-            &expected_second_ids,
-            8,
-            q_token_elements,
-            k_token_elements,
-            v_token_elements,
-            attention_elements,
-            hidden,
-            false,
-            &format!(
-                "package model-loop layer {} second batch",
-                layers[layer_position].layer_index
-            ),
-        )?;
-    }
-    scheduler
-        .advance_decode_batch(&second_ready)
-        .map_err(|err| format!("failed to advance model-loop second ready batch: {err}"))?;
+    let second_batch_ready = run_scheduler_layer_stack_ready_batch(
+        &mut layer_runner,
+        &mut scheduler,
+        &mut layer_runs,
+        &mut stream,
+        &expected_second_ids,
+        8,
+        q_token_elements,
+        k_token_elements,
+        v_token_elements,
+        attention_elements,
+        hidden,
+        "package model-loop second batch",
+    )?;
     let final_ready = scheduler
         .ready_decode_batch(8)
         .map_err(|err| format!("failed to query model-loop final ready batch: {err}"))?
@@ -11665,10 +11840,10 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         ));
     }
 
-    for (layer_position, runner) in layer_runners.iter().enumerate() {
+    for layer_position in 0..layer_runner.layer_count() {
         for run in &mut layer_runs[layer_position] {
-            let cache = runner
-                .read_cache_to_host(run.request_id, &mut stream)
+            let cache = layer_runner
+                .read_layer_cache_to_host(layer_position, run.request_id, &mut stream)
                 .map_err(|err| {
                     format!(
                         "failed to read package model-loop layer {} cache for {:?}: {err}",
@@ -11847,8 +12022,8 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         block_size,
         cache_blocks,
         block_tables,
-        first_ready.len(),
-        second_ready.len(),
+        first_batch_ready,
+        second_batch_ready,
         final_ready,
         decode_steps_by_layer,
         cached_tokens,
