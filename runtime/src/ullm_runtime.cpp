@@ -369,6 +369,10 @@ public:
         return compile_kernel(arch, add_kernel_source(), "ullm_add_f32.hip", code, error);
     }
 
+    bool compile_rope_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(arch, rope_kernel_source(), "ullm_rope_f32.hip", code, error);
+    }
+
     bool compile_depthwise_conv1d_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -614,6 +618,49 @@ extern "C" __global__ void ullm_add_f32_kernel(
         return;
     }
     output[index] = lhs[index] + rhs[index];
+}
+)";
+    }
+
+    static const char *rope_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_rope_f32_kernel(
+    const float *input,
+    unsigned long long sequence_len,
+    unsigned long long heads,
+    unsigned long long head_dim,
+    unsigned long long rotary_dim,
+    unsigned long long position_offset,
+    float rope_base,
+    float *output) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long half = rotary_dim >> 1;
+    const unsigned long long work_dim = half + (head_dim - rotary_dim);
+    const unsigned long long work_items = sequence_len * heads * work_dim;
+    if (index >= work_items) {
+        return;
+    }
+    const unsigned long long local_dim = index % work_dim;
+    const unsigned long long head_index = index / work_dim;
+    const unsigned long long base = head_index * head_dim;
+    if (local_dim >= half) {
+        const unsigned long long dim = rotary_dim + (local_dim - half);
+        output[base + dim] = input[base + dim];
+        return;
+    }
+    const unsigned long long pair_dim = local_dim;
+    const unsigned long long timestep = head_index / heads;
+    const float position = static_cast<float>(position_offset + timestep);
+    const float exponent =
+        (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(rotary_dim);
+    const float theta = position / powf(rope_base, exponent);
+    const float c = cosf(theta);
+    const float s = sinf(theta);
+    const float first = input[base + pair_dim];
+    const float second = input[base + half + pair_dim];
+    output[base + pair_dim] = first * c - second * s;
+    output[base + half + pair_dim] = second * c + first * s;
 }
 )";
     }
@@ -1684,6 +1731,38 @@ void add_f32_host(
     }
 }
 
+void rope_f32_host(
+    const float *input,
+    size_t sequence_len,
+    size_t heads,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float *output) {
+    const size_t half = rotary_dim / 2;
+    for (size_t timestep = 0; timestep < sequence_len; ++timestep) {
+        const float position = static_cast<float>(position_offset + timestep);
+        for (size_t head = 0; head < heads; ++head) {
+            const size_t base = (timestep * heads + head) * head_dim;
+            for (size_t pair_dim = 0; pair_dim < half; ++pair_dim) {
+                const float exponent =
+                    (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(rotary_dim);
+                const float theta = position / std::pow(rope_base, exponent);
+                const float c = std::cos(theta);
+                const float s = std::sin(theta);
+                const float first = input[base + pair_dim];
+                const float second = input[base + half + pair_dim];
+                output[base + pair_dim] = first * c - second * s;
+                output[base + half + pair_dim] = second * c + first * s;
+            }
+            for (size_t dim = rotary_dim; dim < head_dim; ++dim) {
+                output[base + dim] = input[base + dim];
+            }
+        }
+    }
+}
+
 class HipSiluMulKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -2046,6 +2125,207 @@ ullm_status add_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 add HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipRopeKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_rope_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_rope_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build RoPE HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipRopeKernelCache &hip_rope_kernel_cache() {
+    static HipRopeKernelCache cache;
+    return cache;
+}
+
+bool rope_f32_hip_kernel(
+    const ullm_runtime_buffer *input_buffer,
+    size_t sequence_len,
+    size_t heads,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = input_buffer->hip_device_id;
+    void *function = hip_rope_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    const size_t work_dim = (rotary_dim / 2) + (head_dim - rotary_dim);
+    const size_t work_items = sequence_len * heads * work_dim;
+    const size_t grid_size = (work_items + block_size - 1) / block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "RoPE element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_sequence_len = static_cast<unsigned long long>(sequence_len);
+    unsigned long long kernel_heads = static_cast<unsigned long long>(heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_rotary_dim = static_cast<unsigned long long>(rotary_dim);
+    unsigned long long kernel_position_offset = static_cast<unsigned long long>(position_offset);
+    void *input_ptr = input_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &input_ptr,
+        &kernel_sequence_len,
+        &kernel_heads,
+        &kernel_head_dim,
+        &kernel_rotary_dim,
+        &kernel_position_offset,
+        &rope_base,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 RoPE";
+        }
+        return false;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        if (error != nullptr) {
+            *error = "failed to synchronize f32 RoPE HIP kernel";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status rope_f32_hip_staging(
+    const ullm_runtime_buffer *input_buffer,
+    size_t sequence_len,
+    size_t heads,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    size_t required_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_input(required_bytes / sizeof(float));
+    std::vector<float> host_output(required_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = input_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            required_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 RoPE HIP input to host staging buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 RoPE HIP input staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    rope_f32_host(
+        host_input.data(),
+        sequence_len,
+        heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        host_output.data());
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            required_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 RoPE output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 RoPE HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -3638,6 +3918,116 @@ ullm_status ullm_runtime_add_f32(
         lhs_buffer,
         rhs_buffer,
         elements,
+        required_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_rope_f32(
+    const ullm_runtime_buffer *input_buffer,
+    size_t sequence_len,
+    size_t heads,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (input_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 RoPE received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (sequence_len == 0 || heads == 0 || head_dim == 0 || rotary_dim == 0) {
+        set_error("f32 RoPE sequence_len, heads, head_dim, and rotary_dim must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rotary_dim > head_dim || (rotary_dim % 2) != 0) {
+        set_error("f32 RoPE rotary_dim must be even and no greater than head_dim");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(rope_base) || rope_base <= 1.0f) {
+        set_error("f32 RoPE base must be finite and greater than one");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(input_buffer, output_buffer)) {
+        set_error("f32 RoPE buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 RoPE stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (heads > max_size / sequence_len) {
+        set_error("f32 RoPE head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t head_sequence = heads * sequence_len;
+    if (head_dim > max_size / head_sequence) {
+        set_error("f32 RoPE element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t elements = head_sequence * head_dim;
+    if (elements > max_size / sizeof(float)) {
+        set_error("f32 RoPE byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_bytes = elements * sizeof(float);
+    if (input_buffer->bytes < required_bytes) {
+        set_error("f32 RoPE input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_bytes) {
+        set_error("f32 RoPE output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (input_buffer->backend == BackendKind::Cpu) {
+        const auto *input = static_cast<const float *>(input_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        rope_f32_host(
+            input,
+            sequence_len,
+            heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (rope_f32_hip_kernel(
+            input_buffer,
+            sequence_len,
+            heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_ROPE_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty() ? "f32 RoPE HIP kernel is unavailable" : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return rope_f32_hip_staging(
+        input_buffer,
+        sequence_len,
+        heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
         required_bytes,
         output_buffer,
         stream);

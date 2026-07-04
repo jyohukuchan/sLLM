@@ -108,6 +108,17 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_rope_f32(
+        input_buffer: *const RawRuntimeBuffer,
+        sequence_len: usize,
+        heads: usize,
+        head_dim: usize,
+        rotary_dim: usize,
+        position_offset: usize,
+        rope_base: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_linear_attn_gate_beta_f32(
         a_buffer: *const RawRuntimeBuffer,
         b_buffer: *const RawRuntimeBuffer,
@@ -498,6 +509,59 @@ pub fn add_f32(
             rhs_buffer.raw.as_ptr(),
             elements,
             output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn rope_f32(
+    input: &RuntimeBuffer,
+    sequence_len: usize,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    position_offset: usize,
+    rope_base: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if sequence_len == 0 {
+        return Err("f32 RoPE sequence_len must be greater than zero".to_string());
+    }
+    if heads == 0 {
+        return Err("f32 RoPE heads must be greater than zero".to_string());
+    }
+    if head_dim == 0 {
+        return Err("f32 RoPE head_dim must be greater than zero".to_string());
+    }
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        return Err("f32 RoPE rotary_dim must be even and no greater than head_dim".to_string());
+    }
+    if !rope_base.is_finite() || rope_base <= 1.0 {
+        return Err("f32 RoPE base must be finite and greater than one".to_string());
+    }
+    let head_sequence = sequence_len
+        .checked_mul(heads)
+        .ok_or_else(|| "f32 RoPE head-sequence element count overflows".to_string())?;
+    let elements = head_sequence
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 RoPE element count overflows".to_string())?;
+    let required_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 RoPE byte size overflows".to_string())?;
+    check_copy_range(0, required_bytes, input.size()?)?;
+    check_copy_range(0, required_bytes, output.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_rope_f32(
+            input.raw.as_ptr(),
+            sequence_len,
+            heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            output.raw.as_ptr(),
             stream,
         )
     })
@@ -1104,6 +1168,83 @@ mod tests {
             .unwrap();
 
         let err = add_f32(&lhs, &rhs, 4, &mut output, None).unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
+    fn cpu_rope_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let sequence_len = 2_usize;
+        let heads = 2_usize;
+        let head_dim = 6_usize;
+        let rotary_dim = 4_usize;
+        let position_offset = 3_usize;
+        let rope_base = 10000.0_f32;
+        let elements = sequence_len * heads * head_dim;
+        let input_values = (0..elements)
+            .map(|index| (index as f32 - 11.0) / 7.0)
+            .collect::<Vec<_>>();
+        let expected = expected_rope(
+            &input_values,
+            sequence_len,
+            heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        rope_f32(
+            &input,
+            sequence_len,
+            heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; input_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_rope_f32_rejects_invalid_rotary_dim_or_short_output() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let input = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let err = rope_f32(&input, 1, 1, 6, 5, 0, 10000.0, &mut output, None).unwrap_err();
+        assert!(err.contains("rotary_dim"));
+
+        let mut short_output = context
+            .alloc_buffer(5 * std::mem::size_of::<f32>())
+            .unwrap();
+        let err = rope_f32(&input, 1, 1, 6, 4, 0, 10000.0, &mut short_output, None).unwrap_err();
         assert!(err.contains("out of bounds") || err.contains("output"));
     }
 
@@ -1790,6 +1931,66 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_rope_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let sequence_len = 2_usize;
+        let heads = 2_usize;
+        let head_dim = 6_usize;
+        let rotary_dim = 4_usize;
+        let position_offset = 3_usize;
+        let rope_base = 10000.0_f32;
+        let elements = sequence_len * heads * head_dim;
+        let input_values = (0..elements)
+            .map(|index| (index as f32 - 11.0) / 7.0)
+            .collect::<Vec<_>>();
+        let expected = expected_rope(
+            &input_values,
+            sequence_len,
+            heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        rope_f32(
+            &input,
+            sequence_len,
+            heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; input_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-4);
+    }
+
+    #[test]
     fn first_hip_linear_attn_gate_beta_f32_computes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -2118,6 +2319,38 @@ mod tests {
                 gate * sigmoid * *up
             })
             .collect()
+    }
+
+    fn expected_rope(
+        input: &[f32],
+        sequence_len: usize,
+        heads: usize,
+        head_dim: usize,
+        rotary_dim: usize,
+        position_offset: usize,
+        rope_base: f32,
+    ) -> Vec<f32> {
+        let mut output = vec![0.0_f32; input.len()];
+        let half = rotary_dim / 2;
+        for timestep in 0..sequence_len {
+            let position = (position_offset + timestep) as f32;
+            for head in 0..heads {
+                let base = (timestep * heads + head) * head_dim;
+                for pair_dim in 0..half {
+                    let exponent = (2.0 * pair_dim as f32) / rotary_dim as f32;
+                    let theta = position / rope_base.powf(exponent);
+                    let c = theta.cos();
+                    let s = theta.sin();
+                    let first = input[base + pair_dim];
+                    let second = input[base + half + pair_dim];
+                    output[base + pair_dim] = first * c - second * s;
+                    output[base + half + pair_dim] = second * c + first * s;
+                }
+                output[base + rotary_dim..base + head_dim]
+                    .copy_from_slice(&input[base + rotary_dim..base + head_dim]);
+            }
+        }
+        output
     }
 
     fn expected_depthwise_conv1d(

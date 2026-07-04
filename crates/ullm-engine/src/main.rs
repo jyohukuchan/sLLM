@@ -23,6 +23,7 @@ fn main() -> ExitCode {
         Some("runtime-rmsnorm-smoke") => runtime_rmsnorm_smoke(env::args().nth(2)),
         Some("runtime-silu-mul-smoke") => runtime_silu_mul_smoke(env::args().nth(2)),
         Some("runtime-add-smoke") => runtime_add_smoke(env::args().nth(2)),
+        Some("runtime-rope-smoke") => runtime_rope_smoke(env::args().nth(2)),
         Some("runtime-depthwise-conv1d-smoke") => {
             runtime_depthwise_conv1d_smoke(env::args().nth(2))
         }
@@ -795,6 +796,150 @@ fn runtime_add_smoke(device_index: Option<String>) -> ExitCode {
         device_index,
         info.name,
         lhs.len(),
+        format_f32_preview(&output)
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_rope_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let sequence_len = 2_usize;
+    let heads = 2_usize;
+    let head_dim = 6_usize;
+    let rotary_dim = 4_usize;
+    let position_offset = 3_usize;
+    let rope_base = 10000.0_f32;
+    let elements = sequence_len * heads * head_dim;
+    let input = (0..elements)
+        .map(|index| (index as f32 - 11.0) / 7.0)
+        .collect::<Vec<_>>();
+    let expected = runtime_host_rope_f32(
+        &input,
+        sequence_len,
+        heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    );
+    let input_bytes = encode_f32_to_bytes(&input);
+    let output_bytes = input.len() * std::mem::size_of::<f32>();
+
+    let mut input_buffer = match context.alloc_buffer(input_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate input runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut output_buffer = match context.alloc_buffer(output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate output runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy RoPE input into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after input copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    if let Err(err) = ullm_runtime_sys::rope_f32(
+        &input_buffer,
+        sequence_len,
+        heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        &mut output_buffer,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to run runtime rope_f32: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after rope_f32: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_raw = vec![0_u8; output_bytes];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_raw, Some(&mut stream)) {
+        eprintln!("failed to copy rope_f32 result back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output copy: {err}");
+        return ExitCode::from(1);
+    }
+    let output = decode_f32_le_values(&output_raw);
+    let tolerance = if info.backend == "cpu" {
+        1e-5_f32
+    } else {
+        1e-4_f32
+    };
+    if output.len() != expected.len() {
+        eprintln!(
+            "runtime RoPE smoke produced unexpected output length: output={} expected={}",
+            output.len(),
+            expected.len()
+        );
+        return ExitCode::from(1);
+    }
+    let mut max_abs_diff = 0.0_f32;
+    for (actual, expected_value) in output.iter().zip(expected.iter()) {
+        let diff = (*actual - *expected_value).abs();
+        if diff > tolerance {
+            eprintln!(
+                "runtime RoPE smoke produced unexpected output: max_abs_diff={diff} tolerance={tolerance} output={:?} expected={:?}",
+                output, expected
+            );
+            return ExitCode::from(1);
+        }
+        max_abs_diff = max_abs_diff.max(diff);
+    }
+
+    println!(
+        "runtime-rope-smoke backend={} device_index={} name=\"{}\" sequence_len={} heads={} head_dim={} rotary_dim={} position_offset={} rope_base={} output={} max_abs_diff={max_abs_diff:.9} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        sequence_len,
+        heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
         format_f32_preview(&output)
     );
     ExitCode::SUCCESS
@@ -11555,7 +11700,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
@@ -11872,6 +12017,48 @@ fn runtime_host_add_f32(lhs: &[f32], rhs: &[f32]) -> Vec<f32> {
         .zip(rhs.iter())
         .map(|(lhs_value, rhs_value)| lhs_value + rhs_value)
         .collect()
+}
+
+fn runtime_host_rope_f32(
+    input: &[f32],
+    sequence_len: usize,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    position_offset: usize,
+    rope_base: f32,
+) -> Vec<f32> {
+    if sequence_len == 0
+        || heads == 0
+        || head_dim == 0
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || !rotary_dim.is_multiple_of(2)
+        || input.len() != sequence_len * heads * head_dim
+    {
+        return Vec::new();
+    }
+    let mut output = vec![0.0_f32; input.len()];
+    let half = rotary_dim / 2;
+    for timestep in 0..sequence_len {
+        let position = (position_offset + timestep) as f32;
+        for head in 0..heads {
+            let base = (timestep * heads + head) * head_dim;
+            for pair_dim in 0..half {
+                let exponent = (2.0 * pair_dim as f32) / rotary_dim as f32;
+                let theta = position / rope_base.powf(exponent);
+                let c = theta.cos();
+                let s = theta.sin();
+                let first = input[base + pair_dim];
+                let second = input[base + half + pair_dim];
+                output[base + pair_dim] = first * c - second * s;
+                output[base + half + pair_dim] = second * c + first * s;
+            }
+            output[base + rotary_dim..base + head_dim]
+                .copy_from_slice(&input[base + rotary_dim..base + head_dim]);
+        }
+    }
+    output
 }
 
 fn runtime_host_depthwise_conv1d_f32(

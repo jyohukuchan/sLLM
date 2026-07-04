@@ -137,6 +137,17 @@ ullm_status ullm_runtime_depthwise_conv1d_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_rope_f32(
+    const ullm_runtime_buffer *input_buffer,
+    size_t sequence_len,
+    size_t heads,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_linear_attn_gate_beta_f32(
     const ullm_runtime_buffer *a_buffer,
     const ullm_runtime_buffer *b_buffer,
