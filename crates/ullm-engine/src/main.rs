@@ -7257,7 +7257,9 @@ fn package_self_attn_block_smoke(
             return ExitCode::from(1);
         }
     };
-    let (attention_projection_input, output_gate_layout, output_gate_max_abs_diff) = match q_gate {
+    let (attention_projection_input, output_gate_layout, output_gate_max_abs_diff) = match q_gate
+        .as_ref()
+    {
         Some(gate) => {
             let expected_gated_attention = runtime_host_sigmoid_mul_f32(&gate, &attention_output);
             if expected_gated_attention.is_empty() {
@@ -7501,6 +7503,9 @@ struct SelfAttnBlockSmokeRun {
     attention_projection_input: Vec<f32>,
     attn_projected: Vec<f32>,
     block_output: Vec<f32>,
+    paged_block_table: Vec<u32>,
+    paged_block_size: usize,
+    paged_cache_blocks: usize,
     hidden: usize,
     q_heads: usize,
     kv_heads: usize,
@@ -7515,9 +7520,14 @@ struct SelfAttnBlockSmokeRun {
     q_rope_max_abs_diff: f32,
     k_rope_max_abs_diff: f32,
     attention_max_abs_diff: f32,
+    paged_kv_write_k_max_abs_diff: f32,
+    paged_kv_write_v_max_abs_diff: f32,
+    paged_step_attention_max_abs_diff: f32,
+    causal_paged_step_attention_max_abs_diff: f32,
     output_gate_max_abs_diff: f32,
     o_proj_max_abs_diff: f32,
     block_max_abs_diff: f32,
+    causal_paged_block_max_abs_diff: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7736,19 +7746,50 @@ fn run_self_attn_block_sequence_smoke(
         softmax_scale,
         &format!("{label} attention"),
     )?;
+    let paged_block_size = 2_usize;
+    let (paged_block_table, paged_cache_blocks, _) =
+        allocate_fragmented_paged_decode_blocks(sequence_len, paged_block_size)?;
+    let paged_decode = runtime_paged_kv_write_decode_verify(
+        context,
+        stream,
+        &q_rope,
+        &k_rope,
+        &v_projected,
+        &paged_block_table,
+        sequence_len,
+        paged_block_size,
+        paged_cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        &format!("{label} paged decode step"),
+    )?;
+    let causal_paged_step_attention_max_abs_diff = verify_f32_close(
+        &format!("{label} causal-vs-paged-step-attention"),
+        &paged_decode.step_outputs,
+        &attention_output,
+        1e-4,
+        1e-4,
+    )?;
+    let paged_step_attention_output = paged_decode.step_outputs;
 
-    let (attention_projection_input, output_gate_layout, output_gate_max_abs_diff) = match q_gate {
+    let (attention_projection_input, output_gate_layout, output_gate_max_abs_diff) = match q_gate
+        .as_ref()
+    {
         Some(gate) => {
-            let expected_gated_attention = runtime_host_sigmoid_mul_f32(&gate, &attention_output);
+            let expected_gated_attention =
+                runtime_host_sigmoid_mul_f32(&gate, &paged_step_attention_output);
             if expected_gated_attention.is_empty() {
                 return Err(format!(
                     "failed to apply Qwen3.5 self-attn output gate: gate_elements={} attention_elements={}",
                     gate.len(),
-                    attention_output.len()
+                    paged_step_attention_output.len()
                 ));
             }
             let gate_bytes = encode_f32_to_bytes(&gate);
-            let attention_bytes = encode_f32_to_bytes(&attention_output);
+            let attention_bytes = encode_f32_to_bytes(&paged_step_attention_output);
             let output_gate_bytes_len = attention_bytes.len();
             let mut gate_buffer = context
                 .alloc_buffer(gate_bytes.len())
@@ -7775,7 +7816,7 @@ fn run_self_attn_block_sequence_smoke(
             ullm_runtime_sys::sigmoid_mul_f32(
                 &gate_buffer,
                 &attention_buffer,
-                attention_output.len(),
+                paged_step_attention_output.len(),
                 &mut gated_attention_buffer,
                 Some(stream),
             )
@@ -7800,7 +7841,7 @@ fn run_self_attn_block_sequence_smoke(
             )?;
             (gated_attention, "runtime-sigmoid", output_gate_max_abs_diff)
         }
-        None => (attention_output.clone(), "none", 0.0_f32),
+        None => (paged_step_attention_output.clone(), "none", 0.0_f32),
     };
 
     let o_matrix_bytes = o_rows
@@ -7826,6 +7867,22 @@ fn run_self_attn_block_sequence_smoke(
         o_cols,
         &format!("{label} o projection"),
     )?;
+    let causal_attention_projection_input = if let Some(gate) = q_gate.as_ref() {
+        runtime_host_sigmoid_mul_f32(gate, &attention_output)
+    } else {
+        attention_output.clone()
+    };
+    let mut causal_attn_projected = Vec::with_capacity(sequence_len * o_rows);
+    for timestep in 0..sequence_len {
+        let input_start = timestep * o_cols;
+        let input_end = input_start + o_cols;
+        causal_attn_projected.extend(runtime_host_matvec_f32(
+            &o_matrix_host,
+            &causal_attention_projection_input[input_start..input_end],
+            o_rows,
+            o_cols,
+        ));
+    }
 
     let residual_bytes = encode_f32_to_bytes(&residual_sequence);
     let attn_projected_bytes = encode_f32_to_bytes(&attn_projected);
@@ -7872,6 +7929,15 @@ fn run_self_attn_block_sequence_smoke(
         1e-5,
         1e-6,
     )?;
+    let expected_causal_block_output =
+        runtime_host_add_f32(&residual_sequence, &causal_attn_projected);
+    let causal_paged_block_max_abs_diff = verify_f32_close(
+        &format!("{label} causal-vs-paged-block"),
+        &block_output,
+        &expected_causal_block_output,
+        3e-3,
+        2e-5,
+    )?;
 
     Ok(SelfAttnBlockSmokeRun {
         residual_sequence,
@@ -7879,6 +7945,9 @@ fn run_self_attn_block_sequence_smoke(
         attention_projection_input,
         attn_projected,
         block_output,
+        paged_block_table,
+        paged_block_size,
+        paged_cache_blocks,
         hidden: q_cols,
         q_heads,
         kv_heads,
@@ -7893,9 +7962,14 @@ fn run_self_attn_block_sequence_smoke(
         q_rope_max_abs_diff,
         k_rope_max_abs_diff,
         attention_max_abs_diff,
+        paged_kv_write_k_max_abs_diff: paged_decode.k_write_max_abs_diff,
+        paged_kv_write_v_max_abs_diff: paged_decode.v_write_max_abs_diff,
+        paged_step_attention_max_abs_diff: paged_decode.step_output_max_abs_diff,
+        causal_paged_step_attention_max_abs_diff,
         output_gate_max_abs_diff,
         o_proj_max_abs_diff,
         block_max_abs_diff,
+        causal_paged_block_max_abs_diff,
     })
 }
 
@@ -8352,7 +8426,7 @@ fn package_self_attn_mlp_block_smoke_impl(
     };
 
     Ok(format!(
-        "package-self-attn-mlp-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} sequence_len={} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} q_norm_dtype={} k_norm_dtype={} post_norm_dtype={} backend={} device_index={} name=\"{}\" residual_preview={} attention_preview={} gated_attention_preview={} projected_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} q_norm_max_abs_diff={:.9} k_norm_max_abs_diff={:.9} q_rope_max_abs_diff={:.9} k_rope_max_abs_diff={:.9} attention_max_abs_diff={:.9} output_gate_max_abs_diff={:.9} o_proj_max_abs_diff={:.9} block_max_abs_diff={:.9} post_norm_max_abs_diff={:.9} layer_block_max_abs_diff={:.9} verified=true",
+        "package-self-attn-mlp-block-smoke package={} layer={} q_tensor=\"{}\" k_tensor=\"{}\" v_tensor=\"{}\" o_tensor=\"{}\" q_norm_tensor=\"{}\" k_norm_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} sequence_len={} paged_block_size={} paged_cache_blocks={} paged_block_table={:?} q_projection_layout={} q_gate_elements={} output_gate_layout={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} q_norm_dtype={} k_norm_dtype={} post_norm_dtype={} backend={} device_index={} name=\"{}\" residual_preview={} attention_preview={} gated_attention_preview={} projected_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} q_norm_max_abs_diff={:.9} k_norm_max_abs_diff={:.9} q_rope_max_abs_diff={:.9} k_rope_max_abs_diff={:.9} attention_max_abs_diff={:.9} paged_kv_write_k_max_abs_diff={:.9} paged_kv_write_v_max_abs_diff={:.9} paged_step_attention_max_abs_diff={:.9} causal_paged_step_attention_max_abs_diff={:.9} output_gate_max_abs_diff={:.9} o_proj_max_abs_diff={:.9} block_max_abs_diff={:.9} causal_paged_block_max_abs_diff={:.9} post_norm_max_abs_diff={:.9} layer_block_max_abs_diff={:.9} verified=true",
         path,
         layer_index,
         q_tensor,
@@ -8367,6 +8441,9 @@ fn package_self_attn_mlp_block_smoke_impl(
         down_tensor,
         hidden,
         sequence_len,
+        self_attn.paged_block_size,
+        self_attn.paged_cache_blocks,
+        self_attn.paged_block_table,
         self_attn.q_projection_layout,
         self_attn.q_gate_elements,
         self_attn.output_gate_layout,
@@ -8402,9 +8479,14 @@ fn package_self_attn_mlp_block_smoke_impl(
         self_attn.q_rope_max_abs_diff,
         self_attn.k_rope_max_abs_diff,
         self_attn.attention_max_abs_diff,
+        self_attn.paged_kv_write_k_max_abs_diff,
+        self_attn.paged_kv_write_v_max_abs_diff,
+        self_attn.paged_step_attention_max_abs_diff,
+        self_attn.causal_paged_step_attention_max_abs_diff,
         self_attn.output_gate_max_abs_diff,
         self_attn.o_proj_max_abs_diff,
         self_attn.block_max_abs_diff,
+        self_attn.causal_paged_block_max_abs_diff,
         post_norm_max_abs_diff,
         layer_block_max_abs_diff,
     ))
