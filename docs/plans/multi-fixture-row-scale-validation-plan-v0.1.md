@@ -82,11 +82,13 @@ Current gate result:
 | condition | decision | fixtures | median improvement | max regression | reason |
 | --- | --- | ---: | ---: | ---: | --- |
 | `layer6` | reject | 3 | 0.0081653595 | 0.00455665588 | tokens201 regression exceeds `0.001` |
+| `layer6-mlp-selected` | reject | 3 | 0.00720596313 | 0.00403785706 | tokens201 regression exceeds `0.001` |
 | `layer6-attn-mlp` | reject | 3 | 0.00578689575 | 0.0117874146 | tokens201 regression exceeds `0.001` |
 | `combined` | needs_more_fixtures | 1 | 0.0343608856 | 0 | only one paired fixture |
 | `extracted` | reject | 3 | -0.0312900543 | 0.0727806091 | tokens1 and tokens201 regress |
 
 Interpretation: layer6 hidden3994 remains a real local compensation candidate, but it should not be promoted unconditionally under the initial multi-fixture gate.
+The lower tokens101-selected MLP scale reduces the tokens201 regression slightly, but still fails the hard gate.
 Adding the layer6 attention row-scale improves tokens1/tokens101 but increases the tokens201 regression relative to MLP-only.
 The three-row extracted candidate bundle confirms the same rule: row-dot candidates should feed a gated search loop, not direct bundle promotion.
 

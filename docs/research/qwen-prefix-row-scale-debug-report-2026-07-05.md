@@ -28,6 +28,7 @@ Input summary:
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-candidate-gates.md`
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-extracted-candidate-gates.md`
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-layer6-attn-mlp-gates.md`
+- `benchmarks/results/2026-07-05/engine/qwen-prefix-layer6-mlp-selected-gates.md`
 
 Gate settings:
 
@@ -38,6 +39,7 @@ Gate settings:
 | condition | decision | fixtures | median improvement | max regression | reason |
 | --- | --- | ---: | ---: | ---: | --- |
 | `layer6` | reject | 3 | 0.0081653595 | 0.00455665588 | tokens201 regression exceeds `0.001` |
+| `layer6-mlp-selected` | reject | 3 | 0.00720596313 | 0.00403785706 | tokens201 regression exceeds `0.001` |
 | `layer6-attn-mlp` | reject | 3 | 0.00578689575 | 0.0117874146 | tokens201 regression exceeds `0.001` |
 | `combined` | needs_more_fixtures | 1 | 0.0343608856 | 0 | only one paired fixture |
 | `extracted` | reject | 3 | -0.0312900543 | 0.0727806091 | tokens1 and tokens201 regress |
@@ -46,6 +48,7 @@ Interpretation:
 
 - Layer6 hidden3994 row-scale is a real local compensation candidate.
 - It should not be promoted unconditionally under the initial multi-fixture gate.
+- Selecting the lower tokens101-fitted MLP scale reduces the tokens201 regression slightly, but not enough to pass the `0.001` gate.
 - Adding layer6 attention row-scale to layer6 MLP row-scale improves tokens1/tokens101 but worsens tokens201 more than MLP-only.
 - Layer8 QKV V845 cell remains smoke-only because current paired fixture coverage is insufficient.
 - The automatically extracted candidate set is worse than layer6-only, so candidate extraction must feed a gated search loop rather than direct promotion.
@@ -68,6 +71,12 @@ Layer6 `mlp.down_proj.weight[3994]` row-dot scale is stable across the two avail
 
 - token ids `1..16`: scale `1.026471714`, RMSE `0.117735388 -> 0.063680278`
 - token ids `101..116`: scale `1.023383096`, RMSE `0.131756300 -> 0.061972585`
+
+The lower tokens101-selected MLP-only scale was tested:
+
+- token ids `1..16`: `0.645338058 -> 0.638132095`
+- token ids `101..116`: `1.080525398 -> 1.047520638`
+- token ids `201..216`: `1.140727997 -> 1.144765854`
 
 The extracted three-row candidate set was tested across all three fixtures:
 
@@ -93,6 +102,7 @@ This means the local correction is real, but it changes later propagation in a w
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.
+- `tools/run-qwen-prefix-smoke-matrix.py` real run for selected layer6 MLP-only scale across tokens1/tokens101/tokens201.
 - Regenerated tokens1 layer6 hidden3994 trace with `qwen-layer-module-trace-v0.10`.
 
 ## Next Action
