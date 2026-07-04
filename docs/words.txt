@@ -35,6 +35,7 @@ block:同じlocal-scaleを共有するraw-valueのまとまり
 block-size:1つのblockに含まれるraw-valueの数
 KV cache:attention decode用のkey/value cache
 block table:sequenceが参照するKV cache block idの配列
+KV block allocation:requestやdecode対象token数から必要なKV cache block数を計算し、block tableに使うblock idを割り当てるscheduler側の処理
 group:実装上のblockの旧称または変数名。文書ではblockを優先する
 superblock:複数のblockをまとめた補正metadataの共有単位
 superblock補正:superblock単位に保存する追加metadataでlocal-scaleや実効値を補正する方式

@@ -118,6 +118,14 @@ impl KvBlockAllocator {
         self.allocations.values().map(Vec::len).sum()
     }
 
+    pub fn block_count_for_tokens(&self, token_count: usize) -> usize {
+        if token_count == 0 {
+            return 0;
+        }
+        let block_size = self.block_size_tokens as usize;
+        (token_count - 1) / block_size + 1
+    }
+
     pub fn allocate(
         &mut self,
         request_id: RequestId,
@@ -142,6 +150,15 @@ impl KvBlockAllocator {
         }
         self.allocations.insert(request_id, blocks.clone());
         Ok(BlockAllocation { request_id, blocks })
+    }
+
+    pub fn allocate_for_tokens(
+        &mut self,
+        request_id: RequestId,
+        token_count: usize,
+    ) -> Result<BlockAllocation, String> {
+        let block_count = self.block_count_for_tokens(token_count);
+        self.allocate(request_id, block_count)
     }
 
     pub fn free_request(&mut self, request_id: RequestId) -> usize {
@@ -248,6 +265,21 @@ mod tests {
         let b = allocator.allocate(RequestId(11), 2).unwrap();
         assert_eq!(b.blocks, vec![3, 0]);
         assert_eq!(allocator.allocation(RequestId(11)), Some([3, 0].as_slice()));
+    }
+
+    #[test]
+    fn kv_allocator_allocates_required_blocks_for_tokens() {
+        let mut allocator = KvBlockAllocator::with_block_size(4, 4);
+        assert_eq!(allocator.block_count_for_tokens(0), 0);
+        assert_eq!(allocator.block_count_for_tokens(1), 1);
+        assert_eq!(allocator.block_count_for_tokens(4), 1);
+        assert_eq!(allocator.block_count_for_tokens(5), 2);
+        assert_eq!(allocator.block_count_for_tokens(9), 3);
+
+        let allocation = allocator.allocate_for_tokens(RequestId(20), 9).unwrap();
+        assert_eq!(allocation.blocks, vec![0, 1, 2]);
+        assert_eq!(allocator.free_blocks(), 1);
+        assert!(allocator.allocate_for_tokens(RequestId(21), 5).is_err());
     }
 
     #[test]

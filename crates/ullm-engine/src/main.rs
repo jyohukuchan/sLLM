@@ -16785,8 +16785,14 @@ fn allocate_fragmented_paged_decode_blocks(
         ));
     }
     let allocation = allocator
-        .allocate(RequestId(101), block_count)
+        .allocate_for_tokens(RequestId(101), cache_len)
         .map_err(|err| format!("failed to allocate decode KV blocks: {err}"))?;
+    if allocation.blocks.len() != block_count {
+        return Err(format!(
+            "decode KV allocation block count {} does not match expected {block_count}",
+            allocation.blocks.len()
+        ));
+    }
     let stats = allocator.stats();
     Ok((allocation.blocks, cache_blocks, stats))
 }
