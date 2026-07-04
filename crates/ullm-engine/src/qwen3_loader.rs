@@ -1,9 +1,12 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeSet;
+
 use crate::decoder::{
-    Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights,
-    Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights, qwen3_self_attn_runtime_shape,
+    PagedDecodeShape, Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights,
+    Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights,
+    qwen3_self_attn_runtime_shape,
 };
 use crate::host_bytes::encode_f32_to_bytes;
 use crate::loader::{
@@ -28,6 +31,171 @@ pub struct Qwen3PackageDecoderLayerRuntime {
     pub post_norm: PassthroughF32Data,
     pub weights: Qwen3DecoderLayerRuntimeWeights,
     pub runtime_shape: Qwen3SelfAttnRuntimeShape,
+}
+
+pub struct Qwen3PackageModelRuntime {
+    pub layers: Vec<Qwen3PackageDecoderLayerRuntime>,
+    pub hidden: usize,
+    pub q_heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub value_dim: usize,
+    pub softmax_scale: f32,
+    pub mlp_epsilon: f32,
+}
+
+impl Qwen3PackageModelRuntime {
+    pub fn load(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        layer_indices: &[usize],
+    ) -> Result<Self, String> {
+        if layer_indices.is_empty() {
+            return Err(
+                "Qwen3 package model runtime requires at least one layer index".to_string(),
+            );
+        }
+        let mut unique_layers = BTreeSet::new();
+        for &layer_index in layer_indices {
+            if !unique_layers.insert(layer_index) {
+                return Err(format!(
+                    "Qwen3 package model runtime layer index {layer_index} is duplicated"
+                ));
+            }
+        }
+
+        let mut layers = Vec::with_capacity(layer_indices.len());
+        for &layer_index in layer_indices {
+            layers.push(qwen3_package_decoder_layer_runtime_from_package(
+                context,
+                stream,
+                path,
+                chunk_bytes,
+                layer_index,
+            )?);
+        }
+
+        let first = layers
+            .first()
+            .ok_or_else(|| "Qwen3 package model runtime loaded no layers".to_string())?;
+        let hidden = first.runtime_shape.hidden;
+        let q_heads = first.runtime_shape.q_heads;
+        let kv_heads = first.runtime_shape.kv_heads;
+        let head_dim = first.runtime_shape.head_dim;
+        let value_dim = first.runtime_shape.value_dim;
+        for layer in &layers {
+            if layer.runtime_shape.hidden != hidden
+                || layer.runtime_shape.q_heads != q_heads
+                || layer.runtime_shape.kv_heads != kv_heads
+                || layer.runtime_shape.head_dim != head_dim
+                || layer.runtime_shape.value_dim != value_dim
+            {
+                return Err(format!(
+                    "Qwen3 package model runtime layer {} shape mismatch: hidden={} q_heads={} kv_heads={} head_dim={} value_dim={}",
+                    layer.layer_index,
+                    layer.runtime_shape.hidden,
+                    layer.runtime_shape.q_heads,
+                    layer.runtime_shape.kv_heads,
+                    layer.runtime_shape.head_dim,
+                    layer.runtime_shape.value_dim
+                ));
+            }
+            if layer.q_norm.values.len() != head_dim || layer.k_norm.values.len() != head_dim {
+                return Err(format!(
+                    "Qwen3 package model runtime layer {} q/k norm length mismatch: q={} k={} head_dim={head_dim}",
+                    layer.layer_index,
+                    layer.q_norm.values.len(),
+                    layer.k_norm.values.len()
+                ));
+            }
+        }
+
+        Ok(Self {
+            layers,
+            hidden,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale: 1.0_f32 / (head_dim as f32).sqrt(),
+            mlp_epsilon: 1e-5_f32,
+        })
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn layer_indices(&self) -> Vec<usize> {
+        self.layers.iter().map(|layer| layer.layer_index).collect()
+    }
+
+    pub fn default_rotary_dim(&self) -> Result<usize, String> {
+        let candidate = if self.head_dim >= 4 {
+            self.head_dim / 4
+        } else {
+            self.head_dim
+        };
+        let rotary_dim = candidate - (candidate % 2);
+        if rotary_dim == 0 {
+            return Err(format!(
+                "default rotary_dim is zero for head_dim={}",
+                self.head_dim
+            ));
+        }
+        Ok(rotary_dim)
+    }
+
+    pub fn decode_shape(&self, block_size: usize, cache_blocks: usize) -> PagedDecodeShape {
+        PagedDecodeShape {
+            block_size,
+            cache_blocks,
+            q_heads: self.q_heads,
+            kv_heads: self.kv_heads,
+            head_dim: self.head_dim,
+            value_dim: self.value_dim,
+        }
+    }
+
+    pub fn tensor_names_by_layer<F>(&self, mut select: F) -> Vec<String>
+    where
+        F: FnMut(&Qwen3PackageDecoderLayerRuntime) -> &str,
+    {
+        self.layers
+            .iter()
+            .map(|layer| select(layer).to_string())
+            .collect()
+    }
+
+    pub fn q_norm_dtypes(&self) -> Vec<String> {
+        self.layers
+            .iter()
+            .map(|layer| layer.q_norm.dtype.clone())
+            .collect()
+    }
+
+    pub fn k_norm_dtypes(&self) -> Vec<String> {
+        self.layers
+            .iter()
+            .map(|layer| layer.k_norm.dtype.clone())
+            .collect()
+    }
+
+    pub fn post_norm_dtypes(&self) -> Vec<String> {
+        self.layers
+            .iter()
+            .map(|layer| layer.post_norm.dtype.clone())
+            .collect()
+    }
+
+    pub fn intermediates(&self) -> Vec<usize> {
+        self.layers
+            .iter()
+            .map(|layer| layer.weights.post_attention.intermediate)
+            .collect()
+    }
 }
 
 pub fn qwen3_package_decoder_layer_runtime_from_package(
@@ -383,5 +551,43 @@ mod tests {
         };
 
         assert!(err.contains("post RMSNorm length"));
+    }
+
+    #[test]
+    fn package_model_runtime_rejects_empty_layer_list_before_package_io() {
+        let mut context = RuntimeContext::create(0).expect("create CPU runtime context");
+        let mut stream = context.create_stream().expect("create CPU runtime stream");
+
+        let err = match Qwen3PackageModelRuntime::load(
+            &mut context,
+            &mut stream,
+            "/path/that/should/not/be/read",
+            1024,
+            &[],
+        ) {
+            Ok(_) => panic!("empty layer list must fail before package IO"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("at least one layer index"));
+    }
+
+    #[test]
+    fn package_model_runtime_rejects_duplicate_layers_before_package_io() {
+        let mut context = RuntimeContext::create(0).expect("create CPU runtime context");
+        let mut stream = context.create_stream().expect("create CPU runtime stream");
+
+        let err = match Qwen3PackageModelRuntime::load(
+            &mut context,
+            &mut stream,
+            "/path/that/should/not/be/read",
+            1024,
+            &[3, 3],
+        ) {
+            Ok(_) => panic!("duplicate layer list must fail before package IO"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("duplicated"));
     }
 }
