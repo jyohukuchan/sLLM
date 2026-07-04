@@ -153,3 +153,44 @@ Pass criteria:
 ## Decision Gate
 
 Proceed to manifest row-scale metadata only if layer `10` is the initial target and the implementation is kept optional. Do not generalize to layer `11` until a self-attention-specific row-dot trace exists.
+
+## 2026-07-05 Prototype Result
+
+Implemented the first manifest metadata prototype:
+
+- Engine package manifest parsing accepts optional `row_scale_overrides`.
+- `materialize_selected_aq4_matrix` applies matching row scales after AQ4 dequantization and before returning the runtime matrix.
+- `ullm-quant --row-scale-overrides-json PATH` attaches validated metadata to direct package manifests.
+- Existing packages without metadata remain load-compatible; the no-metadata p4p46 package still runs with `row_scale_overrides=none`.
+
+Validation package:
+
+- `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer10.ullm.d`
+- Created as a hardlink copy of the p4p46-inproj package with only `manifest.json` changed.
+
+CPU current-binary comparison, no metadata vs manifest metadata:
+
+| mode | max MSE before | max MSE after | max abs before | max abs after |
+| --- | ---: | ---: | ---: | ---: |
+| `golden_before_each_layer` | `0.000740506879` | `0.000740506879` | `0.875896454` | `0.508314133` |
+| `actual_prefix` | `0.004141662294` | `0.004106469453` | `1.744266510` | `0.967845917` |
+
+Layer `10` direct effect:
+
+| mode | layer 10 max abs before | layer 10 max abs after |
+| --- | ---: | ---: |
+| `golden_before_each_layer` | `0.875896454` | `0.304975510` |
+| `actual_prefix` | `1.744266510` | `0.967845917` |
+
+R9700 manifest metadata validation:
+
+| mode | max MSE | max mean abs diff | max abs diff | min cosine similarity |
+| --- | ---: | ---: | ---: | ---: |
+| `golden_before_each_layer` | `0.000740507114` | `0.020715803` | `0.508314133` | `0.998585695` |
+| `actual_prefix` | `0.004106476000` | `0.050080222` | `0.967796326` | `0.992982658` |
+
+Conclusion:
+
+- Manifest metadata reproduces the layer `10` max-abs improvement without using the smoke CLI override.
+- The improvement is backend-stable on CPU and R9700.
+- Aggregate MSE is still dominated by later layer drift, so layer `11` remains a separate debugging track.

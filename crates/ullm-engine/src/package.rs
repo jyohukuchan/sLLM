@@ -50,6 +50,7 @@ pub struct TensorPayloadBundle {
     pub index_file: ReferencedFile,
     pub scale_file: ReferencedFile,
     pub codebook_file: ReferencedFile,
+    pub row_scale_overrides: Vec<RowScaleOverrideEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,6 +118,24 @@ impl ReferencedFileRole {
     }
 }
 
+pub const ROW_SCALE_OVERRIDES_SCHEMA_VERSION: &str = "row-scale-overrides-v0.1";
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RowScaleOverridesManifest {
+    pub schema_version: String,
+    #[serde(default)]
+    pub entries: Vec<RowScaleOverrideEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RowScaleOverrideEntry {
+    pub tensor_name: String,
+    pub row_index: usize,
+    pub scale: f32,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct Manifest {
     schema_version: Option<String>,
@@ -127,6 +146,8 @@ struct Manifest {
     passthrough_tensors: Vec<PassthroughTensor>,
     #[serde(default)]
     codebooks: Vec<Codebook>,
+    #[serde(default)]
+    row_scale_overrides: Option<RowScaleOverridesManifest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,7 +274,7 @@ pub fn select_tensor_payload_bundle(
         .tensors
         .get(tensor_index)
         .ok_or_else(|| format!("tensor index {tensor_index} is out of range"))?;
-    tensor_payload_bundle_from_manifest(package_dir, tensor_index, tensor)
+    tensor_payload_bundle_from_manifest(package_dir, &manifest, tensor_index, tensor)
 }
 
 pub fn list_tensor_payload_bundles(
@@ -265,6 +286,7 @@ pub fn list_tensor_payload_bundles(
     for (tensor_index, tensor) in manifest.tensors.iter().enumerate() {
         bundles.push(tensor_payload_bundle_from_manifest(
             package_dir,
+            &manifest,
             tensor_index,
             tensor,
         )?);
@@ -304,6 +326,7 @@ pub fn list_passthrough_payload_bundles(
 
 fn tensor_payload_bundle_from_manifest(
     package_dir: &Path,
+    manifest: &Manifest,
     tensor_index: usize,
     tensor: &QuantizedTensor,
 ) -> Result<TensorPayloadBundle, String> {
@@ -336,6 +359,8 @@ fn tensor_payload_bundle_from_manifest(
         ReferencedFileRole::TensorCodebook,
         tensor.codebook_file.as_deref(),
     )?;
+    let row_scale_overrides =
+        matching_row_scale_overrides(&manifest.row_scale_overrides, &tensor_name)?;
 
     Ok(TensorPayloadBundle {
         tensor_index,
@@ -354,7 +379,46 @@ fn tensor_payload_bundle_from_manifest(
         index_file,
         scale_file,
         codebook_file,
+        row_scale_overrides,
     })
+}
+
+fn matching_row_scale_overrides(
+    overrides: &Option<RowScaleOverridesManifest>,
+    tensor_name: &str,
+) -> Result<Vec<RowScaleOverrideEntry>, String> {
+    let Some(overrides) = overrides else {
+        return Ok(Vec::new());
+    };
+    if overrides.schema_version != ROW_SCALE_OVERRIDES_SCHEMA_VERSION {
+        return Err(format!(
+            "row_scale_overrides schema_version must be {}, got {}",
+            ROW_SCALE_OVERRIDES_SCHEMA_VERSION, overrides.schema_version
+        ));
+    }
+    let mut seen = BTreeSet::<(&str, usize)>::new();
+    let mut matching = Vec::new();
+    for entry in &overrides.entries {
+        if entry.tensor_name.is_empty() {
+            return Err("row_scale_overrides entry tensor_name must not be empty".to_string());
+        }
+        if !entry.scale.is_finite() || entry.scale <= 0.0 {
+            return Err(format!(
+                "row_scale_overrides entry for {} row {} must have a finite positive scale",
+                entry.tensor_name, entry.row_index
+            ));
+        }
+        if !seen.insert((entry.tensor_name.as_str(), entry.row_index)) {
+            return Err(format!(
+                "duplicate row_scale_overrides entry for {} row {}",
+                entry.tensor_name, entry.row_index
+            ));
+        }
+        if entry.tensor_name == tensor_name {
+            matching.push(entry.clone());
+        }
+    }
+    Ok(matching)
 }
 
 fn passthrough_payload_bundle_from_manifest(
@@ -742,7 +806,16 @@ mod tests {
                 "family": "test-family",
                 "candidate_id": "test-candidate",
                 "file": "codebooks/c.f32"
-              }]
+              }],
+              "row_scale_overrides": {
+                "schema_version": "row-scale-overrides-v0.1",
+                "entries": [{
+                  "tensor_name": "tensor-a",
+                  "row_index": 2,
+                  "scale": 1.25,
+                  "source": "unit-test"
+                }]
+              }
             }"#,
         )
         .unwrap();
@@ -776,6 +849,16 @@ mod tests {
             select_existing_referenced_file(&root, ReferencedFileRole::TensorScale).unwrap();
         assert_eq!(scale.relative_path, "tensors/a.scale_u8");
         assert_eq!(scale.role, ReferencedFileRole::TensorScale);
+
+        let bundle = select_tensor_payload_bundle(&root, &TensorSelector::First).unwrap();
+        assert_eq!(bundle.row_scale_overrides.len(), 1);
+        assert_eq!(bundle.row_scale_overrides[0].tensor_name, "tensor-a");
+        assert_eq!(bundle.row_scale_overrides[0].row_index, 2);
+        assert_eq!(bundle.row_scale_overrides[0].scale, 1.25);
+        assert_eq!(
+            bundle.row_scale_overrides[0].source.as_deref(),
+            Some("unit-test")
+        );
 
         let tensor_codebook =
             select_existing_referenced_file(&root, ReferencedFileRole::TensorCodebook).unwrap();

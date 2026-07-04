@@ -99,6 +99,7 @@ struct Options {
     convert_include_passthrough: bool,
     convert_copy_buffer_bytes: usize,
     convert_overwrite: bool,
+    row_scale_overrides_json: Option<PathBuf>,
     merge_policy_summary: Option<PathBuf>,
     merge_plan_json: Option<PathBuf>,
     merge_output_dir: Option<PathBuf>,
@@ -273,6 +274,26 @@ struct PrototypeManifest {
     codebooks: Vec<PrototypeCodebookManifest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     passthrough_tensors: Vec<PrototypePassthroughTensorManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    row_scale_overrides: Option<PrototypeRowScaleOverrides>,
+}
+
+const ROW_SCALE_OVERRIDES_SCHEMA_VERSION: &str = "row-scale-overrides-v0.1";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PrototypeRowScaleOverrides {
+    schema_version: String,
+    #[serde(default)]
+    entries: Vec<PrototypeRowScaleOverrideEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PrototypeRowScaleOverrideEntry {
+    tensor_name: String,
+    row_index: usize,
+    scale: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -535,6 +556,7 @@ fn parse_options() -> Result<Options, String> {
         convert_include_passthrough: false,
         convert_copy_buffer_bytes: 8 * 1024 * 1024,
         convert_overwrite: false,
+        row_scale_overrides_json: None,
         merge_policy_summary: None,
         merge_plan_json: None,
         merge_output_dir: None,
@@ -673,6 +695,12 @@ fn parse_options() -> Result<Options, String> {
                     parse_usize("--convert-copy-buffer-bytes", args.next())?;
             }
             "--convert-overwrite" => options.convert_overwrite = true,
+            "--row-scale-overrides-json" => {
+                options.row_scale_overrides_json =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--row-scale-overrides-json requires a value".to_string()
+                    })?));
+            }
             "--merge-policy-summary" => {
                 options.merge_policy_summary =
                     Some(PathBuf::from(args.next().ok_or_else(|| {
@@ -802,6 +830,10 @@ fn print_help() {
         "                                 payload copy buffer size for direct package passthrough"
     );
     println!("  --convert-overwrite           replace existing convert outputs");
+    println!("  --row-scale-overrides-json <PATH>");
+    println!(
+        "                                 attach row-scale metadata to direct package manifest"
+    );
     println!("  --merge-policy-summary <PATH> merge per-tensor prototype summary JSON");
     println!("  --merge-plan-json <PATH>      model plan JSON for passthrough merge");
     println!("  --merge-output-dir <PATH>     merged prototype .ullm.d output directory");
@@ -2264,6 +2296,7 @@ fn write_prototype_tensor(
         tensors: vec![tensor_manifest],
         codebooks: vec![codebook_manifest],
         passthrough_tensors: Vec::new(),
+        row_scale_overrides: None,
     };
     let manifest_path = output_dir.join("manifest.json");
     write_json_pretty_file(&manifest_path, &manifest)?;
@@ -2607,6 +2640,64 @@ fn run_prototype_convert(options: &Options) -> Result<PrototypeConvertSummary, S
     Ok(summary)
 }
 
+fn load_direct_package_row_scale_overrides(
+    path: Option<&Path>,
+    tensors: &[PrototypeTensorManifest],
+) -> Result<Option<PrototypeRowScaleOverrides>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let overrides: PrototypeRowScaleOverrides = read_json_file(path)?;
+    if overrides.schema_version != ROW_SCALE_OVERRIDES_SCHEMA_VERSION {
+        return Err(format!(
+            "row_scale_overrides schema_version must be {}, got {}",
+            ROW_SCALE_OVERRIDES_SCHEMA_VERSION, overrides.schema_version
+        ));
+    }
+
+    let tensor_by_name = tensors
+        .iter()
+        .map(|tensor| (tensor.name.as_str(), tensor))
+        .collect::<BTreeMap<_, _>>();
+    let mut seen = BTreeSet::<(&str, usize)>::new();
+    for entry in &overrides.entries {
+        if entry.tensor_name.is_empty() {
+            return Err("row_scale_overrides entry tensor_name must not be empty".to_string());
+        }
+        if !entry.scale.is_finite() || entry.scale <= 0.0 {
+            return Err(format!(
+                "row_scale_overrides entry for {} row {} must have a finite positive scale",
+                entry.tensor_name, entry.row_index
+            ));
+        }
+        let Some(tensor) = tensor_by_name.get(entry.tensor_name.as_str()) else {
+            return Err(format!(
+                "row_scale_overrides entry references tensor {} that is not in the direct package manifest",
+                entry.tensor_name
+            ));
+        };
+        if tensor.shape.len() != 2 {
+            return Err(format!(
+                "row_scale_overrides tensor {} must be 2D, got shape {:?}",
+                entry.tensor_name, tensor.shape
+            ));
+        }
+        if entry.row_index >= tensor.shape[0] {
+            return Err(format!(
+                "row_scale_overrides row out of range for {}: row={} rows={}",
+                entry.tensor_name, entry.row_index, tensor.shape[0]
+            ));
+        }
+        if !seen.insert((entry.tensor_name.as_str(), entry.row_index)) {
+            return Err(format!(
+                "duplicate row_scale_overrides entry for {} row {}",
+                entry.tensor_name, entry.row_index
+            ));
+        }
+    }
+    Ok(Some(overrides))
+}
+
 fn run_direct_prototype_package(
     options: &Options,
 ) -> Result<PrototypeDirectPackageSummary, String> {
@@ -2784,12 +2875,18 @@ fn run_direct_prototype_package(
         Vec::new()
     };
 
+    let row_scale_overrides = load_direct_package_row_scale_overrides(
+        options.row_scale_overrides_json.as_deref(),
+        &tensors,
+    )?;
+
     let manifest = PrototypeManifest {
         schema_version: "ullm-prototype-manifest-v0.1".to_string(),
         source_model_dir: plan.model_dir.clone(),
         tensors,
         codebooks,
         passthrough_tensors,
+        row_scale_overrides,
     };
     let manifest_path = output_dir.join("manifest.json");
     write_json_pretty_file(&manifest_path, &manifest)?;
@@ -3330,6 +3427,7 @@ fn merge_prototype_dirs(
         tensors: merged_tensors,
         codebooks: merged_codebooks,
         passthrough_tensors,
+        row_scale_overrides: None,
     };
     let manifest_path = output_dir.join("manifest.json");
     write_json_pretty_file(&manifest_path, &manifest)?;
@@ -4362,6 +4460,7 @@ mod tests {
             convert_include_passthrough: false,
             convert_copy_buffer_bytes: 1024,
             convert_overwrite: false,
+            row_scale_overrides_json: None,
             merge_policy_summary: None,
             merge_plan_json: None,
             merge_output_dir: None,
@@ -4632,6 +4731,7 @@ mod tests {
         }"#;
         let manifest: PrototypeManifest = serde_json::from_str(text).expect("manifest");
         assert!(manifest.passthrough_tensors.is_empty());
+        assert!(manifest.row_scale_overrides.is_none());
     }
 
     #[test]
@@ -4854,11 +4954,12 @@ mod tests {
         let output_dir = root.join("direct.ullm.d");
         let plan_path = root.join("plan.json");
         let codebook_path = root.join("codebooks.json");
+        let row_scale_path = root.join("row-scale-overrides.json");
         let summary_path = root.join("summary.json");
         let safetensors_path = model_dir.join("model.safetensors");
         fs::create_dir_all(&model_dir).expect("model dir");
 
-        let header = br#"{"quant":{"dtype":"BF16","shape":[16],"data_offsets":[0,32]},"quant2":{"dtype":"BF16","shape":[16],"data_offsets":[32,64]},"keep":{"dtype":"U8","shape":[4],"data_offsets":[64,68]}}"#;
+        let header = br#"{"quant":{"dtype":"BF16","shape":[2,8],"data_offsets":[0,32]},"quant2":{"dtype":"BF16","shape":[2,8],"data_offsets":[32,64]},"keep":{"dtype":"U8","shape":[4],"data_offsets":[64,68]}}"#;
         let mut safetensors = fs::File::create(&safetensors_path).expect("safetensors");
         safetensors
             .write_all(&(header.len() as u64).to_le_bytes())
@@ -4905,7 +5006,7 @@ mod tests {
                 "name": "quant",
                 "source_file": safetensors_path.display().to_string(),
                 "dtype": "BF16",
-                "shape": [16],
+                "shape": [2, 8],
                 "family": "mlp_up",
                 "n_elements": 16,
                 "n_bytes": 32,
@@ -4919,7 +5020,7 @@ mod tests {
                 "name": "quant2",
                 "source_file": safetensors_path.display().to_string(),
                 "dtype": "BF16",
-                "shape": [16],
+                "shape": [2, 8],
                 "family": "mlp_up",
                 "n_elements": 16,
                 "n_bytes": 32,
@@ -4962,6 +5063,20 @@ mod tests {
             .expect("codebook json"),
         )
         .expect("codebook");
+        fs::write(
+            &row_scale_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "row-scale-overrides-v0.1",
+                "entries": [{
+                    "tensor_name": "quant",
+                    "row_index": 1,
+                    "scale": 1.25,
+                    "source": "unit-test"
+                }]
+            }))
+            .expect("row scale json"),
+        )
+        .expect("row scale");
 
         let mut options = test_options("all-g16");
         options.convert_plan_json = Some(plan_path);
@@ -4972,6 +5087,7 @@ mod tests {
         options.convert_verify = true;
         options.convert_jobs = 2;
         options.chunk_bytes = 32;
+        options.row_scale_overrides_json = Some(row_scale_path);
 
         let summary = run_direct_prototype_package(&options).expect("direct package");
         assert_eq!(summary.selected_count, 2);
@@ -4986,6 +5102,19 @@ mod tests {
         assert!(output_dir.join("manifest.json").exists());
         assert!(output_dir.join("tensors").join("000-quant.idx4").exists());
         assert!(output_dir.join("tensors").join("001-quant2.idx4").exists());
+        let manifest: PrototypeManifest =
+            serde_json::from_str(&fs::read_to_string(output_dir.join("manifest.json")).unwrap())
+                .expect("direct manifest");
+        let overrides = manifest
+            .row_scale_overrides
+            .as_ref()
+            .expect("row scale overrides");
+        assert_eq!(overrides.schema_version, "row-scale-overrides-v0.1");
+        assert_eq!(overrides.entries.len(), 1);
+        assert_eq!(overrides.entries[0].tensor_name, "quant");
+        assert_eq!(overrides.entries[0].row_index, 1);
+        assert_eq!(overrides.entries[0].scale, 1.25);
+        assert_eq!(overrides.entries[0].source.as_deref(), Some("unit-test"));
         assert_eq!(
             fs::read(output_dir.join("passthrough").join("002-keep.raw")).expect("passthrough"),
             vec![9, 8, 7, 6]

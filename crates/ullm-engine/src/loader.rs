@@ -3,7 +3,7 @@
 
 use crate::package::{
     PackageSummary, PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole,
-    TensorPayloadBundle, TensorSelector, list_tensor_payload_bundles,
+    RowScaleOverrideEntry, TensorPayloadBundle, TensorSelector, list_tensor_payload_bundles,
     select_passthrough_payload_bundle, select_tensor_payload_bundle,
 };
 use std::collections::BTreeMap;
@@ -321,7 +321,77 @@ pub fn materialize_selected_aq4_matrix(
     stream.synchronize().map_err(|err| {
         format!("failed to synchronize runtime stream after materializing {tensor_name}: {err}")
     })?;
+    apply_row_scale_overrides_to_materialized_matrix(
+        stream,
+        &mut output,
+        rows,
+        cols,
+        tensor_name,
+        &bundle.row_scale_overrides,
+    )?;
     Ok((rows, cols, output))
+}
+
+fn apply_row_scale_overrides_to_materialized_matrix(
+    stream: &mut RuntimeStream,
+    matrix: &mut RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    tensor_name: &str,
+    overrides: &[RowScaleOverrideEntry],
+) -> Result<(), String> {
+    if overrides.is_empty() {
+        return Ok(());
+    }
+    let matrix_bytes_len = rows
+        .checked_mul(cols)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| {
+            format!("row_scale_overrides matrix byte size overflows for {tensor_name}")
+        })?;
+    let mut matrix_bytes = vec![0_u8; matrix_bytes_len];
+    matrix
+        .copy_to_host(0, &mut matrix_bytes, Some(stream))
+        .map_err(|err| {
+            format!("failed to copy materialized {tensor_name} for row_scale_overrides: {err}")
+        })?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize after {tensor_name} row_scale_overrides copy: {err}")
+    })?;
+
+    let row_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| format!("row_scale_overrides row byte size overflows for {tensor_name}"))?;
+    for entry in overrides {
+        if entry.row_index >= rows {
+            return Err(format!(
+                "row_scale_overrides row out of range for {tensor_name}: row={} rows={rows}",
+                entry.row_index
+            ));
+        }
+        let row_start = entry
+            .row_index
+            .checked_mul(row_bytes)
+            .ok_or_else(|| format!("row_scale_overrides row offset overflows for {tensor_name}"))?;
+        let row_end = row_start
+            .checked_add(row_bytes)
+            .ok_or_else(|| format!("row_scale_overrides row end overflows for {tensor_name}"))?;
+        for offset in (row_start..row_end).step_by(std::mem::size_of::<f32>()) {
+            let mut raw = [0_u8; 4];
+            raw.copy_from_slice(&matrix_bytes[offset..offset + 4]);
+            let scaled = f32::from_le_bytes(raw) * entry.scale;
+            matrix_bytes[offset..offset + 4].copy_from_slice(&scaled.to_le_bytes());
+        }
+    }
+
+    matrix
+        .copy_from_host(0, &matrix_bytes, Some(stream))
+        .map_err(|err| {
+            format!("failed to copy row-scaled materialized {tensor_name} back to runtime: {err}")
+        })?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize after {tensor_name} row_scale_overrides copy back: {err}")
+    })
 }
 
 pub fn resolve_passthrough_dtype<'a>(
@@ -796,6 +866,7 @@ fn load_payload_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
     use crate::package::{TensorSelector, select_tensor_payload_bundle};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1094,6 +1165,85 @@ mod tests {
             (2, 2)
         );
         assert!(matrix_shape_rows_cols(&[4], config.elements).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn materialize_selected_aq4_matrix_applies_manifest_row_scale_overrides() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-row-scale-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("tensors/a.idx4"), [0x21_u8, 0x43]).unwrap();
+        fs::write(root.join("tensors/a.scale_u8"), [127_u8, 127_u8]).unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        fs::write(
+            root.join("codebooks/a.f32"),
+            encode_f32_to_bytes(&codebook_values),
+        )
+        .unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "tensor.weight",
+                "dtype": "BF16",
+                "shape": [2, 2],
+                "family": "test",
+                "candidate_id": "aq4_test",
+                "scale_format": "e8m0",
+                "group_size": 2,
+                "tensor_scale": 1.0,
+                "index_encoding": "idx4_low_nibble_first",
+                "scale_encoding": "u8_scale_table_index",
+                "elements": 4,
+                "groups": 2,
+                "index_file": "tensors/a.idx4",
+                "scale_file": "tensors/a.scale_u8",
+                "codebook_file": "codebooks/a.f32"
+              }],
+              "row_scale_overrides": {
+                "schema_version": "row-scale-overrides-v0.1",
+                "entries": [{
+                  "tensor_name": "tensor.weight",
+                  "row_index": 1,
+                  "scale": 10.0,
+                  "source": "unit-test"
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut registry = WeightRegistry::new();
+        let (rows, cols, output) = materialize_selected_aq4_matrix(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            &root,
+            "tensor.weight",
+            8,
+        )
+        .unwrap();
+
+        assert_eq!((rows, cols), (2, 2));
+        let mut output_bytes = vec![0_u8; 4 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(
+            decode_f32_le_values(&output_bytes),
+            vec![1.0_f32, 2.0, 30.0, 40.0]
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
