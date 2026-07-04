@@ -7,7 +7,8 @@ use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
 use ullm_engine::decoder::{
-    PagedDecodeShape, Qwen3SelfAttnBlockStepState, Qwen3SelfAttnDecodeState,
+    PagedDecodeShape, Qwen3DecoderLayerStepState, Qwen3SelfAttnBlockStepState,
+    Qwen3SelfAttnDecodeState,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -7501,10 +7502,15 @@ fn package_self_attn_block_smoke(
 
 struct SelfAttnBlockSmokeRun {
     residual_sequence: Vec<f32>,
+    q_rope: Vec<f32>,
+    k_rope: Vec<f32>,
+    v_projected: Vec<f32>,
+    q_gate: Option<Vec<f32>>,
     attention_output: Vec<f32>,
     attention_projection_input: Vec<f32>,
     attn_projected: Vec<f32>,
     block_output: Vec<f32>,
+    o_matrix: ullm_runtime_sys::RuntimeBuffer,
     paged_block_table: Vec<u32>,
     paged_block_size: usize,
     paged_cache_blocks: usize,
@@ -7981,10 +7987,15 @@ fn run_self_attn_block_sequence_smoke(
 
     Ok(SelfAttnBlockSmokeRun {
         residual_sequence,
+        q_rope,
+        k_rope,
+        v_projected,
+        q_gate,
         attention_output,
         attention_projection_input,
         attn_projected,
         block_output,
+        o_matrix,
         paged_block_table,
         paged_block_size,
         paged_cache_blocks,
@@ -8213,15 +8224,8 @@ fn package_self_attn_mlp_block_smoke_impl(
             post_norm.values.len()
         ));
     }
-    let hidden_bytes = hidden
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| "hidden byte size overflows".to_string())?;
-    let hidden_sequence_bytes = hidden_bytes
-        .checked_mul(sequence_len)
-        .ok_or_else(|| "hidden sequence byte size overflows".to_string())?;
     let mlp_epsilon = 1e-5_f32;
     let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm.values);
-    let attention_block_bytes = encode_f32_to_bytes(&self_attn.block_output);
 
     let mut post_normed_expected = Vec::with_capacity(sequence_len * hidden);
     for timestep in 0..sequence_len {
@@ -8235,15 +8239,9 @@ fn package_self_attn_mlp_block_smoke_impl(
         post_normed_expected.extend_from_slice(&expected);
     }
 
-    let mut attn_block_step_buffer = context
-        .alloc_buffer(hidden_bytes)
-        .map_err(|err| format!("failed to allocate attention block step buffer: {err}"))?;
     let mut post_norm_weight_buffer = context
         .alloc_buffer(post_norm_weight_bytes.len())
         .map_err(|err| format!("failed to allocate post RMSNorm weight buffer: {err}"))?;
-    let mut post_normed_buffer = context
-        .alloc_buffer(hidden_bytes)
-        .map_err(|err| format!("failed to allocate post RMSNorm output buffer: {err}"))?;
     post_norm_weight_buffer
         .copy_from_host(0, &post_norm_weight_bytes, Some(&mut stream))
         .map_err(|err| format!("failed to copy post RMSNorm weight into runtime buffer: {err}"))?;
@@ -8251,54 +8249,7 @@ fn package_self_attn_mlp_block_smoke_impl(
         .synchronize()
         .map_err(|err| format!("failed to synchronize after post RMSNorm weight copy: {err}"))?;
 
-    let mut post_normed_bytes = vec![0_u8; hidden_sequence_bytes];
-    for timestep in 0..sequence_len {
-        let byte_start = timestep * hidden_bytes;
-        let byte_end = byte_start + hidden_bytes;
-        attn_block_step_buffer
-            .copy_from_host(
-                0,
-                &attention_block_bytes[byte_start..byte_end],
-                Some(&mut stream),
-            )
-            .map_err(|err| {
-                format!("failed to copy attention block timestep {timestep} for post norm: {err}")
-            })?;
-        ullm_runtime_sys::rmsnorm_f32(
-            &attn_block_step_buffer,
-            &post_norm_weight_buffer,
-            hidden,
-            mlp_epsilon,
-            &mut post_normed_buffer,
-            Some(&mut stream),
-        )
-        .map_err(|err| format!("failed to run post RMSNorm timestep {timestep}: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after post RMSNorm timestep {timestep}: {err}")
-        })?;
-        post_normed_buffer
-            .copy_to_host(
-                0,
-                &mut post_normed_bytes[byte_start..byte_end],
-                Some(&mut stream),
-            )
-            .map_err(|err| {
-                format!("failed to copy post RMSNorm timestep {timestep} to host: {err}")
-            })?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after post RMSNorm host copy {timestep}: {err}")
-        })?;
-    }
-    let post_normed = decode_f32_le_values(&post_normed_bytes);
-    let post_norm_max_abs_diff = verify_f32_close(
-        "package-self-attn-mlp-block-smoke post RMSNorm",
-        &post_normed,
-        &post_normed_expected,
-        1e-4,
-        1e-5,
-    )?;
-
-    let (mlp_output, layer_output, layer_block_max_abs_diff) = {
+    let (post_normed, mlp_output, layer_output, post_norm_max_abs_diff, layer_block_max_abs_diff) = {
         let mut registry = WeightRegistry::new();
         let (gate_rows, gate_cols, gate_matrix) = materialize_selected_aq4_matrix(
             &mut context,
@@ -8335,126 +8286,127 @@ fn package_self_attn_mlp_block_smoke_impl(
             ));
         }
         let intermediate = gate_rows;
-        let intermediate_bytes = intermediate
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| "MLP intermediate byte size overflows".to_string())?;
-        let mut post_normed_step_buffer = context
-            .alloc_buffer(hidden_bytes)
-            .map_err(|err| format!("failed to allocate post normed step buffer: {err}"))?;
-        let mut gate_buffer = context
-            .alloc_buffer(intermediate_bytes)
-            .map_err(|err| format!("failed to allocate MLP gate buffer: {err}"))?;
-        let mut up_buffer = context
-            .alloc_buffer(intermediate_bytes)
-            .map_err(|err| format!("failed to allocate MLP up buffer: {err}"))?;
-        let mut mlp_activated_buffer = context
-            .alloc_buffer(intermediate_bytes)
-            .map_err(|err| format!("failed to allocate MLP activated buffer: {err}"))?;
-        let mut mlp_output_buffer = context
-            .alloc_buffer(hidden_bytes)
-            .map_err(|err| format!("failed to allocate MLP output buffer: {err}"))?;
-        let mut layer_output_buffer = context
-            .alloc_buffer(hidden_bytes)
-            .map_err(|err| format!("failed to allocate layer output buffer: {err}"))?;
-        let mut mlp_output_bytes = vec![0_u8; hidden_sequence_bytes];
-        let mut layer_output_bytes = vec![0_u8; hidden_sequence_bytes];
+        let decode_shape = PagedDecodeShape {
+            block_size: self_attn.paged_block_size,
+            cache_blocks: self_attn.paged_cache_blocks,
+            q_heads: self_attn.q_heads,
+            kv_heads: self_attn.kv_heads,
+            head_dim: self_attn.head_dim,
+            value_dim: self_attn.value_dim,
+        };
+        let mut layer_step_state = Qwen3DecoderLayerStepState::new(
+            &mut context,
+            &mut stream,
+            decode_shape,
+            self_attn.paged_block_table.clone(),
+            hidden,
+            intermediate,
+            self_attn.softmax_scale,
+            mlp_epsilon,
+        )?;
+        let q_token_elements = self_attn.q_heads * self_attn.head_dim;
+        let k_token_elements = self_attn.kv_heads * self_attn.head_dim;
+        let v_token_elements = self_attn.kv_heads * self_attn.value_dim;
+        let attention_elements = self_attn.q_heads * self_attn.value_dim;
+        let mut layer_step_block_output = Vec::with_capacity(sequence_len * hidden);
+        let mut post_normed = Vec::with_capacity(sequence_len * hidden);
+        let mut mlp_output = Vec::with_capacity(sequence_len * hidden);
+        let mut layer_output = Vec::with_capacity(sequence_len * hidden);
         for timestep in 0..sequence_len {
-            let byte_start = timestep * hidden_bytes;
-            let byte_end = byte_start + hidden_bytes;
-            post_normed_step_buffer
-                .copy_from_host(
-                    0,
-                    &post_normed_bytes[byte_start..byte_end],
-                    Some(&mut stream),
-                )
-                .map_err(|err| format!("failed to copy post normed timestep {timestep}: {err}"))?;
-            ullm_runtime_sys::matvec_f32(
-                &gate_matrix,
-                &post_normed_step_buffer,
-                gate_rows,
-                gate_cols,
-                &mut gate_buffer,
-                Some(&mut stream),
-            )
-            .map_err(|err| format!("failed to run MLP gate matvec timestep {timestep}: {err}"))?;
-            ullm_runtime_sys::matvec_f32(
-                &up_matrix,
-                &post_normed_step_buffer,
-                up_rows,
-                up_cols,
-                &mut up_buffer,
-                Some(&mut stream),
-            )
-            .map_err(|err| format!("failed to run MLP up matvec timestep {timestep}: {err}"))?;
-            stream.synchronize().map_err(|err| {
-                format!("failed to synchronize after MLP gate/up timestep {timestep}: {err}")
-            })?;
-            ullm_runtime_sys::silu_mul_f32(
-                &gate_buffer,
-                &up_buffer,
-                intermediate,
-                &mut mlp_activated_buffer,
-                Some(&mut stream),
-            )
-            .map_err(|err| format!("failed to run MLP SiLU-mul timestep {timestep}: {err}"))?;
-            stream.synchronize().map_err(|err| {
-                format!("failed to synchronize after MLP SiLU-mul timestep {timestep}: {err}")
-            })?;
-            ullm_runtime_sys::matvec_f32(
-                &down_matrix,
-                &mlp_activated_buffer,
-                down_rows,
-                down_cols,
-                &mut mlp_output_buffer,
-                Some(&mut stream),
-            )
-            .map_err(|err| format!("failed to run MLP down matvec timestep {timestep}: {err}"))?;
-            stream.synchronize().map_err(|err| {
-                format!("failed to synchronize after MLP down timestep {timestep}: {err}")
-            })?;
-            mlp_output_buffer
-                .copy_to_host(
-                    0,
-                    &mut mlp_output_bytes[byte_start..byte_end],
-                    Some(&mut stream),
-                )
-                .map_err(|err| format!("failed to copy MLP output timestep {timestep}: {err}"))?;
-            attn_block_step_buffer
-                .copy_from_host(
-                    0,
-                    &attention_block_bytes[byte_start..byte_end],
-                    Some(&mut stream),
+            let q_start = timestep * q_token_elements;
+            let q_end = q_start + q_token_elements;
+            let k_start = timestep * k_token_elements;
+            let k_end = k_start + k_token_elements;
+            let v_start = timestep * v_token_elements;
+            let v_end = v_start + v_token_elements;
+            let attention_start = timestep * attention_elements;
+            let attention_end = attention_start + attention_elements;
+            let residual_start = timestep * hidden;
+            let residual_end = residual_start + hidden;
+            let gate_step = self_attn
+                .q_gate
+                .as_ref()
+                .map(|gate| &gate[attention_start..attention_end]);
+            let step = layer_step_state
+                .step(
+                    &mut stream,
+                    &self_attn.o_matrix,
+                    &post_norm_weight_buffer,
+                    &gate_matrix,
+                    &up_matrix,
+                    &down_matrix,
+                    &self_attn.q_rope[q_start..q_end],
+                    &self_attn.k_rope[k_start..k_end],
+                    &self_attn.v_projected[v_start..v_end],
+                    gate_step,
+                    &self_attn.residual_sequence[residual_start..residual_end],
                 )
                 .map_err(|err| {
-                    format!(
-                        "failed to copy attention block timestep {timestep} for MLP residual: {err}"
-                    )
+                    format!("failed to run Qwen3 decoder layer step {timestep}: {err}")
                 })?;
-            ullm_runtime_sys::add_f32(
-                &attn_block_step_buffer,
-                &mlp_output_buffer,
-                hidden,
-                &mut layer_output_buffer,
-                Some(&mut stream),
-            )
-            .map_err(|err| format!("failed to run MLP residual add timestep {timestep}: {err}"))?;
-            stream.synchronize().map_err(|err| {
-                format!("failed to synchronize after MLP residual timestep {timestep}: {err}")
-            })?;
-            layer_output_buffer
-                .copy_to_host(
-                    0,
-                    &mut layer_output_bytes[byte_start..byte_end],
-                    Some(&mut stream),
-                )
-                .map_err(|err| format!("failed to copy layer output timestep {timestep}: {err}"))?;
-            stream.synchronize().map_err(|err| {
-                format!("failed to synchronize after layer output copy timestep {timestep}: {err}")
-            })?;
+            if step.cache_position != timestep {
+                return Err(format!(
+                    "Qwen3 decoder layer step wrote position {}, expected {timestep}",
+                    step.cache_position
+                ));
+            }
+            if step.cache_len != timestep + 1 {
+                return Err(format!(
+                    "Qwen3 decoder layer step reported cache_len {}, expected {}",
+                    step.cache_len,
+                    timestep + 1
+                ));
+            }
+            layer_step_block_output.extend_from_slice(&step.block_output);
+            post_normed.extend_from_slice(&step.post_normed);
+            mlp_output.extend_from_slice(&step.mlp_output);
+            layer_output.extend_from_slice(&step.layer_output);
         }
-        let mlp_output = decode_f32_le_values(&mlp_output_bytes);
-        let layer_output = decode_f32_le_values(&layer_output_bytes);
-        let expected_layer_output = runtime_host_add_f32(&self_attn.block_output, &mlp_output);
+
+        let (expected_paged_k_cache, expected_paged_v_cache) =
+            pack_paged_decode_kv_cache_for_block_table(
+                &self_attn.k_rope,
+                &self_attn.v_projected,
+                &self_attn.paged_block_table,
+                sequence_len,
+                self_attn.paged_block_size,
+                self_attn.paged_cache_blocks,
+                self_attn.kv_heads,
+                self_attn.head_dim,
+                self_attn.value_dim,
+            )?;
+        let layer_cache = layer_step_state
+            .read_cache_to_host(&mut stream)
+            .map_err(|err| format!("failed to read Qwen3 decoder layer paged cache: {err}"))?;
+        verify_f32_close(
+            "package-self-attn-mlp-block-smoke layer step paged k cache write",
+            &layer_cache.k,
+            &expected_paged_k_cache,
+            1e-5,
+            1e-5,
+        )?;
+        verify_f32_close(
+            "package-self-attn-mlp-block-smoke layer step paged v cache write",
+            &layer_cache.v,
+            &expected_paged_v_cache,
+            1e-5,
+            1e-5,
+        )?;
+        verify_f32_close(
+            "package-self-attn-mlp-block-smoke layer step attention block",
+            &layer_step_block_output,
+            &self_attn.block_output,
+            1e-4,
+            1e-5,
+        )?;
+        let post_norm_max_abs_diff = verify_f32_close(
+            "package-self-attn-mlp-block-smoke post RMSNorm",
+            &post_normed,
+            &post_normed_expected,
+            1e-4,
+            1e-5,
+        )?;
+        let expected_layer_output = runtime_host_add_f32(&layer_step_block_output, &mlp_output);
         let layer_block_max_abs_diff = verify_f32_close(
             "package-self-attn-mlp-block-smoke layer residual",
             &layer_output,
@@ -8462,7 +8414,13 @@ fn package_self_attn_mlp_block_smoke_impl(
             1e-5,
             1e-6,
         )?;
-        (mlp_output, layer_output, layer_block_max_abs_diff)
+        (
+            post_normed,
+            mlp_output,
+            layer_output,
+            post_norm_max_abs_diff,
+            layer_block_max_abs_diff,
+        )
     };
 
     Ok(format!(

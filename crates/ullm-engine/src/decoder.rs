@@ -49,6 +49,16 @@ pub struct Qwen3SelfAttnBlockStepOutput {
     pub block_output: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen3DecoderLayerStepOutput {
+    pub cache_position: usize,
+    pub cache_len: usize,
+    pub block_output: Vec<f32>,
+    pub post_normed: Vec<f32>,
+    pub mlp_output: Vec<f32>,
+    pub layer_output: Vec<f32>,
+}
+
 #[derive(Debug)]
 pub struct PagedDecodeState {
     shape: PagedDecodeShape,
@@ -80,6 +90,21 @@ pub struct Qwen3SelfAttnBlockStepState {
     projected_buffer: RuntimeBuffer,
     residual_buffer: RuntimeBuffer,
     block_buffer: RuntimeBuffer,
+}
+
+#[derive(Debug)]
+pub struct Qwen3DecoderLayerStepState {
+    block_state: Qwen3SelfAttnBlockStepState,
+    intermediate: usize,
+    mlp_epsilon: f32,
+    post_normed_buffer: RuntimeBuffer,
+    post_norm_input_buffer: RuntimeBuffer,
+    gate_buffer: RuntimeBuffer,
+    up_buffer: RuntimeBuffer,
+    activated_buffer: RuntimeBuffer,
+    mlp_output_buffer: RuntimeBuffer,
+    block_output_buffer: RuntimeBuffer,
+    layer_output_buffer: RuntimeBuffer,
 }
 
 impl PagedDecodeShape {
@@ -497,6 +522,277 @@ impl Qwen3SelfAttnDecodeState {
         stream: &mut RuntimeStream,
     ) -> Result<PagedKvCacheReadback, String> {
         self.state.read_cache_to_host(stream)
+    }
+}
+
+impl Qwen3DecoderLayerStepState {
+    pub fn new(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        shape: PagedDecodeShape,
+        block_table: Vec<u32>,
+        hidden: usize,
+        intermediate: usize,
+        softmax_scale: f32,
+        mlp_epsilon: f32,
+    ) -> Result<Self, String> {
+        if hidden == 0 {
+            return Err("Qwen3 decoder layer hidden size must be greater than zero".to_string());
+        }
+        if intermediate == 0 {
+            return Err(
+                "Qwen3 decoder layer intermediate size must be greater than zero".to_string(),
+            );
+        }
+        if !mlp_epsilon.is_finite() || mlp_epsilon <= 0.0 {
+            return Err(
+                "Qwen3 decoder layer MLP epsilon must be finite and greater than zero".to_string(),
+            );
+        }
+        let block_state = Qwen3SelfAttnBlockStepState::new(
+            context,
+            stream,
+            shape,
+            block_table,
+            hidden,
+            softmax_scale,
+        )?;
+        let hidden_bytes = f32_bytes(hidden);
+        let intermediate_bytes = f32_bytes(intermediate);
+        let mut post_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate Qwen3 decoder layer post normed buffer: {err}")
+        })?;
+        let mut post_norm_input_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate Qwen3 decoder layer post norm input buffer: {err}")
+        })?;
+        let mut gate_buffer = context
+            .alloc_buffer(intermediate_bytes)
+            .map_err(|err| format!("failed to allocate Qwen3 decoder layer gate buffer: {err}"))?;
+        let mut up_buffer = context
+            .alloc_buffer(intermediate_bytes)
+            .map_err(|err| format!("failed to allocate Qwen3 decoder layer up buffer: {err}"))?;
+        let mut activated_buffer = context.alloc_buffer(intermediate_bytes).map_err(|err| {
+            format!("failed to allocate Qwen3 decoder layer activated buffer: {err}")
+        })?;
+        let mut mlp_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate Qwen3 decoder layer MLP output buffer: {err}")
+        })?;
+        let mut block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate Qwen3 decoder layer block output buffer: {err}")
+        })?;
+        let mut layer_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate Qwen3 decoder layer output buffer: {err}")
+        })?;
+        zero_buffer(&mut post_normed_buffer, Some(stream))?;
+        zero_buffer(&mut post_norm_input_buffer, Some(stream))?;
+        zero_buffer(&mut gate_buffer, Some(stream))?;
+        zero_buffer(&mut up_buffer, Some(stream))?;
+        zero_buffer(&mut activated_buffer, Some(stream))?;
+        zero_buffer(&mut mlp_output_buffer, Some(stream))?;
+        zero_buffer(&mut block_output_buffer, Some(stream))?;
+        zero_buffer(&mut layer_output_buffer, Some(stream))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize Qwen3 decoder layer setup: {err}"))?;
+        Ok(Self {
+            block_state,
+            intermediate,
+            mlp_epsilon,
+            post_normed_buffer,
+            post_norm_input_buffer,
+            gate_buffer,
+            up_buffer,
+            activated_buffer,
+            mlp_output_buffer,
+            block_output_buffer,
+            layer_output_buffer,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step(
+        &mut self,
+        stream: &mut RuntimeStream,
+        o_projection_matrix: &RuntimeBuffer,
+        post_norm_weight: &RuntimeBuffer,
+        mlp_gate_matrix: &RuntimeBuffer,
+        mlp_up_matrix: &RuntimeBuffer,
+        mlp_down_matrix: &RuntimeBuffer,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output_gate: Option<&[f32]>,
+        residual: &[f32],
+    ) -> Result<Qwen3DecoderLayerStepOutput, String> {
+        let block_step =
+            self.block_state
+                .step(stream, o_projection_matrix, q, k, v, output_gate, residual)?;
+
+        let hidden = self.block_state.hidden();
+        let hidden_bytes = f32_bytes(hidden);
+        if post_norm_weight.size()? != hidden_bytes {
+            return Err(format!(
+                "Qwen3 decoder layer post RMSNorm weight size must match hidden {hidden}"
+            ));
+        }
+
+        let gate_elements = self.intermediate.checked_mul(hidden).ok_or_else(|| {
+            "Qwen3 decoder layer MLP gate matrix element count overflows".to_string()
+        })?;
+        let gate_bytes = f32_bytes(gate_elements);
+        if mlp_gate_matrix.size()? != gate_bytes {
+            return Err(format!(
+                "Qwen3 decoder layer MLP gate matrix does not match [{},{}]",
+                self.intermediate, hidden
+            ));
+        }
+        if mlp_up_matrix.size()? != gate_bytes {
+            return Err(format!(
+                "Qwen3 decoder layer MLP up matrix does not match [{},{}]",
+                self.intermediate, hidden
+            ));
+        }
+        let down_elements = hidden.checked_mul(self.intermediate).ok_or_else(|| {
+            "Qwen3 decoder layer MLP down matrix element count overflows".to_string()
+        })?;
+        let down_bytes = f32_bytes(down_elements);
+        if mlp_down_matrix.size()? != down_bytes {
+            return Err(format!(
+                "Qwen3 decoder layer MLP down matrix does not match [{},{}]",
+                hidden, self.intermediate
+            ));
+        }
+
+        self.post_norm_input_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&block_step.block_output), Some(stream))
+            .map_err(|err| {
+                format!("failed to copy Qwen3 decoder layer attention block output: {err}")
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 decoder layer attention block output copy: {err}")
+        })?;
+        ullm_runtime_sys::rmsnorm_f32(
+            &self.post_norm_input_buffer,
+            post_norm_weight,
+            hidden,
+            self.mlp_epsilon,
+            &mut self.post_normed_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run Qwen3 decoder layer post RMSNorm: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 decoder layer post RMSNorm: {err}")
+        })?;
+
+        ullm_runtime_sys::matvec_f32(
+            mlp_gate_matrix,
+            &self.post_normed_buffer,
+            self.intermediate,
+            hidden,
+            &mut self.gate_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run Qwen3 decoder layer MLP gate matvec: {err}"))?;
+        ullm_runtime_sys::matvec_f32(
+            mlp_up_matrix,
+            &self.post_normed_buffer,
+            self.intermediate,
+            hidden,
+            &mut self.up_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run Qwen3 decoder layer MLP up matvec: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 decoder layer MLP gate/up matvec: {err}")
+        })?;
+        ullm_runtime_sys::silu_mul_f32(
+            &self.gate_buffer,
+            &self.up_buffer,
+            self.intermediate,
+            &mut self.activated_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run Qwen3 decoder layer MLP SiLU-mul: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 decoder layer MLP SiLU-mul: {err}")
+        })?;
+        ullm_runtime_sys::matvec_f32(
+            mlp_down_matrix,
+            &self.activated_buffer,
+            hidden,
+            self.intermediate,
+            &mut self.mlp_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run Qwen3 decoder layer MLP down matvec: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 decoder layer MLP down matvec: {err}")
+        })?;
+
+        self.block_output_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&block_step.block_output), Some(stream))
+            .map_err(|err| format!("failed to copy Qwen3 decoder layer block output: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 decoder layer block output copy: {err}")
+        })?;
+        ullm_runtime_sys::add_f32(
+            &self.block_output_buffer,
+            &self.mlp_output_buffer,
+            hidden,
+            &mut self.layer_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run Qwen3 decoder layer MLP residual add: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 decoder layer MLP residual add: {err}")
+        })?;
+
+        let post_normed = read_f32_buffer(&self.post_normed_buffer, stream, hidden)?;
+        let mlp_output = read_f32_buffer(&self.mlp_output_buffer, stream, hidden)?;
+        let layer_output = read_f32_buffer(&self.layer_output_buffer, stream, hidden)?;
+        Ok(Qwen3DecoderLayerStepOutput {
+            cache_position: block_step.cache_position,
+            cache_len: block_step.cache_len,
+            block_output: block_step.block_output,
+            post_normed,
+            mlp_output,
+            layer_output,
+        })
+    }
+
+    pub fn shape(&self) -> PagedDecodeShape {
+        self.block_state.shape()
+    }
+
+    pub fn hidden(&self) -> usize {
+        self.block_state.hidden()
+    }
+
+    pub fn intermediate(&self) -> usize {
+        self.intermediate
+    }
+
+    pub fn mlp_epsilon(&self) -> f32 {
+        self.mlp_epsilon
+    }
+
+    pub fn written_len(&self) -> usize {
+        self.block_state.written_len()
+    }
+
+    pub fn block_table(&self) -> &[u32] {
+        self.block_state.block_table()
+    }
+
+    pub fn reset(&mut self, stream: &mut RuntimeStream) -> Result<(), String> {
+        self.block_state.reset(stream)
+    }
+
+    pub fn read_cache_to_host(
+        &self,
+        stream: &mut RuntimeStream,
+    ) -> Result<PagedKvCacheReadback, String> {
+        self.block_state.read_cache_to_host(stream)
     }
 }
 
@@ -1101,6 +1397,185 @@ mod tests {
     }
 
     #[test]
+    fn qwen3_decoder_layer_step_state_runs_post_norm_and_mlp_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 2,
+            value_dim: 2,
+        };
+        let hidden = 4_usize;
+        let intermediate = 3_usize;
+        let block_table = vec![3_u32, 0_u32];
+        let softmax_scale = 1.0_f32 / (shape.head_dim as f32).sqrt();
+        let mlp_epsilon = 1e-5_f32;
+        let mut state = Qwen3DecoderLayerStepState::new(
+            &mut context,
+            &mut stream,
+            shape,
+            block_table.clone(),
+            hidden,
+            intermediate,
+            softmax_scale,
+            mlp_epsilon,
+        )
+        .unwrap();
+
+        let attention_elements = shape.output_elements().unwrap();
+        let o_matrix = (0..hidden * attention_elements)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let mut o_matrix_buffer = context.alloc_buffer(f32_bytes(o_matrix.len())).unwrap();
+        o_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&o_matrix), Some(&mut stream))
+            .unwrap();
+
+        let post_norm_weight = (0..hidden)
+            .map(|index| ((index * 7) as f32 - 3.0) / 11.0)
+            .collect::<Vec<_>>();
+        let mut post_norm_weight_buffer = context
+            .alloc_buffer(f32_bytes(post_norm_weight.len()))
+            .unwrap();
+        post_norm_weight_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&post_norm_weight), Some(&mut stream))
+            .unwrap();
+
+        let mlp_gate_matrix = (0..intermediate * hidden)
+            .map(|index| ((index * 11) as f32 - 13.0) / 19.0)
+            .collect::<Vec<_>>();
+        let mut mlp_gate_matrix_buffer = context
+            .alloc_buffer(f32_bytes(mlp_gate_matrix.len()))
+            .unwrap();
+        mlp_gate_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&mlp_gate_matrix), Some(&mut stream))
+            .unwrap();
+
+        let mlp_up_matrix = (0..intermediate * hidden)
+            .map(|index| ((index * 17) as f32 - 23.0) / 29.0)
+            .collect::<Vec<_>>();
+        let mut mlp_up_matrix_buffer = context
+            .alloc_buffer(f32_bytes(mlp_up_matrix.len()))
+            .unwrap();
+        mlp_up_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&mlp_up_matrix), Some(&mut stream))
+            .unwrap();
+
+        let mlp_down_matrix = (0..hidden * intermediate)
+            .map(|index| ((index * 31) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let mut mlp_down_matrix_buffer = context
+            .alloc_buffer(f32_bytes(mlp_down_matrix.len()))
+            .unwrap();
+        mlp_down_matrix_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&mlp_down_matrix), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let cache_len = 3_usize;
+        let logical_q = (0..cache_len * shape.q_elements().unwrap())
+            .map(|index| ((index * 7) as f32 - 11.0) / 19.0)
+            .collect::<Vec<_>>();
+        let logical_k = (0..cache_len * shape.k_token_elements().unwrap())
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let logical_v = (0..cache_len * shape.v_token_elements().unwrap())
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let gate_sequence = (0..cache_len * attention_elements)
+            .map(|index| ((index * 13) as f32 - 15.0) / 23.0)
+            .collect::<Vec<_>>();
+        let residual_sequence = (0..cache_len * hidden)
+            .map(|index| ((index * 9) as f32 - 10.0) / 31.0)
+            .collect::<Vec<_>>();
+
+        for timestep in 0..cache_len {
+            let q_start = timestep * shape.q_elements().unwrap();
+            let q_end = q_start + shape.q_elements().unwrap();
+            let k_start = timestep * shape.k_token_elements().unwrap();
+            let k_end = k_start + shape.k_token_elements().unwrap();
+            let v_start = timestep * shape.v_token_elements().unwrap();
+            let v_end = v_start + shape.v_token_elements().unwrap();
+            let gate_start = timestep * attention_elements;
+            let gate_end = gate_start + attention_elements;
+            let residual_start = timestep * hidden;
+            let residual_end = residual_start + hidden;
+            let step = state
+                .step(
+                    &mut stream,
+                    &o_matrix_buffer,
+                    &post_norm_weight_buffer,
+                    &mlp_gate_matrix_buffer,
+                    &mlp_up_matrix_buffer,
+                    &mlp_down_matrix_buffer,
+                    &logical_q[q_start..q_end],
+                    &logical_k[k_start..k_end],
+                    &logical_v[v_start..v_end],
+                    Some(&gate_sequence[gate_start..gate_end]),
+                    &residual_sequence[residual_start..residual_end],
+                )
+                .unwrap();
+            assert_eq!(step.cache_position, timestep);
+            assert_eq!(step.cache_len, timestep + 1);
+
+            let (expected_k, expected_v) = pack_paged_kv_for_test(
+                &logical_k[..k_end],
+                &logical_v[..v_end],
+                &block_table,
+                timestep + 1,
+                shape,
+            );
+            let expected_attention = expected_paged_decode_attn(
+                &logical_q[q_start..q_end],
+                &expected_k,
+                &expected_v,
+                &block_table,
+                timestep + 1,
+                shape,
+                softmax_scale,
+            );
+            let expected_projection_input =
+                sigmoid_mul_for_test(&gate_sequence[gate_start..gate_end], &expected_attention);
+            let expected_block = {
+                let projected = matvec_for_test(
+                    &o_matrix,
+                    &expected_projection_input,
+                    hidden,
+                    attention_elements,
+                );
+                add_for_test(&residual_sequence[residual_start..residual_end], &projected)
+            };
+            let expected_post_normed =
+                expected_rmsnorm_for_test(&expected_block, &post_norm_weight, mlp_epsilon);
+            let expected_mlp_gate = matvec_for_test(
+                &mlp_gate_matrix,
+                &expected_post_normed,
+                intermediate,
+                hidden,
+            );
+            let expected_mlp_up =
+                matvec_for_test(&mlp_up_matrix, &expected_post_normed, intermediate, hidden);
+            let expected_mlp_activated = silu_mul_for_test(&expected_mlp_gate, &expected_mlp_up);
+            let expected_mlp_output = matvec_for_test(
+                &mlp_down_matrix,
+                &expected_mlp_activated,
+                hidden,
+                intermediate,
+            );
+            let expected_layer_output = add_for_test(&expected_block, &expected_mlp_output);
+
+            assert_f32s_close(&step.block_output, &expected_block, 1e-5);
+            assert_f32s_close(&step.post_normed, &expected_post_normed, 1e-5);
+            assert_f32s_close(&step.mlp_output, &expected_mlp_output, 1e-5);
+            assert_f32s_close(&step.layer_output, &expected_layer_output, 1e-5);
+        }
+        assert_eq!(state.written_len(), cache_len);
+    }
+
+    #[test]
     fn paged_decode_state_rejects_short_block_table() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -1256,6 +1731,27 @@ mod tests {
             output[row] = (0..cols).map(|col| matrix[base + col] * input[col]).sum();
         }
         output
+    }
+
+    fn expected_rmsnorm_for_test(input: &[f32], weight: &[f32], epsilon: f32) -> Vec<f32> {
+        assert_eq!(input.len(), weight.len());
+        let mean_square = input.iter().map(|value| value * value).sum::<f32>() / input.len() as f32;
+        let inv_sqrt = 1.0_f32 / (mean_square + epsilon).sqrt();
+        input
+            .iter()
+            .zip(weight)
+            .map(|(value, weight)| value * inv_sqrt * weight)
+            .collect()
+    }
+
+    fn silu_mul_for_test(gate: &[f32], up: &[f32]) -> Vec<f32> {
+        gate.iter()
+            .zip(up)
+            .map(|(gate, up)| {
+                let sigmoid = 1.0_f32 / (1.0_f32 + (-gate).exp());
+                gate * sigmoid * up
+            })
+            .collect()
     }
 
     fn add_for_test(lhs: &[f32], rhs: &[f32]) -> Vec<f32> {
