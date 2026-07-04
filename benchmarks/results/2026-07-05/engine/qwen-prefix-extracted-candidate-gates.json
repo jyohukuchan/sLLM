@@ -1,0 +1,68 @@
+{
+  "baseline_condition": "baseline",
+  "candidates": [
+    {
+      "comparisons": [
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens1-baseline",
+          "baseline_layer": 11,
+          "baseline_max_abs_diff": 0.6453380584716797,
+          "baseline_token_index": 7,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens1-extracted",
+          "candidate_layer": 11,
+          "candidate_max_abs_diff": 0.6766281127929688,
+          "candidate_token_index": 7,
+          "delta": 0.03129005432128906,
+          "fixture": "tokens1",
+          "improvement": -0.03129005432128906
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens101-baseline",
+          "baseline_layer": 7,
+          "baseline_max_abs_diff": 1.0805253982543945,
+          "baseline_token_index": 12,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens101-extracted",
+          "candidate_layer": 7,
+          "candidate_max_abs_diff": 1.0399055480957031,
+          "candidate_token_index": 12,
+          "delta": -0.040619850158691406,
+          "fixture": "tokens101",
+          "improvement": 0.040619850158691406
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens201-baseline",
+          "baseline_layer": 11,
+          "baseline_max_abs_diff": 1.1407279968261719,
+          "baseline_token_index": 13,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens201-extracted",
+          "candidate_layer": 11,
+          "candidate_max_abs_diff": 1.2135086059570312,
+          "candidate_token_index": 13,
+          "delta": 0.07278060913085938,
+          "fixture": "tokens201",
+          "improvement": -0.07278060913085938
+        }
+      ],
+      "condition": "extracted",
+      "decision": "reject",
+      "fixture_count": 3,
+      "max_regression": 0.07278060913085938,
+      "mean_improvement": -0.02115027109781901,
+      "median_improvement": -0.03129005432128906,
+      "reason": "fixture regression exceeds 0.001"
+    }
+  ],
+  "gates": {
+    "max_fixture_worsen": 0.001,
+    "min_fixture_count": 3,
+    "min_median_improvement": 0.005
+  },
+  "schema_version": "qwen-prefix-candidate-gates-v0.1",
+  "source_summary": "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-extracted-candidates-summary.json"
+}
