@@ -56,6 +56,7 @@ scheduler decode runner:scheduler decode batchから取り出したrequestをrun
 scheduler request decode runner:request idごとにruntime decode stateとblock tableを保持し、scheduler decode batchのrequest id、allocation、cache positionを検証してdecode stepを実行するlibrary runner
 scheduler multi-request decode runner:2件以上のscheduler decode batchを、1-stepずつ同時にruntime paged decode stateへ与えて検証するrunner境界。成功した場合のみscheduler run stateを一括でadvance_decodeする
 multi-request scheduler decode smoke:複数requestを合成し、scheduler multi-request decode runner経由で同一ステップのdecode境界を回すsmoke
+multi-request scheduler layer decode smoke:複数requestを合成し、Qwen3 decoder layer request decode runner経由で同一decode batchのattention/block/post RMSNorm/MLP/layer出力とpaged K/V cacheを検証するsmoke
 scheduled paged decode blocks:scheduler run stateを通して得たpaged decode用block tableとcache block数、KV allocator stats、active decode requestのprefill/decode進行値をまとめたsmoke用の結果
 runtime:weight、KV cache、backend、kernel呼び出しを管理してmodel executionを実行する層
 runtime buffer:runtimeがbackend上またはCPU fallback上に確保するbyte buffer
