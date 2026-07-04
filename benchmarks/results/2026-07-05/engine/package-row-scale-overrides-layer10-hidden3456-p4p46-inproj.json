@@ -1,0 +1,17 @@
+{
+  "schema_version": "package-row-scale-overrides-v0.1",
+  "overrides": [
+    {
+      "layer_index": 10,
+      "tensor_suffix": "linear_attn.out_proj.weight",
+      "row_index": 3456,
+      "scale": 1.02307179310
+    },
+    {
+      "layer_index": 10,
+      "tensor_suffix": "mlp.down_proj.weight",
+      "row_index": 3456,
+      "scale": 1.04165701172
+    }
+  ]
+}
