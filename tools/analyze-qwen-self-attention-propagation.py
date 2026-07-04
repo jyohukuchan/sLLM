@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""Trace package q/k/v projection error through Qwen full self-attention."""
+
+from __future__ import annotations
+
+import argparse
+import gc
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from aq_scale_formats import scale_values
+
+
+SCHEMA_VERSION = "qwen-self-attention-propagation-v0.1"
+
+
+def load_trace_module() -> Any:
+    path = Path(__file__).with_name("export-qwen-layer-module-trace.py")
+    spec = importlib.util.spec_from_file_location("qwen_layer_module_trace", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-dir", type=Path, required=True)
+    parser.add_argument("--fixture", type=Path, required=True)
+    parser.add_argument("--package-dir", type=Path, required=True)
+    parser.add_argument("--layer", type=int, required=True)
+    parser.add_argument(
+        "--hidden-index",
+        action="append",
+        type=int,
+        required=True,
+        help="Hidden row to summarize. Can be passed multiple times.",
+    )
+    parser.add_argument("--dtype", choices=("bfloat16", "float32"), default="bfloat16")
+    parser.add_argument("--torch-threads", type=int, default=8)
+    parser.add_argument("--summary-json", type=Path, required=True)
+    parser.add_argument("--markdown", type=Path)
+    parser.add_argument(
+        "--trust-remote-code",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    return parser.parse_args()
+
+
+def torch_dtype(name: str) -> torch.dtype:
+    if name == "bfloat16":
+        return torch.bfloat16
+    if name == "float32":
+        return torch.float32
+    raise ValueError(f"unsupported dtype: {name}")
+
+
+def dequantize_package_matrix(package_dir: Path, tensor: dict[str, Any]) -> np.ndarray:
+    shape = tensor.get("shape")
+    if not isinstance(shape, list) or len(shape) != 2:
+        raise ValueError(f"{tensor.get('name')} shape is not 2D: {shape}")
+    rows = int(shape[0])
+    cols = int(shape[1])
+    elements = rows * cols
+
+    packed = np.fromfile(package_dir / str(tensor["index_file"]), dtype=np.uint8)
+    indices = np.empty(packed.size * 2, dtype=np.uint8)
+    indices[0::2] = packed & 0x0F
+    indices[1::2] = packed >> 4
+    indices = indices[:elements]
+    if indices.size != elements:
+        raise ValueError(f"{tensor.get('name')} index payload has {indices.size} elements, expected {elements}")
+
+    codebook = np.fromfile(package_dir / str(tensor["codebook_file"]), dtype="<f4")
+    if codebook.size != 16:
+        raise ValueError(f"{tensor.get('codebook_file')} has {codebook.size} entries, expected 16")
+
+    scale_indices = np.fromfile(package_dir / str(tensor["scale_file"]), dtype=np.uint8)
+    group_size = int(tensor["group_size"])
+    expected_groups = (elements + group_size - 1) // group_size
+    if scale_indices.size != expected_groups:
+        raise ValueError(
+            f"{tensor.get('name')} scale payload has {scale_indices.size} groups, expected {expected_groups}"
+        )
+    scales = scale_values(str(tensor["scale_format"])).numpy().astype(np.float32)
+    combined_scales = scales[scale_indices] * np.float32(tensor["tensor_scale"])
+    per_element_scales = np.repeat(combined_scales, group_size)[:elements]
+    values = codebook[indices].astype(np.float32, copy=False) * per_element_scales
+    return values.reshape(rows, cols)
+
+
+def package_projection(
+    package_dir: Path,
+    manifest: dict[str, dict[str, Any]],
+    normed: torch.Tensor,
+    tensor_name: str,
+) -> torch.Tensor:
+    package_weight = dequantize_package_matrix(package_dir, manifest[tensor_name])
+    weight = torch.from_numpy(package_weight)
+    output = torch.matmul(
+        normed.float().reshape(-1, normed.shape[-1]),
+        weight.t(),
+    ).reshape(normed.shape[0], normed.shape[1], -1)
+    del weight, package_weight
+    gc.collect()
+    return output
+
+
+def tensor_stats(values: np.ndarray) -> dict[str, float | int]:
+    values = values.astype(np.float64, copy=False)
+    abs_values = np.abs(values)
+    return {
+        "count": int(values.size),
+        "mse": float(np.mean(values * values)),
+        "mean_abs": float(np.mean(abs_values)),
+        "max_abs": float(np.max(abs_values)),
+    }
+
+
+def self_attention_o_input(
+    layer: torch.nn.Module,
+    rotary: torch.nn.Module,
+    hidden_size: int,
+    q_projection: torch.Tensor,
+    k_projection: torch.Tensor,
+    v_projection: torch.Tensor,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    from transformers.integrations.sdpa_attention import sdpa_attention_forward
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as qwen35
+
+    batch_size, sequence_len, _features = q_projection.shape
+    head_dim = int(layer.self_attn.head_dim)
+    hidden_shape = (batch_size, sequence_len, -1, head_dim)
+
+    q_grouped = q_projection.view(batch_size, sequence_len, -1, head_dim * 2)
+    query, gate = torch.chunk(q_grouped, 2, dim=-1)
+    gate = gate.reshape(batch_size, sequence_len, -1)
+
+    query = layer.self_attn.q_norm(query.reshape(hidden_shape).to(dtype)).transpose(1, 2)
+    key = layer.self_attn.k_norm(k_projection.view(hidden_shape).to(dtype)).transpose(1, 2)
+    value = v_projection.view(hidden_shape).to(dtype).transpose(1, 2)
+
+    position_ids = torch.arange(sequence_len, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
+    rotary_position_ids = position_ids[None, ...].expand(3, batch_size, -1)
+    rotary_input = torch.empty((batch_size, sequence_len, hidden_size), dtype=dtype)
+    cos, sin = rotary(rotary_input, rotary_position_ids)
+    query, key = qwen35.apply_rotary_pos_emb(query, key, cos.to(query.dtype), sin.to(key.dtype))
+
+    attn_output, _ = sdpa_attention_forward(
+        layer.self_attn,
+        query,
+        key,
+        value,
+        attention_mask=None,
+        dropout=0.0,
+        scaling=layer.self_attn.scaling,
+    )
+    attn_output = attn_output.reshape(batch_size, sequence_len, -1).contiguous()
+    return (attn_output * torch.sigmoid(gate.to(attn_output.dtype))).float()
+
+
+def capture_layer_o_input(
+    trace: Any,
+    layer: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    position_ids: torch.Tensor,
+) -> np.ndarray:
+    captured: dict[str, np.ndarray] = {}
+
+    def pre_hook(_module: torch.nn.Module, inputs: tuple[object, ...]) -> None:
+        captured["o_input"] = trace.to_numpy_f32(trace.capture_first_tensor(inputs))
+
+    handle = layer.self_attn.o_proj.register_forward_pre_hook(pre_hook)
+    with torch.inference_mode():
+        try:
+            _ = layer(
+                hidden_states,
+                position_embeddings=position_embeddings,
+                attention_mask=None,
+                position_ids=position_ids,
+                past_key_values=None,
+            )
+        finally:
+            handle.remove()
+    return captured["o_input"]
+
+
+def summarize_hidden_rows(
+    trace: Any,
+    package_dir: Path,
+    manifest: dict[str, dict[str, Any]],
+    state: dict[str, torch.Tensor],
+    layer_index: int,
+    hidden_indices: list[int],
+    source_o_input: np.ndarray,
+    package_o_input: np.ndarray,
+) -> list[dict[str, Any]]:
+    rows = []
+    o_tensor_name = f"model.language_model.layers.{layer_index}.self_attn.o_proj.weight"
+    for hidden_index in hidden_indices:
+        source_row = state["self_attn.o_proj.weight"][hidden_index].float().numpy()
+        package_row = trace.dequantize_package_row(package_dir, manifest[o_tensor_name], hidden_index)
+        per_token = []
+        for token_index in range(source_o_input.shape[1]):
+            source_source = float(np.dot(source_o_input[0, token_index], source_row))
+            package_input_source_row = float(np.dot(package_o_input[0, token_index], source_row))
+            package_package = float(np.dot(package_o_input[0, token_index], package_row))
+            per_token.append(
+                {
+                    "token_index": token_index,
+                    "source_input_source_o_row": source_source,
+                    "package_input_source_o_row": package_input_source_row,
+                    "package_input_package_o_row": package_package,
+                    "input_error_using_source_o_row": package_input_source_row - source_source,
+                    "total_error_with_package_o_row": package_package - source_source,
+                }
+            )
+        worst_input = max(per_token, key=lambda item: abs(float(item["input_error_using_source_o_row"])))
+        worst_total = max(per_token, key=lambda item: abs(float(item["total_error_with_package_o_row"])))
+        rows.append(
+            {
+                "hidden_index": hidden_index,
+                "source_o_row_l2_norm": float(np.linalg.norm(source_row.astype(np.float64))),
+                "package_o_row_l2_norm": float(np.linalg.norm(package_row.astype(np.float64))),
+                "worst_input_error_using_source_o_row": worst_input,
+                "worst_total_error_with_package_o_row": worst_total,
+                "per_token": per_token,
+            }
+        )
+    return rows
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def fmt(value: Any, digits: int = 9) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.{digits}g}"
+    return str(value)
+
+
+def write_markdown(path: Path, payload: dict[str, Any]) -> None:
+    lines = [
+        "| hidden | worst_input_token | input_error_source_o_row | worst_total_token | total_error_package_o_row |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in payload["hidden_rows"]:
+        worst_input = row["worst_input_error_using_source_o_row"]
+        worst_total = row["worst_total_error_with_package_o_row"]
+        lines.append(
+            "| {} | {} | {} | {} | {} |".format(
+                row["hidden_index"],
+                worst_input["token_index"],
+                fmt(worst_input["input_error_using_source_o_row"]),
+                worst_total["token_index"],
+                fmt(worst_total["total_error_with_package_o_row"]),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "| stage | mse | mean_abs | max_abs |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
+    for name, stats in payload["stage_diff"].items():
+        lines.append(
+            "| {} | {} | {} | {} |".format(
+                name,
+                fmt(stats["mse"]),
+                fmt(stats["mean_abs"]),
+                fmt(stats["max_abs"]),
+            )
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main() -> int:
+    args = parse_args()
+    torch.set_num_threads(args.torch_threads)
+    dtype = torch_dtype(args.dtype)
+    trace = load_trace_module()
+
+    model_dir = args.model_dir.expanduser().resolve()
+    fixture = args.fixture.expanduser().resolve()
+    package_dir = args.package_dir.expanduser().resolve()
+
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.from_pretrained(
+        str(model_dir),
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=True,
+    )
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
+    layers = trace.resolve_layers(model)
+    layer = layers[args.layer]
+    if getattr(layer, "layer_type", None) != "full_attention":
+        raise ValueError(f"layer {args.layer} is {getattr(layer, 'layer_type', None)}; expected full_attention")
+    rotary_template = trace.resolve_rotary_embedding(model)
+    if rotary_template is None:
+        raise ValueError("model does not expose a rotary embedding")
+
+    metadata = trace.read_fixture_metadata(fixture)
+    entry = trace.fixture_layer_entry(metadata, args.layer)
+    before = trace.read_f32_tensor(fixture / str(entry["before_file"]), [int(value) for value in entry["before_shape"]])
+    if before.ndim != 3:
+        raise ValueError(f"expected [batch,seq,hidden] fixture shape, got {before.shape}")
+
+    weight_files = trace.build_weight_file_map(model_dir)
+    state = trace.load_layer_state(model_dir, weight_files, args.layer)
+    layer.to_empty(device="cpu")
+    layer.load_state_dict(state, strict=True)
+    layer.to(device="cpu", dtype=dtype)
+    layer.eval()
+
+    rotary = type(rotary_template)(rotary_template.config, device=torch.device("cpu")).to(dtype=dtype)
+    manifest = trace.read_package_manifest(package_dir)
+    if manifest is None:
+        raise ValueError("package manifest is missing")
+
+    hidden_states = torch.from_numpy(before).to(dtype=dtype)
+    sequence_len = hidden_states.shape[1]
+    position_ids = torch.arange(sequence_len, dtype=torch.long).unsqueeze(0).expand(hidden_states.shape[0], -1)
+    rotary_position_ids = position_ids[None, ...].expand(3, hidden_states.shape[0], -1)
+    position_embeddings = rotary(hidden_states, rotary_position_ids)
+
+    with torch.inference_mode():
+        attention_input_normed = layer.input_layernorm(hidden_states)
+        source_q = layer.self_attn.q_proj(attention_input_normed)
+        source_k = layer.self_attn.k_proj(attention_input_normed)
+        source_v = layer.self_attn.v_proj(attention_input_normed)
+        source_o_input = self_attention_o_input(
+            layer,
+            rotary,
+            before.shape[-1],
+            source_q,
+            source_k,
+            source_v,
+            dtype,
+        )
+        captured_source_o_input = capture_layer_o_input(
+            trace,
+            layer,
+            hidden_states,
+            position_embeddings,
+            position_ids,
+        )
+        package_q = package_projection(
+            package_dir,
+            manifest,
+            attention_input_normed,
+            f"model.language_model.layers.{args.layer}.self_attn.q_proj.weight",
+        )
+        package_k = package_projection(
+            package_dir,
+            manifest,
+            attention_input_normed,
+            f"model.language_model.layers.{args.layer}.self_attn.k_proj.weight",
+        )
+        package_v = package_projection(
+            package_dir,
+            manifest,
+            attention_input_normed,
+            f"model.language_model.layers.{args.layer}.self_attn.v_proj.weight",
+        )
+        package_o_input = self_attention_o_input(
+            layer,
+            rotary,
+            before.shape[-1],
+            package_q,
+            package_k,
+            package_v,
+            torch.float32,
+        )
+
+    source_o_input_np = source_o_input.numpy()
+    package_o_input_np = package_o_input.numpy()
+    captured_diff = source_o_input_np - captured_source_o_input
+    stage_diff = {
+        "source_o_input_replay_vs_layer_hook": tensor_stats(captured_diff),
+        "package_q_projection_vs_source": tensor_stats(package_q.numpy() - source_q.float().numpy()),
+        "package_k_projection_vs_source": tensor_stats(package_k.numpy() - source_k.float().numpy()),
+        "package_v_projection_vs_source": tensor_stats(package_v.numpy() - source_v.float().numpy()),
+        "package_o_input_vs_source": tensor_stats(package_o_input_np - source_o_input_np),
+    }
+
+    hidden_indices = list(dict.fromkeys(int(index) for index in args.hidden_index))
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "command": "analyze-qwen-self-attention-propagation",
+        "model_dir": str(model_dir),
+        "fixture": str(fixture),
+        "package_dir": str(package_dir),
+        "layer_index": args.layer,
+        "hidden_indices": hidden_indices,
+        "dtype": args.dtype,
+        "stage_diff": stage_diff,
+        "hidden_rows": summarize_hidden_rows(
+            trace,
+            package_dir,
+            manifest,
+            state,
+            args.layer,
+            hidden_indices,
+            source_o_input_np,
+            package_o_input_np,
+        ),
+    }
+    write_json(args.summary_json, payload)
+    if args.markdown is not None:
+        write_markdown(args.markdown, payload)
+    print(f"qwen-self-attention-propagation hidden_rows={len(hidden_indices)} output={args.summary_json}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -13,6 +13,7 @@ Generated traces:
 - `qwen-layer-module-trace-layer11-hidden3377-full-attn-p4p46-inproj.jsonl`
 - `qwen-layer-module-trace-layer11-hidden3994-full-attn-p4p46-inproj.jsonl`
 - `qwen-row-dot-sensitivity-layer11-hidden3377-3994-full-attn-p4p46-inproj.json`
+- `qwen-self-attention-propagation-layer11-hidden3377-3994-3456-p4p46-inproj.json`
 
 Layer replay check:
 
@@ -40,10 +41,27 @@ Projection row-dot hotspots:
 | 3994 | self_attention_k_projection | 0.507676098 |
 | 3994 | self_attention_v_projection | -0.987190539 |
 
+Package q/k/v propagation through attention:
+
+| stage | mse | mean_abs | max_abs |
+| --- | ---: | ---: | ---: |
+| package_q_projection_vs_source | 0.00508335839 | 0.0549604281 | 0.823976994 |
+| package_k_projection_vs_source | 0.00498192002 | 0.0538277185 | 0.479312897 |
+| package_v_projection_vs_source | 0.00267562417 | 0.040563034 | 0.952980042 |
+| package_o_input_vs_source | 0.000112062289 | 0.00615733091 | 0.187569141 |
+
+Hidden-row propagation summary:
+
+| hidden | worst input token | input error via source o row | worst total token | total error via package o row |
+| ---: | ---: | ---: | ---: | ---: |
+| 3377 | 10 | -0.0221332256 | 1 | 0.0242107697 |
+| 3994 | 14 | -0.0975656509 | 13 | 0.11529398 |
+| 3456 | 1 | 0.00994926319 | 4 | -0.0106792711 |
+
 Interpretation:
 
 - Layer `11` full-attention replay is close enough to the golden fixture for module-level debugging.
 - The final `self_attention_o_proj` and `mlp_down_proj` row errors are much smaller than the layer `10` row-scale target.
 - One-row scaling is not the next best lever for layer `11`.
-- The larger measurable errors are in q/k/v projection row-dot checks, especially `self_attention_v_projection` for hidden `3994`.
-- Next debugging should trace q/k/v projection error through q/k norm, RoPE, attention value mix, gate, and `o_proj` input rather than adding more final-row scale overrides.
+- The larger raw errors are in q/k/v projection checks, especially `self_attention_v_projection` for hidden `3994`, but the causal attention mix reduces the full `o_proj` input max abs difference to about `0.188`.
+- Hidden `3994` still receives a measurable `o_proj` input contribution (`0.098` using the source row, `0.115` including the package row), so the next target is attention-input propagation rather than blind final-row scale overrides.
