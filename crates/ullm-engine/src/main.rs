@@ -271,6 +271,7 @@ fn main() -> ExitCode {
             env::args().nth(13),
             env::args().nth(14),
             env::args().nth(15),
+            env::args().nth(16),
         ),
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
@@ -11933,6 +11934,7 @@ fn package_golden_prefix_smoke(
     row_scale_overrides_path: Option<String>,
     input_dump_dir: Option<String>,
     sampled_token_indices: Option<String>,
+    cell_delta_overrides_path: Option<String>,
 ) -> ExitCode {
     let Some(path) = path else {
         eprintln!("package-golden-prefix-smoke requires a .ullm.d path");
@@ -12019,6 +12021,14 @@ fn package_golden_prefix_smoke(
                 return ExitCode::from(2);
             }
         };
+    let cell_delta_overrides =
+        match load_package_cell_delta_overrides(cell_delta_overrides_path.as_deref()) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(2);
+            }
+        };
     let sampled_token_indices = match sampled_token_indices.as_deref() {
         Some("none") | None => Vec::new(),
         Some(raw) => match parse_usize_csv(raw, "sampled token indices") {
@@ -12042,6 +12052,7 @@ fn package_golden_prefix_smoke(
         report_path.as_deref(),
         run_mode,
         row_scale_overrides.as_ref(),
+        cell_delta_overrides.as_ref(),
         input_dump_dir,
         &sampled_token_indices,
     ) {
@@ -12071,6 +12082,7 @@ fn package_golden_prefix_smoke_impl(
     report_path: Option<&str>,
     run_mode: PackageGoldenPrefixRunMode,
     row_scale_overrides: Option<&PackageRowScaleOverrides>,
+    cell_delta_overrides: Option<&PackageCellDeltaOverrides>,
     input_dump_dir: Option<&str>,
     sampled_token_indices: &[usize],
 ) -> Result<String, String> {
@@ -12210,6 +12222,7 @@ fn package_golden_prefix_smoke_impl(
                     ));
                 }
                 let mut applied_row_scale_overrides = Vec::new();
+                let mut applied_cell_delta_overrides = Vec::new();
                 let self_attn_o_row_scale_overrides = matching_package_row_scale_overrides(
                     row_scale_overrides,
                     layer_index,
@@ -12223,6 +12236,45 @@ fn package_golden_prefix_smoke_impl(
                     &layer.o_tensor,
                     &self_attn_o_row_scale_overrides,
                 )?);
+                let self_attn_o_cell_delta_overrides = matching_package_cell_delta_overrides(
+                    cell_delta_overrides,
+                    layer_index,
+                    "self_attn.o_proj.weight",
+                );
+                applied_cell_delta_overrides.extend(apply_package_cell_delta_overrides_to_matrix(
+                    &mut stream,
+                    &mut layer.weights.self_attn.o_matrix,
+                    layer.weights.self_attn.o_rows,
+                    layer.weights.self_attn.o_cols,
+                    &layer.o_tensor,
+                    &self_attn_o_cell_delta_overrides,
+                )?);
+                let gate_cell_delta_overrides = matching_package_cell_delta_overrides(
+                    cell_delta_overrides,
+                    layer_index,
+                    "mlp.gate_proj.weight",
+                );
+                applied_cell_delta_overrides.extend(apply_package_cell_delta_overrides_to_matrix(
+                    &mut stream,
+                    &mut layer.weights.post_attention.mlp.gate_matrix,
+                    layer.weights.post_attention.mlp.gate_rows,
+                    layer.weights.post_attention.mlp.gate_cols,
+                    &layer.gate_tensor,
+                    &gate_cell_delta_overrides,
+                )?);
+                let up_cell_delta_overrides = matching_package_cell_delta_overrides(
+                    cell_delta_overrides,
+                    layer_index,
+                    "mlp.up_proj.weight",
+                );
+                applied_cell_delta_overrides.extend(apply_package_cell_delta_overrides_to_matrix(
+                    &mut stream,
+                    &mut layer.weights.post_attention.mlp.up_matrix,
+                    layer.weights.post_attention.mlp.gate_rows,
+                    layer.weights.post_attention.mlp.gate_cols,
+                    &layer.up_tensor,
+                    &up_cell_delta_overrides,
+                )?);
                 let down_row_scale_overrides = matching_package_row_scale_overrides(
                     row_scale_overrides,
                     layer_index,
@@ -12235,6 +12287,19 @@ fn package_golden_prefix_smoke_impl(
                     layer.weights.post_attention.intermediate,
                     &layer.down_tensor,
                     &down_row_scale_overrides,
+                )?);
+                let down_cell_delta_overrides = matching_package_cell_delta_overrides(
+                    cell_delta_overrides,
+                    layer_index,
+                    "mlp.down_proj.weight",
+                );
+                applied_cell_delta_overrides.extend(apply_package_cell_delta_overrides_to_matrix(
+                    &mut stream,
+                    &mut layer.weights.post_attention.mlp.down_matrix,
+                    layer.weights.post_attention.hidden,
+                    layer.weights.post_attention.intermediate,
+                    &layer.down_tensor,
+                    &down_cell_delta_overrides,
                 )?);
                 let input_norm_tensor =
                     format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
@@ -12390,11 +12455,25 @@ fn package_golden_prefix_smoke_impl(
                         &overrides.source_path,
                     );
                 }
+                if let Some(overrides) = cell_delta_overrides {
+                    insert_json_detail(
+                        &mut details,
+                        "cell_delta_override_source",
+                        &overrides.source_path,
+                    );
+                }
                 if !applied_row_scale_overrides.is_empty() {
                     insert_json_detail(
                         &mut details,
                         "applied_row_scale_overrides",
                         &applied_row_scale_overrides,
+                    );
+                }
+                if !applied_cell_delta_overrides.is_empty() {
+                    insert_json_detail(
+                        &mut details,
+                        "applied_cell_delta_overrides",
+                        &applied_cell_delta_overrides,
                     );
                 }
                 insert_json_detail(
@@ -12468,6 +12547,7 @@ fn package_golden_prefix_smoke_impl(
                     sequence_len,
                     layer_input,
                     row_scale_overrides,
+                    cell_delta_overrides,
                 )?;
                 let mut details = serde_json::Map::new();
                 insert_json_detail(&mut details, "runtime_line", &run.line);
@@ -12482,11 +12562,25 @@ fn package_golden_prefix_smoke_impl(
                         &overrides.source_path,
                     );
                 }
+                if let Some(overrides) = cell_delta_overrides {
+                    insert_json_detail(
+                        &mut details,
+                        "cell_delta_override_source",
+                        &overrides.source_path,
+                    );
+                }
                 if !run.applied_row_scale_overrides.is_empty() {
                     insert_json_detail(
                         &mut details,
                         "applied_row_scale_overrides",
                         &run.applied_row_scale_overrides,
+                    );
+                }
+                if !run.applied_cell_delta_overrides.is_empty() {
+                    insert_json_detail(
+                        &mut details,
+                        "applied_cell_delta_overrides",
+                        &run.applied_cell_delta_overrides,
                     );
                 }
                 let extra_hot_input_vectors = [
@@ -12705,7 +12799,7 @@ fn package_golden_prefix_smoke_impl(
     }
 
     Ok(format!(
-        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} run_mode={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} row_scale_overrides={} manifest_row_scale_overrides={} input_dump_dir={} sampled_tokens={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
+        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} run_mode={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} row_scale_overrides={} cell_delta_overrides={} manifest_row_scale_overrides={} input_dump_dir={} sampled_tokens={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
         path,
         fixture_path,
         layer_start,
@@ -12723,6 +12817,9 @@ fn package_golden_prefix_smoke_impl(
         position_offset,
         rope_base,
         row_scale_overrides
+            .map(|overrides| overrides.source_path.as_str())
+            .unwrap_or("none"),
+        cell_delta_overrides
             .map(|overrides| overrides.source_path.as_str())
             .unwrap_or("none"),
         manifest_row_scale_override_count,
@@ -20337,11 +20434,13 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
         sequence_len,
         residual_sequence,
         None,
+        None,
     )?;
     Ok(run.line)
 }
 
 const PACKAGE_ROW_SCALE_OVERRIDES_SCHEMA_VERSION: &str = "package-row-scale-overrides-v0.1";
+const PACKAGE_CELL_DELTA_OVERRIDES_SCHEMA_VERSION: &str = "package-cell-delta-overrides-v0.1";
 
 #[derive(Debug, Clone)]
 struct PackageRowScaleOverrides {
@@ -20370,6 +20469,41 @@ struct AppliedPackageRowScaleOverride {
     tensor_suffix: String,
     row_index: usize,
     scale: f32,
+    rows: usize,
+    cols: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PackageCellDeltaOverrides {
+    source_path: String,
+    overrides: Vec<PackageCellDeltaOverride>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct PackageCellDeltaOverridesFile {
+    schema_version: String,
+    overrides: Vec<PackageCellDeltaOverride>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct PackageCellDeltaOverride {
+    layer_index: usize,
+    tensor_suffix: String,
+    row_index: usize,
+    col_index: usize,
+    delta: f32,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct AppliedPackageCellDeltaOverride {
+    layer_index: usize,
+    tensor_name: String,
+    tensor_suffix: String,
+    row_index: usize,
+    col_index: usize,
+    delta: f32,
+    previous_value: f32,
+    new_value: f32,
     rows: usize,
     cols: usize,
 }
@@ -20416,6 +20550,52 @@ fn load_package_row_scale_overrides(
     }))
 }
 
+fn load_package_cell_delta_overrides(
+    path: Option<&str>,
+) -> Result<Option<PackageCellDeltaOverrides>, String> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    if path.is_empty() || path == "none" {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read cell delta overrides JSON {path}: {err}"))?;
+    let parsed: PackageCellDeltaOverridesFile = serde_json::from_str(&raw)
+        .map_err(|err| format!("failed to parse cell delta overrides JSON {path}: {err}"))?;
+    if parsed.schema_version != PACKAGE_CELL_DELTA_OVERRIDES_SCHEMA_VERSION {
+        return Err(format!(
+            "cell delta overrides schema_version must be {}, got {}",
+            PACKAGE_CELL_DELTA_OVERRIDES_SCHEMA_VERSION, parsed.schema_version
+        ));
+    }
+
+    let mut seen = std::collections::BTreeSet::<(usize, String, usize, usize)>::new();
+    for override_entry in &parsed.overrides {
+        validate_package_cell_delta_override(override_entry)?;
+        let key = (
+            override_entry.layer_index,
+            override_entry.tensor_suffix.clone(),
+            override_entry.row_index,
+            override_entry.col_index,
+        );
+        if !seen.insert(key) {
+            return Err(format!(
+                "duplicate cell delta override: layer={} tensor_suffix={} row={} col={}",
+                override_entry.layer_index,
+                override_entry.tensor_suffix,
+                override_entry.row_index,
+                override_entry.col_index
+            ));
+        }
+    }
+
+    Ok(Some(PackageCellDeltaOverrides {
+        source_path: path.to_string(),
+        overrides: parsed.overrides,
+    }))
+}
+
 fn validate_package_row_scale_override(
     override_entry: &PackageRowScaleOverride,
 ) -> Result<(), String> {
@@ -20440,12 +20620,61 @@ fn validate_package_row_scale_override(
     Ok(())
 }
 
+fn validate_package_cell_delta_override(
+    override_entry: &PackageCellDeltaOverride,
+) -> Result<(), String> {
+    if !matches!(
+        override_entry.tensor_suffix.as_str(),
+        "linear_attn.out_proj.weight"
+            | "self_attn.o_proj.weight"
+            | "mlp.down_proj.weight"
+            | "mlp.gate_proj.weight"
+            | "mlp.up_proj.weight"
+    ) {
+        return Err(format!(
+            "unsupported cell delta override tensor_suffix={}; expected linear_attn.out_proj.weight, self_attn.o_proj.weight, mlp.down_proj.weight, mlp.gate_proj.weight, or mlp.up_proj.weight",
+            override_entry.tensor_suffix
+        ));
+    }
+    if !override_entry.delta.is_finite() {
+        return Err(format!(
+            "cell delta override must be finite: layer={} tensor_suffix={} row={} col={} delta={}",
+            override_entry.layer_index,
+            override_entry.tensor_suffix,
+            override_entry.row_index,
+            override_entry.col_index,
+            override_entry.delta
+        ));
+    }
+    Ok(())
+}
+
 fn matching_package_row_scale_overrides(
     row_scale_overrides: Option<&PackageRowScaleOverrides>,
     layer_index: usize,
     tensor_suffix: &str,
 ) -> Vec<PackageRowScaleOverride> {
     row_scale_overrides
+        .map(|overrides| {
+            overrides
+                .overrides
+                .iter()
+                .filter(|override_entry| {
+                    override_entry.layer_index == layer_index
+                        && override_entry.tensor_suffix == tensor_suffix
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn matching_package_cell_delta_overrides(
+    cell_delta_overrides: Option<&PackageCellDeltaOverrides>,
+    layer_index: usize,
+    tensor_suffix: &str,
+) -> Vec<PackageCellDeltaOverride> {
+    cell_delta_overrides
         .map(|overrides| {
             overrides
                 .overrides
@@ -20537,9 +20766,106 @@ fn apply_package_row_scale_overrides_to_matrix(
     Ok(applied)
 }
 
+fn apply_package_cell_delta_overrides_to_matrix(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    matrix: &mut ullm_runtime_sys::RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    tensor_name: &str,
+    overrides: &[PackageCellDeltaOverride],
+) -> Result<Vec<AppliedPackageCellDeltaOverride>, String> {
+    if overrides.is_empty() {
+        return Ok(Vec::new());
+    }
+    if rows == 0 || cols == 0 {
+        return Err(format!(
+            "cannot apply cell delta overrides to empty matrix {tensor_name}: rows={rows} cols={cols}"
+        ));
+    }
+    let matrix_bytes_len = rows
+        .checked_mul(cols)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| {
+            format!("cell delta override matrix byte size overflows for {tensor_name}")
+        })?;
+    let mut matrix_bytes = vec![0_u8; matrix_bytes_len];
+    matrix
+        .copy_to_host(0, &mut matrix_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {tensor_name} for cell delta overrides: {err}"))?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize after {tensor_name} cell override copy: {err}")
+    })?;
+
+    let mut applied = Vec::with_capacity(overrides.len());
+    for override_entry in overrides {
+        if override_entry.row_index >= rows {
+            return Err(format!(
+                "cell delta override row out of range for {tensor_name}: row={} rows={rows}",
+                override_entry.row_index
+            ));
+        }
+        if override_entry.col_index >= cols {
+            return Err(format!(
+                "cell delta override column out of range for {tensor_name}: col={} cols={cols}",
+                override_entry.col_index
+            ));
+        }
+        let element_index = override_entry
+            .row_index
+            .checked_mul(cols)
+            .and_then(|value| value.checked_add(override_entry.col_index))
+            .ok_or_else(|| {
+                format!("cell delta override element index overflows for {tensor_name}")
+            })?;
+        let offset = element_index
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                format!("cell delta override byte offset overflows for {tensor_name}")
+            })?;
+        let mut raw = [0_u8; 4];
+        raw.copy_from_slice(&matrix_bytes[offset..offset + 4]);
+        let previous_value = f32::from_le_bytes(raw);
+        let new_value = previous_value + override_entry.delta;
+        if !new_value.is_finite() {
+            return Err(format!(
+                "cell delta override produced non-finite value for {tensor_name}: layer={} row={} col={} previous={} delta={}",
+                override_entry.layer_index,
+                override_entry.row_index,
+                override_entry.col_index,
+                previous_value,
+                override_entry.delta
+            ));
+        }
+        matrix_bytes[offset..offset + 4].copy_from_slice(&new_value.to_le_bytes());
+        applied.push(AppliedPackageCellDeltaOverride {
+            layer_index: override_entry.layer_index,
+            tensor_name: tensor_name.to_string(),
+            tensor_suffix: override_entry.tensor_suffix.clone(),
+            row_index: override_entry.row_index,
+            col_index: override_entry.col_index,
+            delta: override_entry.delta,
+            previous_value,
+            new_value,
+            rows,
+            cols,
+        });
+    }
+
+    matrix
+        .copy_from_host(0, &matrix_bytes, Some(stream))
+        .map_err(|err| {
+            format!("failed to copy cell-delta-adjusted {tensor_name} back to runtime: {err}")
+        })?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize after cell-delta-adjusted {tensor_name} copy back: {err}")
+    })?;
+    Ok(applied)
+}
+
 struct PackageLinearAttnMlpBlockSequenceRun {
     line: String,
     applied_row_scale_overrides: Vec<AppliedPackageRowScaleOverride>,
+    applied_cell_delta_overrides: Vec<AppliedPackageCellDeltaOverride>,
     attention_input_normed: Vec<f32>,
     attention_qkv_projection: Vec<f32>,
     attention_qkv_projection_dim: usize,
@@ -20579,6 +20905,7 @@ fn package_linear_attn_mlp_block_sequence_run(
     sequence_len: usize,
     residual_sequence: Vec<f32>,
     row_scale_overrides: Option<&PackageRowScaleOverrides>,
+    cell_delta_overrides: Option<&PackageCellDeltaOverrides>,
 ) -> Result<PackageLinearAttnMlpBlockSequenceRun, String> {
     let key_heads = 16_usize;
     let value_heads = 32_usize;
@@ -20722,6 +21049,7 @@ fn package_linear_attn_mlp_block_sequence_run(
     let attn_norm_weight_bytes = encode_f32_to_bytes(&attn_norm.values);
     let post_norm_weight_bytes = encode_f32_to_bytes(&post_norm_weight_values);
     let mut applied_row_scale_overrides = Vec::new();
+    let mut applied_cell_delta_overrides = Vec::new();
 
     let mut input_buffer = context
         .alloc_buffer(hidden_bytes)
@@ -20882,6 +21210,19 @@ fn package_linear_attn_mlp_block_sequence_run(
             out_cols,
             &out_tensor,
             &out_row_scale_overrides,
+        )?);
+        let out_cell_delta_overrides = matching_package_cell_delta_overrides(
+            cell_delta_overrides,
+            layer_index,
+            "linear_attn.out_proj.weight",
+        );
+        applied_cell_delta_overrides.extend(apply_package_cell_delta_overrides_to_matrix(
+            &mut stream,
+            &mut out_matrix,
+            out_rows,
+            out_cols,
+            &out_tensor,
+            &out_cell_delta_overrides,
         )?);
 
         let mut qkv_step_buffer = context
@@ -21585,7 +21926,7 @@ fn package_linear_attn_mlp_block_sequence_run(
         layer_block_max_abs_diff,
     ) = {
         let mut registry = WeightRegistry::new();
-        let (gate_rows, gate_cols, gate_matrix) = materialize_selected_aq4_matrix(
+        let (gate_rows, gate_cols, mut gate_matrix) = materialize_selected_aq4_matrix(
             &mut context,
             &mut stream,
             &mut registry,
@@ -21593,7 +21934,7 @@ fn package_linear_attn_mlp_block_sequence_run(
             &gate_tensor,
             chunk_bytes,
         )?;
-        let (up_rows, up_cols, up_matrix) = materialize_selected_aq4_matrix(
+        let (up_rows, up_cols, mut up_matrix) = materialize_selected_aq4_matrix(
             &mut context,
             &mut stream,
             &mut registry,
@@ -21631,6 +21972,45 @@ fn package_linear_attn_mlp_block_sequence_run(
             down_cols,
             &down_tensor,
             &down_row_scale_overrides,
+        )?);
+        let gate_cell_delta_overrides = matching_package_cell_delta_overrides(
+            cell_delta_overrides,
+            layer_index,
+            "mlp.gate_proj.weight",
+        );
+        applied_cell_delta_overrides.extend(apply_package_cell_delta_overrides_to_matrix(
+            &mut stream,
+            &mut gate_matrix,
+            gate_rows,
+            gate_cols,
+            &gate_tensor,
+            &gate_cell_delta_overrides,
+        )?);
+        let up_cell_delta_overrides = matching_package_cell_delta_overrides(
+            cell_delta_overrides,
+            layer_index,
+            "mlp.up_proj.weight",
+        );
+        applied_cell_delta_overrides.extend(apply_package_cell_delta_overrides_to_matrix(
+            &mut stream,
+            &mut up_matrix,
+            up_rows,
+            up_cols,
+            &up_tensor,
+            &up_cell_delta_overrides,
+        )?);
+        let down_cell_delta_overrides = matching_package_cell_delta_overrides(
+            cell_delta_overrides,
+            layer_index,
+            "mlp.down_proj.weight",
+        );
+        applied_cell_delta_overrides.extend(apply_package_cell_delta_overrides_to_matrix(
+            &mut stream,
+            &mut down_matrix,
+            down_rows,
+            down_cols,
+            &down_tensor,
+            &down_cell_delta_overrides,
         )?);
         let intermediate = gate_rows;
         let intermediate_bytes = intermediate
@@ -21823,7 +22203,7 @@ fn package_linear_attn_mlp_block_sequence_run(
     };
 
     let line = format!(
-        "package-linear-attn-mlp-block-smoke package={} layer={} input_norm_tensor=\"{}\" qkv_tensor=\"{}\" conv_tensor=\"{}\" a_tensor=\"{}\" b_tensor=\"{}\" a_log_tensor=\"{}\" dt_bias_tensor=\"{}\" z_tensor=\"{}\" norm_tensor=\"{}\" out_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} key_heads={} value_heads={} key_dim={} value_dim={} sequence_len={} kernel_size={} qk_l2_norm={} q_scale={q_scale:.9} input_norm_dtype={} conv_dtype={} a_log_dtype={} dt_bias_dtype={} norm_dtype={} post_norm_dtype={} row_scale_overrides={} backend={} device_index={} name=\"{}\" residual_preview={} attention_output_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} conv_max_abs_diff={conv_max_abs_diff:.9} gate_beta_max_abs_diff={gate_beta_max_abs_diff:.9} recurrent_max_abs_diff={recurrent_max_abs_diff:.9} attn_norm_max_abs_diff={attn_norm_max_abs_diff:.9} attn_activation_max_abs_diff={attn_activation_max_abs_diff:.9} attn_output_max_abs_diff={attn_output_max_abs_diff:.9} attn_block_max_abs_diff={attn_block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} layer_block_max_abs_diff={layer_block_max_abs_diff:.9} verified=true",
+        "package-linear-attn-mlp-block-smoke package={} layer={} input_norm_tensor=\"{}\" qkv_tensor=\"{}\" conv_tensor=\"{}\" a_tensor=\"{}\" b_tensor=\"{}\" a_log_tensor=\"{}\" dt_bias_tensor=\"{}\" z_tensor=\"{}\" norm_tensor=\"{}\" out_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} key_heads={} value_heads={} key_dim={} value_dim={} sequence_len={} kernel_size={} qk_l2_norm={} q_scale={q_scale:.9} input_norm_dtype={} conv_dtype={} a_log_dtype={} dt_bias_dtype={} norm_dtype={} post_norm_dtype={} row_scale_overrides={} cell_delta_overrides={} backend={} device_index={} name=\"{}\" residual_preview={} attention_output_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} conv_max_abs_diff={conv_max_abs_diff:.9} gate_beta_max_abs_diff={gate_beta_max_abs_diff:.9} recurrent_max_abs_diff={recurrent_max_abs_diff:.9} attn_norm_max_abs_diff={attn_norm_max_abs_diff:.9} attn_activation_max_abs_diff={attn_activation_max_abs_diff:.9} attn_output_max_abs_diff={attn_output_max_abs_diff:.9} attn_block_max_abs_diff={attn_block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} layer_block_max_abs_diff={layer_block_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         input_norm_tensor,
@@ -21855,6 +22235,7 @@ fn package_linear_attn_mlp_block_sequence_run(
         attn_norm.dtype,
         post_norm.dtype,
         applied_row_scale_overrides.len(),
+        applied_cell_delta_overrides.len(),
         info.backend,
         device_index,
         info.name,
@@ -21868,6 +22249,7 @@ fn package_linear_attn_mlp_block_sequence_run(
     Ok(PackageLinearAttnMlpBlockSequenceRun {
         line,
         applied_row_scale_overrides,
+        applied_cell_delta_overrides,
         attention_input_normed: input_normed,
         attention_qkv_projection: qkv_output,
         attention_qkv_projection_dim: qkv_rows_expected,
@@ -22923,7 +23305,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
