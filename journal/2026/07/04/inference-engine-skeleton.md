@@ -991,6 +991,17 @@
 - 5.3-codex-spark reviewer Linnaeus recommended keeping this cut in `main.rs` for now, retaining borrowed runtime weights, and leaving expected/diff logic outside the runner; the implementation follows that boundary.
 - Next useful step: move request scheduling/allocation setup into a small model-loop smoke request plan object, or add a variant that accepts more than two layer indices before turning this into a wider model-runner API.
 
+2026-07-04 package model loop request plan:
+- Commit `71e1766 Add package model loop request plan` adds `PackageModelLoopRequestPlan` in `crates/ullm-engine/src/main.rs`.
+- The request plan owns the model-loop smoke request list, `SchedulerState`, request ids, prompt/max-new/total token counts, scheduler-derived block tables, initial residual sequences, and paged block sizing.
+- `package_self_attn_mlp_block_model_loop_smoke_impl` now asks the plan to allocate prefill requests, provide per-request residual/block metadata, complete all prefills, expose scheduler state for stack-runner decode batches, and report cached/generated token counts.
+- Cached/generated token reporting now errors if a request is unexpectedly absent from active scheduler state, instead of silently falling back to `0`.
+- `docs/words.txt` adds `package model loop request plan`.
+- Validation passed: `cargo fmt --all --check`, `cargo check -p ullm-engine`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, `cargo test --workspace -- --test-threads=1`, `git diff --check`, and `package-self-attn-mlp-block-model-loop-smoke` on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`.
+- Model-loop smoke result remained stable: CPU all diffs `0`; R9700/V620 prepared-path diffs q/k norm `0.000000954`, q RoPE `0.000000238`, k RoPE `0.000000477`, causal attention `0.000000477`, with layer output and K/V cache diffs `0`.
+- 5.3-codex-spark reviewer Singer confirmed this is the right smoke-local boundary for now, and recommended keeping expected/diff calculation outside the plan.
+- Next useful step: either let the model-loop CLI accept more than two layer indices, or move layer-run expected preparation into a small plan object so `package_self_attn_mlp_block_model_loop_smoke_impl` becomes a thinner orchestration function.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -1102,6 +1113,7 @@
 - `0be4510 Add package model loop smoke`
 - `18defff Add decoder layer stack runner`
 - `ecf75a0 Add package model loop bundle`
+- `71e1766 Add package model loop request plan`
 
 ## 次の行動
 
