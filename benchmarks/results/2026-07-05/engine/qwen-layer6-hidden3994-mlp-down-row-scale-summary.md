@@ -129,6 +129,10 @@ A hardlink package copy was created outside the repository:
 
 Manifest-only reports:
 
+- manifest row-scale JSON:
+  - `package-row-scale-overrides-layer6h3994-layer6-layer10-p4p46-inproj.json`
+  - schema: `row-scale-overrides-v0.1`
+  - entries: existing layer6/10 hidden3456 entries plus layer6 `mlp.down_proj.weight[3994]`
 - layer6 row-scale only:
   - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6h3994-layer6-layer10-p4p46-inproj.jsonl`
   - max abs: `0.637172699`
@@ -137,6 +141,12 @@ Manifest-only reports:
   - `package-golden-prefix-cpu-actual-prefix0-12-rotary64-manifest-row-scale-layer6h3994-layer6-layer10-cell-delta-layer8qkv-v845col3994-p4p46-inproj.jsonl`
   - max abs: `0.610977173`
   - matches the current best CLI row-scale + QKV cell result
+
+Validation:
+
+- JSON duplicate/positive-scale check: passed, `5` entries.
+- `cargo test -p ullm-engine row_scale -- --nocapture`: passed.
+- `cargo test -p ullm-quant row_scale -- --nocapture`: passed with `0` matching tests.
 
 ## Interpretation
 
