@@ -86,6 +86,66 @@ def failure_shape(trace: dict[str, Any]) -> str:
     return "mixed_delta"
 
 
+def component_scale_fit(
+    samples: list[dict[str, Any]],
+    component_key: str,
+    fixed_key: str,
+) -> dict[str, Any] | None:
+    numerator = 0.0
+    denominator = 0.0
+    parsed_samples: list[tuple[float, float, float]] = []
+    for sample in samples:
+        component = parse_float(sample.get(component_key))
+        fixed = parse_float(sample.get(fixed_key))
+        expected = parse_float(sample.get("expected_delta"))
+        if component is None or fixed is None or expected is None:
+            continue
+        parsed_samples.append((component, fixed, expected))
+        numerator += component * (expected - fixed)
+        denominator += component * component
+    if not parsed_samples or denominator <= 0.0:
+        return None
+
+    scale = numerator / denominator
+    original_sq = 0.0
+    scaled_sq = 0.0
+    original_max = 0.0
+    scaled_max = 0.0
+    worst_original_token = None
+    worst_scaled_token = None
+    for index, (component, fixed, expected) in enumerate(parsed_samples):
+        original_error = fixed + component - expected
+        scaled_error = fixed + scale * component - expected
+        original_abs = abs(original_error)
+        scaled_abs = abs(scaled_error)
+        original_sq += original_error * original_error
+        scaled_sq += scaled_error * scaled_error
+        if original_abs > original_max:
+            original_max = original_abs
+            worst_original_token = index
+        if scaled_abs > scaled_max:
+            scaled_max = scaled_abs
+            worst_scaled_token = index
+
+    count = len(parsed_samples)
+    original_rmse = (original_sq / count) ** 0.5
+    scaled_rmse = (scaled_sq / count) ** 0.5
+    improvement = (
+        (original_rmse - scaled_rmse) / original_rmse if original_rmse > 0.0 else None
+    )
+    return {
+        "scale": scale,
+        "count": count,
+        "original_rmse": original_rmse,
+        "scaled_rmse": scaled_rmse,
+        "original_max_abs": original_max,
+        "scaled_max_abs": scaled_max,
+        "rmse_improvement": improvement,
+        "worst_original_token": worst_original_token,
+        "worst_scaled_token": worst_scaled_token,
+    }
+
+
 def read_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
@@ -101,6 +161,9 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
             delta_distribution = module.get("delta_distribution")
             if not isinstance(trace, dict) or not isinstance(delta_distribution, dict):
                 continue
+            per_token_hot = module.get("per_token_hot_hidden_trace")
+            if not isinstance(per_token_hot, list):
+                per_token_hot = []
             delta_location = delta_distribution.get("max_abs_diff_location")
             if not isinstance(delta_location, dict):
                 delta_location = {}
@@ -131,6 +194,20 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
                 "delta_max_token": parse_int(delta_location.get("token_index")),
                 "delta_max_hidden": parse_int(delta_location.get("hidden_index")),
             }
+            mlp_scale_fit = component_scale_fit(
+                per_token_hot,
+                component_key="mlp_output",
+                fixed_key="attention_output",
+            )
+            if mlp_scale_fit is not None:
+                row["mlp_scale_fit"] = mlp_scale_fit
+            attention_scale_fit = component_scale_fit(
+                per_token_hot,
+                component_key="attention_output",
+                fixed_key="mlp_output",
+            )
+            if attention_scale_fit is not None:
+                row["attention_scale_fit"] = attention_scale_fit
             if output_diff not in (None, 0.0) and delta_diff is not None:
                 row["abs_delta_diff_over_abs_output_diff"] = abs(delta_diff) / abs(output_diff)
             else:
@@ -185,10 +262,16 @@ def fmt(value: Any, digits: int = 6) -> str:
 
 def build_markdown(rows: list[dict[str, Any]]) -> str:
     lines = [
-        "| layer | kind | mode | range | hot | tok | output_diff | input_diff | delta_diff | attn | mlp | expected_delta | actual_delta | dominant | shape |",
-        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        "| layer | kind | mode | range | hot | tok | output_diff | input_diff | delta_diff | attn | mlp | expected_delta | actual_delta | mlp_scale | mlp_scaled_max | mlp_impr | attn_scale | attn_scaled_max | attn_impr | dominant | shape |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for row in rows:
+        mlp_scale_fit = row.get("mlp_scale_fit") if isinstance(row.get("mlp_scale_fit"), dict) else {}
+        attention_scale_fit = (
+            row.get("attention_scale_fit")
+            if isinstance(row.get("attention_scale_fit"), dict)
+            else {}
+        )
         lines.append(
             "| "
             + " | ".join(
@@ -206,6 +289,12 @@ def build_markdown(rows: list[dict[str, Any]]) -> str:
                     fmt(row.get("mlp_output")),
                     fmt(row.get("expected_delta")),
                     fmt(row.get("actual_delta")),
+                    fmt(mlp_scale_fit.get("scale")),
+                    fmt(mlp_scale_fit.get("scaled_max_abs")),
+                    fmt(mlp_scale_fit.get("rmse_improvement")),
+                    fmt(attention_scale_fit.get("scale")),
+                    fmt(attention_scale_fit.get("scaled_max_abs")),
+                    fmt(attention_scale_fit.get("rmse_improvement")),
                     str(row.get("dominant_actual_module") or "-"),
                     str(row.get("failure_shape") or "-"),
                 ]

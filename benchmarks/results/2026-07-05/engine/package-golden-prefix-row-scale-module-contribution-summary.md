@@ -1,50 +1,50 @@
-| layer | kind | mode | range | hot | tok | output_diff | input_diff | delta_diff | attn | mlp | expected_delta | actual_delta | dominant | shape |
-|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| 0 | linear_attention | actual_prefix | 0..12 | 3994 | 3 | 0.10824 | 0 | 0.10824 | 5.73496 | 0.66063 | 6.28735 | 6.39559 | attention | mixed_delta |
-| 0 | linear_attention | actual_prefix | 0..12 | 3994 | 3 | 0.10824 | 0 | 0.10824 | 5.73496 | 0.66063 | 6.28735 | 6.39559 | attention | mixed_delta |
-| 1 | linear_attention | actual_prefix | 0..12 | 3994 | 13 | -0.255609 | 0.0802007 | -0.335809 | 1.33559 | 0.859846 | 2.53125 | 2.19544 | attention | mixed_delta |
-| 1 | linear_attention | actual_prefix | 0..12 | 3994 | 13 | -0.255609 | 0.0802007 | -0.335809 | 1.33559 | 0.859846 | 2.53125 | 2.19544 | attention | mixed_delta |
-| 2 | linear_attention | actual_prefix | 0..12 | 3994 | 12 | -0.353747 | -0.198491 | -0.155256 | 0.668041 | -2.29205 | -1.46875 | -1.62401 | mlp | mixed_delta |
-| 2 | linear_attention | actual_prefix | 0..12 | 3994 | 12 | -0.353747 | -0.198491 | -0.155256 | 0.668041 | -2.29205 | -1.46875 | -1.62401 | mlp | mixed_delta |
-| 3 | self_attention | actual_prefix | 0..12 | 3994 | 0 | 0.456402 | 0.128147 | 0.328255 | 1.6553 | -2.32705 | -1 | -0.671745 | mixed | mixed_delta |
-| 3 | self_attention | actual_prefix | 0..12 | 3994 | 0 | 0.456402 | 0.128147 | 0.328255 | 1.6553 | -2.32705 | -1 | -0.671745 | mixed | mixed_delta |
-| 4 | linear_attention | actual_prefix | 0..12 | 3994 | 14 | -0.618922 | -0.423377 | -0.195545 | 2.9409 | -1.13645 | 2 | 1.80445 | attention | mixed_delta |
-| 4 | linear_attention | actual_prefix | 0..12 | 3994 | 14 | -0.618922 | -0.423377 | -0.195545 | 2.9409 | -1.13645 | 2 | 1.80445 | attention | mixed_delta |
-| 5 | linear_attention | actual_prefix | 0..12 | 3994 | 14 | -0.571157 | -0.618922 | 0.0477648 | 1.65213 | -0.979361 | 0.625 | 0.672765 | attention | mixed_delta |
-| 5 | linear_attention | actual_prefix | 0..12 | 3994 | 14 | -0.571157 | -0.618922 | 0.0477648 | 1.65213 | -0.979361 | 0.625 | 0.672765 | attention | mixed_delta |
-| 6 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.588711 | -0.0314252 | -0.557285 | 7.1226 | 12.1326 | 19.8125 | 19.2552 | mlp | mixed_delta |
-| 6 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.588711 | -0.0314252 | -0.557285 | 7.1226 | 12.1326 | 19.8125 | 19.2552 | mlp | mixed_delta |
-| 7 | self_attention | actual_prefix | 0..12 | 3994 | 0 | -0.665709 | -0.494328 | -0.171381 | -16.7852 | -4.1362 | -20.75 | -20.9214 | attention | mixed_delta |
-| 7 | self_attention | actual_prefix | 0..12 | 3994 | 0 | -0.665709 | -0.494328 | -0.171381 | -16.7852 | -4.1362 | -20.75 | -20.9214 | attention | mixed_delta |
-| 8 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.735359 | -0.623331 | -0.112028 | 0.0861176 | 0.0518546 | 0.25 | 0.137972 | attention | mixed_delta |
-| 8 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.735359 | -0.623331 | -0.112028 | 0.0861176 | 0.0518546 | 0.25 | 0.137972 | attention | mixed_delta |
-| 9 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.769667 | -0.735359 | -0.0343075 | -0.032704 | 0.373395 | 0.375 | 0.340693 | mlp | mixed_delta |
-| 9 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.769667 | -0.735359 | -0.0343075 | -0.032704 | 0.373395 | 0.375 | 0.340693 | mlp | mixed_delta |
-| 10 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -1.74427 | -0.769667 | -0.9746 | 7.2605 | 14.5149 | 22.75 | 21.7754 | mlp | mixed_delta |
-| 10 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.967846 | -0.769667 | -0.198179 | 7.42802 | 15.1238 | 22.75 | 22.5518 | mlp | mixed_delta |
-| 11 | self_attention | actual_prefix | 0..12 | 3456 | 0 | -1.6869 | -1.74427 | 0.0573654 | 0.0494132 | -0.492047 | -0.5 | -0.442635 | mlp | mixed_delta |
-| 11 | self_attention | actual_prefix | 0..12 | 3456 | 0 | -0.911423 | -0.967846 | 0.0564232 | 0.0479999 | -0.491578 | -0.5 | -0.443577 | mlp | mixed_delta |
-| 0 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 3 | 0.10824 | 0 | 0.10824 | 5.73496 | 0.66063 | 6.28735 | 6.39559 | attention | mixed_delta |
-| 0 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 3 | 0.10824 | 0 | 0.10824 | 5.73496 | 0.66063 | 6.28735 | 6.39559 | attention | mixed_delta |
-| 1 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 11 | -0.125503 | 0 | -0.125503 | 1.70961 | 0.571141 | 2.40625 | 2.28075 | attention | mixed_delta |
-| 1 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 11 | -0.125503 | 0 | -0.125503 | 1.70961 | 0.571141 | 2.40625 | 2.28075 | attention | mixed_delta |
-| 2 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 4 | -0.161942 | 0 | -0.161942 | 1.80165 | -4.08859 | -2.125 | -2.28694 | mlp | mixed_delta |
-| 2 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 4 | -0.161942 | 0 | -0.161942 | 1.80165 | -4.08859 | -2.125 | -2.28694 | mlp | mixed_delta |
-| 3 | self_attention | golden_before_each_layer | 0..12 | 3994 | 0 | 0.316113 | 0 | 0.316113 | 1.6135 | -2.29739 | -1 | -0.683887 | mixed | mixed_delta |
-| 3 | self_attention | golden_before_each_layer | 0..12 | 3994 | 0 | 0.316113 | 0 | 0.316113 | 1.6135 | -2.29739 | -1 | -0.683887 | mixed | mixed_delta |
-| 4 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 1 | -0.0919132 | 0 | -0.0919132 | 1.20966 | 0.760928 | 2.0625 | 1.97059 | attention | mixed_delta |
-| 4 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 1 | -0.0919132 | 0 | -0.0919132 | 1.20966 | 0.760928 | 2.0625 | 1.97059 | attention | mixed_delta |
-| 5 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 1 | -0.167782 | 0 | -0.167782 | 1.3544 | 0.352821 | 1.875 | 1.70722 | attention | mixed_delta |
-| 5 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 1 | -0.167782 | 0 | -0.167782 | 1.3544 | 0.352821 | 1.875 | 1.70722 | attention | mixed_delta |
-| 6 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 0 | -0.486214 | 0 | -0.486214 | 10.8122 | 13.9516 | 25.25 | 24.7638 | mixed | mixed_delta |
-| 6 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 0 | -0.486214 | 0 | -0.486214 | 10.8122 | 13.9516 | 25.25 | 24.7638 | mixed | mixed_delta |
-| 7 | self_attention | golden_before_each_layer | 0..12 | 3994 | 15 | -0.420027 | 0 | -0.420027 | 2.35885 | -0.528873 | 2.25 | 1.82997 | attention | mixed_delta |
-| 7 | self_attention | golden_before_each_layer | 0..12 | 3994 | 15 | -0.420027 | 0 | -0.420027 | 2.35885 | -0.528873 | 2.25 | 1.82997 | attention | mixed_delta |
-| 8 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 14 | 0.24173 | 0 | 0.24173 | 1.14323 | 0.348501 | 1.25 | 1.49173 | attention | mixed_delta |
-| 8 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 14 | 0.24173 | 0 | 0.24173 | 1.14323 | 0.348501 | 1.25 | 1.49173 | attention | mixed_delta |
-| 9 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 7 | -0.177616 | 0 | -0.177616 | -0.0173183 | 2.2147 | 2.375 | 2.19738 | mlp | mixed_delta |
-| 9 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 7 | -0.177616 | 0 | -0.177616 | -0.0173183 | 2.2147 | 2.375 | 2.19738 | mlp | mixed_delta |
-| 10 | linear_attention | golden_before_each_layer | 0..12 | 3456 | 0 | -0.875896 | 0 | -0.875896 | 7.31638 | 14.5577 | 22.75 | 21.8741 | mlp | mixed_delta |
-| 10 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 3 | 0.304976 | 0 | 0.304976 | 1.60065 | 1.32932 | 2.625 | 2.92998 | mixed | mixed_delta |
-| 11 | self_attention | golden_before_each_layer | 0..12 | 3377 | 13 | -0.179061 | 0 | -0.179061 | 0.0969478 | 0.311821 | 0.58783 | 0.408768 | mlp | mixed_delta |
-| 11 | self_attention | golden_before_each_layer | 0..12 | 3377 | 13 | -0.179061 | 0 | -0.179061 | 0.0969478 | 0.311821 | 0.58783 | 0.408768 | mlp | mixed_delta |
+| layer | kind | mode | range | hot | tok | output_diff | input_diff | delta_diff | attn | mlp | expected_delta | actual_delta | mlp_scale | mlp_scaled_max | mlp_impr | attn_scale | attn_scaled_max | attn_impr | dominant | shape |
+|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 0 | linear_attention | actual_prefix | 0..12 | 3994 | 3 | 0.10824 | 0 | 0.10824 | 5.73496 | 0.66063 | 6.28735 | 6.39559 | 0.960049 | 0.122166 | 0.148701 | 0.98765 | 0.0683863 | 0.587125 | attention | mixed_delta |
+| 0 | linear_attention | actual_prefix | 0..12 | 3994 | 3 | 0.10824 | 0 | 0.10824 | 5.73496 | 0.66063 | 6.28735 | 6.39559 | 0.960049 | 0.122166 | 0.148701 | 0.98765 | 0.0683863 | 0.587125 | attention | mixed_delta |
+| 1 | linear_attention | actual_prefix | 0..12 | 3994 | 13 | -0.255609 | 0.0802007 | -0.335809 | 1.33559 | 0.859846 | 2.53125 | 2.19544 | 1.2485 | 0.270421 | 0.459331 | 1.07222 | 0.239355 | 0.344138 | attention | mixed_delta |
+| 1 | linear_attention | actual_prefix | 0..12 | 3994 | 13 | -0.255609 | 0.0802007 | -0.335809 | 1.33559 | 0.859846 | 2.53125 | 2.19544 | 1.2485 | 0.270421 | 0.459331 | 1.07222 | 0.239355 | 0.344138 | attention | mixed_delta |
+| 2 | linear_attention | actual_prefix | 0..12 | 3994 | 12 | -0.353747 | -0.198491 | -0.155256 | 0.668041 | -2.29205 | -1.46875 | -1.62401 | 0.972222 | 0.213616 | 0.153322 | 1.00135 | 0.26546 | 9.99164e-05 | mlp | mixed_delta |
+| 2 | linear_attention | actual_prefix | 0..12 | 3994 | 12 | -0.353747 | -0.198491 | -0.155256 | 0.668041 | -2.29205 | -1.46875 | -1.62401 | 0.972222 | 0.213616 | 0.153322 | 1.00135 | 0.26546 | 9.99164e-05 | mlp | mixed_delta |
+| 3 | self_attention | actual_prefix | 0..12 | 3994 | 0 | 0.456402 | 0.128147 | 0.328255 | 1.6553 | -2.32705 | -1 | -0.671745 | 1.02836 | 0.352217 | 0.00451509 | 0.998135 | 0.340209 | 0.00172824 | mixed | mixed_delta |
+| 3 | self_attention | actual_prefix | 0..12 | 3994 | 0 | 0.456402 | 0.128147 | 0.328255 | 1.6553 | -2.32705 | -1 | -0.671745 | 1.02836 | 0.352217 | 0.00451509 | 0.998135 | 0.340209 | 0.00172824 | mixed | mixed_delta |
+| 4 | linear_attention | actual_prefix | 0..12 | 3994 | 14 | -0.618922 | -0.423377 | -0.195545 | 2.9409 | -1.13645 | 2 | 1.80445 | 0.971311 | 0.325533 | 0.0194723 | 1.01718 | 0.288528 | 0.0436792 | attention | mixed_delta |
+| 4 | linear_attention | actual_prefix | 0..12 | 3994 | 14 | -0.618922 | -0.423377 | -0.195545 | 2.9409 | -1.13645 | 2 | 1.80445 | 0.971311 | 0.325533 | 0.0194723 | 1.01718 | 0.288528 | 0.0436792 | attention | mixed_delta |
+| 5 | linear_attention | actual_prefix | 0..12 | 3994 | 14 | -0.571157 | -0.618922 | 0.0477648 | 1.65213 | -0.979361 | 0.625 | 0.672765 | 0.970376 | 0.333322 | 0.0447565 | 1.00053 | 0.318303 | 2.40804e-05 | attention | mixed_delta |
+| 5 | linear_attention | actual_prefix | 0..12 | 3994 | 14 | -0.571157 | -0.618922 | 0.0477648 | 1.65213 | -0.979361 | 0.625 | 0.672765 | 0.970376 | 0.333322 | 0.0447565 | 1.00053 | 0.318303 | 2.40804e-05 | attention | mixed_delta |
+| 6 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.588711 | -0.0314252 | -0.557285 | 7.1226 | 12.1326 | 19.8125 | 19.2552 | 1.04584 | 0.0477684 | 0.800583 | 1.07798 | 0.0497525 | 0.799333 | mlp | mixed_delta |
+| 6 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.588711 | -0.0314252 | -0.557285 | 7.1226 | 12.1326 | 19.8125 | 19.2552 | 1.04584 | 0.0477684 | 0.800583 | 1.07798 | 0.0497525 | 0.799333 | mlp | mixed_delta |
+| 7 | self_attention | actual_prefix | 0..12 | 3994 | 0 | -0.665709 | -0.494328 | -0.171381 | -16.7852 | -4.1362 | -20.75 | -20.9214 | 0.974728 | 0.607007 | 0.00492765 | 1.00102 | 0.617106 | 0.000120132 | attention | mixed_delta |
+| 7 | self_attention | actual_prefix | 0..12 | 3994 | 0 | -0.665709 | -0.494328 | -0.171381 | -16.7852 | -4.1362 | -20.75 | -20.9214 | 0.974728 | 0.607007 | 0.00492765 | 1.00102 | 0.617106 | 0.000120132 | attention | mixed_delta |
+| 8 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.735359 | -0.623331 | -0.112028 | 0.0861176 | 0.0518546 | 0.25 | 0.137972 | 1.33336 | 0.0947415 | 0.0755807 | 0.723239 | 0.135862 | 0.260748 | attention | mixed_delta |
+| 8 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.735359 | -0.623331 | -0.112028 | 0.0861176 | 0.0518546 | 0.25 | 0.137972 | 1.33336 | 0.0947415 | 0.0755807 | 0.723239 | 0.135862 | 0.260748 | attention | mixed_delta |
+| 9 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.769667 | -0.735359 | -0.0343075 | -0.032704 | 0.373395 | 0.375 | 0.340693 | 1.07643 | 0.0681058 | 0.0632699 | 1.14273 | 0.056284 | 0.108281 | mlp | mixed_delta |
+| 9 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.769667 | -0.735359 | -0.0343075 | -0.032704 | 0.373395 | 0.375 | 0.340693 | 1.07643 | 0.0681058 | 0.0632699 | 1.14273 | 0.056284 | 0.108281 | mlp | mixed_delta |
+| 10 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -1.74427 | -0.769667 | -0.9746 | 7.2605 | 14.5149 | 22.75 | 21.7754 | 1.06701 | 0.0751339 | 0.860599 | 1.13383 | 0.0826357 | 0.852191 | mlp | mixed_delta |
+| 10 | linear_attention | actual_prefix | 0..12 | 3456 | 0 | -0.967846 | -0.769667 | -0.198179 | 7.42802 | 15.1238 | 22.75 | 22.5518 | 1.01301 | 0.0760683 | 0.43489 | 1.02657 | 0.0775938 | 0.438321 | mlp | mixed_delta |
+| 11 | self_attention | actual_prefix | 0..12 | 3456 | 0 | -1.6869 | -1.74427 | 0.0573654 | 0.0494132 | -0.492047 | -0.5 | -0.442635 | 1.12453 | 0.0557441 | 0.220849 | 0.560722 | 0.040924 | 0.458751 | mlp | mixed_delta |
+| 11 | self_attention | actual_prefix | 0..12 | 3456 | 0 | -0.911423 | -0.967846 | 0.0564232 | 0.0479999 | -0.491578 | -0.5 | -0.443577 | 1.12255 | 0.0554227 | 0.217693 | 0.564084 | 0.0408496 | 0.455246 | mlp | mixed_delta |
+| 0 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 3 | 0.10824 | 0 | 0.10824 | 5.73496 | 0.66063 | 6.28735 | 6.39559 | 0.960049 | 0.122166 | 0.148701 | 0.98765 | 0.0683863 | 0.587125 | attention | mixed_delta |
+| 0 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 3 | 0.10824 | 0 | 0.10824 | 5.73496 | 0.66063 | 6.28735 | 6.39559 | 0.960049 | 0.122166 | 0.148701 | 0.98765 | 0.0683863 | 0.587125 | attention | mixed_delta |
+| 1 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 11 | -0.125503 | 0 | -0.125503 | 1.70961 | 0.571141 | 2.40625 | 2.28075 | 1.06017 | 0.159786 | 0.165156 | 1.02764 | 0.101039 | 0.372764 | attention | mixed_delta |
+| 1 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 11 | -0.125503 | 0 | -0.125503 | 1.70961 | 0.571141 | 2.40625 | 2.28075 | 1.06017 | 0.159786 | 0.165156 | 1.02764 | 0.101039 | 0.372764 | attention | mixed_delta |
+| 2 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 4 | -0.161942 | 0 | -0.161942 | 1.80165 | -4.08859 | -2.125 | -2.28694 | 0.97835 | 0.144832 | 0.246158 | 1.02093 | 0.156438 | 0.0663273 | mlp | mixed_delta |
+| 2 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 4 | -0.161942 | 0 | -0.161942 | 1.80165 | -4.08859 | -2.125 | -2.28694 | 0.97835 | 0.144832 | 0.246158 | 1.02093 | 0.156438 | 0.0663273 | mlp | mixed_delta |
+| 3 | self_attention | golden_before_each_layer | 0..12 | 3994 | 0 | 0.316113 | 0 | 0.316113 | 1.6135 | -2.29739 | -1 | -0.683887 | 1.07274 | 0.202768 | 0.0927724 | 0.990315 | 0.300485 | 0.144662 | mixed | mixed_delta |
+| 3 | self_attention | golden_before_each_layer | 0..12 | 3994 | 0 | 0.316113 | 0 | 0.316113 | 1.6135 | -2.29739 | -1 | -0.683887 | 1.07274 | 0.202768 | 0.0927724 | 0.990315 | 0.300485 | 0.144662 | mixed | mixed_delta |
+| 4 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 1 | -0.0919132 | 0 | -0.0919132 | 1.20966 | 0.760928 | 2.0625 | 1.97059 | 1.00127 | 0.0909477 | 0.000334012 | 1.00197 | 0.0932921 | 0.00508298 | attention | mixed_delta |
+| 4 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 1 | -0.0919132 | 0 | -0.0919132 | 1.20966 | 0.760928 | 2.0625 | 1.97059 | 1.00127 | 0.0909477 | 0.000334012 | 1.00197 | 0.0932921 | 0.00508298 | attention | mixed_delta |
+| 5 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 1 | -0.167782 | 0 | -0.167782 | 1.3544 | 0.352821 | 1.875 | 1.70722 | 0.997809 | 0.168555 | 0.000915172 | 1.01195 | 0.151592 | 0.0471603 | attention | mixed_delta |
+| 5 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 1 | -0.167782 | 0 | -0.167782 | 1.3544 | 0.352821 | 1.875 | 1.70722 | 0.997809 | 0.168555 | 0.000915172 | 1.01195 | 0.151592 | 0.0471603 | attention | mixed_delta |
+| 6 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 0 | -0.486214 | 0 | -0.486214 | 10.8122 | 13.9516 | 25.25 | 24.7638 | 1.03659 | 0.281899 | 0.346705 | 1.03788 | 0.430108 | 0.199025 | mixed | mixed_delta |
+| 6 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 0 | -0.486214 | 0 | -0.486214 | 10.8122 | 13.9516 | 25.25 | 24.7638 | 1.03659 | 0.281899 | 0.346705 | 1.03788 | 0.430108 | 0.199025 | mixed | mixed_delta |
+| 7 | self_attention | golden_before_each_layer | 0..12 | 3994 | 15 | -0.420027 | 0 | -0.420027 | 2.35885 | -0.528873 | 2.25 | 1.82997 | 0.986384 | 0.412825 | 0.00282519 | 1.01333 | 0.388582 | 0.0386688 | attention | mixed_delta |
+| 7 | self_attention | golden_before_each_layer | 0..12 | 3994 | 15 | -0.420027 | 0 | -0.420027 | 2.35885 | -0.528873 | 2.25 | 1.82997 | 0.986384 | 0.412825 | 0.00282519 | 1.01333 | 0.388582 | 0.0386688 | attention | mixed_delta |
+| 8 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 14 | 0.24173 | 0 | 0.24173 | 1.14323 | 0.348501 | 1.25 | 1.49173 | 0.941931 | 0.231662 | 0.0411774 | 0.940435 | 0.230355 | 0.120483 | attention | mixed_delta |
+| 8 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 14 | 0.24173 | 0 | 0.24173 | 1.14323 | 0.348501 | 1.25 | 1.49173 | 0.941931 | 0.231662 | 0.0411774 | 0.940435 | 0.230355 | 0.120483 | attention | mixed_delta |
+| 9 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 7 | -0.177616 | 0 | -0.177616 | -0.0173183 | 2.2147 | 2.375 | 2.19738 | 1.02173 | 0.129498 | 0.136922 | 1.00205 | 0.177651 | 0.000164787 | mlp | mixed_delta |
+| 9 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 7 | -0.177616 | 0 | -0.177616 | -0.0173183 | 2.2147 | 2.375 | 2.19738 | 1.02173 | 0.129498 | 0.136922 | 1.00205 | 0.177651 | 0.000164787 | mlp | mixed_delta |
+| 10 | linear_attention | golden_before_each_layer | 0..12 | 3456 | 0 | -0.875896 | 0 | -0.875896 | 7.31638 | 14.5577 | 22.75 | 21.8741 | 1.05982 | 0.0659627 | 0.862742 | 1.11983 | 0.0303608 | 0.919726 | mlp | mixed_delta |
+| 10 | linear_attention | golden_before_each_layer | 0..12 | 3994 | 3 | 0.304976 | 0 | 0.304976 | 1.60065 | 1.32932 | 2.625 | 2.92998 | 0.992753 | 0.295342 | 0.00388899 | 0.998487 | 0.302553 | 0.000708591 | mixed | mixed_delta |
+| 11 | self_attention | golden_before_each_layer | 0..12 | 3377 | 13 | -0.179061 | 0 | -0.179061 | 0.0969478 | 0.311821 | 0.58783 | 0.408768 | 1.2183 | 0.110991 | 0.349441 | 1.91039 | 0.0908004 | 0.382474 | mlp | mixed_delta |
+| 11 | self_attention | golden_before_each_layer | 0..12 | 3377 | 13 | -0.179061 | 0 | -0.179061 | 0.0969478 | 0.311821 | 0.58783 | 0.408768 | 1.2183 | 0.110991 | 0.349441 | 1.91039 | 0.0908004 | 0.382474 | mlp | mixed_delta |
