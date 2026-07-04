@@ -39,6 +39,17 @@ pub struct ActiveRequestState {
     pub generated_tokens: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerDecodeRequest {
+    pub request: Request,
+    pub allocation: BlockAllocation,
+    pub cached_tokens: usize,
+    pub generated_tokens: usize,
+    pub cache_position: usize,
+    pub next_cache_len: usize,
+    pub remaining_new_tokens: usize,
+}
+
 #[derive(Debug)]
 pub struct SchedulerState {
     queue: RequestQueue,
@@ -85,6 +96,65 @@ impl SchedulerState {
 
     pub fn active_request_ids(&self) -> Vec<RequestId> {
         self.active.keys().copied().collect()
+    }
+
+    pub fn ready_decode_batch(
+        &self,
+        max_requests: usize,
+    ) -> Result<Vec<SchedulerDecodeRequest>, String> {
+        if max_requests == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut ready = Vec::new();
+        for state in self.active.values() {
+            if state.cached_tokens < state.request.prompt_tokens {
+                continue;
+            }
+            if state.generated_tokens >= state.request.max_new_tokens {
+                continue;
+            }
+            let next_cache_len = state.cached_tokens.checked_add(1).ok_or_else(|| {
+                format!("request {:?} cached token count overflow", state.request.id)
+            })?;
+            let max_cache_capacity = state
+                .allocation
+                .blocks
+                .len()
+                .checked_mul(self.allocator.block_size_tokens() as usize)
+                .ok_or_else(|| {
+                    format!("request {:?} cache capacity overflows", state.request.id)
+                })?;
+            if next_cache_len > max_cache_capacity {
+                return Err(format!(
+                    "request {:?} exceeds allocated cache capacity {}",
+                    state.request.id, max_cache_capacity
+                ));
+            }
+            let remaining_new_tokens = state
+                .request
+                .max_new_tokens
+                .checked_sub(state.generated_tokens)
+                .ok_or_else(|| {
+                    format!(
+                        "request {:?} generated token count exceeds max_new_tokens",
+                        state.request.id
+                    )
+                })?;
+            ready.push(SchedulerDecodeRequest {
+                request: state.request.clone(),
+                allocation: state.allocation.clone(),
+                cached_tokens: state.cached_tokens,
+                generated_tokens: state.generated_tokens,
+                cache_position: state.cached_tokens,
+                next_cache_len,
+                remaining_new_tokens,
+            });
+            if ready.len() == max_requests {
+                break;
+            }
+        }
+        Ok(ready)
     }
 
     pub fn release_request(&mut self, request_id: RequestId) -> usize {
@@ -823,5 +893,150 @@ mod tests {
         assert_eq!(scheduler.active_len(), 0);
         assert!(scheduler.active_request(RequestId(1)).is_none());
         assert!(scheduler.active_request_ids().is_empty());
+    }
+
+    #[test]
+    fn scheduler_state_ready_decode_batch_selects_only_ready_requests() {
+        let mut scheduler = SchedulerState::with_block_size(8, 8);
+        scheduler.enqueue(Request::new(1, 3, 2));
+        scheduler.enqueue(Request::new(2, 2, 1));
+        scheduler.enqueue(Request::new(3, 4, 3));
+        let selected = scheduler
+            .pop_prefill_batch_with_allocation(16)
+            .expect("allocation should succeed");
+        assert_eq!(
+            selected
+                .iter()
+                .map(|entry| entry.request.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1), RequestId(2), RequestId(3)]
+        );
+
+        scheduler
+            .complete_prefill(RequestId(1))
+            .expect("request 1 prefill complete");
+        scheduler
+            .complete_prefill(RequestId(2))
+            .expect("request 2 prefill complete");
+        scheduler
+            .complete_prefill(RequestId(3))
+            .expect("request 3 prefill complete");
+        scheduler
+            .advance_decode(RequestId(2))
+            .expect("request 2 should advance one token");
+
+        let ready = scheduler
+            .ready_decode_batch(8)
+            .expect("ready decode batch should be generated");
+        assert_eq!(
+            ready
+                .iter()
+                .map(|entry| entry.request.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1), RequestId(3)]
+        );
+        assert_eq!(
+            ready[0],
+            SchedulerDecodeRequest {
+                request: Request {
+                    id: RequestId(1),
+                    prompt_tokens: 3,
+                    max_new_tokens: 2
+                },
+                allocation: scheduler
+                    .active_request(RequestId(1))
+                    .expect("request 1 should be active")
+                    .allocation
+                    .clone(),
+                cached_tokens: 3,
+                generated_tokens: 0,
+                cache_position: 3,
+                next_cache_len: 4,
+                remaining_new_tokens: 2
+            }
+        );
+        assert_eq!(ready[0].allocation.request_id, RequestId(1));
+    }
+
+    #[test]
+    fn scheduler_state_ready_decode_batch_respects_max_requests_limit() {
+        let mut scheduler = SchedulerState::with_block_size(8, 8);
+        scheduler.enqueue(Request::new(1, 3, 2));
+        scheduler.enqueue(Request::new(2, 2, 4));
+        scheduler
+            .pop_prefill_batch_with_allocation(8)
+            .expect("allocation should succeed");
+        scheduler
+            .complete_prefill(RequestId(1))
+            .expect("request 1 prefill complete");
+        scheduler
+            .complete_prefill(RequestId(2))
+            .expect("request 2 prefill complete");
+        let limited = scheduler
+            .ready_decode_batch(1)
+            .expect("ready decode batch should be generated");
+        assert_eq!(
+            limited
+                .iter()
+                .map(|entry| entry.request.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1)]
+        );
+        assert_eq!(limited[0].cache_position, 3);
+        assert_eq!(limited[0].next_cache_len, 4);
+        assert_eq!(limited[0].remaining_new_tokens, 2);
+    }
+
+    #[test]
+    fn scheduler_state_ready_decode_batch_excludes_unready_and_complete_requests() {
+        let mut scheduler = SchedulerState::with_block_size(8, 8);
+        scheduler.enqueue(Request::new(1, 3, 1));
+        scheduler.enqueue(Request::new(2, 2, 1));
+        scheduler
+            .pop_prefill_batch_with_allocation(6)
+            .expect("allocation should succeed");
+        scheduler
+            .complete_prefill(RequestId(1))
+            .expect("request 1 prefill complete");
+
+        let ready_before = scheduler
+            .ready_decode_batch(4)
+            .expect("ready decode batch should be generated");
+        assert_eq!(
+            ready_before
+                .iter()
+                .map(|entry| entry.request.id)
+                .collect::<Vec<_>>(),
+            vec![RequestId(1)]
+        );
+        assert_eq!(ready_before[0].cache_position, 3);
+        assert_eq!(ready_before[0].next_cache_len, 4);
+        assert_eq!(ready_before[0].remaining_new_tokens, 1);
+
+        scheduler
+            .advance_decode(RequestId(1))
+            .expect("request 1 decode should advance");
+        let ready_after = scheduler
+            .ready_decode_batch(4)
+            .expect("ready decode batch should be generated");
+        assert!(ready_after.is_empty());
+    }
+
+    #[test]
+    fn scheduler_state_ready_decode_batch_returns_empty_for_zero_limit_or_no_ready_requests() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 8, 4));
+        scheduler
+            .pop_prefill_batch_with_allocation(8)
+            .expect("allocation should succeed");
+        let zero_limit = scheduler
+            .ready_decode_batch(0)
+            .expect("zero limit should be accepted");
+        assert!(zero_limit.is_empty());
+
+        let not_ready = scheduler
+            .ready_decode_batch(4)
+            .expect("ready decode batch should be generated");
+        assert!(not_ready.is_empty());
     }
 }
