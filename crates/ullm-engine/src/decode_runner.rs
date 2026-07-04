@@ -584,6 +584,13 @@ impl<'weights> Qwen3DecoderLayerStackRequestDecodeRunner<'weights> {
             .map_err(|err| format!("failed to run decoder layer {layer_index} prefill: {err}"))
     }
 
+    /// Runs one scheduler ready decode batch through every registered layer.
+    ///
+    /// `layer_inputs` must have one input slice per stack layer, in layer order.
+    /// Each slice must contain exactly one input for every request in
+    /// `ready_batch`. The method validates every layer before executing any
+    /// decode step, runs each layer without advancing the scheduler, and then
+    /// advances the scheduler batch once after all layers have succeeded.
     pub fn run_ready_batch_across_layers(
         &mut self,
         stream: &mut RuntimeStream,
