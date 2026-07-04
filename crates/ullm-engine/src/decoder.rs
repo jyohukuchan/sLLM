@@ -107,6 +107,120 @@ pub struct Qwen3DecoderLayerStepState {
     layer_output_buffer: RuntimeBuffer,
 }
 
+pub struct Qwen3SelfAttnRuntimeWeights {
+    pub q_rows: usize,
+    pub q_cols: usize,
+    pub k_rows: usize,
+    pub v_rows: usize,
+    pub o_rows: usize,
+    pub o_cols: usize,
+    pub head_dim: usize,
+    pub kv_heads: usize,
+    pub value_dim: usize,
+    pub q_matrix: RuntimeBuffer,
+    pub k_matrix: RuntimeBuffer,
+    pub v_matrix: RuntimeBuffer,
+    pub o_matrix: RuntimeBuffer,
+}
+
+pub struct Qwen3MlpRuntimeWeights {
+    pub gate_rows: usize,
+    pub gate_cols: usize,
+    pub gate_matrix: RuntimeBuffer,
+    pub up_matrix: RuntimeBuffer,
+    pub down_matrix: RuntimeBuffer,
+}
+
+pub struct Qwen3PostAttentionRuntimeWeights {
+    pub hidden: usize,
+    pub intermediate: usize,
+    pub post_norm_weight: RuntimeBuffer,
+    pub mlp: Qwen3MlpRuntimeWeights,
+}
+
+pub struct Qwen3DecoderLayerRuntimeWeights {
+    pub self_attn: Qwen3SelfAttnRuntimeWeights,
+    pub post_attention: Qwen3PostAttentionRuntimeWeights,
+}
+
+pub struct Qwen3DecoderLayerRuntime<'weights> {
+    weights: &'weights Qwen3DecoderLayerRuntimeWeights,
+    step_state: Qwen3DecoderLayerStepState,
+}
+
+impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        weights: &'weights Qwen3DecoderLayerRuntimeWeights,
+        decode_shape: PagedDecodeShape,
+        block_table: Vec<u32>,
+        softmax_scale: f32,
+        mlp_epsilon: f32,
+    ) -> Result<Self, String> {
+        let post_attention = &weights.post_attention;
+        if weights.self_attn.q_cols != post_attention.hidden {
+            return Err(format!(
+                "Qwen3 decoder layer runtime hidden mismatch: self_attn_hidden={} post_attention_hidden={}",
+                weights.self_attn.q_cols, post_attention.hidden
+            ));
+        }
+        if post_attention.mlp.gate_rows != post_attention.intermediate
+            || post_attention.mlp.gate_cols != post_attention.hidden
+        {
+            return Err("Qwen3 decoder layer runtime MLP gate shape is inconsistent".to_string());
+        }
+        let step_state = Qwen3DecoderLayerStepState::new(
+            context,
+            stream,
+            decode_shape,
+            block_table,
+            post_attention.hidden,
+            post_attention.intermediate,
+            softmax_scale,
+            mlp_epsilon,
+        )?;
+
+        Ok(Self {
+            weights,
+            step_state,
+        })
+    }
+
+    pub fn step(
+        &mut self,
+        stream: &mut RuntimeStream,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output_gate: Option<&[f32]>,
+        residual: &[f32],
+    ) -> Result<Qwen3DecoderLayerStepOutput, String> {
+        let post_attention = &self.weights.post_attention;
+        self.step_state.step(
+            stream,
+            &self.weights.self_attn.o_matrix,
+            &post_attention.post_norm_weight,
+            &post_attention.mlp.gate_matrix,
+            &post_attention.mlp.up_matrix,
+            &post_attention.mlp.down_matrix,
+            q,
+            k,
+            v,
+            output_gate,
+            residual,
+        )
+    }
+
+    pub fn read_cache_to_host(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<PagedKvCacheReadback, String> {
+        self.step_state.read_cache_to_host(stream)
+    }
+}
+
 impl PagedDecodeShape {
     pub fn validate(&self) -> Result<(), String> {
         if self.block_size == 0 {

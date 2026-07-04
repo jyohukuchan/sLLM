@@ -7,8 +7,9 @@ use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
 use ullm_engine::decoder::{
-    PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerStepOutput,
-    Qwen3DecoderLayerStepState, Qwen3SelfAttnBlockStepState, Qwen3SelfAttnDecodeState,
+    PagedDecodeShape, Qwen3DecoderLayerRuntime, Qwen3DecoderLayerRuntimeWeights,
+    Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnBlockStepState,
+    Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimeWeights,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -7765,120 +7766,6 @@ fn qwen3_self_attn_prepare_sequence_smoke(
         paged_block_size,
         paged_cache_blocks,
     })
-}
-
-struct Qwen3SelfAttnRuntimeWeights {
-    q_rows: usize,
-    q_cols: usize,
-    k_rows: usize,
-    v_rows: usize,
-    o_rows: usize,
-    o_cols: usize,
-    head_dim: usize,
-    kv_heads: usize,
-    value_dim: usize,
-    q_matrix: ullm_runtime_sys::RuntimeBuffer,
-    k_matrix: ullm_runtime_sys::RuntimeBuffer,
-    v_matrix: ullm_runtime_sys::RuntimeBuffer,
-    o_matrix: ullm_runtime_sys::RuntimeBuffer,
-}
-
-struct Qwen3MlpRuntimeWeights {
-    gate_rows: usize,
-    gate_cols: usize,
-    gate_matrix: ullm_runtime_sys::RuntimeBuffer,
-    up_matrix: ullm_runtime_sys::RuntimeBuffer,
-    down_matrix: ullm_runtime_sys::RuntimeBuffer,
-}
-
-struct Qwen3PostAttentionRuntimeWeights {
-    hidden: usize,
-    intermediate: usize,
-    post_norm_weight: ullm_runtime_sys::RuntimeBuffer,
-    mlp: Qwen3MlpRuntimeWeights,
-}
-
-struct Qwen3DecoderLayerRuntimeWeights {
-    self_attn: Qwen3SelfAttnRuntimeWeights,
-    post_attention: Qwen3PostAttentionRuntimeWeights,
-}
-
-struct Qwen3DecoderLayerRuntime<'weights> {
-    weights: &'weights Qwen3DecoderLayerRuntimeWeights,
-    step_state: Qwen3DecoderLayerStepState,
-}
-
-impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        context: &mut ullm_runtime_sys::RuntimeContext,
-        stream: &mut ullm_runtime_sys::RuntimeStream,
-        weights: &'weights Qwen3DecoderLayerRuntimeWeights,
-        decode_shape: PagedDecodeShape,
-        block_table: Vec<u32>,
-        softmax_scale: f32,
-        mlp_epsilon: f32,
-    ) -> Result<Self, String> {
-        let post_attention = &weights.post_attention;
-        if weights.self_attn.q_cols != post_attention.hidden {
-            return Err(format!(
-                "Qwen3 decoder layer runtime hidden mismatch: self_attn_hidden={} post_attention_hidden={}",
-                weights.self_attn.q_cols, post_attention.hidden
-            ));
-        }
-        if post_attention.mlp.gate_rows != post_attention.intermediate
-            || post_attention.mlp.gate_cols != post_attention.hidden
-        {
-            return Err("Qwen3 decoder layer runtime MLP gate shape is inconsistent".to_string());
-        }
-        let step_state = Qwen3DecoderLayerStepState::new(
-            context,
-            stream,
-            decode_shape,
-            block_table,
-            post_attention.hidden,
-            post_attention.intermediate,
-            softmax_scale,
-            mlp_epsilon,
-        )?;
-
-        Ok(Self {
-            weights,
-            step_state,
-        })
-    }
-
-    fn step(
-        &mut self,
-        stream: &mut ullm_runtime_sys::RuntimeStream,
-        q: &[f32],
-        k: &[f32],
-        v: &[f32],
-        output_gate: Option<&[f32]>,
-        residual: &[f32],
-    ) -> Result<Qwen3DecoderLayerStepOutput, String> {
-        let post_attention = &self.weights.post_attention;
-        self.step_state.step(
-            stream,
-            &self.weights.self_attn.o_matrix,
-            &post_attention.post_norm_weight,
-            &post_attention.mlp.gate_matrix,
-            &post_attention.mlp.up_matrix,
-            &post_attention.mlp.down_matrix,
-            q,
-            k,
-            v,
-            output_gate,
-            residual,
-        )
-    }
-
-    fn read_cache_to_host(
-        &mut self,
-        stream: &mut ullm_runtime_sys::RuntimeStream,
-    ) -> Result<PagedKvCacheReadback, String> {
-        self.step_state.read_cache_to_host(stream)
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
