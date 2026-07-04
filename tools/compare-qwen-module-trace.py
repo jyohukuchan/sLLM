@@ -344,7 +344,7 @@ def fmt(value: Any) -> str:
     return f"{parsed:.6g}"
 
 
-def markdown(rows: list[dict[str, Any]]) -> str:
+def markdown(rows: list[dict[str, Any]], skipped: list[dict[str, Any]]) -> str:
     def feature_label(value: Any, field_name: str) -> str:
         if not isinstance(value, dict):
             return "-"
@@ -439,6 +439,30 @@ def markdown(rows: list[dict[str, Any]]) -> str:
                 *stage_rows,
             ]
         )
+    if skipped:
+        lines.extend(
+            [
+                "",
+                "## Skipped",
+                "",
+                "| layer | reason | package_hidden | fullref_hidden | token |",
+                "|---:|---|---:|---:|---:|",
+            ]
+        )
+        for item in skipped:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(item.get("layer_index", "-")),
+                        str(item.get("reason", "-")),
+                        str(item.get("package_hidden_index", "-")),
+                        str(item.get("fullref_hidden_index", "-")),
+                        str(item.get("token_index", "-")),
+                    ]
+                )
+                + " |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -451,7 +475,7 @@ def main() -> int:
     args.summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if args.markdown:
         args.markdown.parent.mkdir(parents=True, exist_ok=True)
-        args.markdown.write_text(markdown(summary["rows"]), encoding="utf-8")
+        args.markdown.write_text(markdown(summary["rows"], summary["skipped"]), encoding="utf-8")
     print(
         "qwen-module-trace-comparison "
         f"rows={summary['row_count']} skipped={len(summary['skipped'])}"

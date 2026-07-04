@@ -420,6 +420,51 @@ def top_abs_feature_indices(values: np.ndarray, limit: int = TOP_ABS_FEATURES) -
     return [int(index) for index in finite_indices[top_finite_indices]]
 
 
+def mapped_hot_feature_indices(
+    values: np.ndarray,
+    feature_dim: int,
+    hidden: int,
+    attention_hot_feature_indices: list[int],
+) -> list[int]:
+    if feature_dim == hidden:
+        return list(attention_hot_feature_indices)
+    head_width = 128
+    if hidden % head_width == 0:
+        value_heads = hidden // head_width
+        if feature_dim == value_heads:
+            indices = sorted({int(index) // head_width for index in attention_hot_feature_indices})
+            indices = [index for index in indices if 0 <= index < feature_dim]
+            if indices:
+                return indices
+        elif feature_dim % head_width == 0:
+            feature_heads = feature_dim // head_width
+            if feature_heads > 0 and feature_heads <= value_heads and value_heads % feature_heads == 0:
+                value_heads_per_feature_head = value_heads // feature_heads
+                indices = []
+                for feature_index in attention_hot_feature_indices:
+                    value_head = int(feature_index) // head_width
+                    head_offset = int(feature_index) % head_width
+                    feature_head = value_head // value_heads_per_feature_head
+                    mapped_index = feature_head * head_width + head_offset
+                    if 0 <= mapped_index < feature_dim:
+                        indices.append(mapped_index)
+                indices = sorted(set(indices))
+                if indices:
+                    return indices
+        if feature_dim > hidden:
+            v_base = feature_dim - hidden
+            indices = sorted(
+                {
+                    v_base + int(feature_index)
+                    for feature_index in attention_hot_feature_indices
+                    if 0 <= v_base + int(feature_index) < feature_dim
+                }
+            )
+            if indices:
+                return indices
+    return top_abs_feature_indices(values)
+
+
 def hot_vector_projection_summary(
     values: np.ndarray,
     token_index: int,
@@ -491,7 +536,7 @@ def add_token_vector_summary(
     )
 
 
-def causal_conv1d_silu(values: np.ndarray, weight: np.ndarray) -> np.ndarray:
+def causal_conv1d(values: np.ndarray, weight: np.ndarray) -> np.ndarray:
     if values.ndim != 3:
         raise ValueError(f"conv input expected [batch,seq,channels], got {values.shape}")
     if weight.ndim == 3:
@@ -508,7 +553,11 @@ def causal_conv1d_silu(values: np.ndarray, weight: np.ndarray) -> np.ndarray:
         if left_padding >= sequence_len:
             continue
         output[:, left_padding:, :] += values[:, : sequence_len - left_padding, :] * weight[:, kernel]
-    return (output / (1.0 + np.exp(-output))).astype(np.float32)
+    return output.astype(np.float32)
+
+
+def causal_conv1d_silu(values: np.ndarray, weight: np.ndarray) -> np.ndarray:
+    return silu(causal_conv1d(values, weight))
 
 
 def silu(values: np.ndarray) -> np.ndarray:
@@ -538,6 +587,45 @@ def linear_attn_gate_beta(a: np.ndarray, b: np.ndarray, a_log: np.ndarray, dt_bi
     )
     beta = 1.0 / (1.0 + np.exp(-b.astype(np.float32)))
     return gate.astype(np.float32), beta.astype(np.float32)
+
+
+def split_linear_attn_qkv_for_recurrent(
+    conv_output: np.ndarray,
+    key_heads: int,
+    value_heads: int,
+    key_dim: int,
+    value_dim: int,
+    q_scale: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if conv_output.ndim != 3:
+        raise ValueError(f"conv output expected [batch,seq,features], got {conv_output.shape}")
+    q_features = key_heads * key_dim
+    k_features = key_heads * key_dim
+    v_features = value_heads * value_dim
+    expected_features = q_features + k_features + v_features
+    if conv_output.shape[2] != expected_features:
+        raise ValueError(f"conv output feature mismatch: got {conv_output.shape[2]} expected {expected_features}")
+
+    q = conv_output[:, :, :q_features].astype(np.float32).reshape(
+        conv_output.shape[0],
+        conv_output.shape[1],
+        key_heads,
+        key_dim,
+    )
+    k = conv_output[:, :, q_features : q_features + k_features].astype(np.float32).reshape(
+        conv_output.shape[0],
+        conv_output.shape[1],
+        key_heads,
+        key_dim,
+    )
+    v = conv_output[:, :, q_features + k_features :].astype(np.float32)
+    q_norm = np.sqrt(np.sum(q * q, axis=-1, keepdims=True) + np.float32(1e-6))
+    k_norm = np.sqrt(np.sum(k * k, axis=-1, keepdims=True) + np.float32(1e-6))
+    q = (q / q_norm) * np.float32(q_scale)
+    k = k / k_norm
+    q = q.reshape(conv_output.shape[0], conv_output.shape[1], q_features)
+    k = k.reshape(conv_output.shape[0], conv_output.shape[1], k_features)
+    return q.astype(np.float32), k.astype(np.float32), v.astype(np.float32)
 
 
 def row_dot_trace(
@@ -743,9 +831,23 @@ def run_layer_trace(
     attention_z_projection = captured["attention_z_projection"]
     attention_a_projection = captured["attention_a_projection"]
     attention_b_projection = captured["attention_b_projection"]
-    attention_conv = causal_conv1d_silu(
+    attention_conv_pre_silu = causal_conv1d(
         attention_qkv_projection,
         tensor_to_numpy_f32(state["linear_attn.conv1d.weight"]),
+    )
+    attention_conv = silu(attention_conv_pre_silu)
+    value_dim = int(state["linear_attn.norm.weight"].numel())
+    value_heads = int(before.shape[2] // value_dim)
+    key_dim = value_dim
+    key_heads = int((attention_qkv_projection.shape[2] - before.shape[2]) // (2 * key_dim))
+    q_scale = 1.0 / math.sqrt(float(key_dim))
+    attention_recurrent_q, attention_recurrent_k, attention_recurrent_v = split_linear_attn_qkv_for_recurrent(
+        attention_conv,
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        q_scale,
     )
     attention_gate, attention_beta = linear_attn_gate_beta(
         attention_a_projection,
@@ -877,7 +979,11 @@ def run_layer_trace(
         ("attention_gate_silu", attention_gate_silu),
         ("attention_a_projection", attention_a_projection),
         ("attention_b_projection", attention_b_projection),
+        ("attention_conv_pre_silu", attention_conv_pre_silu),
         ("attention_conv", attention_conv),
+        ("attention_recurrent_q", attention_recurrent_q),
+        ("attention_recurrent_k", attention_recurrent_k),
+        ("attention_recurrent_v", attention_recurrent_v),
         ("attention_gate", attention_gate),
         ("attention_beta", attention_beta),
         ("attention_recurrent", attention_recurrent),
@@ -890,7 +996,17 @@ def run_layer_trace(
                 int(item["feature_index"])
                 for item in hot_input_vectors["attention_projection_input"]["top_abs_features"]
             ]
-        sampled_group_width = 128 if values.shape[2] == before.shape[2] and before.shape[2] % 128 == 0 else None
+        else:
+            sampled_features = mapped_hot_feature_indices(
+                values[0, token_index],
+                values.shape[2],
+                before.shape[2],
+                [
+                    int(item["feature_index"])
+                    for item in hot_input_vectors["attention_projection_input"]["top_abs_features"]
+                ],
+            )
+        sampled_group_width = 128 if values.shape[2] % 128 == 0 else None
         add_token_vector_summary(
             hot_input_vectors,
             name,
@@ -920,7 +1036,11 @@ def run_layer_trace(
             ("attention_gate_silu", attention_gate_silu),
             ("attention_a_projection", attention_a_projection),
             ("attention_b_projection", attention_b_projection),
+            ("attention_conv_pre_silu", attention_conv_pre_silu),
             ("attention_conv", attention_conv),
+            ("attention_recurrent_q", attention_recurrent_q),
+            ("attention_recurrent_k", attention_recurrent_k),
+            ("attention_recurrent_v", attention_recurrent_v),
             ("attention_gate", attention_gate),
             ("attention_beta", attention_beta),
             ("attention_recurrent", attention_recurrent),
@@ -933,7 +1053,17 @@ def run_layer_trace(
                     int(feature["feature_index"])
                     for feature in item["attention_projection_input"]["top_abs_features"]
                 ]
-            sampled_group_width = 128 if values.shape[2] == before.shape[2] and before.shape[2] % 128 == 0 else None
+            else:
+                sampled_features = mapped_hot_feature_indices(
+                    values[0, token],
+                    values.shape[2],
+                    before.shape[2],
+                    [
+                        int(feature["feature_index"])
+                        for feature in item["attention_projection_input"]["top_abs_features"]
+                    ],
+                )
+            sampled_group_width = 128 if values.shape[2] % 128 == 0 else None
             add_token_vector_summary(
                 item,
                 name,

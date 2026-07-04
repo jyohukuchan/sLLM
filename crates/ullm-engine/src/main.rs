@@ -12318,9 +12318,29 @@ fn package_golden_prefix_smoke_impl(
                         run.attention_gate_dim,
                     ),
                     (
+                        "attention_conv_pre_silu",
+                        run.attention_conv_pre_silu.as_slice(),
+                        run.attention_qkv_projection_dim,
+                    ),
+                    (
                         "attention_conv",
                         run.attention_conv.as_slice(),
                         run.attention_qkv_projection_dim,
+                    ),
+                    (
+                        "attention_recurrent_q",
+                        run.attention_recurrent_q.as_slice(),
+                        run.attention_recurrent_qk_dim,
+                    ),
+                    (
+                        "attention_recurrent_k",
+                        run.attention_recurrent_k.as_slice(),
+                        run.attention_recurrent_qk_dim,
+                    ),
+                    (
+                        "attention_recurrent_v",
+                        run.attention_recurrent_v.as_slice(),
+                        hidden,
                     ),
                     (
                         "attention_gate",
@@ -12899,11 +12919,13 @@ fn package_hot_input_vectors(
                 values.len()
             )
         })?;
-        let sampled_feature_indices = if *feature_dim == hidden {
-            attention_hot_feature_indices.as_slice()
-        } else {
-            &[]
-        };
+        let sampled_feature_indices_storage = package_mapped_hot_feature_indices(
+            slice,
+            *feature_dim,
+            hidden,
+            &attention_hot_feature_indices,
+        );
+        let sampled_feature_indices = sampled_feature_indices_storage.as_slice();
         insert_json_detail(
             &mut vectors,
             *name,
@@ -12911,8 +12933,8 @@ fn package_hot_input_vectors(
                 token_index,
                 slice,
                 sampled_feature_indices,
-                if *feature_dim == hidden {
-                    hidden_group_width
+                if *feature_dim % 128 == 0 {
+                    Some(128)
                 } else {
                     None
                 },
@@ -12920,6 +12942,68 @@ fn package_hot_input_vectors(
         );
     }
     Ok(vectors)
+}
+
+fn package_mapped_hot_feature_indices(
+    values: &[f32],
+    feature_dim: usize,
+    hidden: usize,
+    attention_hot_feature_indices: &[usize],
+) -> Vec<usize> {
+    if feature_dim == hidden {
+        return attention_hot_feature_indices.to_vec();
+    }
+    let head_width = 128_usize;
+    if hidden % head_width == 0 {
+        let value_heads = hidden / head_width;
+        if feature_dim == value_heads {
+            let mut indices = attention_hot_feature_indices
+                .iter()
+                .map(|feature_index| feature_index / head_width)
+                .filter(|head_index| *head_index < feature_dim)
+                .collect::<Vec<_>>();
+            indices.sort_unstable();
+            indices.dedup();
+            if !indices.is_empty() {
+                return indices;
+            }
+        } else if feature_dim % head_width == 0 {
+            let feature_heads = feature_dim / head_width;
+            if feature_heads > 0 && feature_heads <= value_heads && value_heads % feature_heads == 0
+            {
+                let value_heads_per_feature_head = value_heads / feature_heads;
+                let mut indices = attention_hot_feature_indices
+                    .iter()
+                    .map(|feature_index| {
+                        let value_head = feature_index / head_width;
+                        let head_offset = feature_index % head_width;
+                        let feature_head = value_head / value_heads_per_feature_head;
+                        feature_head * head_width + head_offset
+                    })
+                    .filter(|feature_index| *feature_index < feature_dim)
+                    .collect::<Vec<_>>();
+                indices.sort_unstable();
+                indices.dedup();
+                if !indices.is_empty() {
+                    return indices;
+                }
+            }
+        }
+        if feature_dim > hidden {
+            let v_base = feature_dim - hidden;
+            let mut indices = attention_hot_feature_indices
+                .iter()
+                .map(|feature_index| v_base + feature_index)
+                .filter(|feature_index| *feature_index < feature_dim)
+                .collect::<Vec<_>>();
+            indices.sort_unstable();
+            indices.dedup();
+            if !indices.is_empty() {
+                return indices;
+            }
+        }
+    }
+    package_top_abs_feature_indices(values, 8)
 }
 
 fn package_vector_summary(
@@ -15838,8 +15922,9 @@ fn package_linear_attn_recurrent_smoke(
         }
     }
 
+    let conv_activated = runtime_host_silu_f32(&conv_output);
     let qkv_split = match split_linear_attn_qkv_for_recurrent(
-        &conv_output,
+        &conv_activated,
         sequence_len,
         key_heads,
         value_heads,
@@ -17596,8 +17681,9 @@ fn package_linear_attn_workflow_smoke_impl(
         }
     }
 
+    let conv_activated = runtime_host_silu_f32(&conv_output);
     let qkv_split = match split_linear_attn_qkv_for_recurrent(
-        &conv_output,
+        &conv_activated,
         sequence_len,
         key_heads,
         value_heads,
@@ -18920,8 +19006,9 @@ fn package_linear_attn_mlp_block_smoke_impl(
         )?;
         let gate_beta_max_abs_diff = gate_max_abs_diff.max(beta_max_abs_diff);
 
+        let conv_activated = runtime_host_silu_f32(&conv_output);
         let qkv_split = split_linear_attn_qkv_for_recurrent(
-            &conv_output,
+            &conv_activated,
             sequence_len,
             key_heads,
             value_heads,
@@ -19499,7 +19586,12 @@ struct PackageLinearAttnMlpBlockSequenceRun {
     attention_a_projection: Vec<f32>,
     attention_b_projection: Vec<f32>,
     attention_gate_dim: usize,
+    attention_conv_pre_silu: Vec<f32>,
     attention_conv: Vec<f32>,
+    attention_recurrent_q: Vec<f32>,
+    attention_recurrent_k: Vec<f32>,
+    attention_recurrent_v: Vec<f32>,
+    attention_recurrent_qk_dim: usize,
     attention_gate: Vec<f32>,
     attention_beta: Vec<f32>,
     attention_recurrent: Vec<f32>,
@@ -19737,6 +19829,10 @@ fn package_linear_attn_mlp_block_sequence_run(
         a_output,
         b_output,
         conv_output,
+        conv_activated,
+        recurrent_q,
+        recurrent_k,
+        recurrent_v,
         gate_output,
         beta_output,
         recurrent_output,
@@ -20053,8 +20149,9 @@ fn package_linear_attn_mlp_block_sequence_run(
         )?;
         let gate_beta_max_abs_diff = gate_max_abs_diff.max(beta_max_abs_diff);
 
+        let conv_activated = runtime_host_silu_f32(&conv_output);
         let qkv_split = split_linear_attn_qkv_for_recurrent(
-            &conv_output,
+            &conv_activated,
             sequence_len,
             key_heads,
             value_heads,
@@ -20064,6 +20161,9 @@ fn package_linear_attn_mlp_block_sequence_run(
             q_scale,
         )
         .map_err(|err| format!("failed to split qkv for recurrent: {err}"))?;
+        let recurrent_q = qkv_split.q.clone();
+        let recurrent_k = qkv_split.k.clone();
+        let recurrent_v = qkv_split.v.clone();
         let state_elements = value_heads
             .checked_mul(key_dim)
             .and_then(|value| value.checked_mul(value_dim))
@@ -20398,6 +20498,10 @@ fn package_linear_attn_mlp_block_sequence_run(
             a_output,
             b_output,
             conv_output,
+            conv_activated,
+            recurrent_q,
+            recurrent_k,
+            recurrent_v,
             gate_output,
             beta_output,
             recurrent_output,
@@ -20733,7 +20837,12 @@ fn package_linear_attn_mlp_block_sequence_run(
         attention_a_projection: a_output,
         attention_b_projection: b_output,
         attention_gate_dim: value_heads,
-        attention_conv: conv_output,
+        attention_conv_pre_silu: conv_output,
+        attention_conv: conv_activated,
+        attention_recurrent_q: recurrent_q,
+        attention_recurrent_k: recurrent_k,
+        attention_recurrent_v: recurrent_v,
+        attention_recurrent_qk_dim: key_heads * key_dim,
         attention_gate: gate_output,
         attention_beta: beta_output,
         attention_recurrent: recurrent_output,

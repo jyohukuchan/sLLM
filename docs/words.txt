@@ -165,3 +165,4 @@ Qwen3.5 gated RMSNorm:linear attentionのrecurrent出力を`head_v_dim`単位に
 projection row-dot check:full-referenceの入力vectorに対してsource weight rowとpackage AQ4復元rowのdot積を比較し、projection単体の量子化寄与を測る診断
 sampled feature:hot input vector内で、あるstageのtop absolute feature indexを他stageでも同じfeature indexとして記録する診断点。stageごとのtop feature集合が一致しない場合でも、同じ内部featureの値と誤差を追跡できる
 head RMS diagnostic:Qwen3.5 gated RMSNormのようにhead_v_dim単位で正規化する境界について、sampled featureが属するhead内のRMSやmax_absをpackage/full-referenceで比較する診断
+linear attention Conv1d activation:Qwen3.5 linear attentionではdepthwise Conv1d出力にSiLUを適用してからq/k/v splitとrecurrentへ渡す境界。uLLMのdepthwise_conv1d_f32は純粋な畳み込みkernelとして残し、参照実装に合わせるcaller側でpost-SiLU値を使う
