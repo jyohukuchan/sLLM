@@ -7,8 +7,8 @@ use std::io::Read;
 use std::process::ExitCode;
 use std::time::Instant;
 use ullm_engine::decoder::{
-    PagedDecodeShape, Qwen3DecoderLayerStepState, Qwen3SelfAttnBlockStepState,
-    Qwen3SelfAttnDecodeState,
+    PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerStepOutput,
+    Qwen3DecoderLayerStepState, Qwen3SelfAttnBlockStepState, Qwen3SelfAttnDecodeState,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -7501,7 +7501,6 @@ fn package_self_attn_block_smoke(
 }
 
 struct SelfAttnBlockSmokeRun {
-    self_attn_weights: Qwen3SelfAttnRuntimeWeights,
     residual_sequence: Vec<f32>,
     q_rope: Vec<f32>,
     k_rope: Vec<f32>,
@@ -7574,11 +7573,89 @@ struct Qwen3DecoderLayerRuntimeWeights {
     post_attention: Qwen3PostAttentionRuntimeWeights,
 }
 
+struct Qwen3DecoderLayerRuntime<'weights> {
+    weights: &'weights Qwen3DecoderLayerRuntimeWeights,
+    step_state: Qwen3DecoderLayerStepState,
+}
+
+impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        weights: &'weights Qwen3DecoderLayerRuntimeWeights,
+        decode_shape: PagedDecodeShape,
+        block_table: Vec<u32>,
+        softmax_scale: f32,
+        mlp_epsilon: f32,
+    ) -> Result<Self, String> {
+        let post_attention = &weights.post_attention;
+        if weights.self_attn.q_cols != post_attention.hidden {
+            return Err(format!(
+                "Qwen3 decoder layer runtime hidden mismatch: self_attn_hidden={} post_attention_hidden={}",
+                weights.self_attn.q_cols, post_attention.hidden
+            ));
+        }
+        if post_attention.mlp.gate_rows != post_attention.intermediate
+            || post_attention.mlp.gate_cols != post_attention.hidden
+        {
+            return Err("Qwen3 decoder layer runtime MLP gate shape is inconsistent".to_string());
+        }
+        let step_state = Qwen3DecoderLayerStepState::new(
+            context,
+            stream,
+            decode_shape,
+            block_table,
+            post_attention.hidden,
+            post_attention.intermediate,
+            softmax_scale,
+            mlp_epsilon,
+        )?;
+
+        Ok(Self {
+            weights,
+            step_state,
+        })
+    }
+
+    fn step(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output_gate: Option<&[f32]>,
+        residual: &[f32],
+    ) -> Result<Qwen3DecoderLayerStepOutput, String> {
+        let post_attention = &self.weights.post_attention;
+        self.step_state.step(
+            stream,
+            &self.weights.self_attn.o_matrix,
+            &post_attention.post_norm_weight,
+            &post_attention.mlp.gate_matrix,
+            &post_attention.mlp.up_matrix,
+            &post_attention.mlp.down_matrix,
+            q,
+            k,
+            v,
+            output_gate,
+            residual,
+        )
+    }
+
+    fn read_cache_to_host(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<PagedKvCacheReadback, String> {
+        self.step_state.read_cache_to_host(stream)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_self_attn_block_sequence_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
-    self_attn_weights: Qwen3SelfAttnRuntimeWeights,
+    self_attn_weights: &Qwen3SelfAttnRuntimeWeights,
     sequence_len: usize,
     rotary_dim: usize,
     rope_base: f32,
@@ -7959,7 +8036,6 @@ fn run_self_attn_block_sequence_smoke(
     )?;
 
     Ok(SelfAttnBlockSmokeRun {
-        self_attn_weights,
         residual_sequence,
         q_rope,
         k_rope,
@@ -8414,15 +8490,10 @@ fn package_self_attn_mlp_block_smoke_impl(
         &up_tensor,
         &down_tensor,
     )?;
-    let Qwen3DecoderLayerRuntimeWeights {
-        self_attn: self_attn_weights,
-        post_attention: layer_weights,
-    } = layer_weights;
-
     let self_attn = run_self_attn_block_sequence_smoke(
         &mut context,
         &mut stream,
-        self_attn_weights,
+        &layer_weights.self_attn,
         sequence_len,
         rotary_dim,
         rope_base,
@@ -8434,14 +8505,14 @@ fn package_self_attn_mlp_block_smoke_impl(
 
     let hidden = self_attn.hidden;
     let mlp_epsilon = 1e-5_f32;
-    if layer_weights.hidden != hidden {
+    if layer_weights.post_attention.hidden != hidden {
         return Err(format!(
             "Qwen3 decoder layer runtime weight hidden mismatch: expected={hidden} got={}",
-            layer_weights.hidden
+            layer_weights.post_attention.hidden
         ));
     }
-    if layer_weights.mlp.gate_rows != layer_weights.intermediate
-        || layer_weights.mlp.gate_cols != hidden
+    if layer_weights.post_attention.mlp.gate_rows != layer_weights.post_attention.intermediate
+        || layer_weights.post_attention.mlp.gate_cols != hidden
     {
         return Err("Qwen3 decoder layer runtime MLP gate shape is inconsistent".to_string());
     }
@@ -8467,13 +8538,12 @@ fn package_self_attn_mlp_block_smoke_impl(
             head_dim: self_attn.head_dim,
             value_dim: self_attn.value_dim,
         };
-        let mut layer_step_state = Qwen3DecoderLayerStepState::new(
+        let mut layer_runtime = Qwen3DecoderLayerRuntime::new(
             &mut context,
             &mut stream,
+            &layer_weights,
             decode_shape,
             self_attn.paged_block_table.clone(),
-            hidden,
-            layer_weights.intermediate,
             self_attn.softmax_scale,
             mlp_epsilon,
         )?;
@@ -8500,14 +8570,9 @@ fn package_self_attn_mlp_block_smoke_impl(
                 .q_gate
                 .as_ref()
                 .map(|gate| &gate[attention_start..attention_end]);
-            let step = layer_step_state
+            let step = layer_runtime
                 .step(
                     &mut stream,
-                    &self_attn.self_attn_weights.o_matrix,
-                    &layer_weights.post_norm_weight,
-                    &layer_weights.mlp.gate_matrix,
-                    &layer_weights.mlp.up_matrix,
-                    &layer_weights.mlp.down_matrix,
                     &self_attn.q_rope[q_start..q_end],
                     &self_attn.k_rope[k_start..k_end],
                     &self_attn.v_projected[v_start..v_end],
@@ -8548,7 +8613,7 @@ fn package_self_attn_mlp_block_smoke_impl(
                 self_attn.head_dim,
                 self_attn.value_dim,
             )?;
-        let layer_cache = layer_step_state
+        let layer_cache = layer_runtime
             .read_cache_to_host(&mut stream)
             .map_err(|err| format!("failed to read Qwen3 decoder layer paged cache: {err}"))?;
         verify_f32_close(
