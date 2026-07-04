@@ -23,7 +23,7 @@ from aq_scale_formats import scale_values
 from safetensors import safe_open
 
 
-SCHEMA_VERSION = "qwen-layer-module-trace-v0.6"
+SCHEMA_VERSION = "qwen-layer-module-trace-v0.7"
 
 
 TOP_ABS_FEATURES = 8
@@ -795,30 +795,109 @@ def projection_row_dot_trace(
             for feature_index in selected_features_override
             if 0 <= int(feature_index) < module_output.shape[2]
         ]
-    vector = input_values[0, token_index].astype(np.float64)
-    traces = []
-    for feature_index in selected_features:
-        source_row = tensor_to_numpy_f32(source_weight[feature_index])
+    def projection_entry(
+        token: int,
+        feature_index: int,
+        source_row: np.ndarray,
+        package_row: np.ndarray | None,
+    ) -> dict[str, Any]:
+        vector = input_values[0, token].astype(np.float64)
         source_dot = float(np.dot(vector, source_row.astype(np.float64)))
-        output_value = float(module_output[0, token_index, feature_index])
-        trace: dict[str, Any] = {
-            "token_index": token_index,
+        output_value = float(module_output[0, token, feature_index])
+        entry: dict[str, Any] = {
+            "token_index": token,
             "feature_index": feature_index,
             "source_row_dot": source_dot,
             "module_output": output_value,
             "source_row_dot_error": source_dot - output_value,
         }
-        if package_dir is not None and package_tensor is not None:
-            package_row = dequantize_package_row(package_dir, package_tensor, feature_index)
+        if package_row is not None:
             package_dot = float(np.dot(vector, package_row.astype(np.float64)))
-            trace.update(
+            entry.update(
                 {
                     "package_row_dot": package_dot,
                     "package_row_dot_error_vs_source_row": package_dot - source_dot,
                     "package_row_dot_error_vs_module": package_dot - output_value,
                 }
             )
+        return entry
+
+    def projection_scale_fit(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+        numerator = 0.0
+        denominator = 0.0
+        original_errors = []
+        for entry in entries:
+            source = entry.get("source_row_dot")
+            package = entry.get("package_row_dot")
+            if not isinstance(source, (int, float)) or not isinstance(package, (int, float)):
+                continue
+            source_f = float(source)
+            package_f = float(package)
+            numerator += source_f * package_f
+            denominator += package_f * package_f
+            original_errors.append(package_f - source_f)
+        if denominator <= 0.0 or not original_errors:
+            return None
+        scale = numerator / denominator
+        scaled_errors = [
+            float(entry["package_row_dot"]) * scale - float(entry["source_row_dot"])
+            for entry in entries
+            if isinstance(entry.get("source_row_dot"), (int, float))
+            and isinstance(entry.get("package_row_dot"), (int, float))
+        ]
+        if not scaled_errors:
+            return None
+
+        def rms(values: list[float]) -> float:
+            return float(np.sqrt(np.mean(np.square(np.asarray(values, dtype=np.float64)))))
+
+        worst_index, worst_error = max(
+            enumerate(original_errors),
+            key=lambda item: abs(item[1]),
+        )
+        worst_scaled_index, worst_scaled_error = max(
+            enumerate(scaled_errors),
+            key=lambda item: abs(item[1]),
+        )
+        original_rmse = rms(original_errors)
+        scaled_rmse = rms(scaled_errors)
+        return {
+            "optimal_scale": scale,
+            "original_rmse": original_rmse,
+            "scaled_rmse": scaled_rmse,
+            "rmse_improvement_ratio": None
+            if original_rmse <= 0.0
+            else 1.0 - (scaled_rmse / original_rmse),
+            "original_max_abs_error": max(abs(value) for value in original_errors),
+            "scaled_max_abs_error": max(abs(value) for value in scaled_errors),
+            "original_mean_error": sum(original_errors) / len(original_errors),
+            "scaled_mean_error": sum(scaled_errors) / len(scaled_errors),
+            "worst_token_index": entries[worst_index].get("token_index"),
+            "worst_error": worst_error,
+            "worst_scaled_token_index": entries[worst_scaled_index].get("token_index"),
+            "worst_scaled_error": worst_scaled_error,
+        }
+
+    traces = []
+    per_token_by_feature = []
+    for feature_index in selected_features:
+        source_row = tensor_to_numpy_f32(source_weight[feature_index])
+        package_row = None
+        if package_dir is not None and package_tensor is not None:
+            package_row = dequantize_package_row(package_dir, package_tensor, feature_index)
+        trace = projection_entry(token_index, feature_index, source_row, package_row)
         traces.append(trace)
+        per_token = [
+            projection_entry(token, feature_index, source_row, package_row)
+            for token in range(module_output.shape[1])
+        ]
+        per_token_by_feature.append(
+            {
+                "feature_index": feature_index,
+                "per_token": per_token,
+                "scale_fit": projection_scale_fit(per_token),
+            }
+        )
 
     worst_package = None
     if traces and package_dir is not None and package_tensor is not None:
@@ -834,6 +913,7 @@ def projection_row_dot_trace(
         "selected_feature_count": len(selected_features),
         "selected_features": selected_features,
         "per_feature": traces,
+        "per_token_by_feature": per_token_by_feature,
         "worst_package_row_error": worst_package,
     }
 
