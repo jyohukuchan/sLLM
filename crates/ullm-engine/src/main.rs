@@ -214,6 +214,19 @@ fn main() -> ExitCode {
                 env::args().nth(9),
             )
         }
+        Some("package-self-attn-mlp-block-model-loop-smoke") => {
+            package_self_attn_mlp_block_model_loop_smoke(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+                env::args().nth(8),
+                env::args().nth(9),
+                env::args().nth(10),
+            )
+        }
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -2634,6 +2647,7 @@ fn run_scheduler_layer_ready_batch(
     v_token_elements: usize,
     attention_elements: usize,
     hidden: usize,
+    advance_scheduler: bool,
     label: &str,
 ) -> Result<usize, String> {
     let ready = scheduler
@@ -2734,7 +2748,11 @@ fn run_scheduler_layer_ready_batch(
                 residual: &run.residual_sequence[residual_start..residual_start + hidden],
             });
         }
-        runner.run_ready_batch(stream, scheduler, &ready, &inputs)?
+        if advance_scheduler {
+            runner.run_ready_batch(stream, scheduler, &ready, &inputs)?
+        } else {
+            runner.run_ready_batch_without_advance(stream, scheduler, &ready, &inputs)?
+        }
     };
 
     for output in outputs {
@@ -3237,6 +3255,7 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
         v_token_elements,
         attention_elements,
         hidden,
+        true,
         "runtime scheduler layer decode first batch",
     )?;
     let second_batch_ready = run_scheduler_layer_ready_batch(
@@ -3251,6 +3270,7 @@ fn runtime_scheduler_layer_decode_smoke_impl(device_index: u32) -> Result<String
         v_token_elements,
         attention_elements,
         hidden,
+        true,
         "runtime scheduler layer decode second batch",
     )?;
     let final_ready = scheduler
@@ -8655,6 +8675,28 @@ struct Qwen3SelfAttnPreparedSequence {
     scheduler_active_len: usize,
 }
 
+struct Qwen3SelfAttnModelLoopPreparedSequence {
+    residual_sequence: Vec<f32>,
+    q_rope: Vec<f32>,
+    k_rope: Vec<f32>,
+    v_projected: Vec<f32>,
+    q_gate: Option<Vec<f32>>,
+    hidden: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    q_projection_layout: &'static str,
+    q_gate_elements: usize,
+    output_gate_layout: &'static str,
+    q_norm_max_abs_diff: f32,
+    k_norm_max_abs_diff: f32,
+    q_rope_max_abs_diff: f32,
+    k_rope_max_abs_diff: f32,
+    attention_max_abs_diff: f32,
+}
+
 #[allow(dead_code)]
 struct SelfAttnBlockSmokeRun {
     residual_sequence: Vec<f32>,
@@ -8697,6 +8739,204 @@ struct SelfAttnBlockSmokeRun {
     o_proj_max_abs_diff: f32,
     block_max_abs_diff: f32,
     causal_paged_block_max_abs_diff: f32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qwen3_self_attn_prepare_model_loop_sequence_smoke(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    self_attn_weights: &Qwen3SelfAttnRuntimeWeights,
+    residual_sequence: Vec<f32>,
+    sequence_len: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    position_offset: usize,
+    q_norm: &PassthroughF32Data,
+    k_norm: &PassthroughF32Data,
+    paged_block_table: &[u32],
+    paged_block_size: usize,
+    paged_cache_blocks: usize,
+    label: &str,
+) -> Result<Qwen3SelfAttnModelLoopPreparedSequence, String> {
+    let Qwen3SelfAttnRuntimeShape {
+        hidden,
+        q_heads: shape_q_heads,
+        kv_heads: _,
+        head_dim: _,
+        value_dim: _,
+        attention_width: _,
+        q_projection_layout,
+    } = qwen3_self_attn_runtime_shape(self_attn_weights)?;
+    let expected_residual_len = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| format!("{label} residual length overflows"))?;
+    if residual_sequence.len() != expected_residual_len {
+        return Err(format!(
+            "{label} residual length {} does not match expected {}",
+            residual_sequence.len(),
+            expected_residual_len
+        ));
+    }
+
+    let prepared = qwen3_self_attn_prepare_sequence_for_paged_decode_f32(
+        context,
+        stream,
+        self_attn_weights,
+        residual_sequence,
+        sequence_len,
+        &q_norm.values,
+        &k_norm.values,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        paged_block_table,
+        paged_block_size,
+        paged_cache_blocks,
+    )?;
+    let Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode {
+        residual_sequence,
+        prepared:
+            Qwen3SelfAttnRuntimePreparedSequence {
+                q_query,
+                k_projected,
+                q_normed,
+                k_normed,
+                q_rope,
+                k_rope,
+                v_projected,
+                q_gate,
+                attention_output,
+                shape,
+                softmax_scale,
+                q_projection_layout: prepared_q_projection_layout,
+                q_gate_elements,
+                output_gate_layout,
+            },
+        paged_k_cache: _,
+        paged_v_cache: _,
+        paged_block_table: _,
+        paged_block_size: _,
+        paged_cache_blocks: _,
+    } = prepared;
+
+    if q_projection_layout != prepared_q_projection_layout {
+        return Err(format!(
+            "{label} q projection layout changed between shape and prepare: {q_projection_layout} vs {prepared_q_projection_layout}"
+        ));
+    }
+    if shape.q_heads != shape_q_heads {
+        return Err(format!(
+            "{label} q head count changed between shape and prepare: {} vs {shape_q_heads}",
+            shape.q_heads
+        ));
+    }
+
+    let epsilon = 1e-5_f32;
+    let mut expected_q_normed = Vec::with_capacity(q_query.len());
+    for head_input in q_query.chunks_exact(shape.head_dim) {
+        expected_q_normed.extend(runtime_host_rmsnorm_f32(
+            head_input,
+            &q_norm.values,
+            epsilon,
+        ));
+    }
+    let q_norm_max_abs_diff = verify_f32_close(
+        &format!("{label} q_norm"),
+        &q_normed,
+        &expected_q_normed,
+        1e-4_f32,
+        1e-4_f32,
+    )?;
+
+    let mut expected_k_normed = Vec::with_capacity(k_normed.len());
+    for head_input in k_projected.chunks_exact(shape.head_dim) {
+        expected_k_normed.extend(runtime_host_rmsnorm_f32(
+            head_input,
+            &k_norm.values,
+            epsilon,
+        ));
+    }
+    let k_norm_max_abs_diff = verify_f32_close(
+        &format!("{label} k_norm"),
+        &k_normed,
+        &expected_k_normed,
+        1e-4_f32,
+        1e-4_f32,
+    )?;
+
+    let expected_q_rope = runtime_host_rope_f32(
+        &q_normed,
+        sequence_len,
+        shape.q_heads,
+        shape.head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    );
+    let q_rope_max_abs_diff = verify_f32_close(
+        &format!("{label} q_rope"),
+        &q_rope,
+        &expected_q_rope,
+        1e-4_f32,
+        1e-4_f32,
+    )?;
+    let expected_k_rope = runtime_host_rope_f32(
+        &k_normed,
+        sequence_len,
+        shape.kv_heads,
+        shape.head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    );
+    let k_rope_max_abs_diff = verify_f32_close(
+        &format!("{label} k_rope"),
+        &k_rope,
+        &expected_k_rope,
+        1e-4_f32,
+        1e-4_f32,
+    )?;
+
+    let expected_attention = runtime_host_causal_attn_f32(
+        &q_rope,
+        &k_rope,
+        &v_projected,
+        sequence_len,
+        shape.q_heads,
+        shape.kv_heads,
+        shape.head_dim,
+        shape.value_dim,
+        softmax_scale,
+    );
+    let attention_max_abs_diff = verify_f32_close(
+        &format!("{label} attention"),
+        &attention_output,
+        &expected_attention,
+        1e-4_f32,
+        1e-4_f32,
+    )?;
+
+    Ok(Qwen3SelfAttnModelLoopPreparedSequence {
+        residual_sequence,
+        q_rope,
+        k_rope,
+        v_projected,
+        q_gate,
+        hidden,
+        q_heads: shape.q_heads,
+        kv_heads: shape.kv_heads,
+        head_dim: shape.head_dim,
+        value_dim: shape.value_dim,
+        softmax_scale,
+        q_projection_layout: prepared_q_projection_layout,
+        q_gate_elements,
+        output_gate_layout,
+        q_norm_max_abs_diff,
+        k_norm_max_abs_diff,
+        q_rope_max_abs_diff,
+        k_rope_max_abs_diff,
+        attention_max_abs_diff,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10633,6 +10873,7 @@ fn package_self_attn_mlp_block_scheduler_smoke_impl(
         v_token_elements,
         attention_elements,
         hidden,
+        true,
         "package scheduler layer first batch",
     )?;
     let second_batch_ready = run_scheduler_layer_ready_batch(
@@ -10647,6 +10888,7 @@ fn package_self_attn_mlp_block_scheduler_smoke_impl(
         v_token_elements,
         attention_elements,
         hidden,
+        true,
         "package scheduler layer second batch",
     )?;
     let final_ready = scheduler
@@ -10826,6 +11068,814 @@ fn package_self_attn_mlp_block_scheduler_smoke_impl(
         q_norm.dtype,
         k_norm.dtype,
         post_norm.dtype,
+        info.backend,
+        device_index,
+        info.name,
+    ))
+}
+
+struct PackageModelLoopLayerSmoke {
+    layer_index: usize,
+    q_tensor: String,
+    k_tensor: String,
+    v_tensor: String,
+    o_tensor: String,
+    q_norm_tensor: String,
+    k_norm_tensor: String,
+    post_norm_tensor: String,
+    gate_tensor: String,
+    up_tensor: String,
+    down_tensor: String,
+    q_norm: PassthroughF32Data,
+    k_norm: PassthroughF32Data,
+    post_norm: PassthroughF32Data,
+    weights: Qwen3DecoderLayerRuntimeWeights,
+    runtime_shape: Qwen3SelfAttnRuntimeShape,
+}
+
+fn load_package_model_loop_layer_smoke(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    layer_index: usize,
+) -> Result<PackageModelLoopLayerSmoke, String> {
+    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
+    let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
+    let o_tensor = format!("model.language_model.layers.{layer_index}.self_attn.o_proj.weight");
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+    let post_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+    let q_norm = read_named_passthrough_f32(path, &q_norm_tensor, chunk_bytes)?;
+    let k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)?;
+    let post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
+    let weights = qwen3_decoder_layer_runtime_weights_from_package(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        &q_tensor,
+        &k_tensor,
+        &v_tensor,
+        &o_tensor,
+        &q_norm,
+        &k_norm,
+        &post_norm,
+        &gate_tensor,
+        &up_tensor,
+        &down_tensor,
+    )?;
+    let runtime_shape = qwen3_self_attn_runtime_shape(&weights.self_attn)?;
+    if weights.post_attention.hidden != runtime_shape.hidden {
+        return Err(format!(
+            "model loop layer {layer_index} hidden mismatch: self_attn={} post_attention={}",
+            runtime_shape.hidden, weights.post_attention.hidden
+        ));
+    }
+    Ok(PackageModelLoopLayerSmoke {
+        layer_index,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        o_tensor,
+        q_norm_tensor,
+        k_norm_tensor,
+        post_norm_tensor,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        q_norm,
+        k_norm,
+        post_norm,
+        weights,
+        runtime_shape,
+    })
+}
+
+fn package_self_attn_mlp_block_model_loop_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    first_layer_index: Option<String>,
+    second_layer_index: Option<String>,
+    sequence_len: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-self-attn-mlp-block-model-loop-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let first_layer_index = match parse_optional_usize(first_layer_index, 3, "first layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let second_layer_index = match parse_optional_usize(second_layer_index, 7, "second layer index")
+    {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 3, "sequence length") {
+        Ok(value) if value >= 3 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be at least three for model-loop smoke");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 3, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    match package_self_attn_mlp_block_model_loop_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        [first_layer_index, second_layer_index],
+        sequence_len,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_self_attn_mlp_block_model_loop_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: [usize; 2],
+    sequence_len: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+) -> Result<String, String> {
+    if layer_indices[0] == layer_indices[1] {
+        return Err("model-loop smoke requires two distinct layer indices".to_string());
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let mut layers = Vec::with_capacity(layer_indices.len());
+    for layer_index in layer_indices {
+        layers.push(load_package_model_loop_layer_smoke(
+            &mut context,
+            &mut stream,
+            path,
+            chunk_bytes,
+            layer_index,
+        )?);
+    }
+
+    let hidden = layers[0].runtime_shape.hidden;
+    let q_heads = layers[0].runtime_shape.q_heads;
+    let kv_heads = layers[0].runtime_shape.kv_heads;
+    let head_dim = layers[0].runtime_shape.head_dim;
+    let value_dim = layers[0].runtime_shape.value_dim;
+    for layer in &layers {
+        if layer.runtime_shape.hidden != hidden
+            || layer.runtime_shape.q_heads != q_heads
+            || layer.runtime_shape.kv_heads != kv_heads
+            || layer.runtime_shape.head_dim != head_dim
+            || layer.runtime_shape.value_dim != value_dim
+        {
+            return Err(format!(
+                "model-loop smoke layer {} shape mismatch: hidden={} q_heads={} kv_heads={} head_dim={} value_dim={}",
+                layer.layer_index,
+                layer.runtime_shape.hidden,
+                layer.runtime_shape.q_heads,
+                layer.runtime_shape.kv_heads,
+                layer.runtime_shape.head_dim,
+                layer.runtime_shape.value_dim
+            ));
+        }
+        if layer.q_norm.values.len() != head_dim || layer.k_norm.values.len() != head_dim {
+            return Err(format!(
+                "model-loop smoke layer {} q/k norm length mismatch: q={} k={} head_dim={head_dim}",
+                layer.layer_index,
+                layer.q_norm.values.len(),
+                layer.k_norm.values.len()
+            ));
+        }
+    }
+
+    let default_rotary_dim = {
+        let candidate = if head_dim >= 4 {
+            head_dim / 4
+        } else {
+            head_dim
+        };
+        candidate - (candidate % 2)
+    };
+    if default_rotary_dim == 0 {
+        return Err(format!(
+            "default rotary_dim is zero for head_dim={head_dim}"
+        ));
+    }
+    let rotary_dim = match rotary_dim {
+        Some(raw) => raw
+            .parse::<usize>()
+            .map_err(|err| format!("invalid rotary dim {raw:?}: {err}"))?,
+        None => default_rotary_dim,
+    };
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        return Err(format!(
+            "rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim}, head_dim={head_dim}"
+        ));
+    }
+
+    let block_size = 2_usize;
+    let requests = vec![
+        Request::new(201, sequence_len - 2, 2),
+        Request::new(202, sequence_len - 1, 1),
+        Request::new(203, 1, 0),
+    ];
+    let mut required_blocks = 0_usize;
+    for request in &requests {
+        let total_tokens = request
+            .prompt_tokens
+            .checked_add(request.max_new_tokens)
+            .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
+        let request_blocks = (total_tokens - 1) / block_size + 1;
+        required_blocks = required_blocks
+            .checked_add(request_blocks)
+            .ok_or_else(|| "model-loop required block count overflows".to_string())?;
+    }
+    let cache_blocks = required_blocks
+        .checked_add(2)
+        .ok_or_else(|| "model-loop cache block count overflows".to_string())?;
+    if cache_blocks > u32::MAX as usize || block_size > u32::MAX as usize {
+        return Err(format!(
+            "model-loop block layout exceeds u32 range: cache_blocks={cache_blocks} block_size={block_size}"
+        ));
+    }
+    let decode_shape = PagedDecodeShape {
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+    };
+    let q_token_elements = decode_shape.q_elements()?;
+    let k_token_elements = decode_shape.k_token_elements()?;
+    let v_token_elements = decode_shape.v_token_elements()?;
+    let attention_elements = decode_shape.output_elements()?;
+    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let mlp_epsilon = 1e-5_f32;
+
+    let mut scheduler = SchedulerState::with_block_size(cache_blocks as u32, block_size as u32);
+    for request in &requests {
+        scheduler.enqueue(request.clone());
+    }
+    let mut allocated = scheduler
+        .pop_prefill_batch_with_allocation(usize::MAX)
+        .map_err(|err| format!("failed to allocate model-loop package batch: {err}"))?;
+    if allocated.len() != requests.len() {
+        return Err(format!(
+            "model-loop selected {} requests, expected {}",
+            allocated.len(),
+            requests.len()
+        ));
+    }
+
+    let mut request_ids = Vec::with_capacity(allocated.len());
+    let mut prompt_tokens = Vec::with_capacity(allocated.len());
+    let mut max_new_tokens = Vec::with_capacity(allocated.len());
+    let mut total_tokens = Vec::with_capacity(allocated.len());
+    let mut block_tables = Vec::with_capacity(allocated.len());
+    let mut initial_residuals = Vec::with_capacity(allocated.len());
+    for (request_index, scheduled) in allocated.drain(..).enumerate() {
+        let request = scheduled.request;
+        let request_total_tokens = request
+            .prompt_tokens
+            .checked_add(request.max_new_tokens)
+            .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
+        let base_input = deterministic_f32_vector(hidden);
+        let residual_elements = request_total_tokens
+            .checked_mul(hidden)
+            .ok_or_else(|| format!("request {:?} residual element count overflows", request.id))?;
+        let mut residual = Vec::with_capacity(residual_elements);
+        for timestep in 0..request_total_tokens {
+            let shifted_timestep = timestep
+                .checked_add(request_index.checked_mul(sequence_len).ok_or_else(|| {
+                    "model-loop residual timestep multiplier overflows".to_string()
+                })?)
+                .ok_or_else(|| "model-loop residual timestep overflows".to_string())?;
+            residual.extend(linear_attn_step_input(&base_input, shifted_timestep));
+        }
+        request_ids.push(request.id.0);
+        prompt_tokens.push(request.prompt_tokens);
+        max_new_tokens.push(request.max_new_tokens);
+        total_tokens.push(request_total_tokens);
+        block_tables.push(scheduled.allocation.blocks);
+        initial_residuals.push(residual);
+    }
+
+    let mut layer_runs: Vec<Vec<SchedulerLayerDecodeRun>> = Vec::with_capacity(layers.len());
+    let mut q_projection_layouts = Vec::with_capacity(layers.len());
+    let mut output_gate_layouts = Vec::with_capacity(layers.len());
+    let mut q_gate_elements_by_layer = Vec::with_capacity(layers.len());
+    let mut q_norm_max_abs_diff = 0.0_f32;
+    let mut k_norm_max_abs_diff = 0.0_f32;
+    let mut q_rope_max_abs_diff = 0.0_f32;
+    let mut k_rope_max_abs_diff = 0.0_f32;
+    let mut causal_attention_max_abs_diff = 0.0_f32;
+
+    for (layer_position, layer) in layers.iter().enumerate() {
+        let mut runs = Vec::with_capacity(requests.len());
+        let mut q_gate_elements = Vec::with_capacity(requests.len());
+        for (request_index, request) in requests.iter().enumerate() {
+            let residual_sequence = if layer_position == 0 {
+                initial_residuals[request_index].clone()
+            } else {
+                layer_runs[layer_position - 1][request_index]
+                    .expected
+                    .layer_output
+                    .clone()
+            };
+            let request_position_stride =
+                request_index.checked_mul(sequence_len).ok_or_else(|| {
+                    "model-loop request position offset multiplier overflows".to_string()
+                })?;
+            let request_position_offset = position_offset
+                .checked_add(request_position_stride)
+                .ok_or_else(|| "model-loop request position offset overflows".to_string())?;
+            let prepared = qwen3_self_attn_prepare_model_loop_sequence_smoke(
+                &mut context,
+                &mut stream,
+                &layer.weights.self_attn,
+                residual_sequence,
+                total_tokens[request_index],
+                rotary_dim,
+                rope_base,
+                request_position_offset,
+                &layer.q_norm,
+                &layer.k_norm,
+                &block_tables[request_index],
+                block_size,
+                cache_blocks,
+                &format!(
+                    "package-self-attn-mlp-block-model-loop-smoke layer {} request {:?}",
+                    layer.layer_index, request.id
+                ),
+            )?;
+            if prepared.hidden != hidden
+                || prepared.q_heads != q_heads
+                || prepared.kv_heads != kv_heads
+                || prepared.head_dim != head_dim
+                || prepared.value_dim != value_dim
+            {
+                return Err(format!(
+                    "model-loop prepared shape mismatch for layer {} request {:?}",
+                    layer.layer_index, request.id
+                ));
+            }
+            q_gate_elements.push(prepared.q_gate_elements);
+            q_norm_max_abs_diff = q_norm_max_abs_diff.max(prepared.q_norm_max_abs_diff);
+            k_norm_max_abs_diff = k_norm_max_abs_diff.max(prepared.k_norm_max_abs_diff);
+            q_rope_max_abs_diff = q_rope_max_abs_diff.max(prepared.q_rope_max_abs_diff);
+            k_rope_max_abs_diff = k_rope_max_abs_diff.max(prepared.k_rope_max_abs_diff);
+            causal_attention_max_abs_diff =
+                causal_attention_max_abs_diff.max(prepared.attention_max_abs_diff);
+            if request_index == 0 {
+                q_projection_layouts.push(prepared.q_projection_layout);
+                output_gate_layouts.push(prepared.output_gate_layout);
+            }
+
+            let expected = qwen3_decoder_layer_sequence_to_host_f32(
+                &layer.weights,
+                &mut context,
+                &mut stream,
+                decode_shape,
+                &block_tables[request_index],
+                prepared.softmax_scale,
+                mlp_epsilon,
+                &prepared.q_rope,
+                &prepared.k_rope,
+                &prepared.v_projected,
+                prepared.q_gate.as_deref(),
+                &prepared.residual_sequence,
+                total_tokens[request_index],
+            )?;
+            runs.push(SchedulerLayerDecodeRun {
+                request_id: request.id,
+                prompt_tokens: request.prompt_tokens,
+                max_new_tokens: request.max_new_tokens,
+                total_tokens: total_tokens[request_index],
+                block_table: block_tables[request_index].clone(),
+                q_sequence: prepared.q_rope,
+                k_sequence: prepared.k_rope,
+                v_sequence: prepared.v_projected,
+                output_gate_sequence: prepared.q_gate,
+                residual_sequence: prepared.residual_sequence,
+                expected,
+                decode_steps: 0,
+                attention_max_abs_diff: 0.0,
+                projection_input_max_abs_diff: 0.0,
+                projected_max_abs_diff: 0.0,
+                block_max_abs_diff: 0.0,
+                post_norm_max_abs_diff: 0.0,
+                mlp_max_abs_diff: 0.0,
+                layer_max_abs_diff: 0.0,
+                k_cache_max_abs_diff: 0.0,
+                v_cache_max_abs_diff: 0.0,
+            });
+        }
+        q_gate_elements_by_layer.push(q_gate_elements);
+        layer_runs.push(runs);
+    }
+
+    let mut layer_runners = Vec::with_capacity(layers.len());
+    for (layer_position, layer) in layers.iter().enumerate() {
+        let mut runner = Qwen3DecoderLayerRequestDecodeRunner::new();
+        for run in &layer_runs[layer_position] {
+            runner.insert_request(
+                &mut context,
+                &mut stream,
+                run.request_id,
+                &layer.weights,
+                decode_shape,
+                run.block_table.clone(),
+                softmax_scale,
+                mlp_epsilon,
+            )?;
+        }
+        layer_runners.push(runner);
+    }
+
+    for (layer_position, runner) in layer_runners.iter_mut().enumerate() {
+        for run in &mut layer_runs[layer_position] {
+            for timestep in 0..run.prompt_tokens {
+                run_scheduler_layer_prefill_step(
+                    runner,
+                    &mut stream,
+                    run,
+                    timestep,
+                    q_token_elements,
+                    k_token_elements,
+                    v_token_elements,
+                    attention_elements,
+                    hidden,
+                    &format!(
+                        "package model-loop layer {} prefill",
+                        layers[layer_position].layer_index
+                    ),
+                )?;
+            }
+        }
+    }
+    for request in &requests {
+        scheduler.complete_prefill(request.id).map_err(|err| {
+            format!(
+                "failed to complete package model-loop prefill {:?}: {err}",
+                request.id
+            )
+        })?;
+    }
+
+    let expected_first_ids = [RequestId(201), RequestId(202)];
+    let first_ready = scheduler
+        .ready_decode_batch(8)
+        .map_err(|err| format!("failed to query model-loop first ready batch: {err}"))?;
+    let first_ready_ids = first_ready
+        .iter()
+        .map(|request| request.request.id)
+        .collect::<Vec<_>>();
+    if first_ready_ids != expected_first_ids {
+        return Err(format!(
+            "model-loop first ready ids {:?} did not match expected {:?}",
+            first_ready_ids, expected_first_ids
+        ));
+    }
+    for (layer_position, runner) in layer_runners.iter_mut().enumerate() {
+        run_scheduler_layer_ready_batch(
+            runner,
+            &mut scheduler,
+            &mut layer_runs[layer_position],
+            &mut stream,
+            &expected_first_ids,
+            8,
+            q_token_elements,
+            k_token_elements,
+            v_token_elements,
+            attention_elements,
+            hidden,
+            false,
+            &format!(
+                "package model-loop layer {} first batch",
+                layers[layer_position].layer_index
+            ),
+        )?;
+    }
+    scheduler
+        .advance_decode_batch(&first_ready)
+        .map_err(|err| format!("failed to advance model-loop first ready batch: {err}"))?;
+
+    let expected_second_ids = [RequestId(201)];
+    let second_ready = scheduler
+        .ready_decode_batch(8)
+        .map_err(|err| format!("failed to query model-loop second ready batch: {err}"))?;
+    let second_ready_ids = second_ready
+        .iter()
+        .map(|request| request.request.id)
+        .collect::<Vec<_>>();
+    if second_ready_ids != expected_second_ids {
+        return Err(format!(
+            "model-loop second ready ids {:?} did not match expected {:?}",
+            second_ready_ids, expected_second_ids
+        ));
+    }
+    for (layer_position, runner) in layer_runners.iter_mut().enumerate() {
+        run_scheduler_layer_ready_batch(
+            runner,
+            &mut scheduler,
+            &mut layer_runs[layer_position],
+            &mut stream,
+            &expected_second_ids,
+            8,
+            q_token_elements,
+            k_token_elements,
+            v_token_elements,
+            attention_elements,
+            hidden,
+            false,
+            &format!(
+                "package model-loop layer {} second batch",
+                layers[layer_position].layer_index
+            ),
+        )?;
+    }
+    scheduler
+        .advance_decode_batch(&second_ready)
+        .map_err(|err| format!("failed to advance model-loop second ready batch: {err}"))?;
+    let final_ready = scheduler
+        .ready_decode_batch(8)
+        .map_err(|err| format!("failed to query model-loop final ready batch: {err}"))?
+        .len();
+    if final_ready != 0 {
+        return Err(format!(
+            "package model-loop final ready count {final_ready}, expected 0"
+        ));
+    }
+
+    for (layer_position, runner) in layer_runners.iter().enumerate() {
+        for run in &mut layer_runs[layer_position] {
+            let cache = runner
+                .read_cache_to_host(run.request_id, &mut stream)
+                .map_err(|err| {
+                    format!(
+                        "failed to read package model-loop layer {} cache for {:?}: {err}",
+                        layers[layer_position].layer_index, run.request_id
+                    )
+                })?;
+            run.k_cache_max_abs_diff = verify_f32_close(
+                &format!(
+                    "package model-loop layer {} request {:?} k cache",
+                    layers[layer_position].layer_index, run.request_id
+                ),
+                &cache.k,
+                &run.expected.paged_cache.k,
+                1e-5,
+                1e-5,
+            )?;
+            run.v_cache_max_abs_diff = verify_f32_close(
+                &format!(
+                    "package model-loop layer {} request {:?} v cache",
+                    layers[layer_position].layer_index, run.request_id
+                ),
+                &cache.v,
+                &run.expected.paged_cache.v,
+                1e-5,
+                1e-5,
+            )?;
+        }
+    }
+
+    let stats = scheduler.allocator_stats();
+    let cached_tokens = requests
+        .iter()
+        .map(|request| {
+            scheduler
+                .active_request(request.id)
+                .map(|active| active.cached_tokens)
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let generated_tokens = requests
+        .iter()
+        .map(|request| {
+            scheduler
+                .active_request(request.id)
+                .map(|active| active.generated_tokens)
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let decode_steps_by_layer = layer_runs
+        .iter()
+        .map(|runs| runs.iter().map(|run| run.decode_steps).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let layer_indices = layers
+        .iter()
+        .map(|layer| layer.layer_index)
+        .collect::<Vec<_>>();
+    let q_tensors = layers
+        .iter()
+        .map(|layer| layer.q_tensor.clone())
+        .collect::<Vec<_>>();
+    let k_tensors = layers
+        .iter()
+        .map(|layer| layer.k_tensor.clone())
+        .collect::<Vec<_>>();
+    let v_tensors = layers
+        .iter()
+        .map(|layer| layer.v_tensor.clone())
+        .collect::<Vec<_>>();
+    let o_tensors = layers
+        .iter()
+        .map(|layer| layer.o_tensor.clone())
+        .collect::<Vec<_>>();
+    let q_norm_tensors = layers
+        .iter()
+        .map(|layer| layer.q_norm_tensor.clone())
+        .collect::<Vec<_>>();
+    let k_norm_tensors = layers
+        .iter()
+        .map(|layer| layer.k_norm_tensor.clone())
+        .collect::<Vec<_>>();
+    let post_norm_tensors = layers
+        .iter()
+        .map(|layer| layer.post_norm_tensor.clone())
+        .collect::<Vec<_>>();
+    let gate_tensors = layers
+        .iter()
+        .map(|layer| layer.gate_tensor.clone())
+        .collect::<Vec<_>>();
+    let up_tensors = layers
+        .iter()
+        .map(|layer| layer.up_tensor.clone())
+        .collect::<Vec<_>>();
+    let down_tensors = layers
+        .iter()
+        .map(|layer| layer.down_tensor.clone())
+        .collect::<Vec<_>>();
+    let q_norm_dtypes = layers
+        .iter()
+        .map(|layer| layer.q_norm.dtype.clone())
+        .collect::<Vec<_>>();
+    let k_norm_dtypes = layers
+        .iter()
+        .map(|layer| layer.k_norm.dtype.clone())
+        .collect::<Vec<_>>();
+    let post_norm_dtypes = layers
+        .iter()
+        .map(|layer| layer.post_norm.dtype.clone())
+        .collect::<Vec<_>>();
+
+    let attention_max_abs_diff = layer_runs
+        .iter()
+        .flatten()
+        .map(|run| run.attention_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let projection_input_max_abs_diff = layer_runs
+        .iter()
+        .flatten()
+        .map(|run| run.projection_input_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let projected_max_abs_diff = layer_runs
+        .iter()
+        .flatten()
+        .map(|run| run.projected_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let block_max_abs_diff = layer_runs
+        .iter()
+        .flatten()
+        .map(|run| run.block_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let post_norm_max_abs_diff = layer_runs
+        .iter()
+        .flatten()
+        .map(|run| run.post_norm_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let mlp_max_abs_diff = layer_runs
+        .iter()
+        .flatten()
+        .map(|run| run.mlp_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let layer_max_abs_diff = layer_runs
+        .iter()
+        .flatten()
+        .map(|run| run.layer_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let k_cache_max_abs_diff = layer_runs
+        .iter()
+        .flatten()
+        .map(|run| run.k_cache_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+    let v_cache_max_abs_diff = layer_runs
+        .iter()
+        .flatten()
+        .map(|run| run.v_cache_max_abs_diff)
+        .fold(0.0_f32, f32::max);
+
+    Ok(format!(
+        "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} mlp_epsilon={mlp_epsilon:.9} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+        path,
+        layer_indices,
+        q_tensors,
+        k_tensors,
+        v_tensors,
+        o_tensors,
+        q_norm_tensors,
+        k_norm_tensors,
+        post_norm_tensors,
+        gate_tensors,
+        up_tensors,
+        down_tensors,
+        sequence_len,
+        requests.len(),
+        request_ids,
+        prompt_tokens,
+        max_new_tokens,
+        total_tokens,
+        block_size,
+        cache_blocks,
+        block_tables,
+        first_ready.len(),
+        second_ready.len(),
+        final_ready,
+        decode_steps_by_layer,
+        cached_tokens,
+        generated_tokens,
+        scheduler.active_len(),
+        stats.free_blocks,
+        stats.allocated_blocks,
+        stats.free_runs,
+        stats.largest_free_run,
+        hidden,
+        layers
+            .iter()
+            .map(|layer| layer.weights.post_attention.intermediate)
+            .collect::<Vec<_>>(),
+        q_projection_layouts,
+        q_gate_elements_by_layer,
+        output_gate_layouts,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        q_norm_dtypes,
+        k_norm_dtypes,
+        post_norm_dtypes,
         info.backend,
         device_index,
         info.name,
@@ -18721,7 +19771,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [FIRST_LAYER_INDEX] [SECOND_LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
