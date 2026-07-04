@@ -34,7 +34,8 @@ use ullm_engine::loader::{
 use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 use ullm_engine::qwen3_loader::{
     Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
-    qwen3_decoder_layer_runtime_weights_from_package, qwen3_package_model_stack_runner,
+    qwen3_decoder_layer_runtime_weights_from_package,
+    qwen3_package_model_run_ready_batch_from_sequences, qwen3_package_model_stack_runner,
     qwen3_self_attn_runtime_weights_from_package,
 };
 use ullm_engine::scheduler::{
@@ -2829,11 +2830,7 @@ fn run_scheduler_layer_stack_ready_batch(
     runs_by_layer: &mut [Vec<SchedulerLayerDecodeRun>],
     stream: &mut ullm_runtime_sys::RuntimeStream,
     ready: &[SchedulerDecodeRequest],
-    q_token_elements: usize,
-    k_token_elements: usize,
-    v_token_elements: usize,
-    attention_elements: usize,
-    hidden: usize,
+    decode: Qwen3PackageModelDecodePlan,
     label: &str,
 ) -> Result<usize, String> {
     if ready.is_empty() {
@@ -2893,33 +2890,29 @@ fn run_scheduler_layer_stack_ready_batch(
         }
     }
 
-    let input_layout = Qwen3DecoderLayerDecodeInputLayout {
-        q_token_elements,
-        k_token_elements,
-        v_token_elements,
-        attention_elements,
-        hidden,
-    };
-    let mut layer_inputs = Vec::with_capacity(runs_by_layer.len());
-    for (layer_position, runs) in runs_by_layer.iter().enumerate() {
-        let sequences = runs
-            .iter()
-            .map(scheduler_layer_decode_sequence_view)
-            .collect::<Vec<_>>();
-        let inputs = qwen3_decoder_layer_decode_batch_inputs_from_sequences(
-            ready,
-            &sequences,
-            input_layout,
-            &format!("{label} layer {layer_position}"),
-        )?;
-        layer_inputs.push(inputs);
-    }
-
-    let layer_input_refs = layer_inputs.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    let outputs_by_layer =
-        runner.run_ready_batch_across_layers(stream, scheduler, &ready, &layer_input_refs)?;
-    drop(layer_input_refs);
-    drop(layer_inputs);
+    let layer_sequences = runs_by_layer
+        .iter()
+        .map(|runs| {
+            runs.iter()
+                .map(scheduler_layer_decode_sequence_view)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let layer_sequence_refs = layer_sequences
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let outputs_by_layer = qwen3_package_model_run_ready_batch_from_sequences(
+        runner,
+        stream,
+        scheduler,
+        ready,
+        decode,
+        &layer_sequence_refs,
+        label,
+    )?;
+    drop(layer_sequence_refs);
+    drop(layer_sequences);
 
     for (layer_position, outputs) in outputs_by_layer.into_iter().enumerate() {
         let runs = runs_by_layer
@@ -2938,7 +2931,13 @@ fn run_scheduler_layer_stack_ready_batch(
                     run.request_id
                 )
             })?;
-            verify_scheduler_layer_step_output(label, run, &output, hidden, attention_elements)?;
+            verify_scheduler_layer_step_output(
+                label,
+                run,
+                &output,
+                decode.hidden,
+                decode.attention_elements,
+            )?;
         }
     }
     Ok(ready.len())
@@ -11472,11 +11471,7 @@ impl PackageModelLoopExecutionPlan {
                 &mut layer_run_plan.runs_by_layer,
                 stream,
                 &ready,
-                self.decode.q_token_elements,
-                self.decode.k_token_elements,
-                self.decode.v_token_elements,
-                self.decode.attention_elements,
-                self.decode.hidden,
+                self.decode,
                 &label,
             )?;
             decode_batch_ready_counts.push(ready_count);

@@ -3,7 +3,11 @@
 
 use std::collections::BTreeSet;
 
-use crate::decode_runner::Qwen3DecoderLayerStackRequestDecodeRunner;
+use crate::decode_runner::{
+    Qwen3DecoderLayerDecodeBatchOutput, Qwen3DecoderLayerDecodeInputLayout,
+    Qwen3DecoderLayerDecodeSequenceView, Qwen3DecoderLayerStackRequestDecodeRunner,
+    qwen3_decoder_layer_decode_batch_inputs_from_sequences,
+};
 use crate::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntimeWeights, Qwen3MlpRuntimeWeights,
     Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights,
@@ -13,7 +17,7 @@ use crate::host_bytes::encode_f32_to_bytes;
 use crate::loader::{
     PassthroughF32Data, WeightRegistry, materialize_selected_aq4_matrix, read_named_passthrough_f32,
 };
-use crate::scheduler::RequestId;
+use crate::scheduler::{RequestId, SchedulerDecodeRequest, SchedulerState};
 use ullm_runtime_sys::{RuntimeContext, RuntimeStream};
 
 pub struct Qwen3PackageDecoderLayerRuntime {
@@ -151,6 +155,37 @@ pub fn qwen3_package_model_stack_runner<'weights, 'requests>(
         }
     }
     Ok(layer_runner)
+}
+
+pub fn qwen3_package_model_run_ready_batch_from_sequences<'a>(
+    runner: &mut Qwen3DecoderLayerStackRequestDecodeRunner<'_>,
+    stream: &mut RuntimeStream,
+    scheduler: &mut SchedulerState,
+    ready_batch: &[SchedulerDecodeRequest],
+    decode_plan: Qwen3PackageModelDecodePlan,
+    layer_sequences: &[&[Qwen3DecoderLayerDecodeSequenceView<'a>]],
+    label: &str,
+) -> Result<Vec<Vec<Qwen3DecoderLayerDecodeBatchOutput>>, String> {
+    let input_layout = Qwen3DecoderLayerDecodeInputLayout {
+        q_token_elements: decode_plan.q_token_elements,
+        k_token_elements: decode_plan.k_token_elements,
+        v_token_elements: decode_plan.v_token_elements,
+        attention_elements: decode_plan.attention_elements,
+        hidden: decode_plan.hidden,
+    };
+    let mut layer_inputs = Vec::with_capacity(layer_sequences.len());
+    for (layer_position, sequences) in layer_sequences.iter().enumerate() {
+        let inputs = qwen3_decoder_layer_decode_batch_inputs_from_sequences(
+            ready_batch,
+            sequences,
+            input_layout,
+            &format!("{label} layer {layer_position}"),
+        )?;
+        layer_inputs.push(inputs);
+    }
+
+    let layer_input_refs = layer_inputs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    runner.run_ready_batch_across_layers(stream, scheduler, ready_batch, &layer_input_refs)
 }
 
 impl Qwen3PackageModelRuntime {
@@ -603,6 +638,7 @@ pub fn qwen3_decoder_layer_runtime_weights_from_package(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::Request;
 
     fn passthrough(values: Vec<f32>) -> PassthroughF32Data {
         PassthroughF32Data {
@@ -716,6 +752,62 @@ mod tests {
         };
 
         assert!(err.contains("0 layers but 1 layer request sets"));
+    }
+
+    #[test]
+    fn package_model_ready_batch_from_sequences_builds_inputs_before_stack_run() {
+        let mut context = RuntimeContext::create(0).expect("create CPU runtime context");
+        let mut stream = context.create_stream().expect("create CPU runtime stream");
+        let decode_plan = Qwen3PackageModelDecodePlan::from_shape(4, 2, 1, 2, 2, 2, 2)
+            .expect("decode plan from small shape");
+        let mut scheduler = SchedulerState::with_block_size(2, 2);
+        scheduler.enqueue(Request::new(61, 1, 1));
+        scheduler
+            .pop_prefill_batch_with_allocation(1)
+            .expect("allocation should succeed");
+        scheduler
+            .complete_prefill(RequestId(61))
+            .expect("prefill completion should succeed");
+        let ready = scheduler
+            .ready_decode_batch(1)
+            .expect("ready batch should be generated");
+        let q = vec![0.125_f32; 2 * decode_plan.q_token_elements];
+        let k = vec![0.25_f32; 2 * decode_plan.k_token_elements];
+        let v = vec![0.375_f32; 2 * decode_plan.v_token_elements];
+        let gate = vec![0.5_f32; 2 * decode_plan.attention_elements];
+        let residual = vec![0.625_f32; 2 * decode_plan.hidden];
+        let sequence = Qwen3DecoderLayerDecodeSequenceView {
+            request_id: RequestId(61),
+            q_sequence: &q,
+            k_sequence: &k,
+            v_sequence: &v,
+            output_gate_sequence: Some(&gate),
+            residual_sequence: &residual,
+        };
+        let layer_sequences = vec![vec![sequence]];
+        let layer_sequence_refs = layer_sequences
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let mut runner = Qwen3DecoderLayerStackRequestDecodeRunner::new();
+
+        let err = qwen3_package_model_run_ready_batch_from_sequences(
+            &mut runner,
+            &mut stream,
+            &mut scheduler,
+            &ready,
+            decode_plan,
+            &layer_sequence_refs,
+            "package model ready batch test",
+        )
+        .expect_err("empty stack runner should reject layer input");
+
+        assert!(err.contains("0 layers but 1 layer input batches"), "{err}");
+        let active = scheduler
+            .active_request(RequestId(61))
+            .expect("request should remain active after failed stack run");
+        assert_eq!(active.cached_tokens, 1);
+        assert_eq!(active.generated_tokens, 0);
     }
 
     #[test]

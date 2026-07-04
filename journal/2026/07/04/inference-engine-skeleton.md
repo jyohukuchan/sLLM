@@ -1549,3 +1549,35 @@
 ### 次の行動
 
 - 次は `PackageModelLoopExecutionPlan::execute` 内のprefill loop、decode loop、cache verifyをそれぞれ小さいprivate methodへ出すか、`SchedulerLayerDecodeRun` の入力・進行状態をさらに独立型へ切り出すかを選ぶ。実runner APIに近いのは前者だが、所有権設計の見通しが必要。
+
+## Qwen3 package model ready batch run 抽出
+
+### 前回の要点
+
+- `PackageModelLoopLayerRunPlan::stack_requests()` を追加し、stack runner setupへ渡すrequest id/block table view構築をlayer run plan側へ寄せた。
+- `PackageModelLoopExecutionPlan::execute` には、ready batchごとのlayer sequence view作成、decode input作成、stack runner実行が残っていた。
+
+### 今回の変更点
+
+- `qwen3_loader.rs` に `qwen3_package_model_run_ready_batch_from_sequences` を追加した。
+- 新関数は `Qwen3PackageModelDecodePlan` から `Qwen3DecoderLayerDecodeInputLayout` を作り、layerごとの `Qwen3DecoderLayerDecodeSequenceView` からready batch inputを組み立てて、`Qwen3DecoderLayerStackRequestDecodeRunner::run_ready_batch_across_layers` へ渡す。
+- `main.rs` の `run_scheduler_layer_stack_ready_batch` は、cache position、remaining token、block tableのsmoke検証と、出力diff・`decode_steps` 更新だけを持つ形にした。
+- qwen3_loader側に、sequence input構築後に空stack runnerで失敗し、SchedulerStateが進まないことを確認する単体テストを追加した。
+- `docs/words.txt` に `Qwen3 package model ready batch run` を追加した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo test -p ullm-engine decode_runner -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- `package-self-attn-mlp-block-model-loop-smoke` with layers `3,7,11`, sequence len `3`, passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; all reported `decode_batch_ready_counts=[2, 1]`, `final_ready=0`, `decode_steps_by_layer=[[2, 1, 0], [2, 1, 0], [2, 1, 0]]`, `verified=true`。
+
+### 次の行動
+
+- 次はprefill側にも同じ考え方を適用し、`Qwen3 package model prefill step/run` のような薄いlibrary境界を作る。ただしprefillはscheduler advanceを伴わないため、smoke側のprefill完了処理との境界を崩さない。
