@@ -62,3 +62,17 @@ Result:
 | CPU | golden_before_each_layer | row 3377 | `0.000714828336` | `0.020418806` | `0.167163849` | `0.998780983` |
 
 The layer `11` probe is only a weak improvement. After row `3377` is scaled, the max-diff coordinate moves to hidden `3994`, so layer `11` looks like a broader multi-row or mixed-path drift rather than the same single-row pattern seen at layer `10`.
+
+A second probe added row `3994` with a least-squares scale derived after applying row `3377`:
+
+- Override file: `benchmarks/results/2026-07-05/engine/package-row-scale-overrides-layer11-hidden3377-3994-self-attn-mlp-p4p46-inproj.json`
+- Additional row: layer `11`, `mlp.down_proj.weight`, row `3994`, scale `1.020286172534`
+- Report: `benchmarks/results/2026-07-05/engine/package-golden-prefix-cpu-golden-before-layer11-two-row-scale-override-p4p46-inproj.jsonl`
+
+Result:
+
+| Backend | Mode | Override | Layer 11 MSE | Layer 11 Mean Abs Diff | Layer 11 Max Abs Diff | Layer 11 Cosine |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| CPU | golden_before_each_layer | rows 3377 + 3994 | `0.000714424519` | `0.020416921` | `0.179649353` | `0.998781590` |
+
+The two-row version improves MSE only marginally and worsens max abs compared with the single-row probe. This reinforces that layer `11` should not be handled by hand-picked row scaling without a proper self-attention-layer row-dot trace.
