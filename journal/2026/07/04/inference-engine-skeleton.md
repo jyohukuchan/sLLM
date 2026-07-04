@@ -7,6 +7,12 @@
 
 ## 今回の変更点
 
+- Commit `e7a2969 Add runtime f32 paged decode attention` で `ullm_runtime_paged_decode_attn_f32` を追加した。
+- Paged decode attentionのruntime layoutは、`q=[q_heads, head_dim]`、物理K cache `k_cache=[cache_blocks, block_size, kv_heads, head_dim]`、物理V cache `v_cache=[cache_blocks, block_size, kv_heads, value_dim]`、`block_table=[ceil(cache_len / block_size)]` のu32配列、`output=[q_heads, value_dim]`。
+- 論理token `t` は `block_id = block_table[t / block_size]`、`block_offset = t % block_size` で物理slotを参照する。GQAは既存decode attentionと同じく `kv_head = q_head / (q_heads / kv_heads)`。
+- C++ runtimeにCPU fallback、HIPRTC kernel、HIP staging fallbackを追加した。HIP必須フラグは `ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1`。
+- Rust wrapper `ullm_runtime_sys::paged_decode_attn_f32`、CPU/HIP unit test、`ullm-engine runtime-paged-decode-attn-smoke [DEVICE_INDEX]` を追加した。
+- 現段階ではpaged KV allocatorやscheduler全体との接続はまだ行っていない。RDNA2/V620とRDNA4/R9700で検証できるblock table参照境界を先に固定した。
 - Commit `c6b0316 Add runtime f32 decode attention` で `ullm_runtime_decode_attn_f32` を追加した。1-token `q=[q_heads, head_dim]` とprefill済み `k_cache=[cache_len, kv_heads, head_dim]`、`v_cache=[cache_len, kv_heads, value_dim]` からdecode時のGQA softmax attention value mixを実行する。
 - Rust wrapper `ullm_runtime_sys::decode_attn_f32`、CPU/HIP unit test、`ullm-engine runtime-decode-attn-smoke [DEVICE_INDEX]` を追加した。HIP必須フラグは `ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1`。
 - 5.3-codex-spark subagentに `crates/ullm-runtime-sys/src/lib.rs` のextern/wrapper/test追加を分担させ、main側でC ABI/C++ runtimeとengine CLIを統合した。
@@ -99,6 +105,12 @@
 
 ## 実測・検証
 
+- `target/debug/ullm-engine runtime-paged-decode-attn-smoke 0`
+  - CPU fallbackで成功した。`cache_len=5`、`block_size=2`、`cache_blocks=4`、`block_table=[2,0,3]`、max diff `0`。
+- `ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine runtime-paged-decode-attn-smoke 2`
+  - R9700/RDNA4でHIP kernel経路が成功した。max diff `0.000000477`。
+- 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でもruntime paged decode attention smokeが成功した。max diffはいずれも `0.000000477`。
+- 追加後の検証は `cargo fmt --all --check`、`cargo check -p ullm-runtime-sys`、`cargo check -p ullm-engine`、`cargo test -p ullm-runtime-sys paged_decode -- --test-threads=1`、`cargo test -p ullm-runtime-sys -- --test-threads=1`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
 - `target/debug/ullm-engine runtime-decode-attn-smoke 0`
   - CPU fallbackで成功した。output previewは `[-0.2392773,0.0548403,0.0375722,0.3316899,1.0656385,1.3597561,1.5668775,1.8609953]`、max diff `0`。
 - `ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine runtime-decode-attn-smoke 2`
@@ -574,9 +586,11 @@
 - `7c89af6 Add package self attention causal smoke`
 - `8dcd8fe Add package self attention block smoke`
 - `f7173b7 Add runtime f32 sigmoid mul`
+- `e7a2969 Add runtime f32 paged decode attention`
 
 ## 次の行動
 
+- Paged decode attentionのruntime境界はCPU、R9700/RDNA4、V620/RDNA2で通った。次はpackage self-attn decode smokeへ物理paged K/V cache packingを足すか、`KvBlockAllocator` とruntime block table bufferをつなぐ狭いdecoder-step APIを作る。
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
 - CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、小さいMLP workflow smoke、実packageのMLP tensor workflow smoke、実packageのpassthrough RMSNorm workflow smoke、実packageの `RMSNorm -> MLP` workflow smoke、実packageの `linear_attn` projection workflow smoke、実packageの `linear_attn` 補助passthrough tensor workflow smoke、実packageの `linear_attn.in_proj_qkv -> norm` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d` 部分workflow smoke、実packageの `linear_attn.in_proj_a/b + A_log/dt_bias -> gate/beta` 部分workflow smoke、実packageの `linear_attn.in_proj_qkv -> conv1d -> q/k/v split -> recurrent` 部分workflow smoke、実packageのpost-recurrent `in_proj_z -> gated RMSNorm -> out_proj` 部分workflow smoke、実packageの `linear_attn` 部分workflow smoke、実packageの `input RMSNorm -> linear_attn -> residual add` block smoke、実packageの `post RMSNorm -> MLP -> residual add` block smoke、1 tokenおよびsequence length 2の実package `input RMSNorm -> linear_attn -> residual -> post RMSNorm -> MLP -> residual` layer-level partial decoder smoke、通常self-attnのq/k/v/o projection smoke、通常self-attnのq/k projection -> head-wise RMSNorm smoke、通常self-attnのq/k norm -> RoPE smoke、通常self-attnのq/k/v -> causal attention value mix smoke、Qwen3.5 gated q projectionを考慮した通常self-attnの `q/k/v -> RoPE -> causal attention -> runtime output gate -> o_proj -> residual add` block smokeまで通った。次はself-attn block outputを `post_attention_layernorm -> MLP -> residual` に接続する。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
