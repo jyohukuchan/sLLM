@@ -19,6 +19,8 @@ Generated artifacts:
 - `qwen-layer-module-trace-actual-input-layers7-9-11-hidden3994-layer6-layer10-p4p46-inproj.md`
 - `qwen-module-trace-comparison-actual-input-layers7-9-11-hidden3994-layer6-layer10-p4p46-inproj.json`
 - `qwen-module-trace-comparison-actual-input-layers7-9-11-hidden3994-layer6-layer10-p4p46-inproj.md`
+- `qwen-self-attention-propagation-layer7-actual-input-token8-feature503-hidden3994-p4p46-inproj.json`
+- `qwen-self-attention-propagation-layer7-actual-input-token8-feature503-hidden3994-p4p46-inproj.md`
 
 ## Local package error with actual-prefix inputs
 
@@ -70,9 +72,41 @@ and `attention_q_gate` differ, but not enough by themselves to explain the
 `attention_projection_input` feature `503` jump from `0.62890625` to
 `1.128042817`.
 
+## Layer 7 feature 503 replay
+
+`tools/analyze-qwen-self-attention-propagation.py` was extended to replay the
+same layer input with source q/k/v and dequantized package q/k/v, then emit
+per-feature stage values.
+
+For layer `7`, token `8`, feature `503`:
+
+| stage | source | package replay | diff |
+| --- | ---: | ---: | ---: |
+| query_projection | -0.005279541 | 0.083527893 | 0.088807434 |
+| gate_projection | 0.458984375 | 0.501503110 | 0.042518735 |
+| key_projection | -0.621093750 | -0.613185644 | 0.007908106 |
+| value_projection | -1.773437500 | -1.844769835 | -0.071332335 |
+| query_normed | -0.006134033 | 0.097715974 | 0.103850007 |
+| key_normed | -0.785156250 | -0.774710417 | 0.010445833 |
+| raw_attention | 1.023437500 | 1.011238456 | -0.012199044 |
+| gate_sigmoid | 0.613281250 | 0.622812510 | 0.009531260 |
+| o_input | 0.628906250 | 0.629811943 | 0.000905693 |
+
+This replay exactly matches the source layer hook
+(`source_o_input_replay_vs_layer_hook.max_abs = 0`). With dequantized package
+q/k/v, the feature `503` gated `o_proj` input remains close to source
+(`+0.000905693`). That does **not** reproduce the actual package runtime
+`attention_projection_input` value from the JSONL (`1.128042817`, diff
+`0.499136567`).
+
+This narrows the next target further: the mismatch is not explained by
+dequantized q/k/v replay alone. The next diagnostic should compare the package
+runtime causal attention output against a pure host reference on the exact
+layer `7` actual-prefix q/k/v tensors, or dump the full package prepared q/k/v
+and raw attention vectors for that token.
+
 Next useful target:
 
-- Trace layer `7` self-attention internals for token `8`, hidden `3994`,
-  especially the causal attention output feeding `o_proj` input feature `503`.
-  The full-reference trace currently exposes the gated `o_proj` input but not
-  the raw pre-gate attention vector, so that raw vector should be the next dump.
+- Add a Rust-side actual-input self-attention diagnostic for layer `7` that
+  compares runtime causal attention with `runtime_host_causal_attn_f32` and
+  records token `8`, feature `503`.

@@ -34,6 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--fixture", type=Path, required=True)
     parser.add_argument("--package-dir", type=Path, required=True)
+    parser.add_argument(
+        "--input-override-dir",
+        type=Path,
+        help="Optional directory containing layer-XXXX-input.f32 files to use instead of fixture before tensors.",
+    )
     parser.add_argument("--layer", type=int, required=True)
     parser.add_argument(
         "--hidden-index",
@@ -44,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dtype", choices=("bfloat16", "float32"), default="bfloat16")
     parser.add_argument("--torch-threads", type=int, default=8)
+    parser.add_argument("--token-index", action="append", type=int, help="Token index for per-feature stage tracing.")
+    parser.add_argument("--feature-index", action="append", type=int, help="Feature index for per-feature stage tracing.")
     parser.add_argument("--summary-json", type=Path, required=True)
     parser.add_argument("--markdown", type=Path)
     parser.add_argument(
@@ -132,7 +139,8 @@ def self_attention_o_input(
     k_projection: torch.Tensor,
     v_projection: torch.Tensor,
     dtype: torch.dtype,
-) -> torch.Tensor:
+    return_stages: bool = False,
+) -> torch.Tensor | dict[str, torch.Tensor]:
     from transformers.integrations.sdpa_attention import sdpa_attention_forward
     from transformers.models.qwen3_5 import modeling_qwen3_5 as qwen35
 
@@ -144,15 +152,22 @@ def self_attention_o_input(
     query, gate = torch.chunk(q_grouped, 2, dim=-1)
     gate = gate.reshape(batch_size, sequence_len, -1)
 
+    query_projection = query.reshape(batch_size, sequence_len, -1)
+    gate_projection = gate
     query = layer.self_attn.q_norm(query.reshape(hidden_shape).to(dtype)).transpose(1, 2)
     key = layer.self_attn.k_norm(k_projection.view(hidden_shape).to(dtype)).transpose(1, 2)
     value = v_projection.view(hidden_shape).to(dtype).transpose(1, 2)
+    query_normed = query.transpose(1, 2).reshape(batch_size, sequence_len, -1)
+    key_normed = key.transpose(1, 2).reshape(batch_size, sequence_len, -1)
+    value_projected = value.transpose(1, 2).reshape(batch_size, sequence_len, -1)
 
     position_ids = torch.arange(sequence_len, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
     rotary_position_ids = position_ids[None, ...].expand(3, batch_size, -1)
     rotary_input = torch.empty((batch_size, sequence_len, hidden_size), dtype=dtype)
     cos, sin = rotary(rotary_input, rotary_position_ids)
     query, key = qwen35.apply_rotary_pos_emb(query, key, cos.to(query.dtype), sin.to(key.dtype))
+    query_rope = query.transpose(1, 2).reshape(batch_size, sequence_len, -1)
+    key_rope = key.transpose(1, 2).reshape(batch_size, sequence_len, -1)
 
     attn_output, _ = sdpa_attention_forward(
         layer.self_attn,
@@ -163,8 +178,24 @@ def self_attention_o_input(
         dropout=0.0,
         scaling=layer.self_attn.scaling,
     )
-    attn_output = attn_output.reshape(batch_size, sequence_len, -1).contiguous()
-    return (attn_output * torch.sigmoid(gate.to(attn_output.dtype))).float()
+    raw_attention = attn_output.reshape(batch_size, sequence_len, -1).contiguous()
+    gate_sigmoid = torch.sigmoid(gate.to(raw_attention.dtype))
+    o_input = raw_attention * gate_sigmoid
+    if return_stages:
+        return {
+            "query_projection": query_projection.float(),
+            "gate_projection": gate_projection.float(),
+            "key_projection": k_projection.float(),
+            "value_projection": v_projection.float(),
+            "query_normed": query_normed.float(),
+            "key_normed": key_normed.float(),
+            "query_rope": query_rope.float(),
+            "key_rope": key_rope.float(),
+            "raw_attention": raw_attention.float(),
+            "gate_sigmoid": gate_sigmoid.float(),
+            "o_input": o_input.float(),
+        }
+    return o_input.float()
 
 
 def capture_layer_o_input(
@@ -239,6 +270,50 @@ def summarize_hidden_rows(
     return rows
 
 
+def summarize_feature_traces(
+    source_stages: dict[str, torch.Tensor],
+    package_stages: dict[str, torch.Tensor],
+    token_indices: list[int],
+    feature_indices: list[int],
+) -> list[dict[str, Any]]:
+    traces = []
+    for token_index in token_indices:
+        for feature_index in feature_indices:
+            stage_rows = []
+            for name in source_stages.keys():
+                source = source_stages[name]
+                package = package_stages.get(name)
+                if package is None:
+                    continue
+                if source.ndim != 3 or package.ndim != 3:
+                    continue
+                if token_index < 0 or token_index >= source.shape[1] or token_index >= package.shape[1]:
+                    continue
+                if feature_index < 0 or feature_index >= source.shape[2] or feature_index >= package.shape[2]:
+                    continue
+                source_value = float(source[0, token_index, feature_index].item())
+                package_value = float(package[0, token_index, feature_index].item())
+                stage_rows.append(
+                    {
+                        "stage": name,
+                        "token_index": token_index,
+                        "feature_index": feature_index,
+                        "source_value": source_value,
+                        "package_value": package_value,
+                        "diff": package_value - source_value,
+                        "abs_diff": abs(package_value - source_value),
+                    }
+                )
+            traces.append(
+                {
+                    "token_index": token_index,
+                    "feature_index": feature_index,
+                    "stages": stage_rows,
+                }
+            )
+    return traces
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -283,6 +358,29 @@ def write_markdown(path: Path, payload: dict[str, Any]) -> None:
                 fmt(stats["max_abs"]),
             )
         )
+    feature_traces = payload.get("feature_traces")
+    if feature_traces:
+        lines.extend(
+            [
+                "",
+                "## Feature Traces",
+                "",
+                "| token | feature | stage | source | package | diff |",
+                "| ---: | ---: | --- | ---: | ---: | ---: |",
+            ]
+        )
+        for trace in feature_traces:
+            for stage in trace["stages"]:
+                lines.append(
+                    "| {} | {} | {} | {} | {} | {} |".format(
+                        stage["token_index"],
+                        stage["feature_index"],
+                        stage["stage"],
+                        fmt(stage["source_value"]),
+                        fmt(stage["package_value"]),
+                        fmt(stage["diff"]),
+                    )
+                )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -296,6 +394,7 @@ def main() -> int:
     model_dir = args.model_dir.expanduser().resolve()
     fixture = args.fixture.expanduser().resolve()
     package_dir = args.package_dir.expanduser().resolve()
+    input_override_dir = args.input_override_dir.expanduser().resolve() if args.input_override_dir else None
 
     from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -316,7 +415,7 @@ def main() -> int:
 
     metadata = trace.read_fixture_metadata(fixture)
     entry = trace.fixture_layer_entry(metadata, args.layer)
-    before = trace.read_f32_tensor(fixture / str(entry["before_file"]), [int(value) for value in entry["before_shape"]])
+    before, input_source = trace.read_layer_input_tensor(fixture, entry, args.layer, input_override_dir)
     if before.ndim != 3:
         raise ValueError(f"expected [batch,seq,hidden] fixture shape, got {before.shape}")
 
@@ -343,7 +442,7 @@ def main() -> int:
         source_q = layer.self_attn.q_proj(attention_input_normed)
         source_k = layer.self_attn.k_proj(attention_input_normed)
         source_v = layer.self_attn.v_proj(attention_input_normed)
-        source_o_input = self_attention_o_input(
+        source_stages = self_attention_o_input(
             layer,
             rotary,
             before.shape[-1],
@@ -351,7 +450,9 @@ def main() -> int:
             source_k,
             source_v,
             dtype,
+            return_stages=True,
         )
+        source_o_input = source_stages["o_input"]
         captured_source_o_input = capture_layer_o_input(
             trace,
             layer,
@@ -377,7 +478,7 @@ def main() -> int:
             attention_input_normed,
             f"model.language_model.layers.{args.layer}.self_attn.v_proj.weight",
         )
-        package_o_input = self_attention_o_input(
+        package_stages = self_attention_o_input(
             layer,
             rotary,
             before.shape[-1],
@@ -385,7 +486,9 @@ def main() -> int:
             package_k,
             package_v,
             torch.float32,
+            return_stages=True,
         )
+        package_o_input = package_stages["o_input"]
 
     source_o_input_np = source_o_input.numpy()
     package_o_input_np = package_o_input.numpy()
@@ -405,6 +508,8 @@ def main() -> int:
         "model_dir": str(model_dir),
         "fixture": str(fixture),
         "package_dir": str(package_dir),
+        "input_source": input_source,
+        "input_override_dir": None if input_override_dir is None else str(input_override_dir),
         "layer_index": args.layer,
         "hidden_indices": hidden_indices,
         "dtype": args.dtype,
@@ -420,6 +525,13 @@ def main() -> int:
             package_o_input_np,
         ),
     }
+    if args.token_index and args.feature_index:
+        payload["feature_traces"] = summarize_feature_traces(
+            source_stages,
+            package_stages,
+            list(dict.fromkeys(int(index) for index in args.token_index)),
+            list(dict.fromkeys(int(index) for index in args.feature_index)),
+        )
     write_json(args.summary_json, payload)
     if args.markdown is not None:
         write_markdown(args.markdown, payload)
