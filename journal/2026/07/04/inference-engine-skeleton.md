@@ -981,6 +981,16 @@
 - 5.3-codex-spark reviewer Goodall confirmed that keeping weights borrowed, leaving expected/diff logic in `main.rs`, and making scheduler advancement explicit after all layers is the right narrow boundary.
 - Next useful step: introduce a reusable package-loaded model runner/config object that owns layer metadata and stack-runner setup, then shrink `package_self_attn_mlp_block_model_loop_smoke_impl` further.
 
+2026-07-04 package model loop bundle:
+- Commit `ecf75a0 Add package model loop bundle` adds `PackageModelLoopSmokeModel` in `crates/ullm-engine/src/main.rs`.
+- The bundle owns loaded package layer metadata, Qwen3 decoder layer runtime weights, the shared Q/K/V/head shape signature, softmax scale, MLP epsilon, RoPE default parsing, decode shape creation, metadata collection, and `Qwen3DecoderLayerStackRequestDecodeRunner` setup.
+- `package_self_attn_mlp_block_model_loop_smoke_impl` now asks the bundle to load/validate layers and build the stack runner, while smoke-local input generation, expected sequence calculation, and diff aggregation stay in `main.rs`.
+- Duplicate layer indices are now rejected through the bundle's layer-index set, so the path is already compatible with extending beyond two layers later.
+- Validation passed: `cargo fmt --all --check`, `cargo check -p ullm-engine`, `cargo build -p ullm-engine`, `cargo test -p ullm-engine -- --test-threads=1`, `cargo test --workspace -- --test-threads=1`, `git diff --check`, and `package-self-attn-mlp-block-model-loop-smoke` on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`.
+- Model-loop smoke result remained stable: CPU all diffs `0`; R9700/V620 prepared-path diffs q/k norm `0.000000954`, q RoPE `0.000000238`, k RoPE `0.000000477`, causal attention `0.000000477`, with layer output and K/V cache diffs `0`.
+- 5.3-codex-spark reviewer Linnaeus recommended keeping this cut in `main.rs` for now, retaining borrowed runtime weights, and leaving expected/diff logic outside the runner; the implementation follows that boundary.
+- Next useful step: move request scheduling/allocation setup into a small model-loop smoke request plan object, or add a variant that accepts more than two layer indices before turning this into a wider model-runner API.
+
 ## 作成したgit checkpoints
 
 - `4842d52 Add runtime boundary and notice policy`
@@ -1091,6 +1101,7 @@
 - `dc7df79 Add scheduler decode batch advance`
 - `0be4510 Add package model loop smoke`
 - `18defff Add decoder layer stack runner`
+- `ecf75a0 Add package model loop bundle`
 
 ## 次の行動
 
