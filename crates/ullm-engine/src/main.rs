@@ -7538,6 +7538,22 @@ struct SelfAttnBlockSmokeRun {
     causal_paged_block_max_abs_diff: f32,
 }
 
+struct Qwen3SelfAttnRuntimeWeights {
+    q_rows: usize,
+    q_cols: usize,
+    k_rows: usize,
+    v_rows: usize,
+    o_rows: usize,
+    o_cols: usize,
+    head_dim: usize,
+    kv_heads: usize,
+    value_dim: usize,
+    q_matrix: ullm_runtime_sys::RuntimeBuffer,
+    k_matrix: ullm_runtime_sys::RuntimeBuffer,
+    v_matrix: ullm_runtime_sys::RuntimeBuffer,
+    o_matrix: ullm_runtime_sys::RuntimeBuffer,
+}
+
 struct Qwen3MlpRuntimeWeights {
     gate_rows: usize,
     gate_cols: usize,
@@ -7571,74 +7587,32 @@ fn run_self_attn_block_sequence_smoke(
     k_norm: &PassthroughF32Data,
     label: &str,
 ) -> Result<SelfAttnBlockSmokeRun, String> {
-    let head_dim = q_norm.values.len();
-    if head_dim == 0 || k_norm.values.len() != head_dim {
-        return Err(format!(
-            "self-attn q/k norm head dims must be nonzero and equal: q_head_dim={} k_head_dim={}",
-            head_dim,
-            k_norm.values.len()
-        ));
-    }
-
-    let (q_rows, q_cols, k_rows, v_rows, o_rows, o_cols, q_matrix, k_matrix, v_matrix, o_matrix) = {
-        let mut registry = WeightRegistry::new();
-        let (q_rows, q_cols, q_matrix) = materialize_selected_aq4_matrix(
-            context,
-            stream,
-            &mut registry,
-            path,
-            q_tensor,
-            chunk_bytes,
-        )?;
-        let (k_rows, k_cols, k_matrix) = materialize_selected_aq4_matrix(
-            context,
-            stream,
-            &mut registry,
-            path,
-            k_tensor,
-            chunk_bytes,
-        )?;
-        let (v_rows, v_cols, v_matrix) = materialize_selected_aq4_matrix(
-            context,
-            stream,
-            &mut registry,
-            path,
-            v_tensor,
-            chunk_bytes,
-        )?;
-        let (o_rows, o_cols, o_matrix) = materialize_selected_aq4_matrix(
-            context,
-            stream,
-            &mut registry,
-            path,
-            o_tensor,
-            chunk_bytes,
-        )?;
-        if q_cols != k_cols || q_cols != v_cols {
-            return Err(format!(
-                "self-attn q/k/v projection hidden sizes differ: q_cols={q_cols}, k_cols={k_cols}, v_cols={v_cols}"
-            ));
-        }
-        (
-            q_rows, q_cols, k_rows, v_rows, o_rows, o_cols, q_matrix, k_matrix, v_matrix, o_matrix,
-        )
-    };
-
-    if k_rows % head_dim != 0 {
-        return Err(format!(
-            "k rows must be a multiple of head_dim: k_rows={k_rows}, head_dim={head_dim}"
-        ));
-    }
-    let kv_heads = k_rows / head_dim;
-    if kv_heads == 0 {
-        return Err("kv_heads must be greater than zero".to_string());
-    }
-    if v_rows % kv_heads != 0 {
-        return Err(format!(
-            "v rows must be a multiple of kv_heads: v_rows={v_rows}, kv_heads={kv_heads}"
-        ));
-    }
-    let value_dim = v_rows / kv_heads;
+    let Qwen3SelfAttnRuntimeWeights {
+        q_rows,
+        q_cols,
+        k_rows,
+        v_rows,
+        o_rows,
+        o_cols,
+        head_dim,
+        kv_heads,
+        value_dim,
+        q_matrix,
+        k_matrix,
+        v_matrix,
+        o_matrix,
+    } = qwen3_self_attn_runtime_weights_from_package(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        o_tensor,
+        q_norm,
+        k_norm,
+    )?;
 
     let hidden_bytes = q_cols
         .checked_mul(std::mem::size_of::<f32>())
@@ -8036,6 +8010,105 @@ fn run_self_attn_block_sequence_smoke(
         o_proj_max_abs_diff,
         block_max_abs_diff,
         causal_paged_block_max_abs_diff,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qwen3_self_attn_runtime_weights_from_package(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    q_tensor: &str,
+    k_tensor: &str,
+    v_tensor: &str,
+    o_tensor: &str,
+    q_norm: &PassthroughF32Data,
+    k_norm: &PassthroughF32Data,
+) -> Result<Qwen3SelfAttnRuntimeWeights, String> {
+    let head_dim = q_norm.values.len();
+    if head_dim == 0 || k_norm.values.len() != head_dim {
+        return Err(format!(
+            "self-attn q/k norm head dims must be nonzero and equal: q_head_dim={} k_head_dim={}",
+            head_dim,
+            k_norm.values.len()
+        ));
+    }
+
+    let mut registry = WeightRegistry::new();
+    let (q_rows, q_cols, q_matrix) = materialize_selected_aq4_matrix(
+        context,
+        stream,
+        &mut registry,
+        path,
+        q_tensor,
+        chunk_bytes,
+    )?;
+    let (k_rows, k_cols, k_matrix) = materialize_selected_aq4_matrix(
+        context,
+        stream,
+        &mut registry,
+        path,
+        k_tensor,
+        chunk_bytes,
+    )?;
+    let (v_rows, v_cols, v_matrix) = materialize_selected_aq4_matrix(
+        context,
+        stream,
+        &mut registry,
+        path,
+        v_tensor,
+        chunk_bytes,
+    )?;
+    let (o_rows, o_cols, o_matrix) = materialize_selected_aq4_matrix(
+        context,
+        stream,
+        &mut registry,
+        path,
+        o_tensor,
+        chunk_bytes,
+    )?;
+
+    if q_cols != k_cols || q_cols != v_cols {
+        return Err(format!(
+            "self-attn q/k/v projection hidden sizes differ: q_cols={q_cols}, k_cols={k_cols}, v_cols={v_cols}"
+        ));
+    }
+    if o_rows != q_cols {
+        return Err(format!(
+            "self-attn o projection output hidden size mismatch: o_rows={o_rows}, q_cols={q_cols}"
+        ));
+    }
+    if k_rows % head_dim != 0 {
+        return Err(format!(
+            "k rows must be a multiple of head_dim: k_rows={k_rows}, head_dim={head_dim}"
+        ));
+    }
+    let kv_heads = k_rows / head_dim;
+    if kv_heads == 0 {
+        return Err("kv_heads must be greater than zero".to_string());
+    }
+    if v_rows % kv_heads != 0 {
+        return Err(format!(
+            "v rows must be a multiple of kv_heads: v_rows={v_rows}, kv_heads={kv_heads}"
+        ));
+    }
+    let value_dim = v_rows / kv_heads;
+
+    Ok(Qwen3SelfAttnRuntimeWeights {
+        q_rows,
+        q_cols,
+        k_rows,
+        v_rows,
+        o_rows,
+        o_cols,
+        head_dim,
+        kv_heads,
+        value_dim,
+        q_matrix,
+        k_matrix,
+        v_matrix,
+        o_matrix,
     })
 }
 
