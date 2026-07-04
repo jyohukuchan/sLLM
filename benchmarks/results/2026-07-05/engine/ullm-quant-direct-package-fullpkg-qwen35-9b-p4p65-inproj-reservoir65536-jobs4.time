@@ -1,0 +1,23 @@
+	Command being timed: "target/release/ullm-quant --model-dir /home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B --convert-plan-json benchmarks/results/2026-07-01/aq/2026-07-01-ullm-quant-plan-qwen35-9b-p4p65-inproj.json --codebook-json benchmarks/results/2026-07-01/aq/2026-07-01-aq-family-codebooks-qwen35-9b-p4p6-families-weighted-inproj.json --convert-package-output-dir /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p65-inproj-reservoir65536-jobs4.ullm.d --convert-package-summary-output benchmarks/results/2026-07-05/engine/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p65-inproj-reservoir65536-jobs4.json --scale-window 4 --tensor-scale-estimator reservoir --tensor-scale-reservoir-size 65536 --convert-include-passthrough --convert-copy-buffer-bytes 67108864 --convert-jobs 4 --convert-verify --convert-overwrite"
+	User time (seconds): 1079.67
+	System time (seconds): 40.88
+	Percent of CPU this job got: 231%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 8:03.07
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 338564
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 10638684
+	Voluntary context switches: 1096
+	Involuntary context switches: 12186
+	Swaps: 0
+	File system inputs: 1733888
+	File system outputs: 17874328
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
