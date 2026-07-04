@@ -1322,3 +1322,37 @@
 ### 次の行動
 
 - 次はmodel-loop request/execution側の境界を見直す。`PackageModelLoopRequestPlan` はsynthetic requestとdeterministic residual生成を含むため当面smoke-localに残し、`PackageModelLoopExecutionPlan` からstack runner setupやprefill/decode orchestrationの再利用可能部分を切り出せるかを検討する。
+
+## Qwen3 package model decode plan 抽出
+
+### 前回の要点
+
+- `Qwen3PackageModelRuntime` をlibrary側へ移し、複数layer load、層間shape consistency、softmax scale、MLP epsilon、model metadata accessorを `main.rs` から外した。
+- `PackageModelLoopRequestPlan` はsynthetic requestとdeterministic residual生成を含むため、当面はsmoke-localに残す判断にした。
+- `PackageModelLoopExecutionPlan` には、decode shapeとtoken要素数の導出、stack runner構築、prefill/decode loop、期待値diff検証が混在していた。
+
+### 今回の変更点
+
+- `qwen3_loader.rs` に `Qwen3PackageModelDecodePlan` を追加し、`PagedDecodeShape`、q/k/v token要素数、attention出力要素数、hidden幅の導出をlibrary側へ移した。
+- `Qwen3PackageModelDecodePlan::from_shape` を単体テストしやすい入口、`from_model` を `Qwen3PackageModelRuntime` 用の入口にした。
+- `PackageModelLoopExecutionPlan` は `Qwen3PackageModelDecodePlan` を保持する形へ変更し、stack runner構築、scheduler進行、paged K/V cache readback、期待値diff検証はsmoke-localに残した。
+- `docs/words.txt` に `Qwen3 package model decode plan` を追加し、`package model loop execution plan` の定義を更新した。
+- 5.3-codex-spark explorer Deweyへ、今回の分離境界が妥当かのread-only確認を依頼した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- 3-layer model-loop smoke on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with `3,7,11 3` passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`.
+- 全deviceで `decode_batch_ready_counts=[2, 1]`、`final_ready=0`、`cached_tokens=[3, 3, 1]`、`generated_tokens=[2, 1, 0]`、`verified=true`。
+- CPUは全diff `0`。R9700/V620はprepared側の最大diffが既知範囲で、runtime/cache diffはすべて `0`。
+
+### 次の行動
+
+- decode planの次の境界としてstack runner setupをlibrary側へ出せるかを検討する。ただし `SchedulerLayerDecodeRun` と期待値diffに依存する部分は引き続きsmoke-localに残す。

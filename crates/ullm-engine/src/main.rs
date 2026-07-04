@@ -31,8 +31,8 @@ use ullm_engine::loader::{
 };
 use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 use ullm_engine::qwen3_loader::{
-    Qwen3PackageModelRuntime, qwen3_decoder_layer_runtime_weights_from_package,
-    qwen3_self_attn_runtime_weights_from_package,
+    Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime,
+    qwen3_decoder_layer_runtime_weights_from_package, qwen3_self_attn_runtime_weights_from_package,
 };
 use ullm_engine::scheduler::{
     KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
@@ -11100,13 +11100,8 @@ struct PackageModelLoopLayerRunPlan {
 }
 
 struct PackageModelLoopExecutionPlan {
-    decode_shape: PagedDecodeShape,
+    decode: Qwen3PackageModelDecodePlan,
     max_decode_batch_requests: usize,
-    q_token_elements: usize,
-    k_token_elements: usize,
-    v_token_elements: usize,
-    attention_elements: usize,
-    hidden: usize,
 }
 
 struct PackageModelLoopExecutionSummary {
@@ -11502,15 +11497,13 @@ impl PackageModelLoopExecutionPlan {
         model: &Qwen3PackageModelRuntime,
         request_plan: &PackageModelLoopRequestPlan,
     ) -> Result<Self, String> {
-        let decode_shape = model.decode_shape(request_plan.block_size, request_plan.cache_blocks);
         Ok(Self {
-            decode_shape,
+            decode: Qwen3PackageModelDecodePlan::from_model(
+                model,
+                request_plan.block_size,
+                request_plan.cache_blocks,
+            )?,
             max_decode_batch_requests: 8,
-            q_token_elements: decode_shape.q_elements()?,
-            k_token_elements: decode_shape.k_token_elements()?,
-            v_token_elements: decode_shape.v_token_elements()?,
-            attention_elements: decode_shape.output_elements()?,
-            hidden: model.hidden,
         })
     }
 
@@ -11527,7 +11520,7 @@ impl PackageModelLoopExecutionPlan {
             context,
             stream,
             &layer_run_plan.runs_by_layer,
-            self.decode_shape,
+            self.decode.decode_shape,
         )?;
 
         for layer_position in 0..layer_runner.layer_count() {
@@ -11539,11 +11532,11 @@ impl PackageModelLoopExecutionPlan {
                         stream,
                         run,
                         timestep,
-                        self.q_token_elements,
-                        self.k_token_elements,
-                        self.v_token_elements,
-                        self.attention_elements,
-                        self.hidden,
+                        self.decode.q_token_elements,
+                        self.decode.k_token_elements,
+                        self.decode.v_token_elements,
+                        self.decode.attention_elements,
+                        self.decode.hidden,
                         &format!(
                             "package model-loop layer {} prefill",
                             model.layers[layer_position].layer_index
@@ -11571,11 +11564,11 @@ impl PackageModelLoopExecutionPlan {
                 &mut layer_run_plan.runs_by_layer,
                 stream,
                 &ready,
-                self.q_token_elements,
-                self.k_token_elements,
-                self.v_token_elements,
-                self.attention_elements,
-                self.hidden,
+                self.decode.q_token_elements,
+                self.decode.k_token_elements,
+                self.decode.v_token_elements,
+                self.decode.attention_elements,
+                self.decode.hidden,
                 &label,
             )?;
             decode_batch_ready_counts.push(ready_count);
@@ -11659,7 +11652,7 @@ impl PackageModelLoopSmokeRun {
             stream,
             &model,
             &request_plan,
-            execution_plan.decode_shape,
+            execution_plan.decode.decode_shape,
             sequence_len,
             rotary_dim,
             rope_base,

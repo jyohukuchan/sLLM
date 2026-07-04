@@ -44,6 +44,65 @@ pub struct Qwen3PackageModelRuntime {
     pub mlp_epsilon: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Qwen3PackageModelDecodePlan {
+    pub decode_shape: PagedDecodeShape,
+    pub q_token_elements: usize,
+    pub k_token_elements: usize,
+    pub v_token_elements: usize,
+    pub attention_elements: usize,
+    pub hidden: usize,
+}
+
+impl Qwen3PackageModelDecodePlan {
+    pub fn from_model(
+        model: &Qwen3PackageModelRuntime,
+        block_size: usize,
+        cache_blocks: usize,
+    ) -> Result<Self, String> {
+        Self::from_shape(
+            model.hidden,
+            model.q_heads,
+            model.kv_heads,
+            model.head_dim,
+            model.value_dim,
+            block_size,
+            cache_blocks,
+        )
+    }
+
+    pub fn from_shape(
+        hidden: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        block_size: usize,
+        cache_blocks: usize,
+    ) -> Result<Self, String> {
+        if hidden == 0 {
+            return Err("Qwen3 package model decode plan hidden must be greater than zero".into());
+        }
+        let decode_shape = PagedDecodeShape {
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+        };
+        decode_shape.validate()?;
+        Ok(Self {
+            decode_shape,
+            q_token_elements: decode_shape.q_elements()?,
+            k_token_elements: decode_shape.k_token_elements()?,
+            v_token_elements: decode_shape.v_token_elements()?,
+            attention_elements: decode_shape.output_elements()?,
+            hidden,
+        })
+    }
+}
+
 impl Qwen3PackageModelRuntime {
     pub fn load(
         context: &mut RuntimeContext,
@@ -551,6 +610,30 @@ mod tests {
         };
 
         assert!(err.contains("post RMSNorm length"));
+    }
+
+    #[test]
+    fn package_model_decode_plan_from_shape_derives_token_elements() {
+        let plan = Qwen3PackageModelDecodePlan::from_shape(16, 4, 2, 4, 3, 8, 5)
+            .expect("decode plan from shape");
+
+        assert_eq!(plan.decode_shape.block_size, 8);
+        assert_eq!(plan.decode_shape.cache_blocks, 5);
+        assert_eq!(plan.q_token_elements, 16);
+        assert_eq!(plan.k_token_elements, 8);
+        assert_eq!(plan.v_token_elements, 6);
+        assert_eq!(plan.attention_elements, 12);
+        assert_eq!(plan.hidden, 16);
+    }
+
+    #[test]
+    fn package_model_decode_plan_rejects_invalid_shape() {
+        let err = match Qwen3PackageModelDecodePlan::from_shape(16, 3, 2, 4, 3, 8, 5) {
+            Ok(_) => panic!("non-divisible q/kv heads must fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("q_heads must be a multiple of kv_heads"));
     }
 
     #[test]
