@@ -12141,6 +12141,26 @@ fn package_golden_prefix_smoke_impl(
                         layer_index, layer.runtime_shape.hidden
                     ));
                 }
+                let input_norm_tensor =
+                    format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
+                let mut input_norm =
+                    read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)?;
+                input_norm.values =
+                    effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+                if input_norm.values.len() != hidden {
+                    return Err(format!(
+                        "self-attn input RMSNorm length {} does not match hidden={hidden}",
+                        input_norm.values.len()
+                    ));
+                }
+                let mut attention_input_normed = Vec::with_capacity(layer_input_for_delta.len());
+                for residual in layer_input_for_delta.chunks_exact(hidden) {
+                    attention_input_normed.extend(runtime_host_rmsnorm_f32(
+                        residual,
+                        &input_norm.values,
+                        1e-6_f32,
+                    ));
+                }
                 let rotary_dim = match rotary_dim.as_ref() {
                     Some(raw) => parse_package_layer_golden_rotary_dim(
                         layer.runtime_shape.head_dim,
@@ -12155,7 +12175,7 @@ fn package_golden_prefix_smoke_impl(
                     &mut context,
                     &mut stream,
                     &layer.weights.self_attn,
-                    layer_input,
+                    attention_input_normed.clone(),
                     sequence_len,
                     &layer.q_norm.values,
                     &layer.k_norm.values,
@@ -12167,18 +12187,18 @@ fn package_golden_prefix_smoke_impl(
                     cache_blocks,
                 )?;
                 let Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode {
-                    residual_sequence,
+                    residual_sequence: _,
                     prepared:
                         Qwen3SelfAttnRuntimePreparedSequence {
-                            q_query: _,
-                            k_projected: _,
-                            q_normed: _,
-                            k_normed: _,
+                            q_query,
+                            k_projected,
+                            q_normed,
+                            k_normed,
                             q_rope,
                             k_rope,
                             v_projected,
                             q_gate,
-                            attention_output: _,
+                            attention_output,
                             shape,
                             softmax_scale,
                             q_projection_layout,
@@ -12211,12 +12231,13 @@ fn package_golden_prefix_smoke_impl(
                     &k_rope,
                     &v_projected,
                     q_gate.as_deref(),
-                    &residual_sequence,
+                    &layer_input_for_delta,
                     sequence_len,
                 )?;
                 let candidate_ids = package_layer_candidate_ids(path, &layer);
                 let mut details = serde_json::Map::new();
                 insert_json_detail(&mut details, "candidate_ids", candidate_ids);
+                insert_json_detail(&mut details, "input_norm_tensor", &input_norm_tensor);
                 insert_json_detail(&mut details, "q_tensor", &layer.q_tensor);
                 insert_json_detail(&mut details, "k_tensor", &layer.k_tensor);
                 insert_json_detail(&mut details, "v_tensor", &layer.v_tensor);
@@ -12247,9 +12268,45 @@ fn package_golden_prefix_smoke_impl(
                     "output_gate_layout",
                     output_gate_layout.to_string(),
                 );
+                insert_json_detail(&mut details, "input_norm_dtype", &input_norm.dtype);
                 insert_json_detail(&mut details, "q_norm_dtype", &layer.q_norm.dtype);
                 insert_json_detail(&mut details, "k_norm_dtype", &layer.k_norm.dtype);
                 insert_json_detail(&mut details, "post_norm_dtype", &layer.post_norm.dtype);
+                let extra_hot_input_vectors = [
+                    (
+                        "attention_input_normed",
+                        attention_input_normed.as_slice(),
+                        hidden,
+                    ),
+                    ("attention_q_query", q_query.as_slice(), hidden),
+                    (
+                        "attention_k_projected",
+                        k_projected.as_slice(),
+                        shape.kv_heads * shape.head_dim,
+                    ),
+                    (
+                        "attention_v_projected",
+                        v_projected.as_slice(),
+                        shape.kv_heads * shape.value_dim,
+                    ),
+                    ("attention_q_normed", q_normed.as_slice(), hidden),
+                    (
+                        "attention_k_normed",
+                        k_normed.as_slice(),
+                        shape.kv_heads * shape.head_dim,
+                    ),
+                    ("attention_q_rope", q_rope.as_slice(), hidden),
+                    (
+                        "attention_k_rope",
+                        k_rope.as_slice(),
+                        shape.kv_heads * shape.head_dim,
+                    ),
+                    ("attention_output", attention_output.as_slice(), hidden),
+                ];
+                let mut extra_hot_input_vectors = extra_hot_input_vectors.to_vec();
+                if let Some(q_gate) = q_gate.as_ref() {
+                    extra_hot_input_vectors.push(("attention_q_gate", q_gate.as_slice(), hidden));
+                }
                 insert_json_detail(
                     &mut details,
                     "module_contribution",
@@ -12262,7 +12319,7 @@ fn package_golden_prefix_smoke_impl(
                         &layer_output.block_output,
                         &layer_output.post_normed,
                         None,
-                        &[],
+                        &extra_hot_input_vectors,
                         &layer_output.mlp_output,
                         &layer_output.layer_output,
                         sequence_len,
