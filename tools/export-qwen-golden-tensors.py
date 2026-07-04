@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -29,11 +30,16 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Comma-separated token ids to run through the model",
     )
-    parser.add_argument(
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument(
         "--layers",
         type=str,
-        required=True,
         help="Comma-separated 0-based decoder layer indices",
+    )
+    selection.add_argument(
+        "--layer-range",
+        type=str,
+        help="Layer range as START:END (END exclusive)",
     )
     parser.add_argument("--output", type=Path, required=True, help="Output directory for fixture files")
     parser.add_argument(
@@ -68,6 +74,22 @@ def parse_comma_int_list(raw: str, name: str, *, allow_negative: bool = False) -
             raise ValueError(f"--{name} must be non-negative: {value}")
         values.append(value)
     return values
+
+
+def parse_layer_range(raw: str) -> tuple[int, int]:
+    parts = raw.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"--layer-range must be START:END, got: {raw}")
+    start_raw, end_raw = parts
+    if start_raw == "" or end_raw == "":
+        raise ValueError(f"--layer-range must be START:END, got: {raw}")
+    start = int(start_raw)
+    end = int(end_raw)
+    if start < 0 or end < 0:
+        raise ValueError(f"--layer-range values must be non-negative, got: {start}:{end}")
+    if start >= end:
+        raise ValueError(f"--layer-range requires START < END, got: {start}:{end}")
+    return (start, end)
 
 
 def resolve_device(name: str) -> torch.device:
@@ -163,12 +185,17 @@ def load_model(model_dir: Path, device: torch.device, dtype_name: str, trust_rem
 def main() -> int:
     args = parse_args()
     token_ids = parse_comma_int_list(args.token_ids, "token-ids")
-    layer_indices = parse_comma_int_list(args.layers, "layers")
+    is_prefix_mode = args.layer_range is not None
+    if is_prefix_mode:
+        layer_start, layer_end_exclusive = parse_layer_range(args.layer_range)
+        layer_indices = list(range(layer_start, layer_end_exclusive))
+    else:
+        layer_indices = parse_comma_int_list(args.layers, "layers")
 
     if len(token_ids) < 1:
         raise SystemExit("--token-ids must include at least one id")
     if len(layer_indices) < 1:
-        raise SystemExit("--layers must include at least one index")
+        raise SystemExit("--layers / --layer-range must include at least one index")
 
     args.model_dir = args.model_dir.expanduser().resolve()
     args.output = args.output.expanduser().resolve()
@@ -180,7 +207,10 @@ def main() -> int:
     layer_count = len(layers)
     for layer_idx in layer_indices:
         if layer_idx < 0 or layer_idx >= layer_count:
-            raise SystemExit(f"--layers contains out-of-range index {layer_idx} (0..{layer_count - 1})")
+            raise SystemExit(
+                f"{'--layer-range' if is_prefix_mode else '--layers'} contains out-of-range index "
+                f"{layer_idx} (0..{layer_count - 1})"
+            )
 
     selected = list(dict.fromkeys(layer_indices))
     before: dict[int, np.ndarray] = {}
@@ -274,7 +304,14 @@ def main() -> int:
         "sequence_len": sequence_len,
         "hidden_size": hidden_size,
         "layers": metadata_layers,
+        "fixture_kind": "prefix" if is_prefix_mode else "layers",
+        "export_command": " ".join(sys.argv),
+        "torch_version": torch.__version__,
     }
+    if is_prefix_mode:
+        metadata["layer_start"] = layer_start
+        metadata["layer_end_exclusive"] = layer_end_exclusive
+
     (args.output / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",

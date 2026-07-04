@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env;
-use std::fs::File;
-use std::io::Read;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Instant;
 use ullm_engine::decode_runner::{
@@ -253,6 +253,18 @@ fn main() -> ExitCode {
             env::args().nth(7),
             env::args().nth(8),
             env::args().nth(9),
+        ),
+        Some("package-golden-prefix-smoke") => package_golden_prefix_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+            env::args().nth(11),
         ),
         Some("package-linear-attn-qkv-norm-smoke") => package_linear_attn_qkv_norm_smoke(
             env::args().nth(2),
@@ -11876,6 +11888,645 @@ fn package_layer_golden_smoke(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn package_golden_prefix_smoke(
+    path: Option<String>,
+    fixture_path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_start: Option<String>,
+    layer_end_exclusive: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+    report_path: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-golden-prefix-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(fixture_path) = fixture_path else {
+        eprintln!("package-golden-prefix-smoke requires a golden prefix fixture directory");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let fixture = match GoldenTensorFixture::load(&fixture_path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (default_start, default_end_exclusive) = match golden_fixture_default_layer_range(&fixture)
+    {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let layer_start = match parse_optional_usize(layer_start, default_start, "layer start") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let layer_end_exclusive =
+        match parse_optional_usize(layer_end_exclusive, default_end_exclusive, "layer end") {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
+    if layer_end_exclusive <= layer_start {
+        eprintln!(
+            "package-golden-prefix-smoke requires layer end greater than layer start: start={layer_start} end={layer_end_exclusive}"
+        );
+        return ExitCode::from(2);
+    }
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let default_position_offset = match fixture.metadata().position_ids.first() {
+        Some(value) => match usize::try_from(*value) {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("golden fixture first position id does not fit usize");
+                return ExitCode::from(1);
+            }
+        },
+        None => 0,
+    };
+    let position_offset =
+        match parse_optional_usize(position_offset, default_position_offset, "position offset") {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
+
+    match package_golden_prefix_smoke_impl(
+        &path,
+        &fixture_path,
+        fixture,
+        device_index,
+        chunk_bytes,
+        layer_start,
+        layer_end_exclusive,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        report_path.as_deref(),
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_golden_prefix_smoke_impl(
+    path: &str,
+    fixture_path: &str,
+    fixture: GoldenTensorFixture,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_start: usize,
+    layer_end_exclusive: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+    report_path: Option<&str>,
+) -> Result<String, String> {
+    let golden_layers = fixture.select_contiguous_layers(layer_start, layer_end_exclusive)?;
+    let sequence_len = fixture.metadata().sequence_len;
+    let hidden = fixture.metadata().hidden_size;
+    if sequence_len == 0 || hidden == 0 {
+        return Err(format!(
+            "golden prefix fixture has invalid sequence_len={sequence_len} hidden_size={hidden}"
+        ));
+    }
+    validate_golden_position_ids(
+        &fixture.metadata().position_ids,
+        sequence_len,
+        position_offset,
+    )?;
+    for golden_layer in &golden_layers {
+        validate_golden_hidden_shape(
+            &golden_layer.before_shape,
+            sequence_len,
+            hidden,
+            "golden prefix before hidden",
+        )?;
+        validate_golden_hidden_shape(
+            &golden_layer.after_shape,
+            sequence_len,
+            hidden,
+            "golden prefix after hidden",
+        )?;
+    }
+
+    let expected_hidden_elements = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "golden prefix hidden element count overflows".to_string())?;
+    let mut current_hidden = fixture.read_initial_before_f32(layer_start)?;
+    if current_hidden.len() != expected_hidden_elements {
+        return Err(format!(
+            "golden prefix initial payload element mismatch: got {} expected {expected_hidden_elements}",
+            current_hidden.len()
+        ));
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let block_size = sequence_len;
+    let cache_blocks = 1_usize;
+    let block_table = vec![0_u32];
+
+    let mut report_entries = Vec::with_capacity(golden_layers.len());
+    let mut max_mse = 0.0_f64;
+    let mut max_mean_abs_diff = 0.0_f64;
+    let mut max_abs_diff = 0.0_f64;
+    let mut min_cosine_similarity = 1.0_f64;
+    let mut self_attn_rotary_dim = None::<usize>;
+
+    for (layer_position, golden_layer) in golden_layers.iter().enumerate() {
+        let layer_index = golden_layer.layer_index;
+        if current_hidden.len() != expected_hidden_elements {
+            return Err(format!(
+                "package golden prefix input length mismatch before layer {}: got {} expected {expected_hidden_elements}",
+                layer_index,
+                current_hidden.len()
+            ));
+        }
+        let expected_after = fixture.read_layer_after_f32(layer_index)?;
+        if expected_after.len() != expected_hidden_elements {
+            return Err(format!(
+                "golden prefix layer {} after payload element mismatch: got {} expected {expected_hidden_elements}",
+                layer_index,
+                expected_after.len()
+            ));
+        }
+
+        let layer_kind = package_decoder_layer_kind(path, layer_index)?;
+        let (actual, details) = match layer_kind {
+            PackageDecoderLayerKind::SelfAttention => {
+                let layer = qwen3_package_decoder_layer_runtime_from_package(
+                    &mut context,
+                    &mut stream,
+                    path,
+                    chunk_bytes,
+                    layer_index,
+                )?;
+                if layer.runtime_shape.hidden != hidden {
+                    return Err(format!(
+                        "golden hidden_size {hidden} does not match package self-attn layer {} hidden {}",
+                        layer_index, layer.runtime_shape.hidden
+                    ));
+                }
+                let rotary_dim = match rotary_dim.as_ref() {
+                    Some(raw) => parse_package_layer_golden_rotary_dim(
+                        layer.runtime_shape.head_dim,
+                        Some(raw.clone()),
+                    )?,
+                    None => {
+                        parse_package_layer_golden_rotary_dim(layer.runtime_shape.head_dim, None)?
+                    }
+                };
+                self_attn_rotary_dim = Some(rotary_dim);
+                let prepared = qwen3_self_attn_prepare_sequence_for_paged_decode_f32(
+                    &mut context,
+                    &mut stream,
+                    &layer.weights.self_attn,
+                    current_hidden,
+                    sequence_len,
+                    &layer.q_norm.values,
+                    &layer.k_norm.values,
+                    rotary_dim,
+                    position_offset,
+                    rope_base,
+                    &block_table,
+                    block_size,
+                    cache_blocks,
+                )?;
+                let Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode {
+                    residual_sequence,
+                    prepared:
+                        Qwen3SelfAttnRuntimePreparedSequence {
+                            q_query: _,
+                            k_projected: _,
+                            q_normed: _,
+                            k_normed: _,
+                            q_rope,
+                            k_rope,
+                            v_projected,
+                            q_gate,
+                            attention_output: _,
+                            shape,
+                            softmax_scale,
+                            q_projection_layout,
+                            q_gate_elements,
+                            output_gate_layout,
+                        },
+                    paged_k_cache: _,
+                    paged_v_cache: _,
+                    paged_block_table,
+                    paged_block_size,
+                    paged_cache_blocks,
+                } = prepared;
+                let decode_shape = PagedDecodeShape {
+                    block_size: paged_block_size,
+                    cache_blocks: paged_cache_blocks,
+                    q_heads: shape.q_heads,
+                    kv_heads: shape.kv_heads,
+                    head_dim: shape.head_dim,
+                    value_dim: shape.value_dim,
+                };
+                let layer_output = qwen3_decoder_layer_sequence_to_host_f32(
+                    &layer.weights,
+                    &mut context,
+                    &mut stream,
+                    decode_shape,
+                    &paged_block_table,
+                    softmax_scale,
+                    1e-5_f32,
+                    &q_rope,
+                    &k_rope,
+                    &v_projected,
+                    q_gate.as_deref(),
+                    &residual_sequence,
+                    sequence_len,
+                )?;
+                let candidate_ids = package_layer_candidate_ids(path, &layer);
+                let mut details = serde_json::Map::new();
+                insert_json_detail(&mut details, "candidate_ids", candidate_ids);
+                insert_json_detail(&mut details, "q_tensor", &layer.q_tensor);
+                insert_json_detail(&mut details, "k_tensor", &layer.k_tensor);
+                insert_json_detail(&mut details, "v_tensor", &layer.v_tensor);
+                insert_json_detail(&mut details, "o_tensor", &layer.o_tensor);
+                insert_json_detail(&mut details, "gate_tensor", &layer.gate_tensor);
+                insert_json_detail(&mut details, "up_tensor", &layer.up_tensor);
+                insert_json_detail(&mut details, "down_tensor", &layer.down_tensor);
+                insert_json_detail(&mut details, "q_heads", shape.q_heads);
+                insert_json_detail(&mut details, "kv_heads", shape.kv_heads);
+                insert_json_detail(&mut details, "head_dim", shape.head_dim);
+                insert_json_detail(&mut details, "value_dim", shape.value_dim);
+                insert_json_detail(&mut details, "rotary_dim", rotary_dim);
+                insert_json_detail(&mut details, "position_offset", position_offset);
+                insert_json_detail(&mut details, "rope_base", rope_base);
+                insert_json_detail(&mut details, "block_size", paged_block_size);
+                insert_json_detail(&mut details, "cache_blocks", paged_cache_blocks);
+                insert_json_detail(&mut details, "block_table", paged_block_table);
+                insert_json_detail(&mut details, "softmax_scale", softmax_scale);
+                insert_json_detail(&mut details, "mlp_epsilon", 1e-5_f32);
+                insert_json_detail(
+                    &mut details,
+                    "q_projection_layout",
+                    q_projection_layout.to_string(),
+                );
+                insert_json_detail(&mut details, "q_gate_elements", q_gate_elements);
+                insert_json_detail(
+                    &mut details,
+                    "output_gate_layout",
+                    output_gate_layout.to_string(),
+                );
+                insert_json_detail(&mut details, "q_norm_dtype", &layer.q_norm.dtype);
+                insert_json_detail(&mut details, "k_norm_dtype", &layer.k_norm.dtype);
+                insert_json_detail(&mut details, "post_norm_dtype", &layer.post_norm.dtype);
+                (layer_output.layer_output, details)
+            }
+            PackageDecoderLayerKind::LinearAttention => {
+                let (line, actual) = package_linear_attn_mlp_block_sequence_run(
+                    path,
+                    device_index,
+                    chunk_bytes,
+                    layer_index,
+                    sequence_len,
+                    current_hidden,
+                )?;
+                let mut details = serde_json::Map::new();
+                insert_json_detail(&mut details, "runtime_line", line);
+                insert_json_detail(
+                    &mut details,
+                    "candidate_ids",
+                    package_linear_attn_candidate_ids(path, layer_index),
+                );
+                insert_json_detail(
+                    &mut details,
+                    "qkv_tensor",
+                    format!(
+                        "model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight"
+                    ),
+                );
+                insert_json_detail(
+                    &mut details,
+                    "out_tensor",
+                    format!(
+                        "model.language_model.layers.{layer_index}.linear_attn.out_proj.weight"
+                    ),
+                );
+                insert_json_detail(
+                    &mut details,
+                    "gate_tensor",
+                    format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight"),
+                );
+                insert_json_detail(
+                    &mut details,
+                    "up_tensor",
+                    format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight"),
+                );
+                insert_json_detail(
+                    &mut details,
+                    "down_tensor",
+                    format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight"),
+                );
+                (actual, details)
+            }
+        };
+        let metrics = compare_f32_slices(&actual, &expected_after)?;
+        max_mse = max_mse.max(metrics.mse);
+        max_mean_abs_diff = max_mean_abs_diff.max(metrics.mean_abs_diff);
+        max_abs_diff = max_abs_diff.max(metrics.max_abs_diff);
+        min_cosine_similarity = min_cosine_similarity.min(metrics.cosine_similarity);
+
+        let preview_len = 8.min(expected_after.len()).min(actual.len());
+        let expected_preview = expected_after[..preview_len].to_vec();
+        let actual_preview = actual[..preview_len].to_vec();
+        let diff_preview = actual
+            .iter()
+            .zip(expected_after.iter())
+            .take(preview_len)
+            .map(|(actual, expected)| actual - expected)
+            .collect::<Vec<_>>();
+        let failure_class = package_golden_prefix_failure_class(&metrics);
+        append_package_golden_prefix_report_entry(
+            &mut report_entries,
+            path,
+            fixture_path,
+            fixture.metadata().fixture_kind.as_deref(),
+            device_index,
+            &info.backend.to_string(),
+            &info.name,
+            layer_position,
+            layer_index,
+            layer_kind.as_str(),
+            layer_start,
+            layer_end_exclusive,
+            sequence_len,
+            hidden,
+            &metrics,
+            failure_class,
+            expected_preview,
+            actual_preview,
+            diff_preview,
+            details,
+        );
+
+        current_hidden = actual;
+    }
+
+    if let Some(report_path) = report_path {
+        write_jsonl_report(report_path, &report_entries)?;
+    }
+
+    Ok(format!(
+        "package-golden-prefix-smoke package={} fixture={} layers={}..{} layer_count={} sequence_len={} hidden={} block_size={} cache_blocks={} block_table={:?} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" max_mse={:.12} max_mean_abs_diff={:.9} max_abs_diff={:.9} min_cosine_similarity={:.9} report={} verified=true",
+        path,
+        fixture_path,
+        layer_start,
+        layer_end_exclusive,
+        golden_layers.len(),
+        sequence_len,
+        hidden,
+        block_size,
+        cache_blocks,
+        block_table,
+        self_attn_rotary_dim
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        position_offset,
+        rope_base,
+        info.backend,
+        device_index,
+        info.name,
+        max_mse,
+        max_mean_abs_diff,
+        max_abs_diff,
+        min_cosine_similarity,
+        report_path.unwrap_or("none"),
+    ))
+}
+
+fn golden_fixture_default_layer_range(
+    fixture: &GoldenTensorFixture,
+) -> Result<(usize, usize), String> {
+    if let (Some(start), Some(end_exclusive)) = (
+        fixture.metadata().layer_start,
+        fixture.metadata().layer_end_exclusive,
+    ) {
+        if end_exclusive <= start {
+            return Err(format!(
+                "golden fixture metadata has invalid layer range: start={start}, end_exclusive={end_exclusive}"
+            ));
+        }
+        return Ok((start, end_exclusive));
+    }
+
+    let min_layer = fixture
+        .layers()
+        .iter()
+        .map(|layer| layer.layer_index)
+        .min()
+        .ok_or_else(|| "golden fixture has no layer entries".to_string())?;
+    let max_layer = fixture
+        .layers()
+        .iter()
+        .map(|layer| layer.layer_index)
+        .max()
+        .ok_or_else(|| "golden fixture has no layer entries".to_string())?;
+    let end_exclusive = max_layer
+        .checked_add(1)
+        .ok_or_else(|| "golden fixture max layer index overflows".to_string())?;
+    Ok((min_layer, end_exclusive))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageDecoderLayerKind {
+    SelfAttention,
+    LinearAttention,
+}
+
+impl PackageDecoderLayerKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfAttention => "self_attention",
+            Self::LinearAttention => "linear_attention",
+        }
+    }
+}
+
+fn package_decoder_layer_kind(
+    path: &str,
+    layer_index: usize,
+) -> Result<PackageDecoderLayerKind, String> {
+    let self_attn_q = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+    if select_tensor_payload_bundle(path, &TensorSelector::Name(self_attn_q)).is_ok() {
+        return Ok(PackageDecoderLayerKind::SelfAttention);
+    }
+
+    let linear_qkv =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
+    if select_tensor_payload_bundle(path, &TensorSelector::Name(linear_qkv)).is_ok() {
+        return Ok(PackageDecoderLayerKind::LinearAttention);
+    }
+
+    Err(format!(
+        "package layer {layer_index} has neither supported self_attn nor linear_attn package tensors"
+    ))
+}
+
+fn package_linear_attn_candidate_ids(path: &str, layer_index: usize) -> Vec<String> {
+    [
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight"),
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_a.weight"),
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_b.weight"),
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_z.weight"),
+        format!("model.language_model.layers.{layer_index}.linear_attn.out_proj.weight"),
+        format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight"),
+        format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight"),
+        format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight"),
+    ]
+    .iter()
+    .map(|tensor_name| {
+        select_tensor_payload_bundle(path, &TensorSelector::Name(tensor_name.clone()))
+            .ok()
+            .and_then(|bundle| bundle.candidate_id)
+            .unwrap_or_else(|| "unknown".to_string())
+    })
+    .collect()
+}
+
+fn insert_json_detail<T: serde::Serialize>(
+    details: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: T,
+) {
+    details.insert(key.to_string(), serde_json::json!(value));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_package_golden_prefix_report_entry(
+    report_entries: &mut Vec<serde_json::Value>,
+    path: &str,
+    fixture_path: &str,
+    fixture_kind: Option<&str>,
+    device_index: u32,
+    backend: &str,
+    device_name: &str,
+    layer_position: usize,
+    layer_index: usize,
+    layer_kind: &str,
+    layer_start: usize,
+    layer_end_exclusive: usize,
+    sequence_len: usize,
+    hidden: usize,
+    metrics: &ullm_engine::golden::GoldenComparisonMetrics,
+    failure_class: &str,
+    expected_preview: Vec<f32>,
+    actual_preview: Vec<f32>,
+    diff_preview: Vec<f32>,
+    details: serde_json::Map<String, serde_json::Value>,
+) {
+    let mut entry = serde_json::Map::new();
+    insert_json_detail(&mut entry, "command", "package-golden-prefix-smoke");
+    insert_json_detail(&mut entry, "package", path);
+    insert_json_detail(&mut entry, "fixture", fixture_path);
+    insert_json_detail(&mut entry, "fixture_kind", fixture_kind);
+    insert_json_detail(&mut entry, "device_index", device_index);
+    insert_json_detail(&mut entry, "backend", backend);
+    insert_json_detail(&mut entry, "device_name", device_name);
+    insert_json_detail(&mut entry, "layer_position", layer_position);
+    insert_json_detail(&mut entry, "layer_index", layer_index);
+    insert_json_detail(&mut entry, "layer_kind", layer_kind);
+    insert_json_detail(&mut entry, "layer_start", layer_start);
+    insert_json_detail(&mut entry, "layer_end_exclusive", layer_end_exclusive);
+    insert_json_detail(&mut entry, "sequence_len", sequence_len);
+    insert_json_detail(&mut entry, "hidden_size", hidden);
+    insert_json_detail(&mut entry, "mse", metrics.mse);
+    insert_json_detail(&mut entry, "mean_abs_diff", metrics.mean_abs_diff);
+    insert_json_detail(&mut entry, "max_abs_diff", metrics.max_abs_diff);
+    insert_json_detail(&mut entry, "cosine_similarity", metrics.cosine_similarity);
+    insert_json_detail(&mut entry, "failure_class", failure_class);
+    insert_json_detail(&mut entry, "expected_preview", expected_preview);
+    insert_json_detail(&mut entry, "actual_preview", actual_preview);
+    insert_json_detail(&mut entry, "diff_preview", diff_preview);
+    insert_json_detail(&mut entry, "verified", true);
+    entry.extend(details);
+    report_entries.push(serde_json::Value::Object(entry));
+}
+
+fn package_golden_prefix_failure_class(
+    metrics: &ullm_engine::golden::GoldenComparisonMetrics,
+) -> &'static str {
+    if !metrics.mse.is_finite()
+        || !metrics.mean_abs_diff.is_finite()
+        || !metrics.max_abs_diff.is_finite()
+        || !metrics.cosine_similarity.is_finite()
+    {
+        "numeric_drift"
+    } else if metrics.cosine_similarity < 0.5 || metrics.mse > 0.1 {
+        "numeric_drift"
+    } else if metrics.max_abs_diff > 0.0 {
+        "possible_quantization_error"
+    } else {
+        "ok"
+    }
+}
+
+fn write_jsonl_report(path: &str, entries: &[serde_json::Value]) -> Result<(), String> {
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "failed to create report directory {}: {err}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    let mut file = File::create(path)
+        .map_err(|err| format!("failed to create report {}: {err}", path.display()))?;
+    for entry in entries {
+        serde_json::to_writer(&mut file, entry)
+            .map_err(|err| format!("failed to write report {}: {err}", path.display()))?;
+        file.write_all(b"\n")
+            .map_err(|err| format!("failed to write report {}: {err}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn package_layer_golden_smoke_impl(
     path: &str,
     fixture_path: &str,
@@ -17931,6 +18582,31 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
     layer_index: usize,
     sequence_len: usize,
 ) -> Result<String, String> {
+    let hidden = 32_usize * 128_usize;
+    let base_residual = deterministic_f32_vector(hidden);
+    let mut residual_sequence = Vec::with_capacity(sequence_len * hidden);
+    for timestep in 0..sequence_len {
+        residual_sequence.extend(linear_attn_step_input(&base_residual, timestep));
+    }
+    let (line, _) = package_linear_attn_mlp_block_sequence_run(
+        path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        sequence_len,
+        residual_sequence,
+    )?;
+    Ok(line)
+}
+
+fn package_linear_attn_mlp_block_sequence_run(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    sequence_len: usize,
+    residual_sequence: Vec<f32>,
+) -> Result<(String, Vec<f32>), String> {
     let key_heads = 16_usize;
     let value_heads = 32_usize;
     let key_dim = 128_usize;
@@ -18055,7 +18731,13 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
         .checked_mul(sequence_len)
         .ok_or_else(|| "gate/beta sequence byte size overflows".to_string())?;
 
-    let base_residual = deterministic_f32_vector(hidden);
+    if residual_sequence.len() != sequence_len * hidden {
+        return Err(format!(
+            "linear attention residual sequence length mismatch for layer {layer_index}: got {} expected {}",
+            residual_sequence.len(),
+            sequence_len * hidden
+        ));
+    }
     let input_norm_weight_bytes = encode_f32_to_bytes(&input_norm.values);
     let conv_weight_bytes = encode_f32_to_bytes(&conv.values);
     let a_log_bytes = encode_f32_to_bytes(&a_log.values);
@@ -18079,12 +18761,13 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
         .synchronize()
         .map_err(|err| format!("failed to synchronize after input norm weight copy: {err}"))?;
 
-    let mut residual_sequence = Vec::with_capacity(sequence_len * hidden);
     let mut expected_input_normed = Vec::with_capacity(sequence_len * hidden);
     let mut input_normed_sequence_bytes = vec![0_u8; hidden_sequence_bytes];
     for timestep in 0..sequence_len {
-        let residual = linear_attn_step_input(&base_residual, timestep);
-        let residual_bytes = encode_f32_to_bytes(&residual);
+        let residual_start = timestep * hidden;
+        let residual_end = residual_start + hidden;
+        let residual = &residual_sequence[residual_start..residual_end];
+        let residual_bytes = encode_f32_to_bytes(residual);
         input_buffer
             .copy_from_host(0, &residual_bytes, Some(&mut stream))
             .map_err(|err| {
@@ -18116,8 +18799,7 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
         stream.synchronize().map_err(|err| {
             format!("failed to synchronize after input RMSNorm host copy {timestep}: {err}")
         })?;
-        let expected = runtime_host_rmsnorm_f32(&residual, &input_norm.values, input_epsilon);
-        residual_sequence.extend_from_slice(&residual);
+        let expected = runtime_host_rmsnorm_f32(residual, &input_norm.values, input_epsilon);
         expected_input_normed.extend_from_slice(&expected);
     }
     let input_normed = decode_f32_le_values(&input_normed_sequence_bytes);
@@ -19034,7 +19716,7 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
         (mlp_output, layer_output, layer_block_max_abs_diff)
     };
 
-    Ok(format!(
+    let line = format!(
         "package-linear-attn-mlp-block-smoke package={} layer={} input_norm_tensor=\"{}\" qkv_tensor=\"{}\" conv_tensor=\"{}\" a_tensor=\"{}\" b_tensor=\"{}\" a_log_tensor=\"{}\" dt_bias_tensor=\"{}\" z_tensor=\"{}\" norm_tensor=\"{}\" out_tensor=\"{}\" post_norm_tensor=\"{}\" gate_tensor=\"{}\" up_tensor=\"{}\" down_tensor=\"{}\" hidden={} key_heads={} value_heads={} key_dim={} value_dim={} sequence_len={} kernel_size={} qk_l2_norm={} q_scale={q_scale:.9} input_norm_dtype={} conv_dtype={} a_log_dtype={} dt_bias_dtype={} norm_dtype={} post_norm_dtype={} backend={} device_index={} name=\"{}\" residual_preview={} attention_output_preview={} attention_block_preview={} post_norm_preview={} mlp_output_preview={} layer_output_preview={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} conv_max_abs_diff={conv_max_abs_diff:.9} gate_beta_max_abs_diff={gate_beta_max_abs_diff:.9} recurrent_max_abs_diff={recurrent_max_abs_diff:.9} attn_norm_max_abs_diff={attn_norm_max_abs_diff:.9} attn_activation_max_abs_diff={attn_activation_max_abs_diff:.9} attn_output_max_abs_diff={attn_output_max_abs_diff:.9} attn_block_max_abs_diff={attn_block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} layer_block_max_abs_diff={layer_block_max_abs_diff:.9} verified=true",
         path,
         layer_index,
@@ -19075,7 +19757,8 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
         format_f32_preview(&post_normed[..8.min(post_normed.len())]),
         format_f32_preview(&mlp_output[..8.min(mlp_output.len())]),
         format_f32_preview(&layer_output[..8.min(layer_output.len())]),
-    ))
+    );
+    Ok((line, layer_output))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -20101,7 +20784,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,11 @@ pub struct GoldenMetadata {
     pub format_version: String,
     pub model_dir: String,
     pub model_type: Option<String>,
+    pub layer_start: Option<usize>,
+    pub layer_end_exclusive: Option<usize>,
+    pub fixture_kind: Option<String>,
+    pub export_command: Option<String>,
+    pub torch_version: Option<String>,
     pub dtype: String,
     pub token_ids: Vec<u64>,
     pub position_ids: Vec<u64>,
@@ -91,6 +97,50 @@ impl GoldenTensorFixture {
 
     pub fn metadata(&self) -> &GoldenMetadata {
         &self.metadata
+    }
+
+    pub fn select_contiguous_layers(
+        &self,
+        layer_start: usize,
+        layer_end_exclusive: usize,
+    ) -> Result<Vec<&GoldenLayerFixture>, String> {
+        if layer_end_exclusive <= layer_start {
+            return Err(format!(
+                "invalid layer range: start={layer_start}, end_exclusive={layer_end_exclusive}"
+            ));
+        }
+
+        let mut by_index = BTreeMap::<usize, &GoldenLayerFixture>::new();
+        for layer in self.layers() {
+            if by_index.insert(layer.layer_index, layer).is_some() {
+                return Err(format!(
+                    "duplicate layer entry in fixture metadata: layer_index={}",
+                    layer.layer_index
+                ));
+            }
+        }
+
+        let mut layers = Vec::with_capacity(layer_end_exclusive - layer_start);
+        for layer_index in layer_start..layer_end_exclusive {
+            let layer = by_index.get(&layer_index).ok_or_else(|| {
+                format!(
+                    "missing layer in golden fixture: expected contiguous layer_index={layer_index} in range {layer_start}..{layer_end_exclusive}"
+                )
+            })?;
+            layers.push(*layer);
+        }
+
+        Ok(layers)
+    }
+
+    pub fn read_initial_before_f32(&self, layer_start: usize) -> Result<Vec<f32>, String> {
+        let layer = self.select_layer(layer_start)?;
+        self.read_f32_payload(
+            &layer.before_file,
+            &layer.before_shape,
+            layer_start,
+            "initial before",
+        )
     }
 
     pub fn select_layer(&self, layer_index: usize) -> Result<&GoldenLayerFixture, String> {
@@ -312,6 +362,11 @@ mod tests {
                 format_version: "0.1".to_string(),
                 model_dir: "/tmp/model".to_string(),
                 model_type: Some("qwen3.5".to_string()),
+                layer_start: None,
+                layer_end_exclusive: None,
+                fixture_kind: None,
+                export_command: None,
+                torch_version: None,
                 dtype: "F32".to_string(),
                 token_ids: vec![10, 11, 12],
                 position_ids: vec![0, 1, 2],
@@ -331,9 +386,18 @@ mod tests {
         let fixture = GoldenTensorFixture::load(&root).expect("load fixture");
         let layer = fixture.get_layer(2).expect("find layer");
         assert_eq!(layer.layer_index, 2);
+        let contiguous = fixture
+            .select_contiguous_layers(2, 3)
+            .expect("select contiguous layer range");
+        assert_eq!(contiguous.len(), 1);
+        assert_eq!(contiguous[0].layer_index, 2);
 
         let before = fixture.read_layer_before_f32(2).expect("read before");
+        let initial = fixture
+            .read_initial_before_f32(2)
+            .expect("read initial before");
         let after = fixture.read_layer_after_f32(2).expect("read after");
+        assert_eq!(before, initial);
         assert_eq!(before, vec![1.0_f32, 2.0_f32, 3.0_f32, 4.0_f32]);
         assert_eq!(after, vec![2.0_f32, 3.0_f32, 4.0_f32, 5.0_f32]);
 
@@ -361,6 +425,11 @@ mod tests {
                 format_version: "0.1".to_string(),
                 model_dir: "/tmp/model".to_string(),
                 model_type: Some("qwen3.5".to_string()),
+                layer_start: None,
+                layer_end_exclusive: None,
+                fixture_kind: None,
+                export_command: None,
+                torch_version: None,
                 dtype: "F32".to_string(),
                 token_ids: vec![1, 2],
                 position_ids: vec![0, 1],
@@ -382,6 +451,141 @@ mod tests {
             .read_layer_after_f32(0)
             .expect_err("payload byte mismatch should fail");
         assert!(err.contains("payload byte length mismatch"));
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rejects_missing_layer_in_range() {
+        let root = unique_temp_dir("golden-fixture-missing-layer");
+        fs::create_dir_all(root.clone()).expect("create test dir");
+
+        write_f32_le(
+            &root.join("before.raw"),
+            &[1.0_f32, 2.0_f32, 3.0_f32, 4.0_f32],
+        );
+        write_f32_le(
+            &root.join("after.raw"),
+            &[2.0_f32, 3.0_f32, 4.0_f32, 5.0_f32],
+        );
+
+        write_metadata(
+            &root.join("metadata.json"),
+            &GoldenMetadata {
+                format: "golden-v1".to_string(),
+                format_version: "0.1".to_string(),
+                model_dir: "/tmp/model".to_string(),
+                model_type: Some("qwen3.5".to_string()),
+                layer_start: None,
+                layer_end_exclusive: None,
+                fixture_kind: None,
+                export_command: None,
+                torch_version: None,
+                dtype: "F32".to_string(),
+                token_ids: vec![1, 2],
+                position_ids: vec![0, 1],
+                sequence_len: 2,
+                hidden_size: 4,
+                layers: vec![
+                    GoldenLayerFixture {
+                        layer_index: 0,
+                        before_file: "before.raw".to_string(),
+                        after_file: "after.raw".to_string(),
+                        before_shape: vec![1, 4],
+                        after_shape: vec![1, 4],
+                        dtype: "F32".to_string(),
+                    },
+                    GoldenLayerFixture {
+                        layer_index: 2,
+                        before_file: "before.raw".to_string(),
+                        after_file: "after.raw".to_string(),
+                        before_shape: vec![1, 4],
+                        after_shape: vec![1, 4],
+                        dtype: "F32".to_string(),
+                    },
+                ],
+            },
+        );
+
+        let fixture = GoldenTensorFixture::load(&root).expect("load fixture");
+        let err = fixture
+            .select_layer(1)
+            .expect_err("missing layer should fail");
+        assert!(err.contains("no layer entry for layer_index=1"));
+
+        let err = fixture
+            .select_contiguous_layers(0, 3)
+            .expect_err("non-contiguous layer range should fail");
+        assert!(err.contains("missing layer in golden fixture"));
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rejects_non_contiguous_layer_range() {
+        let root = unique_temp_dir("golden-fixture-contiguous-range");
+        fs::create_dir_all(root.clone()).expect("create test dir");
+
+        write_f32_le(
+            &root.join("before0.raw"),
+            &[1.0_f32, 2.0_f32, 3.0_f32, 4.0_f32],
+        );
+        write_f32_le(
+            &root.join("after0.raw"),
+            &[2.0_f32, 3.0_f32, 4.0_f32, 5.0_f32],
+        );
+        write_f32_le(
+            &root.join("before2.raw"),
+            &[9.0_f32, 8.0_f32, 7.0_f32, 6.0_f32],
+        );
+        write_f32_le(
+            &root.join("after2.raw"),
+            &[8.0_f32, 7.0_f32, 6.0_f32, 5.0_f32],
+        );
+
+        write_metadata(
+            &root.join("metadata.json"),
+            &GoldenMetadata {
+                format: "golden-v1".to_string(),
+                format_version: "0.1".to_string(),
+                model_dir: "/tmp/model".to_string(),
+                model_type: Some("qwen3.5".to_string()),
+                layer_start: None,
+                layer_end_exclusive: None,
+                fixture_kind: None,
+                export_command: None,
+                torch_version: None,
+                dtype: "F32".to_string(),
+                token_ids: vec![1, 2],
+                position_ids: vec![0, 1],
+                sequence_len: 2,
+                hidden_size: 4,
+                layers: vec![
+                    GoldenLayerFixture {
+                        layer_index: 2,
+                        before_file: "before2.raw".to_string(),
+                        after_file: "after2.raw".to_string(),
+                        before_shape: vec![1, 4],
+                        after_shape: vec![1, 4],
+                        dtype: "F32".to_string(),
+                    },
+                    GoldenLayerFixture {
+                        layer_index: 0,
+                        before_file: "before0.raw".to_string(),
+                        after_file: "after0.raw".to_string(),
+                        before_shape: vec![1, 4],
+                        after_shape: vec![1, 4],
+                        dtype: "F32".to_string(),
+                    },
+                ],
+            },
+        );
+
+        let fixture = GoldenTensorFixture::load(&root).expect("load fixture");
+        let err = fixture
+            .select_contiguous_layers(0, 3)
+            .expect_err("non-contiguous layer range should fail");
+        assert!(err.contains("missing layer in golden fixture"));
 
         cleanup(&root);
     }
