@@ -23,7 +23,9 @@ use ullm_engine::loader::{
 use ullm_engine::package::{
     PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole, TensorSelector,
 };
-use ullm_engine::scheduler::{KvBlockAllocator, KvBlockAllocatorStats, RequestId};
+use ullm_engine::scheduler::{
+    KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerState,
+};
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -16772,28 +16774,51 @@ fn allocate_fragmented_paged_decode_blocks(
     let cache_blocks = block_count
         .checked_add(2)
         .ok_or_else(|| "paged decode cache_blocks overflows".to_string())?;
-    let mut allocator = KvBlockAllocator::with_block_size(cache_blocks as u32, block_size as u32);
+    let mut scheduler = SchedulerState::with_block_size(cache_blocks as u32, block_size as u32);
     let fragment_blocks = cache_blocks - 1;
-    let fragment = allocator
-        .allocate(RequestId(100), fragment_blocks)
+    let fragment_tokens = fragment_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| "paged decode fragment token count overflows".to_string())?;
+    scheduler.enqueue(Request {
+        id: RequestId(100),
+        prompt_tokens: fragment_tokens,
+        max_new_tokens: 0,
+    });
+    let fragment_batch = scheduler
+        .pop_prefill_batch_with_allocation(fragment_tokens)
         .map_err(|err| format!("failed to allocate fragmenting KV blocks: {err}"))?;
-    let freed = allocator.free_request(fragment.request_id);
-    if freed != fragment.blocks.len() {
+    let fragment = fragment_batch
+        .first()
+        .ok_or_else(|| "fragmenting KV allocation returned an empty batch".to_string())?;
+    let freed = scheduler.release_request(fragment.allocation.request_id);
+    if freed != fragment.allocation.blocks.len() {
         return Err(format!(
             "freed KV block count {freed} does not match allocated fragment blocks {}",
-            fragment.blocks.len()
+            fragment.allocation.blocks.len()
         ));
     }
-    let allocation = allocator
-        .allocate_for_tokens(RequestId(101), cache_len)
+    scheduler.enqueue(Request {
+        id: RequestId(101),
+        prompt_tokens: cache_len,
+        max_new_tokens: 0,
+    });
+    let mut decode_batch = scheduler
+        .pop_prefill_batch_with_allocation(cache_len)
         .map_err(|err| format!("failed to allocate decode KV blocks: {err}"))?;
+    if decode_batch.len() != 1 {
+        return Err(format!(
+            "decode KV allocation selected {} requests, expected 1",
+            decode_batch.len()
+        ));
+    }
+    let allocation = decode_batch.remove(0).allocation;
     if allocation.blocks.len() != block_count {
         return Err(format!(
             "decode KV allocation block count {} does not match expected {block_count}",
             allocation.blocks.len()
         ));
     }
-    let stats = allocator.stats();
+    let stats = scheduler.allocator_stats();
     Ok((allocation.blocks, cache_blocks, stats))
 }
 
