@@ -23,7 +23,7 @@ from aq_scale_formats import scale_values
 from safetensors import safe_open
 
 
-SCHEMA_VERSION = "qwen-layer-module-trace-v0.8"
+SCHEMA_VERSION = "qwen-layer-module-trace-v0.9"
 
 
 TOP_ABS_FEATURES = 8
@@ -49,6 +49,13 @@ def parse_args() -> argparse.Namespace:
         "--token-index",
         type=int,
         help="Token index for hot-vector and projection row-dot traces. Defaults to the max expected delta token per layer.",
+    )
+    parser.add_argument(
+        "--tracked-column",
+        type=int,
+        action="append",
+        default=[],
+        help="Projection input column to include in tracked_dot_error_terms. May be passed multiple times.",
     )
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
@@ -774,6 +781,7 @@ def projection_row_dot_trace(
     package_tensor: dict[str, Any] | None,
     token_index: int,
     selected_features_override: list[int] | None = None,
+    tracked_columns: list[int] | None = None,
 ) -> dict[str, Any]:
     if input_values.ndim != 3:
         raise ValueError(f"{name} input must be [batch,seq,features], got {input_values.shape}")
@@ -795,6 +803,14 @@ def projection_row_dot_trace(
             for feature_index in selected_features_override
             if 0 <= int(feature_index) < module_output.shape[2]
         ]
+    tracked_columns = sorted(
+        {
+            int(column_index)
+            for column_index in (tracked_columns or [])
+            if 0 <= int(column_index) < input_values.shape[2]
+        }
+    )
+
     def projection_entry(
         token: int,
         feature_index: int,
@@ -818,27 +834,34 @@ def projection_row_dot_trace(
             package_dot = float(np.dot(vector, package_row_f64))
             dot_error_terms = vector * (package_row_f64 - source_row_f64)
             top_term_indices = top_abs_feature_indices(dot_error_terms.astype(np.float32))
+            def dot_error_term_entry(column_index: int) -> dict[str, Any]:
+                return {
+                    "column_index": int(column_index),
+                    "group_in_row": None
+                    if group_size is None
+                    else int(column_index) // group_size,
+                    "input_value": float(vector[column_index]),
+                    "source_weight": float(source_row_f64[column_index]),
+                    "package_weight": float(package_row_f64[column_index]),
+                    "weight_error": float(
+                        package_row_f64[column_index] - source_row_f64[column_index]
+                    ),
+                    "dot_error_term": float(dot_error_terms[column_index]),
+                    "abs_dot_error_term": float(abs(dot_error_terms[column_index])),
+                }
+
             entry.update(
                 {
                     "package_row_dot": package_dot,
                     "package_row_dot_error_vs_source_row": package_dot - source_dot,
                     "package_row_dot_error_vs_module": package_dot - output_value,
                     "top_dot_error_terms": [
-                        {
-                            "column_index": int(column_index),
-                            "group_in_row": None
-                            if group_size is None
-                            else int(column_index) // group_size,
-                            "input_value": float(vector[column_index]),
-                            "source_weight": float(source_row_f64[column_index]),
-                            "package_weight": float(package_row_f64[column_index]),
-                            "weight_error": float(
-                                package_row_f64[column_index] - source_row_f64[column_index]
-                            ),
-                            "dot_error_term": float(dot_error_terms[column_index]),
-                            "abs_dot_error_term": float(abs(dot_error_terms[column_index])),
-                        }
+                        dot_error_term_entry(int(column_index))
                         for column_index in top_term_indices
+                    ],
+                    "tracked_dot_error_terms": [
+                        dot_error_term_entry(column_index)
+                        for column_index in tracked_columns
                     ],
                 }
             )
@@ -956,6 +979,7 @@ def run_linear_attention_layer_trace(
     token_index_override: int | None,
     device: torch.device,
     dtype: torch.dtype,
+    tracked_columns: list[int],
 ) -> dict[str, Any]:
     layer_type = getattr(layer, "layer_type", None)
     if layer_type != "linear_attention":
@@ -1147,6 +1171,7 @@ def run_linear_attention_layer_trace(
             package_dir,
             package_qkv_tensor,
             token_index,
+            tracked_columns=tracked_columns,
         ),
         "attention_z_projection": projection_row_dot_trace(
             "attention_z_projection",
@@ -1156,6 +1181,7 @@ def run_linear_attention_layer_trace(
             package_dir,
             package_z_tensor,
             token_index,
+            tracked_columns=tracked_columns,
         ),
         "attention_a_projection": projection_row_dot_trace(
             "attention_a_projection",
@@ -1165,6 +1191,7 @@ def run_linear_attention_layer_trace(
             package_dir,
             package_a_tensor,
             token_index,
+            tracked_columns=tracked_columns,
         ),
         "attention_b_projection": projection_row_dot_trace(
             "attention_b_projection",
@@ -1174,6 +1201,7 @@ def run_linear_attention_layer_trace(
             package_dir,
             package_b_tensor,
             token_index,
+            tracked_columns=tracked_columns,
         ),
         "mlp_gate_projection": projection_row_dot_trace(
             "mlp_gate_projection",
@@ -1184,6 +1212,7 @@ def run_linear_attention_layer_trace(
             package_mlp_gate_tensor,
             token_index,
             mlp_projection_selected_features,
+            tracked_columns=tracked_columns,
         ),
         "mlp_up_projection": projection_row_dot_trace(
             "mlp_up_projection",
@@ -1194,6 +1223,7 @@ def run_linear_attention_layer_trace(
             package_mlp_up_tensor,
             token_index,
             mlp_projection_selected_features,
+            tracked_columns=tracked_columns,
         ),
     }
     hot_input_vectors = hot_input_vector_summaries(
@@ -1378,6 +1408,7 @@ def run_self_attention_layer_trace(
     device: torch.device,
     dtype: torch.dtype,
     rotary_template: torch.nn.Module | None,
+    tracked_columns: list[int],
 ) -> dict[str, Any]:
     layer_type = getattr(layer, "layer_type", None)
     if layer_type != "full_attention":
@@ -1555,6 +1586,7 @@ def run_self_attention_layer_trace(
             package_dir,
             package_q_tensor,
             token_index,
+            tracked_columns=tracked_columns,
         ),
         "self_attention_k_projection": projection_row_dot_trace(
             "self_attention_k_projection",
@@ -1564,6 +1596,7 @@ def run_self_attention_layer_trace(
             package_dir,
             package_k_tensor,
             token_index,
+            tracked_columns=tracked_columns,
         ),
         "self_attention_v_projection": projection_row_dot_trace(
             "self_attention_v_projection",
@@ -1573,6 +1606,7 @@ def run_self_attention_layer_trace(
             package_dir,
             package_v_tensor,
             token_index,
+            tracked_columns=tracked_columns,
         ),
         "mlp_gate_projection": projection_row_dot_trace(
             "mlp_gate_projection",
@@ -1583,6 +1617,7 @@ def run_self_attention_layer_trace(
             package_mlp_gate_tensor,
             token_index,
             mlp_projection_selected_features,
+            tracked_columns=tracked_columns,
         ),
         "mlp_up_projection": projection_row_dot_trace(
             "mlp_up_projection",
@@ -1593,6 +1628,7 @@ def run_self_attention_layer_trace(
             package_mlp_up_tensor,
             token_index,
             mlp_projection_selected_features,
+            tracked_columns=tracked_columns,
         ),
     }
 
@@ -1760,6 +1796,7 @@ def run_layer_trace(
     device: torch.device,
     dtype: torch.dtype,
     rotary_template: torch.nn.Module | None,
+    tracked_columns: list[int],
 ) -> dict[str, Any]:
     layer_type = getattr(layer, "layer_type", None)
     if layer_type == "linear_attention":
@@ -1777,6 +1814,7 @@ def run_layer_trace(
             token_index_override,
             device,
             dtype,
+            tracked_columns,
         )
     if layer_type == "full_attention":
         return run_self_attention_layer_trace(
@@ -1794,6 +1832,7 @@ def run_layer_trace(
             device,
             dtype,
             rotary_template,
+            tracked_columns,
         )
     raise ValueError(f"layer {layer_index} is {layer_type}; unsupported layer type")
 
@@ -1885,6 +1924,7 @@ def main() -> int:
                 device,
                 dtype,
                 rotary_template,
+                args.tracked_column,
             )
         )
 
