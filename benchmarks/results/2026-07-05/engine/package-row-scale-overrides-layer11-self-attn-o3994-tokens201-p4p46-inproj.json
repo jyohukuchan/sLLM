@@ -1,0 +1,11 @@
+{
+  "schema_version": "package-row-scale-overrides-v0.1",
+  "overrides": [
+    {
+      "layer_index": 11,
+      "tensor_suffix": "self_attn.o_proj.weight",
+      "row_index": 3994,
+      "scale": 0.9849548526270905
+    }
+  ]
+}

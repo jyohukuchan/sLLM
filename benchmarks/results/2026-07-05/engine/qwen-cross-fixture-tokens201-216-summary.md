@@ -54,6 +54,20 @@ Row-dot scale fits:
 | `self_attention_o_proj[3994]` | 0.984954853 | 0.059855519 | 0.024166208 |
 | `mlp_down_proj[3994]` | 1.001904073 | 0.022721555 | 0.022321246 |
 
+## Rejected Layer11 O Row-Scale Probe
+
+- Override:
+  - `package-row-scale-overrides-layer11-self-attn-o3994-tokens201-p4p46-inproj.json`
+- Report:
+  - `package-golden-prefix-cpu-actual-prefix0-12-seq16-tokens201-216-rotary64-manifest-row-scale-layer6h3994-layer6-layer10-cli-row-scale-layer11-o3994-p4p46-inproj.jsonl`
+- Result:
+  - baseline: `1.140727997`
+  - layer6 hidden3994 row-scale: `1.145284653`
+  - layer6 hidden3994 row-scale + layer11 `self_attn.o_proj[3994]` row-scale: `1.206287384`
+- Interpretation:
+  - Even though layer11 `self_attention_o_proj[3994]` has a favorable row-dot RMSE fit locally, applying it as a row-scale worsens the full-prefix objective.
+  - This reinforces the need to validate row-scale candidates with end-to-end multi-fixture smokes before promotion.
+
 ## Interpretation
 
 - The layer6 hidden3994 row-scale strongly reduces the early inherited hidden3994 floor:
@@ -65,6 +79,7 @@ Row-dot scale fits:
 - Under the layer6 row-scale condition, layer11 is not pure propagation:
   - local delta error is `0.104715`
   - `self_attention_o_proj[3994]` has a meaningful row-dot scale fit on this fixture, but it has not been validated across fixtures.
+- A direct layer11 `self_attn.o_proj[3994]` row-scale probe worsens this fixture to `1.206287384`, so it is rejected.
 - This weakens a simple unconditional promotion decision.
 - The better interpretation is:
   - the layer6 row-scale is a real local compensation candidate
