@@ -1458,3 +1458,32 @@
 ### 次の行動
 
 - 次の設計課題は、smoke-localの `SchedulerLayerDecodeRun` を入力sequence stateと期待値diff stateへ分けるか、実runner向けの入力所有型を先に作るかを判断すること。
+
+## 単層scheduler ready batch入力slice整理
+
+### 前回の要点
+
+- `qwen3_decoder_layer_prefill_input_from_sequence` と `qwen3_decoder_layer_decode_batch_inputs_from_sequences` により、decoder layerのprefill/ready batch input slicingをdecode_runner側へ移した。
+- `run_scheduler_layer_stack_ready_batch` は既にsequence view補助を使っていたが、単層の `run_scheduler_layer_ready_batch` には手動slice計算が残っていた。
+
+### 今回の変更点
+
+- `run_scheduler_layer_ready_batch` のq/k/v/output gate/residual slice生成を、`qwen3_decoder_layer_decode_batch_inputs_from_sequences` に置き換えた。
+- 単層scheduler-layer smokeとmodel-loop stack smokeの両方が同じdecode_runner側input slicing APIを使う形になった。
+- 5.3-codex-spark explorer Noetherの確認で、次の `SchedulerLayerDecodeRun` 分割では `request/progress/sequence` と `expected/diff` を分けるのが自然だと確認した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo test -p ullm-engine decode_runner -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- `runtime-scheduler-layer-decode-smoke` passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; all reported `first_batch_ready=2`、`second_batch_ready=1`、`final_ready=0`、`verified=true`。
+- `package-self-attn-mlp-block-scheduler-smoke` on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with layer `3`, sequence len `3`, passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`; all reported `decode_steps=[2, 1, 0]`、`final_ready=0`、`verified=true`。runtime/cache diffはすべて `0`。
+
+### 次の行動
+
+- `SchedulerLayerDecodeRun` を入力/progress/sequence stateとsmoke-only expected/diff stateへ分ける。特にmodel-loopで次layer residualを `expected.layer_output` から作る箇所は、expected側の保持場所を明示する。
