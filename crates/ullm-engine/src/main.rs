@@ -7501,6 +7501,7 @@ fn package_self_attn_block_smoke(
 }
 
 struct SelfAttnBlockSmokeRun {
+    self_attn_weights: Qwen3SelfAttnRuntimeWeights,
     residual_sequence: Vec<f32>,
     q_rope: Vec<f32>,
     k_rope: Vec<f32>,
@@ -7510,7 +7511,6 @@ struct SelfAttnBlockSmokeRun {
     attention_projection_input: Vec<f32>,
     attn_projected: Vec<f32>,
     block_output: Vec<f32>,
-    o_matrix: ullm_runtime_sys::RuntimeBuffer,
     paged_block_table: Vec<u32>,
     paged_block_size: usize,
     paged_cache_blocks: usize,
@@ -7587,21 +7587,7 @@ fn run_self_attn_block_sequence_smoke(
     k_norm: &PassthroughF32Data,
     label: &str,
 ) -> Result<SelfAttnBlockSmokeRun, String> {
-    let Qwen3SelfAttnRuntimeWeights {
-        q_rows,
-        q_cols,
-        k_rows,
-        v_rows,
-        o_rows,
-        o_cols,
-        head_dim,
-        kv_heads,
-        value_dim,
-        q_matrix,
-        k_matrix,
-        v_matrix,
-        o_matrix,
-    } = qwen3_self_attn_runtime_weights_from_package(
+    let self_attn_weights = qwen3_self_attn_runtime_weights_from_package(
         context,
         stream,
         path,
@@ -7613,6 +7599,15 @@ fn run_self_attn_block_sequence_smoke(
         q_norm,
         k_norm,
     )?;
+    let q_rows = self_attn_weights.q_rows;
+    let q_cols = self_attn_weights.q_cols;
+    let k_rows = self_attn_weights.k_rows;
+    let v_rows = self_attn_weights.v_rows;
+    let o_rows = self_attn_weights.o_rows;
+    let o_cols = self_attn_weights.o_cols;
+    let head_dim = self_attn_weights.head_dim;
+    let kv_heads = self_attn_weights.kv_heads;
+    let value_dim = self_attn_weights.value_dim;
 
     let hidden_bytes = q_cols
         .checked_mul(std::mem::size_of::<f32>())
@@ -7639,7 +7634,7 @@ fn run_self_attn_block_sequence_smoke(
         let q_step = runtime_matvec_to_host_f32(
             context,
             stream,
-            &q_matrix,
+            &self_attn_weights.q_matrix,
             &input_buffer,
             q_rows,
             q_cols,
@@ -7648,7 +7643,7 @@ fn run_self_attn_block_sequence_smoke(
         let k_step = runtime_matvec_to_host_f32(
             context,
             stream,
-            &k_matrix,
+            &self_attn_weights.k_matrix,
             &input_buffer,
             k_rows,
             q_cols,
@@ -7657,7 +7652,7 @@ fn run_self_attn_block_sequence_smoke(
         let v_step = runtime_matvec_to_host_f32(
             context,
             stream,
-            &v_matrix,
+            &self_attn_weights.v_matrix,
             &input_buffer,
             v_rows,
             q_cols,
@@ -7763,7 +7758,8 @@ fn run_self_attn_block_sequence_smoke(
         .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
         .ok_or_else(|| "o projection matrix byte size overflows".to_string())?;
     let mut o_matrix_raw = vec![0_u8; o_matrix_bytes];
-    o_matrix
+    self_attn_weights
+        .o_matrix
         .copy_to_host(0, &mut o_matrix_raw, Some(stream))
         .map_err(|err| format!("failed to copy materialized o projection to host: {err}"))?;
     stream
@@ -7825,7 +7821,7 @@ fn run_self_attn_block_sequence_smoke(
         let step = qwen_step_state
             .step(
                 stream,
-                &o_matrix,
+                &self_attn_weights.o_matrix,
                 &q_rope[q_start..q_end],
                 &k_rope[k_start..k_end],
                 &v_projected[v_start..v_end],
@@ -7975,6 +7971,7 @@ fn run_self_attn_block_sequence_smoke(
     )?;
 
     Ok(SelfAttnBlockSmokeRun {
+        self_attn_weights,
         residual_sequence,
         q_rope,
         k_rope,
@@ -7984,7 +7981,6 @@ fn run_self_attn_block_sequence_smoke(
         attention_projection_input,
         attn_projected,
         block_output,
-        o_matrix,
         paged_block_table,
         paged_block_size,
         paged_cache_blocks,
@@ -8467,7 +8463,7 @@ fn package_self_attn_mlp_block_smoke_impl(
             let step = layer_step_state
                 .step(
                     &mut stream,
-                    &self_attn.o_matrix,
+                    &self_attn.self_attn_weights.o_matrix,
                     &layer_weights.post_norm_weight,
                     &layer_weights.mlp.gate_matrix,
                     &layer_weights.mlp.up_matrix,
