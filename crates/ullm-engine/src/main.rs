@@ -12164,7 +12164,7 @@ fn package_golden_prefix_smoke_impl(
         let layer_kind = package_decoder_layer_kind(path, layer_index)?;
         let (actual, details) = match layer_kind {
             PackageDecoderLayerKind::SelfAttention => {
-                let layer = qwen3_package_decoder_layer_runtime_from_package(
+                let mut layer = qwen3_package_decoder_layer_runtime_from_package(
                     &mut context,
                     &mut stream,
                     path,
@@ -12177,6 +12177,33 @@ fn package_golden_prefix_smoke_impl(
                         layer_index, layer.runtime_shape.hidden
                     ));
                 }
+                let mut applied_row_scale_overrides = Vec::new();
+                let self_attn_o_row_scale_overrides = matching_package_row_scale_overrides(
+                    row_scale_overrides,
+                    layer_index,
+                    "self_attn.o_proj.weight",
+                );
+                applied_row_scale_overrides.extend(apply_package_row_scale_overrides_to_matrix(
+                    &mut stream,
+                    &mut layer.weights.self_attn.o_matrix,
+                    layer.weights.self_attn.o_rows,
+                    layer.weights.self_attn.o_cols,
+                    &layer.o_tensor,
+                    &self_attn_o_row_scale_overrides,
+                )?);
+                let down_row_scale_overrides = matching_package_row_scale_overrides(
+                    row_scale_overrides,
+                    layer_index,
+                    "mlp.down_proj.weight",
+                );
+                applied_row_scale_overrides.extend(apply_package_row_scale_overrides_to_matrix(
+                    &mut stream,
+                    &mut layer.weights.post_attention.mlp.down_matrix,
+                    layer.weights.post_attention.hidden,
+                    layer.weights.post_attention.intermediate,
+                    &layer.down_tensor,
+                    &down_row_scale_overrides,
+                )?);
                 let input_norm_tensor =
                     format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
                 let mut input_norm =
@@ -12308,6 +12335,20 @@ fn package_golden_prefix_smoke_impl(
                 insert_json_detail(&mut details, "q_norm_dtype", &layer.q_norm.dtype);
                 insert_json_detail(&mut details, "k_norm_dtype", &layer.k_norm.dtype);
                 insert_json_detail(&mut details, "post_norm_dtype", &layer.post_norm.dtype);
+                if let Some(overrides) = row_scale_overrides {
+                    insert_json_detail(
+                        &mut details,
+                        "row_scale_override_source",
+                        &overrides.source_path,
+                    );
+                }
+                if !applied_row_scale_overrides.is_empty() {
+                    insert_json_detail(
+                        &mut details,
+                        "applied_row_scale_overrides",
+                        &applied_row_scale_overrides,
+                    );
+                }
                 let extra_hot_input_vectors = [
                     (
                         "attention_input_normed",
@@ -19768,10 +19809,10 @@ fn validate_package_row_scale_override(
 ) -> Result<(), String> {
     if !matches!(
         override_entry.tensor_suffix.as_str(),
-        "linear_attn.out_proj.weight" | "mlp.down_proj.weight"
+        "linear_attn.out_proj.weight" | "self_attn.o_proj.weight" | "mlp.down_proj.weight"
     ) {
         return Err(format!(
-            "unsupported row scale override tensor_suffix={}; expected linear_attn.out_proj.weight or mlp.down_proj.weight",
+            "unsupported row scale override tensor_suffix={}; expected linear_attn.out_proj.weight, self_attn.o_proj.weight, or mlp.down_proj.weight",
             override_entry.tensor_suffix
         ));
     }
