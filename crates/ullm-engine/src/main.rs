@@ -24,9 +24,10 @@ use ullm_engine::decoder::{
     split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
-    LoadOptions, LoadedPayload, LoadedTensorBundle, PassthroughF32Data, WeightRegistry,
-    load_package_tensor_prefix, read_named_passthrough_f32, read_passthrough_payload_f32_bytes,
-    resolve_passthrough_dtype, validate_passthrough_shape_elements,
+    LoadOptions, LoadedPayload, PassthroughF32Data, WeightRegistry, load_package_tensor_prefix,
+    materialize_config, materialize_selected_aq4_matrix, matrix_shape_rows_cols,
+    read_named_passthrough_f32, read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,
+    validate_passthrough_shape_elements,
 };
 use ullm_engine::package::{ReferencedFile, ReferencedFileRole, TensorSelector};
 use ullm_engine::scheduler::{
@@ -20186,64 +20187,6 @@ fn split_linear_attn_qkv_for_recurrent(
     Ok(LinearAttnQkvSplit { q, k, v })
 }
 
-fn materialize_selected_aq4_matrix(
-    context: &mut ullm_runtime_sys::RuntimeContext,
-    stream: &mut ullm_runtime_sys::RuntimeStream,
-    registry: &mut WeightRegistry,
-    path: &str,
-    tensor_name: &str,
-    chunk_bytes: usize,
-) -> Result<(usize, usize, ullm_runtime_sys::RuntimeBuffer), String> {
-    let selector = TensorSelector::Name(tensor_name.to_string());
-    let bundle = ullm_engine::package::select_tensor_payload_bundle(path, &selector)
-        .map_err(|err| format!("failed to select tensor payloads for {tensor_name}: {err}"))?;
-    let registry_index = registry
-        .load_and_insert(
-            context,
-            stream,
-            &bundle,
-            LoadOptions {
-                chunk_bytes,
-                verify: true,
-            },
-        )
-        .map_err(|err| format!("failed to register tensor payloads for {tensor_name}: {err}"))?;
-    let loaded = registry
-        .get(registry_index)
-        .ok_or_else(|| "registered tensor disappeared from weight registry".to_string())?;
-    let materialize = materialize_config(loaded).map_err(|err| {
-        format!(
-            "failed to prepare materialize config for {tensor_name} (registry index {registry_index}): {err}"
-        )
-    })?;
-    let (rows, cols) = matrix_shape_rows_cols(&loaded.shape, materialize.elements)
-        .map_err(|err| format!("invalid shape for {tensor_name}: {err}"))?;
-    let mut output = context
-        .alloc_buffer(materialize.output_bytes)
-        .map_err(|err| {
-            format!("failed to allocate materialized output for {tensor_name}: {err}")
-        })?;
-    if let Err(err) = ullm_runtime_sys::aq4_dequant_f32(
-        loaded.index.buffer.as_ref(),
-        loaded.scale.buffer.as_ref(),
-        loaded.codebook.buffer.as_ref(),
-        &materialize.scale_values,
-        materialize.group_size,
-        materialize.tensor_scale,
-        materialize.elements,
-        &mut output,
-        Some(stream),
-    ) {
-        return Err(format!(
-            "failed to materialize AQ4 tensor {tensor_name}: {err}"
-        ));
-    }
-    stream.synchronize().map_err(|err| {
-        format!("failed to synchronize runtime stream after materializing {tensor_name}: {err}")
-    })?;
-    Ok((rows, cols, output))
-}
-
 fn print_help() {
     eprintln!(
         "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
@@ -20260,83 +20203,6 @@ fn print_help() {
         "payload roles: smallest|tensor-index|tensor-scale|tensor-codebook|codebook|passthrough"
     );
     eprintln!("tensor selector: omitted or numeric index, exact tensor name, or unique substring");
-}
-
-#[derive(Debug)]
-struct MaterializeConfig {
-    scale_format: String,
-    scale_values: Vec<f32>,
-    group_size: usize,
-    tensor_scale: f32,
-    elements: usize,
-    output_bytes: usize,
-}
-
-fn materialize_config(loaded: &LoadedTensorBundle) -> Result<MaterializeConfig, String> {
-    let scale_format = loaded
-        .scale_format
-        .as_deref()
-        .ok_or_else(|| "selected tensor does not declare scale_format".to_string())?;
-    let scale_values = ullm_engine::aq::scale_values(scale_format)?;
-    let group_size = match loaded.group_size {
-        Some(value) if value > 0 => value,
-        Some(_) | None => {
-            return Err("selected tensor does not declare a valid group_size".to_string());
-        }
-    };
-    let tensor_scale = match loaded.tensor_scale {
-        Some(value) if value.is_finite() && value > 0.0 => value,
-        Some(_) | None => {
-            return Err("selected tensor does not declare a valid tensor_scale".to_string());
-        }
-    };
-    if loaded.index_encoding.as_deref() != Some("idx4_low_nibble_first") {
-        return Err("selected tensor uses unsupported index encoding".to_string());
-    }
-    if loaded.scale_encoding.as_deref() != Some("u8_scale_table_index") {
-        return Err("selected tensor uses unsupported scale encoding".to_string());
-    }
-    let elements = usize::try_from(loaded.elements)
-        .map_err(|_| "selected tensor has too many elements for this host".to_string())?;
-    let output_bytes = elements
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| "materialized output byte size overflows".to_string())?;
-    Ok(MaterializeConfig {
-        scale_format: scale_format.to_string(),
-        scale_values,
-        group_size,
-        tensor_scale,
-        elements,
-        output_bytes,
-    })
-}
-
-fn matrix_shape_rows_cols(shape: &[u64], elements: usize) -> Result<(usize, usize), String> {
-    let shape = match shape {
-        shape if shape.len() == 2 => shape,
-        _ => return Err("selected tensor shape is not 2D".to_string()),
-    };
-    let rows_u64 = shape[0];
-    let cols_u64 = shape[1];
-    if rows_u64 == 0 || cols_u64 == 0 {
-        return Err("selected tensor has zero rows or columns".to_string());
-    }
-    let expected_elements = rows_u64
-        .checked_mul(cols_u64)
-        .ok_or_else(|| "selected tensor shape overflows element count".to_string())?;
-    if expected_elements
-        != u64::try_from(elements)
-            .map_err(|_| "selected tensor has too many elements".to_string())?
-    {
-        return Err(format!(
-            "selected tensor shape has {expected_elements} elements but materialize produced {elements}"
-        ));
-    }
-    let rows = usize::try_from(rows_u64)
-        .map_err(|_| "selected tensor row count does not fit host usize".to_string())?;
-    let cols = usize::try_from(cols_u64)
-        .map_err(|_| "selected tensor column count does not fit host usize".to_string())?;
-    Ok((rows, cols))
 }
 
 fn format_u64_shape(shape: &[u64]) -> String {

@@ -4,7 +4,7 @@
 use crate::package::{
     PackageSummary, PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole,
     TensorPayloadBundle, TensorSelector, list_tensor_payload_bundles,
-    select_passthrough_payload_bundle,
+    select_passthrough_payload_bundle, select_tensor_payload_bundle,
 };
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -62,6 +62,16 @@ pub struct PassthroughF32Data {
     pub values: Vec<f32>,
     pub dtype: String,
     pub shape: Vec<u64>,
+}
+
+#[derive(Debug)]
+pub struct MaterializeConfig {
+    pub scale_format: String,
+    pub scale_values: Vec<f32>,
+    pub group_size: usize,
+    pub tensor_scale: f32,
+    pub elements: usize,
+    pub output_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -167,6 +177,131 @@ pub fn read_named_passthrough_f32(
         dtype,
         shape: bundle.shape,
     })
+}
+
+pub fn materialize_config(loaded: &LoadedTensorBundle) -> Result<MaterializeConfig, String> {
+    let scale_format = loaded
+        .scale_format
+        .as_deref()
+        .ok_or_else(|| "selected tensor does not declare scale_format".to_string())?;
+    let scale_values = crate::aq::scale_values(scale_format)?;
+    let group_size = match loaded.group_size {
+        Some(value) if value > 0 => value,
+        Some(_) | None => {
+            return Err("selected tensor does not declare a valid group_size".to_string());
+        }
+    };
+    let tensor_scale = match loaded.tensor_scale {
+        Some(value) if value.is_finite() && value > 0.0 => value,
+        Some(_) | None => {
+            return Err("selected tensor does not declare a valid tensor_scale".to_string());
+        }
+    };
+    if loaded.index_encoding.as_deref() != Some("idx4_low_nibble_first") {
+        return Err("selected tensor uses unsupported index encoding".to_string());
+    }
+    if loaded.scale_encoding.as_deref() != Some("u8_scale_table_index") {
+        return Err("selected tensor uses unsupported scale encoding".to_string());
+    }
+    let elements = usize::try_from(loaded.elements)
+        .map_err(|_| "selected tensor has too many elements for this host".to_string())?;
+    let output_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "materialized output byte size overflows".to_string())?;
+    Ok(MaterializeConfig {
+        scale_format: scale_format.to_string(),
+        scale_values,
+        group_size,
+        tensor_scale,
+        elements,
+        output_bytes,
+    })
+}
+
+pub fn matrix_shape_rows_cols(shape: &[u64], elements: usize) -> Result<(usize, usize), String> {
+    let shape = match shape {
+        shape if shape.len() == 2 => shape,
+        _ => return Err("selected tensor shape is not 2D".to_string()),
+    };
+    let rows_u64 = shape[0];
+    let cols_u64 = shape[1];
+    if rows_u64 == 0 || cols_u64 == 0 {
+        return Err("selected tensor has zero rows or columns".to_string());
+    }
+    let expected_elements = rows_u64
+        .checked_mul(cols_u64)
+        .ok_or_else(|| "selected tensor shape overflows element count".to_string())?;
+    if expected_elements
+        != u64::try_from(elements)
+            .map_err(|_| "selected tensor has too many elements".to_string())?
+    {
+        return Err(format!(
+            "selected tensor shape has {expected_elements} elements but materialize produced {elements}"
+        ));
+    }
+    let rows = usize::try_from(rows_u64)
+        .map_err(|_| "selected tensor row count does not fit host usize".to_string())?;
+    let cols = usize::try_from(cols_u64)
+        .map_err(|_| "selected tensor column count does not fit host usize".to_string())?;
+    Ok((rows, cols))
+}
+
+pub fn materialize_selected_aq4_matrix(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    registry: &mut WeightRegistry,
+    path: impl AsRef<Path>,
+    tensor_name: &str,
+    chunk_bytes: usize,
+) -> Result<(usize, usize, RuntimeBuffer), String> {
+    let selector = TensorSelector::Name(tensor_name.to_string());
+    let bundle = select_tensor_payload_bundle(path, &selector)
+        .map_err(|err| format!("failed to select tensor payloads for {tensor_name}: {err}"))?;
+    let registry_index = registry
+        .load_and_insert(
+            context,
+            stream,
+            &bundle,
+            LoadOptions {
+                chunk_bytes,
+                verify: true,
+            },
+        )
+        .map_err(|err| format!("failed to register tensor payloads for {tensor_name}: {err}"))?;
+    let loaded = registry
+        .get(registry_index)
+        .ok_or_else(|| "registered tensor disappeared from weight registry".to_string())?;
+    let materialize = materialize_config(loaded).map_err(|err| {
+        format!(
+            "failed to prepare materialize config for {tensor_name} (registry index {registry_index}): {err}"
+        )
+    })?;
+    let (rows, cols) = matrix_shape_rows_cols(&loaded.shape, materialize.elements)
+        .map_err(|err| format!("invalid shape for {tensor_name}: {err}"))?;
+    let mut output = context
+        .alloc_buffer(materialize.output_bytes)
+        .map_err(|err| {
+            format!("failed to allocate materialized output for {tensor_name}: {err}")
+        })?;
+    if let Err(err) = ullm_runtime_sys::aq4_dequant_f32(
+        loaded.index.buffer.as_ref(),
+        loaded.scale.buffer.as_ref(),
+        loaded.codebook.buffer.as_ref(),
+        &materialize.scale_values,
+        materialize.group_size,
+        materialize.tensor_scale,
+        materialize.elements,
+        &mut output,
+        Some(stream),
+    ) {
+        return Err(format!(
+            "failed to materialize AQ4 tensor {tensor_name}: {err}"
+        ));
+    }
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize runtime stream after materializing {tensor_name}: {err}")
+    })?;
+    Ok((rows, cols, output))
 }
 
 pub fn resolve_passthrough_dtype<'a>(
@@ -844,6 +979,74 @@ mod tests {
         assert_eq!(f32.dtype, "F32");
         assert_eq!(f32.shape, vec![2]);
         assert_eq!(f32.values, vec![1.25_f32, -0.5_f32]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn materialize_config_resolves_aq4_metadata_and_matrix_shape() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-materialize-config-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("tensors/a.idx4"), [0x10_u8, 0x32]).unwrap();
+        fs::write(root.join("tensors/a.scale_u8"), [1_u8]).unwrap();
+        fs::write(root.join("codebooks/a.f32"), [0_u8; 64]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "layer.0.attn.q_proj.weight",
+                "dtype": "BF16",
+                "shape": [2, 2],
+                "family": "attn_q",
+                "candidate_id": "aq4_test",
+                "scale_format": "e4m3",
+                "group_size": 4,
+                "tensor_scale": 1.0,
+                "index_encoding": "idx4_low_nibble_first",
+                "scale_encoding": "u8_scale_table_index",
+                "elements": 4,
+                "groups": 1,
+                "index_file": "tensors/a.idx4",
+                "scale_file": "tensors/a.scale_u8",
+                "codebook_file": "codebooks/a.f32"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let bundle = select_tensor_payload_bundle(&root, &TensorSelector::First).unwrap();
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let loaded = load_tensor_payload_bundle(
+            &mut context,
+            &mut stream,
+            &bundle,
+            LoadOptions {
+                chunk_bytes: 8,
+                verify: true,
+            },
+        )
+        .unwrap();
+
+        let config = materialize_config(&loaded).unwrap();
+        assert_eq!(config.scale_format, "e4m3");
+        assert!(!config.scale_values.is_empty());
+        assert_eq!(config.group_size, 4);
+        assert_eq!(config.tensor_scale, 1.0);
+        assert_eq!(config.elements, 4);
+        assert_eq!(config.output_bytes, 16);
+        assert_eq!(
+            matrix_shape_rows_cols(&loaded.shape, config.elements).unwrap(),
+            (2, 2)
+        );
+        assert!(matrix_shape_rows_cols(&[4], config.elements).is_err());
 
         fs::remove_dir_all(root).unwrap();
     }
