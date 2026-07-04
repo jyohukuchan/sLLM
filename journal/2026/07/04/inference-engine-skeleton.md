@@ -7,6 +7,14 @@
 
 ## 今回の変更点
 
+- Commit `45aa8fe Drive model loop decode from scheduler` で、`package-self-attn-mlp-block-model-loop-smoke` のdecode loopを固定の `expected_first_ids=[201,202]` / `expected_second_ids=[201]` 前提から外し、`SchedulerState::ready_decode_batch(max_decode_batch_requests)` を空になるまで処理するscheduler駆動loopへ変更した。
+- `run_scheduler_layer_stack_ready_batch` はready batchを外から受け取り、各layer/runの `cache_position`、`remaining_new_tokens`、block table整合性を検証してから `Qwen3DecoderLayerStackRequestDecodeRunner::run_ready_batch_across_layers` を呼ぶ形にした。request id列の固定比較は削除し、実際に処理したbatch sizeを返す。
+- `PackageModelLoopExecutionSummary` には `decode_batch_ready_counts` を追加し、CLI出力にも `decode_batch_ready_counts=[...]` を出すようにした。既存の `first_batch_ready` / `second_batch_ready` は互換用に残し、先頭2batchから算出している。
+- `docs/words.txt` には `package model loop scheduler decode loop` を追加した。
+- 検証は `cargo fmt --all --check`、`git diff --check`、`cargo check -p ullm-engine`、`cargo build -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1` (`72 + 5 passed`)、`cargo test --workspace -- --test-threads=1` を通した。
+- 3-layer smoke `package-self-attn-mlp-block-model-loop-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d DEVICE 1048576 3,7,11 3` はCPU `0`、R9700/RDNA4 `2`、V620/RDNA2 `1` で成功した。全deviceで `first_batch_ready=2`、`second_batch_ready=1`、`decode_batch_ready_counts=[2, 1]`、`final_ready=0`、`cached_tokens=[3, 3, 1]`、`generated_tokens=[2, 1, 0]`。
+- CPUはprepared/runtime/cache diffがすべて `0`。R9700/V620はprepared側が `q_norm=0.000000954`、`k_norm=0.000001192`、`q_rope=0.000000313`、`k_rope=0.000000477`、`causal_attention=0.000000477` で、runtime側のattention/projection/block/post_norm/MLP/layer/K/V cache diffはすべて `0`。
+- 次の有力候補は、Parfitの調査結果どおり `PackageModelLoopSmokeModel` / `PackageModelLoopExecutionPlan` などを `package_model_loop.rs` に移すこと。ただし `Qwen3DecoderLayerStackRequestDecodeRunner<'weights>` は重み参照の寿命を持つため、stack runner自体を長寿命structに保持する設計はまだ避ける。
 - goal再開後の当面scopeを、手元で検証できるRDNA2/V620とRDNA4/R9700に限定した。モデルアーキテクチャ対応も、まずはQwen3.5/Qwen3系の一部decoder経路だけで進める。
 - Commit `cec9548 Add package scheduler layer smoke` で、実package weightを使う `package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]` を追加した。
 - 新smokeは `.ullm.d` からQwen3 decoder layer runtime weightsをmaterializeし、request 201/202/203を同じ `SchedulerState` と `Qwen3DecoderLayerRequestDecodeRunner` に載せてprefill/decode batchを実行する。request 201は2 decode step、request 202は1 decode step、request 203は `max_new_tokens=0` としてdecode batchから除外する。
