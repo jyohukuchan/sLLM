@@ -23,7 +23,7 @@ from aq_scale_formats import scale_values
 from safetensors import safe_open
 
 
-SCHEMA_VERSION = "qwen-layer-module-trace-v0.2"
+SCHEMA_VERSION = "qwen-layer-module-trace-v0.3"
 
 
 TOP_ABS_FEATURES = 8
@@ -533,6 +533,7 @@ def run_layer_trace(
         layer.linear_attn.in_proj_a.register_forward_hook(hook("attention_a_projection")),
         layer.linear_attn.in_proj_b.register_forward_hook(hook("attention_b_projection")),
         layer.linear_attn.norm.register_forward_pre_hook(pre_hook("attention_recurrent_flat")),
+        layer.linear_attn.norm.register_forward_hook(hook("attention_gated_normed")),
         layer.linear_attn.out_proj.register_forward_pre_hook(pre_hook("attention_projection_input")),
         layer.post_attention_layernorm.register_forward_hook(hook("post_normed")),
         layer.mlp.down_proj.register_forward_pre_hook(pre_hook("mlp_activation")),
@@ -572,6 +573,7 @@ def run_layer_trace(
         tensor_to_numpy_f32(state["linear_attn.dt_bias"]),
     )
     attention_recurrent = captured["attention_recurrent_flat"].reshape(before.shape[0], before.shape[1], -1)
+    attention_gated_normed = captured["attention_gated_normed"].reshape(before.shape[0], before.shape[1], -1)
     attention_projection_input = captured["attention_projection_input"]
     attention_output = captured["attention_output"]
     post_normed = captured["post_normed"]
@@ -641,6 +643,7 @@ def run_layer_trace(
         ("attention_gate", attention_gate),
         ("attention_beta", attention_beta),
         ("attention_recurrent", attention_recurrent),
+        ("attention_gated_normed", attention_gated_normed),
     ):
         add_token_vector_summary(hot_input_vectors, name, values, token_index)
     per_token_hot_input_vectors = [
@@ -667,6 +670,7 @@ def run_layer_trace(
             ("attention_gate", attention_gate),
             ("attention_beta", attention_beta),
             ("attention_recurrent", attention_recurrent),
+            ("attention_gated_normed", attention_gated_normed),
         ):
             add_token_vector_summary(item, name, values, token)
 

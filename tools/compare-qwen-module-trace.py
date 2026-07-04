@@ -256,6 +256,12 @@ def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[st
             package_hot.get("mlp_activation"),
             fullref_hot.get("mlp_activation"),
         )
+        common_hot_names = sorted(set(package_hot.keys()) & set(fullref_hot.keys()))
+        comparison["hot_input_vector_stage_errors"] = {
+            name: compare_hot_input_vectors(package_hot.get(name), fullref_hot.get(name))
+            for name in common_hot_names
+            if name != "token_index"
+        }
 
         attention_row_dot = row_dot_by_token(fullref, "attention_out_proj", token)
         if attention_row_dot is not None:
@@ -355,6 +361,43 @@ def markdown(rows: list[dict[str, Any]]) -> str:
                 ]
             )
             + " |"
+        )
+    stage_rows: list[str] = []
+    for row in rows:
+        stage_errors = row.get("hot_input_vector_stage_errors")
+        if not isinstance(stage_errors, dict):
+            continue
+        for stage, comparison in sorted(stage_errors.items()):
+            if not isinstance(comparison, dict):
+                continue
+            stats_error = comparison.get("stats_error") or {}
+            stage_rows.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(row["layer_index"]),
+                        str(row["token_index"]),
+                        str(row["hidden_index"]),
+                        str(stage),
+                        str(comparison.get("status", "-")),
+                        fmt(stats_error.get("abs_mean")),
+                        fmt(stats_error.get("rms")),
+                        fmt(stats_error.get("max_abs")),
+                        top_feature_label(comparison),
+                    ]
+                )
+                + " |"
+            )
+    if stage_rows:
+        lines.extend(
+            [
+                "",
+                "## Hot Input Vector Stage Errors",
+                "",
+                "| layer | token | hidden | stage | status | abs_mean_err | rms_err | max_abs_err | top1 |",
+                "|---:|---:|---:|---|---:|---:|---:|---:|---:|",
+                *stage_rows,
+            ]
         )
     return "\n".join(lines) + "\n"
 

@@ -161,3 +161,4 @@ package golden prefix smoke:.ullm.d内の実package weightを使って連続Qwen
 effective RMSNorm weight:Qwen3.5系で保存値をそのままscaleとして使わず、参照実装と同じく`1 + weight`へ変換したRMSNorm用weight。Qwen3系の通常weightやlinear_attn.norm.weightは直接weightとして扱う
 hot input vector:golden prefixの最大output差分が出たtoken/hidden coordinateについて、そのhiddenを生む直前のattention projection inputやMLP activationなどの入力vector統計を記録した診断情報
 causal Conv1d weight order:PyTorchの`Conv1d(padding=kernel_size-1)`で現在tokenに対応するkernel位置が最後のweight要素になる順序。linear attentionのdepthwise conv1dで参照実装とruntimeの境界を合わせるために使う
+Qwen3.5 gated RMSNorm:linear attentionのrecurrent出力を`head_v_dim`単位にreshapeし、head内でRMSNormした後に同じhead単位の`F.silu(z)`を掛ける正規化境界。参照実装では`linear_attn.norm`の出力がそのまま`out_proj`入力になる
