@@ -1625,10 +1625,18 @@ impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
     }
 
     pub fn read_cache_to_host(
-        &mut self,
+        &self,
         stream: &mut RuntimeStream,
     ) -> Result<PagedKvCacheReadback, String> {
         self.step_state.read_cache_to_host(stream)
+    }
+
+    pub fn written_len(&self) -> usize {
+        self.step_state.written_len()
+    }
+
+    pub fn block_table(&self) -> &[u32] {
+        self.step_state.block_table()
     }
 }
 
