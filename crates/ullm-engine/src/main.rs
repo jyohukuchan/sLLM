@@ -10,7 +10,8 @@ use ullm_engine::decoder::{
     PagedDecodeShape, Qwen3DecoderLayerRuntime, Qwen3DecoderLayerRuntimeWeights,
     Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnBlockStepState,
     Qwen3SelfAttnDecodeState, Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights,
-    qwen3_self_attn_runtime_shape, split_qwen3_self_attn_q_projection,
+    qwen3_headwise_rmsnorm_to_host_f32, qwen3_self_attn_runtime_shape,
+    split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::loader::{
     LoadOptions, LoadedPayload, LoadedTensorBundle, WeightRegistry, load_package_tensor_prefix,
@@ -15704,56 +15705,25 @@ fn runtime_headwise_rmsnorm_verify(
         ));
     }
 
-    let head_bytes = head_dim
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| format!("{label} head byte size overflows"))?;
-    let weight_bytes = encode_f32_to_bytes(weight);
-    let mut weight_buffer = context
-        .alloc_buffer(weight_bytes.len())
-        .map_err(|err| format!("failed to allocate {label} weight buffer: {err}"))?;
-    weight_buffer
-        .copy_from_host(0, &weight_bytes, Some(stream))
-        .map_err(|err| format!("failed to copy {label} weight: {err}"))?;
-    stream
-        .synchronize()
-        .map_err(|err| format!("failed to synchronize after {label} weight copy: {err}"))?;
-
-    let mut input_buffer = context
-        .alloc_buffer(head_bytes)
-        .map_err(|err| format!("failed to allocate {label} input buffer: {err}"))?;
-    let mut output_buffer = context
-        .alloc_buffer(head_bytes)
-        .map_err(|err| format!("failed to allocate {label} output buffer: {err}"))?;
-    let mut output = Vec::with_capacity(input.len());
+    let output = qwen3_headwise_rmsnorm_to_host_f32(context, stream, input, weight, epsilon)
+        .map_err(|err| format!("failed to run {label} RMSNorm: {err}"))?;
+    if output.len() != input.len() {
+        return Err(format!(
+            "{label} runtime output size mismatch: expected {} got {}",
+            input.len(),
+            output.len()
+        ));
+    }
     let mut max_abs_diff = 0.0_f32;
-    let mut output_head_bytes = vec![0_u8; head_bytes];
+
     for (head_index, head_input) in input.chunks_exact(head_dim).enumerate() {
-        let head_input_bytes = encode_f32_to_bytes(head_input);
-        input_buffer
-            .copy_from_host(0, &head_input_bytes, Some(stream))
-            .map_err(|err| format!("failed to copy {label} head {head_index} input: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after {label} head {head_index} input copy: {err}")
-        })?;
-        ullm_runtime_sys::rmsnorm_f32(
-            &input_buffer,
-            &weight_buffer,
-            head_dim,
-            epsilon,
-            &mut output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} head {head_index} RMSNorm: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after {label} head {head_index} RMSNorm: {err}")
-        })?;
-        output_buffer
-            .copy_to_host(0, &mut output_head_bytes, Some(stream))
-            .map_err(|err| format!("failed to copy {label} head {head_index} output: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize after {label} head {head_index} output copy: {err}")
-        })?;
-        let actual = decode_f32_le_values(&output_head_bytes);
+        let actual_head_start = head_index
+            .checked_mul(head_dim)
+            .ok_or_else(|| format!("{label} head index multiplication overflow"))?;
+        let actual_head_end = actual_head_start
+            .checked_add(head_dim)
+            .ok_or_else(|| format!("{label} head length multiplication overflow"))?;
+        let actual = &output[actual_head_start..actual_head_end];
         let expected = runtime_host_rmsnorm_f32(head_input, weight, epsilon);
         let head_max_abs_diff = verify_f32_close(
             &format!("{label} head {head_index}"),
@@ -15763,7 +15733,6 @@ fn runtime_headwise_rmsnorm_verify(
             1e-4_f32,
         )?;
         max_abs_diff = max_abs_diff.max(head_max_abs_diff);
-        output.extend(actual);
     }
     Ok((output, max_abs_diff))
 }

@@ -311,6 +311,81 @@ pub fn split_qwen3_self_attn_q_projection(
     })
 }
 
+pub fn qwen3_headwise_rmsnorm_to_host_f32(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    input: &[f32],
+    weight: &[f32],
+    epsilon: f32,
+) -> Result<Vec<f32>, String> {
+    let head_dim = weight.len();
+    if head_dim == 0 {
+        return Err("Qwen3 headwise RMSNorm weight must not be empty".to_string());
+    }
+    if !input.len().is_multiple_of(head_dim) {
+        return Err(format!(
+            "Qwen3 headwise RMSNorm input length {} is not a multiple of head_dim {}",
+            input.len(),
+            head_dim
+        ));
+    }
+    if !epsilon.is_finite() || epsilon <= 0.0 {
+        return Err(
+            "Qwen3 headwise RMSNorm epsilon must be finite and greater than zero".to_string(),
+        );
+    }
+
+    let weight_bytes = f32s_to_le_bytes(weight);
+    let mut weight_buffer = context
+        .alloc_buffer(weight_bytes.len())
+        .map_err(|err| format!("failed to allocate Qwen3 headwise RMSNorm weight buffer: {err}"))?;
+    weight_buffer
+        .copy_from_host(0, &weight_bytes, Some(stream))
+        .map_err(|err| format!("failed to copy Qwen3 headwise RMSNorm weight: {err}"))?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize Qwen3 headwise RMSNorm weight copy: {err}")
+    })?;
+
+    let head_bytes = f32_bytes(head_dim);
+    let mut input_buffer = context
+        .alloc_buffer(head_bytes)
+        .map_err(|err| format!("failed to allocate Qwen3 headwise RMSNorm input buffer: {err}"))?;
+    let mut output_buffer = context
+        .alloc_buffer(head_bytes)
+        .map_err(|err| format!("failed to allocate Qwen3 headwise RMSNorm output buffer: {err}"))?;
+    let mut output = Vec::with_capacity(input.len());
+    let mut output_head_bytes = vec![0_u8; head_bytes];
+    for head_input in input.chunks_exact(head_dim) {
+        let head_input_bytes = f32s_to_le_bytes(head_input);
+        input_buffer
+            .copy_from_host(0, &head_input_bytes, Some(stream))
+            .map_err(|err| format!("failed to copy Qwen3 headwise RMSNorm head input: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 headwise RMSNorm head input copy: {err}")
+        })?;
+        ullm_runtime_sys::rmsnorm_f32(
+            &input_buffer,
+            &weight_buffer,
+            head_dim,
+            epsilon,
+            &mut output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run Qwen3 headwise RMSNorm: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize Qwen3 headwise RMSNorm: {err}"))?;
+        output_buffer
+            .copy_to_host(0, &mut output_head_bytes, Some(stream))
+            .map_err(|err| format!("failed to copy Qwen3 headwise RMSNorm head output: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 headwise RMSNorm head output copy: {err}")
+        })?;
+        output.extend(le_bytes_to_f32s(&output_head_bytes));
+    }
+    Ok(output)
+}
+
 pub struct Qwen3MlpRuntimeWeights {
     pub gate_rows: usize,
     pub gate_cols: usize,
@@ -1985,6 +2060,29 @@ mod tests {
         assert_eq!(shape.value_dim, 3);
         assert_eq!(shape.attention_width, 18);
         assert_eq!(shape.q_projection_layout, "plain");
+    }
+
+    #[test]
+    fn qwen3_headwise_rmsnorm_to_host_f32_runs_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let head_dim = 4_usize;
+        let q_heads = 3_usize;
+        let epsilon = 1e-5_f32;
+        let input = (0..q_heads * head_dim)
+            .map(|index| (index as f32 * 2.0_f32 - 1.0_f32) / 7.0_f32)
+            .collect::<Vec<_>>();
+        let weight = vec![0.25_f32, 0.5_f32, 0.75_f32, 1.0_f32];
+
+        let output =
+            qwen3_headwise_rmsnorm_to_host_f32(&mut context, &mut stream, &input, &weight, epsilon)
+                .unwrap();
+
+        let mut expected = Vec::with_capacity(input.len());
+        for head_input in input.chunks_exact(head_dim) {
+            expected.extend(expected_rmsnorm_for_test(head_input, &weight, epsilon));
+        }
+        assert_f32s_close(&output, &expected, 1e-5);
     }
 
     #[test]
