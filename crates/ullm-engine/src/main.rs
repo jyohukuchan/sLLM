@@ -7562,43 +7562,31 @@ struct Qwen3MlpRuntimeWeights {
     down_matrix: ullm_runtime_sys::RuntimeBuffer,
 }
 
-struct Qwen3DecoderLayerRuntimeWeights {
+struct Qwen3PostAttentionRuntimeWeights {
     hidden: usize,
     intermediate: usize,
     post_norm_weight: ullm_runtime_sys::RuntimeBuffer,
     mlp: Qwen3MlpRuntimeWeights,
 }
 
+struct Qwen3DecoderLayerRuntimeWeights {
+    self_attn: Qwen3SelfAttnRuntimeWeights,
+    post_attention: Qwen3PostAttentionRuntimeWeights,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_self_attn_block_sequence_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
-    path: &str,
-    chunk_bytes: usize,
+    self_attn_weights: Qwen3SelfAttnRuntimeWeights,
     sequence_len: usize,
     rotary_dim: usize,
     rope_base: f32,
     position_offset: usize,
-    q_tensor: &str,
-    k_tensor: &str,
-    v_tensor: &str,
-    o_tensor: &str,
     q_norm: &PassthroughF32Data,
     k_norm: &PassthroughF32Data,
     label: &str,
 ) -> Result<SelfAttnBlockSmokeRun, String> {
-    let self_attn_weights = qwen3_self_attn_runtime_weights_from_package(
-        context,
-        stream,
-        path,
-        chunk_bytes,
-        q_tensor,
-        k_tensor,
-        v_tensor,
-        o_tensor,
-        q_norm,
-        k_norm,
-    )?;
     let q_rows = self_attn_weights.q_rows;
     let q_cols = self_attn_weights.q_cols;
     let k_rows = self_attn_weights.k_rows;
@@ -8109,7 +8097,7 @@ fn qwen3_self_attn_runtime_weights_from_package(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn qwen3_decoder_layer_runtime_weights_from_package(
+fn qwen3_post_attention_runtime_weights_from_package(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     path: &str,
@@ -8119,7 +8107,7 @@ fn qwen3_decoder_layer_runtime_weights_from_package(
     gate_tensor: &str,
     up_tensor: &str,
     down_tensor: &str,
-) -> Result<Qwen3DecoderLayerRuntimeWeights, String> {
+) -> Result<Qwen3PostAttentionRuntimeWeights, String> {
     if post_norm.values.len() != hidden {
         return Err(format!(
             "post RMSNorm length must match hidden={hidden}: len={}",
@@ -8174,7 +8162,7 @@ fn qwen3_decoder_layer_runtime_weights_from_package(
     }
     let intermediate = gate_rows;
 
-    Ok(Qwen3DecoderLayerRuntimeWeights {
+    Ok(Qwen3PostAttentionRuntimeWeights {
         hidden,
         intermediate,
         post_norm_weight: post_norm_weight_buffer,
@@ -8185,6 +8173,53 @@ fn qwen3_decoder_layer_runtime_weights_from_package(
             up_matrix,
             down_matrix,
         },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qwen3_decoder_layer_runtime_weights_from_package(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    q_tensor: &str,
+    k_tensor: &str,
+    v_tensor: &str,
+    o_tensor: &str,
+    q_norm: &PassthroughF32Data,
+    k_norm: &PassthroughF32Data,
+    post_norm: &PassthroughF32Data,
+    gate_tensor: &str,
+    up_tensor: &str,
+    down_tensor: &str,
+) -> Result<Qwen3DecoderLayerRuntimeWeights, String> {
+    let self_attn = qwen3_self_attn_runtime_weights_from_package(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        o_tensor,
+        q_norm,
+        k_norm,
+    )?;
+    let post_attention = qwen3_post_attention_runtime_weights_from_package(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        self_attn.q_cols,
+        post_norm,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+    )?;
+
+    Ok(Qwen3DecoderLayerRuntimeWeights {
+        self_attn,
+        post_attention,
     })
 }
 
@@ -8363,19 +8398,35 @@ fn package_self_attn_mlp_block_smoke_impl(
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
 
-    let self_attn = run_self_attn_block_sequence_smoke(
+    let layer_weights = qwen3_decoder_layer_runtime_weights_from_package(
         &mut context,
         &mut stream,
         path,
         chunk_bytes,
-        sequence_len,
-        rotary_dim,
-        rope_base,
-        position_offset,
         &q_tensor,
         &k_tensor,
         &v_tensor,
         &o_tensor,
+        &q_norm,
+        &k_norm,
+        &post_norm,
+        &gate_tensor,
+        &up_tensor,
+        &down_tensor,
+    )?;
+    let Qwen3DecoderLayerRuntimeWeights {
+        self_attn: self_attn_weights,
+        post_attention: layer_weights,
+    } = layer_weights;
+
+    let self_attn = run_self_attn_block_sequence_smoke(
+        &mut context,
+        &mut stream,
+        self_attn_weights,
+        sequence_len,
+        rotary_dim,
+        rope_base,
+        position_offset,
         &q_norm,
         &k_norm,
         "package-self-attn-mlp-block-smoke",
@@ -8383,17 +8434,6 @@ fn package_self_attn_mlp_block_smoke_impl(
 
     let hidden = self_attn.hidden;
     let mlp_epsilon = 1e-5_f32;
-    let layer_weights = qwen3_decoder_layer_runtime_weights_from_package(
-        &mut context,
-        &mut stream,
-        path,
-        chunk_bytes,
-        hidden,
-        &post_norm,
-        &gate_tensor,
-        &up_tensor,
-        &down_tensor,
-    )?;
     if layer_weights.hidden != hidden {
         return Err(format!(
             "Qwen3 decoder layer runtime weight hidden mismatch: expected={hidden} got={}",
