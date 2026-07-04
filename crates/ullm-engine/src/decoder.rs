@@ -379,6 +379,7 @@ pub fn qwen3_decoder_layer_sequence_to_host_f32(
     sequence_len: usize,
 ) -> Result<Qwen3DecoderLayerSequenceOutput, String> {
     shape.validate()?;
+    validate_qwen3_decoder_layer_decode_shape(layer_weights, shape)?;
     if sequence_len == 0 {
         return Err("decoder layer sequence length must be greater than zero".to_string());
     }
@@ -1553,6 +1554,7 @@ impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
         softmax_scale: f32,
         mlp_epsilon: f32,
     ) -> Result<Self, String> {
+        validate_qwen3_decoder_layer_decode_shape(weights, decode_shape)?;
         let post_attention = &weights.post_attention;
         if weights.self_attn.q_cols != post_attention.hidden {
             return Err(format!(
@@ -1613,6 +1615,38 @@ impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
     ) -> Result<PagedKvCacheReadback, String> {
         self.step_state.read_cache_to_host(stream)
     }
+}
+
+fn validate_qwen3_decoder_layer_decode_shape(
+    weights: &Qwen3DecoderLayerRuntimeWeights,
+    decode_shape: PagedDecodeShape,
+) -> Result<Qwen3SelfAttnRuntimeShape, String> {
+    let self_attn_shape = qwen3_self_attn_runtime_shape(&weights.self_attn)
+        .map_err(|err| format!("Qwen3 decoder layer self-attn shape is invalid: {err}"))?;
+    if self_attn_shape.hidden != weights.post_attention.hidden {
+        return Err(format!(
+            "Qwen3 decoder layer hidden mismatch: self_attn_hidden={} post_attention_hidden={}",
+            self_attn_shape.hidden, weights.post_attention.hidden
+        ));
+    }
+    if decode_shape.q_heads != self_attn_shape.q_heads
+        || decode_shape.kv_heads != self_attn_shape.kv_heads
+        || decode_shape.head_dim != self_attn_shape.head_dim
+        || decode_shape.value_dim != self_attn_shape.value_dim
+    {
+        return Err(format!(
+            "Qwen3 decoder layer decode shape mismatch: decode=[q_heads={}, kv_heads={}, head_dim={}, value_dim={}] weights=[q_heads={}, kv_heads={}, head_dim={}, value_dim={}]",
+            decode_shape.q_heads,
+            decode_shape.kv_heads,
+            decode_shape.head_dim,
+            decode_shape.value_dim,
+            self_attn_shape.q_heads,
+            self_attn_shape.kv_heads,
+            self_attn_shape.head_dim,
+            self_attn_shape.value_dim
+        ));
+    }
+    Ok(self_attn_shape)
 }
 
 pub fn pack_paged_kv_cache_for_block_table(
@@ -3409,6 +3443,28 @@ mod tests {
         assert_f32s_close(&output.layer_output, &expected_layer_output, 1e-5);
         assert_f32s_close(&output.paged_cache.k, &expected_cache.k, 1e-6);
         assert_f32s_close(&output.paged_cache.v, &expected_cache.v, 1e-6);
+
+        let bad_shape = PagedDecodeShape {
+            q_heads: shape.q_heads * 2,
+            ..shape
+        };
+        let err = qwen3_decoder_layer_sequence_to_host_f32(
+            &weights,
+            &mut context,
+            &mut stream,
+            bad_shape,
+            &block_table,
+            softmax_scale,
+            mlp_epsilon,
+            &q_sequence,
+            &k_sequence,
+            &v_sequence,
+            Some(&output_gate_sequence),
+            &residual_sequence,
+            sequence_len,
+        )
+        .unwrap_err();
+        assert!(err.contains("decode shape mismatch"), "{err}");
     }
 
     #[test]
