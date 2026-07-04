@@ -152,6 +152,22 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_paged_decode_attn_f32(
+        q: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        cache_len: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_linear_attn_gate_beta_f32(
         a_buffer: *const RawRuntimeBuffer,
         b_buffer: *const RawRuntimeBuffer,
@@ -798,6 +814,124 @@ pub fn decode_attn_f32(
             k_cache.raw.as_ptr(),
             v_cache.raw.as_ptr(),
             cache_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn paged_decode_attn_f32(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    cache_len: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if cache_len == 0 {
+        return Err("f32 paged decode attention cache_len must be greater than zero".to_string());
+    }
+    if block_size == 0 {
+        return Err("f32 paged decode attention block_size must be greater than zero".to_string());
+    }
+    if cache_blocks == 0 {
+        return Err(
+            "f32 paged decode attention cache_blocks must be greater than zero".to_string(),
+        );
+    }
+    if q_heads == 0 {
+        return Err("f32 paged decode attention q_heads must be greater than zero".to_string());
+    }
+    if kv_heads == 0 {
+        return Err("f32 paged decode attention kv_heads must be greater than zero".to_string());
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err(
+            "f32 paged decode attention q_heads must be a multiple of kv_heads".to_string(),
+        );
+    }
+    if head_dim == 0 {
+        return Err("f32 paged decode attention head_dim must be greater than zero".to_string());
+    }
+    if value_dim == 0 {
+        return Err("f32 paged decode attention value_dim must be greater than zero".to_string());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "f32 paged decode attention softmax scale must be finite and greater than zero"
+                .to_string(),
+        );
+    }
+
+    let block_table_len = cache_len
+        .checked_sub(1)
+        .and_then(|value| value.checked_div(block_size))
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| "f32 paged decode attention block table length overflows".to_string())?;
+    let q_elements = q_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 paged decode attention q element count overflows".to_string())?;
+    let physical_tokens = cache_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| "f32 paged decode attention physical cache size overflows".to_string())?;
+    let kv_head_cache = physical_tokens
+        .checked_mul(kv_heads)
+        .ok_or_else(|| "f32 paged decode attention kv head-cache count overflows".to_string())?;
+    let k_elements = kv_head_cache
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 paged decode attention k element count overflows".to_string())?;
+    let v_elements = kv_head_cache
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 paged decode attention v element count overflows".to_string())?;
+    let output_elements = q_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 paged decode attention output element count overflows".to_string())?;
+    let block_table_elements = block_table_len
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "f32 paged decode attention block_table byte size overflows".to_string())?;
+
+    let q_bytes = q_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged decode attention q byte size overflows".to_string())?;
+    let k_bytes = k_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged decode attention k byte size overflows".to_string())?;
+    let v_bytes = v_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged decode attention v byte size overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 paged decode attention output byte size overflows".to_string())?;
+
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, k_bytes, k_cache.size()?)?;
+    check_copy_range(0, v_bytes, v_cache.size()?)?;
+    check_copy_range(0, block_table_elements, block_table.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_decode_attn_f32(
+            q.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            cache_len,
+            block_size,
+            cache_blocks,
             q_heads,
             kv_heads,
             head_dim,
@@ -1755,6 +1889,185 @@ mod tests {
     }
 
     #[test]
+    fn cpu_paged_decode_attn_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cache_len = 5_usize;
+        let block_size = 2_usize;
+        let cache_blocks = 4_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k_cache_values = (0..cache_blocks * block_size * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_cache_values = (0..cache_blocks * block_size * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let block_table_values = vec![2_u32, 0_u32, 3_u32];
+        let expected = expected_paged_decode_attn(
+            &q_values,
+            &k_cache_values,
+            &v_cache_values,
+            &block_table_values,
+            cache_len,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_cache = context
+            .alloc_buffer(k_cache_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_cache = context
+            .alloc_buffer(v_cache_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut block_table = context
+            .alloc_buffer(block_table_values.len() * std::mem::size_of::<u32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&k_cache_values), Some(&mut stream))
+            .unwrap();
+        v_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&v_cache_values), Some(&mut stream))
+            .unwrap();
+        let block_table_bytes: Vec<u8> = block_table_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        block_table
+            .copy_from_host(0, &block_table_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        paged_decode_attn_f32(
+            &q,
+            &k_cache,
+            &v_cache,
+            &block_table,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_paged_decode_attn_f32_rejects_invalid_shape_short_output_or_short_block_table() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let q = context
+            .alloc_buffer(12 * std::mem::size_of::<f32>())
+            .unwrap();
+        let k_cache = context
+            .alloc_buffer(4 * 2 * 2 * 3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let v_cache = context
+            .alloc_buffer(4 * 2 * 2 * 2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let block_table = context
+            .alloc_buffer(3 * std::mem::size_of::<u32>())
+            .unwrap();
+
+        let mut short_output = context
+            .alloc_buffer(7 * std::mem::size_of::<f32>())
+            .unwrap();
+        let err = paged_decode_attn_f32(
+            &q,
+            &k_cache,
+            &v_cache,
+            &block_table,
+            5,
+            2,
+            4,
+            3,
+            2,
+            3,
+            2,
+            1.0,
+            &mut short_output,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("q_heads"));
+
+        let mut output = context
+            .alloc_buffer(7 * std::mem::size_of::<f32>())
+            .unwrap();
+        let err = paged_decode_attn_f32(
+            &q,
+            &k_cache,
+            &v_cache,
+            &block_table,
+            5,
+            2,
+            4,
+            4,
+            2,
+            3,
+            2,
+            1.0,
+            &mut output,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("output"));
+
+        let short_block_table = context
+            .alloc_buffer(2 * std::mem::size_of::<u32>())
+            .unwrap();
+        let err = paged_decode_attn_f32(
+            &q,
+            &k_cache,
+            &v_cache,
+            &short_block_table,
+            5,
+            2,
+            4,
+            4,
+            2,
+            3,
+            2,
+            1.0,
+            &mut output,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("block"));
+    }
+
+    #[test]
     fn cpu_linear_attn_gate_beta_f32_computes_expected_values() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -2699,6 +3012,105 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_paged_decode_attn_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cache_len = 5_usize;
+        let block_size = 2_usize;
+        let cache_blocks = 4_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k_cache_values = (0..cache_blocks * block_size * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_cache_values = (0..cache_blocks * block_size * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let block_table_values = vec![2_u32, 0_u32, 3_u32];
+        let expected = expected_paged_decode_attn(
+            &q_values,
+            &k_cache_values,
+            &v_cache_values,
+            &block_table_values,
+            cache_len,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_cache = context
+            .alloc_buffer(k_cache_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_cache = context
+            .alloc_buffer(v_cache_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut block_table = context
+            .alloc_buffer(block_table_values.len() * std::mem::size_of::<u32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&k_cache_values), Some(&mut stream))
+            .unwrap();
+        v_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&v_cache_values), Some(&mut stream))
+            .unwrap();
+        let block_table_bytes: Vec<u8> = block_table_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        block_table
+            .copy_from_host(0, &block_table_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        paged_decode_attn_f32(
+            &q,
+            &k_cache,
+            &v_cache,
+            &block_table,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-4);
+    }
+
+    #[test]
     fn first_hip_linear_attn_gate_beta_f32_computes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -3161,6 +3573,59 @@ mod tests {
                 for (cache_t, weight) in weights.iter().enumerate() {
                     let v_index = (cache_t * kv_heads + kv_head) * value_dim + value;
                     weighted += *weight * v_cache[v_index];
+                }
+                output[output_base + value] = weighted / denominator;
+            }
+        }
+        output
+    }
+
+    fn expected_paged_decode_attn(
+        q: &[f32],
+        k_cache: &[f32],
+        v_cache: &[f32],
+        block_table: &[u32],
+        cache_len: usize,
+        block_size: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+    ) -> Vec<f32> {
+        let mut output = vec![0.0_f32; q_heads * value_dim];
+        let q_per_kv = q_heads / kv_heads;
+        for q_head in 0..q_heads {
+            let kv_head = q_head / q_per_kv;
+            let q_base = q_head * head_dim;
+            let mut scores = Vec::with_capacity(cache_len);
+            for cache_t in 0..cache_len {
+                let block = block_table[cache_t / block_size] as usize;
+                let offset = cache_t % block_size;
+                let k_base = ((block * block_size + offset) * kv_heads + kv_head) * head_dim;
+                let score = (0..head_dim)
+                    .map(|dim| q[q_base + dim] * k_cache[k_base + dim])
+                    .sum::<f32>()
+                    * softmax_scale;
+                scores.push(score);
+            }
+            let max_score = scores
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, |max, score| max.max(score));
+            let weights = scores
+                .iter()
+                .map(|score| (*score - max_score).exp())
+                .collect::<Vec<_>>();
+            let denominator = weights.iter().sum::<f32>();
+            let output_base = q_head * value_dim;
+            for value in 0..value_dim {
+                let mut weighted = 0.0_f32;
+                for (cache_t, weight) in weights.iter().enumerate() {
+                    let block = block_table[cache_t / block_size] as usize;
+                    let offset = cache_t % block_size;
+                    let v_base = ((block * block_size + offset) * kv_heads + kv_head) * value_dim;
+                    weighted += *weight * v_cache[v_base + value];
                 }
                 output[output_base + value] = weighted / denominator;
             }
