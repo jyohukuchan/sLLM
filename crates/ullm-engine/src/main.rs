@@ -11,6 +11,7 @@ use ullm_engine::decode_runner::{
     Qwen3DecoderLayerDecodeSequenceView, Qwen3DecoderLayerRequestDecodeRunner,
     Qwen3DecoderLayerStackRequestDecodeRunner, Qwen3SelfAttnDecodeBatchInput,
     Qwen3SelfAttnRequestDecodeRunner, qwen3_decoder_layer_decode_batch_inputs_from_sequences,
+    qwen3_decoder_layer_prefill_input_from_sequence,
 };
 use ullm_engine::decoder::{
     PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntimeWeights,
@@ -2059,6 +2060,19 @@ fn scheduler_layer_decode_run_mut(
     runs.iter_mut().find(|run| run.request_id == request_id)
 }
 
+fn scheduler_layer_decode_sequence_view(
+    run: &SchedulerLayerDecodeRun,
+) -> Qwen3DecoderLayerDecodeSequenceView<'_> {
+    Qwen3DecoderLayerDecodeSequenceView {
+        request_id: run.request_id,
+        q_sequence: &run.q_sequence,
+        k_sequence: &run.k_sequence,
+        v_sequence: &run.v_sequence,
+        output_gate_sequence: run.output_gate_sequence.as_deref(),
+        residual_sequence: &run.residual_sequence,
+    }
+}
+
 fn runtime_f32_buffer_from_values(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -2432,36 +2446,20 @@ fn run_scheduler_layer_prefill_step(
     hidden: usize,
     label: &str,
 ) -> Result<(), String> {
-    let q_start = timestep
-        .checked_mul(q_token_elements)
-        .ok_or_else(|| format!("{label} q slice start overflows"))?;
-    let k_start = timestep
-        .checked_mul(k_token_elements)
-        .ok_or_else(|| format!("{label} k slice start overflows"))?;
-    let v_start = timestep
-        .checked_mul(v_token_elements)
-        .ok_or_else(|| format!("{label} v slice start overflows"))?;
-    let gate_start = timestep
-        .checked_mul(attention_elements)
-        .ok_or_else(|| format!("{label} gate slice start overflows"))?;
-    let residual_start = timestep
-        .checked_mul(hidden)
-        .ok_or_else(|| format!("{label} residual slice start overflows"))?;
-    let output_gate = run
-        .output_gate_sequence
-        .as_ref()
-        .map(|gate| &gate[gate_start..gate_start + attention_elements]);
-    let step = runner.run_prefill_step(
-        stream,
-        Qwen3DecoderLayerDecodeBatchInput {
-            request_id: run.request_id,
-            q: &run.q_sequence[q_start..q_start + q_token_elements],
-            k: &run.k_sequence[k_start..k_start + k_token_elements],
-            v: &run.v_sequence[v_start..v_start + v_token_elements],
-            output_gate,
-            residual: &run.residual_sequence[residual_start..residual_start + hidden],
-        },
+    let input_layout = Qwen3DecoderLayerDecodeInputLayout {
+        q_token_elements,
+        k_token_elements,
+        v_token_elements,
+        attention_elements,
+        hidden,
+    };
+    let input = qwen3_decoder_layer_prefill_input_from_sequence(
+        scheduler_layer_decode_sequence_view(run),
+        timestep,
+        input_layout,
+        label,
     )?;
+    let step = runner.run_prefill_step(stream, input)?;
     if step.cache_position != timestep {
         return Err(format!(
             "{label} request {:?} wrote cache_position {}, expected {timestep}",
@@ -2485,37 +2483,20 @@ fn run_scheduler_layer_stack_prefill_step(
     hidden: usize,
     label: &str,
 ) -> Result<(), String> {
-    let q_start = timestep
-        .checked_mul(q_token_elements)
-        .ok_or_else(|| format!("{label} q slice start overflows"))?;
-    let k_start = timestep
-        .checked_mul(k_token_elements)
-        .ok_or_else(|| format!("{label} k slice start overflows"))?;
-    let v_start = timestep
-        .checked_mul(v_token_elements)
-        .ok_or_else(|| format!("{label} v slice start overflows"))?;
-    let gate_start = timestep
-        .checked_mul(attention_elements)
-        .ok_or_else(|| format!("{label} gate slice start overflows"))?;
-    let residual_start = timestep
-        .checked_mul(hidden)
-        .ok_or_else(|| format!("{label} residual slice start overflows"))?;
-    let output_gate = run
-        .output_gate_sequence
-        .as_ref()
-        .map(|gate| &gate[gate_start..gate_start + attention_elements]);
-    let step = runner.run_prefill_step(
-        layer_index,
-        stream,
-        Qwen3DecoderLayerDecodeBatchInput {
-            request_id: run.request_id,
-            q: &run.q_sequence[q_start..q_start + q_token_elements],
-            k: &run.k_sequence[k_start..k_start + k_token_elements],
-            v: &run.v_sequence[v_start..v_start + v_token_elements],
-            output_gate,
-            residual: &run.residual_sequence[residual_start..residual_start + hidden],
-        },
+    let input_layout = Qwen3DecoderLayerDecodeInputLayout {
+        q_token_elements,
+        k_token_elements,
+        v_token_elements,
+        attention_elements,
+        hidden,
+    };
+    let input = qwen3_decoder_layer_prefill_input_from_sequence(
+        scheduler_layer_decode_sequence_view(run),
+        timestep,
+        input_layout,
+        label,
     )?;
+    let step = runner.run_prefill_step(layer_index, stream, input)?;
     if step.cache_position != timestep {
         return Err(format!(
             "{label} request {:?} wrote cache_position {}, expected {timestep}",
@@ -2919,14 +2900,7 @@ fn run_scheduler_layer_stack_ready_batch(
     for (layer_position, runs) in runs_by_layer.iter().enumerate() {
         let sequences = runs
             .iter()
-            .map(|run| Qwen3DecoderLayerDecodeSequenceView {
-                request_id: run.request_id,
-                q_sequence: &run.q_sequence,
-                k_sequence: &run.k_sequence,
-                v_sequence: &run.v_sequence,
-                output_gate_sequence: run.output_gate_sequence.as_deref(),
-                residual_sequence: &run.residual_sequence,
-            })
+            .map(scheduler_layer_decode_sequence_view)
             .collect::<Vec<_>>();
         let inputs = qwen3_decoder_layer_decode_batch_inputs_from_sequences(
             ready,

@@ -1424,3 +1424,37 @@
 ### 次の行動
 
 - 次の抽出候補は、prefill step側にも同じsequence view補助を適用すること、またはsmoke-localの `SchedulerLayerDecodeRun` を期待値diffと入力sequenceに分離すること。
+
+## Qwen3 decoder layer prefill input slicing 抽出
+
+### 前回の要点
+
+- `Qwen3DecoderLayerDecodeSequenceView` と `qwen3_decoder_layer_decode_batch_inputs_from_sequences` を追加し、ready decode batch用のq/k/v/output gate/residual slice作成をdecode_runner側へ移した。
+- model-loop smokeには、prefill step側で同じq/k/v/output gate/residual sequenceからtimestepごとのsliceを直接作る処理が残っていた。
+
+### 今回の変更点
+
+- `decode_runner.rs` に `qwen3_decoder_layer_prefill_input_from_sequence` を追加し、sequence viewとprefill timestepから `Qwen3DecoderLayerDecodeBatchInput` を作る処理をlibrary側へ移した。
+- ready batch用の `qwen3_decoder_layer_decode_batch_inputs_from_sequences` は、内部で同じposition-based helperを再利用する形へ整理した。
+- `main.rs` に `scheduler_layer_decode_sequence_view` を追加し、`SchedulerLayerDecodeRun` からdecode_runner側sequence viewを作る処理を一箇所へまとめた。
+- `run_scheduler_layer_prefill_step` と `run_scheduler_layer_stack_prefill_step` は、手動slice計算をやめて `qwen3_decoder_layer_prefill_input_from_sequence` を使う形にした。
+- prefill input slicingの単体テストを追加した。
+- `docs/words.txt` の `Qwen3 decoder layer decode sequence view` と `package model loop execution plan` をprefill/ready batchの両方を含む定義へ更新した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine decode_runner -- --test-threads=1`
+- `cargo test -p ullm-engine package_model_loop_cli_tail_tests -- --test-threads=1`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- 3-layer model-loop smoke on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with `3,7,11 3` passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`.
+- 全deviceで `decode_batch_ready_counts=[2, 1]`、`final_ready=0`、`cached_tokens=[3, 3, 1]`、`generated_tokens=[2, 1, 0]`、`verified=true`。
+- CPUは全diff `0`。R9700/V620はprepared側の最大diffが既知範囲で、runtime/cache diffはすべて `0`。
+
+### 次の行動
+
+- 次の設計課題は、smoke-localの `SchedulerLayerDecodeRun` を入力sequence stateと期待値diff stateへ分けるか、実runner向けの入力所有型を先に作るかを判断すること。

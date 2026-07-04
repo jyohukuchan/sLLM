@@ -126,104 +126,121 @@ pub fn qwen3_decoder_layer_decode_batch_inputs_from_sequences<'a>(
                 request.request.id
             )
         })?;
-        let q_start = request
-            .cache_position
-            .checked_mul(layout.q_token_elements)
-            .ok_or_else(|| {
-                format!(
-                    "{label} request {:?} q slice start overflows",
-                    request.request.id
-                )
-            })?;
-        let k_start = request
-            .cache_position
-            .checked_mul(layout.k_token_elements)
-            .ok_or_else(|| {
-                format!(
-                    "{label} request {:?} k slice start overflows",
-                    request.request.id
-                )
-            })?;
-        let v_start = request
-            .cache_position
-            .checked_mul(layout.v_token_elements)
-            .ok_or_else(|| {
-                format!(
-                    "{label} request {:?} v slice start overflows",
-                    request.request.id
-                )
-            })?;
-        let gate_start = request
-            .cache_position
-            .checked_mul(layout.attention_elements)
-            .ok_or_else(|| {
-                format!(
-                    "{label} request {:?} output gate slice start overflows",
-                    request.request.id
-                )
-            })?;
-        let residual_start = request
-            .cache_position
-            .checked_mul(layout.hidden)
-            .ok_or_else(|| {
-                format!(
-                    "{label} request {:?} residual slice start overflows",
-                    request.request.id
-                )
-            })?;
-        let q = checked_decode_slice(
-            sequence.q_sequence,
-            q_start,
-            layout.q_token_elements,
+        inputs.push(qwen3_decoder_layer_input_from_sequence_at_position(
+            **sequence,
+            request.cache_position,
+            layout,
             label,
-            request.request.id,
-            "q",
-        )?;
-        let k = checked_decode_slice(
-            sequence.k_sequence,
-            k_start,
-            layout.k_token_elements,
-            label,
-            request.request.id,
-            "k",
-        )?;
-        let v = checked_decode_slice(
-            sequence.v_sequence,
-            v_start,
-            layout.v_token_elements,
-            label,
-            request.request.id,
-            "v",
-        )?;
-        let output_gate = match sequence.output_gate_sequence {
-            Some(values) => Some(checked_decode_slice(
-                values,
-                gate_start,
-                layout.attention_elements,
-                label,
-                request.request.id,
-                "output gate",
-            )?),
-            None => None,
-        };
-        let residual = checked_decode_slice(
-            sequence.residual_sequence,
-            residual_start,
-            layout.hidden,
-            label,
-            request.request.id,
-            "residual",
-        )?;
-        inputs.push(Qwen3DecoderLayerDecodeBatchInput {
-            request_id: request.request.id,
-            q,
-            k,
-            v,
-            output_gate,
-            residual,
-        });
+        )?);
     }
     Ok(inputs)
+}
+
+pub fn qwen3_decoder_layer_prefill_input_from_sequence<'a>(
+    sequence: Qwen3DecoderLayerDecodeSequenceView<'a>,
+    timestep: usize,
+    layout: Qwen3DecoderLayerDecodeInputLayout,
+    label: &str,
+) -> Result<Qwen3DecoderLayerDecodeBatchInput<'a>, String> {
+    validate_decode_input_layout(layout, label)?;
+    qwen3_decoder_layer_input_from_sequence_at_position(sequence, timestep, layout, label)
+}
+
+fn qwen3_decoder_layer_input_from_sequence_at_position<'a>(
+    sequence: Qwen3DecoderLayerDecodeSequenceView<'a>,
+    cache_position: usize,
+    layout: Qwen3DecoderLayerDecodeInputLayout,
+    label: &str,
+) -> Result<Qwen3DecoderLayerDecodeBatchInput<'a>, String> {
+    let q_start = cache_position
+        .checked_mul(layout.q_token_elements)
+        .ok_or_else(|| {
+            format!(
+                "{label} request {:?} q slice start overflows",
+                sequence.request_id
+            )
+        })?;
+    let k_start = cache_position
+        .checked_mul(layout.k_token_elements)
+        .ok_or_else(|| {
+            format!(
+                "{label} request {:?} k slice start overflows",
+                sequence.request_id
+            )
+        })?;
+    let v_start = cache_position
+        .checked_mul(layout.v_token_elements)
+        .ok_or_else(|| {
+            format!(
+                "{label} request {:?} v slice start overflows",
+                sequence.request_id
+            )
+        })?;
+    let gate_start = cache_position
+        .checked_mul(layout.attention_elements)
+        .ok_or_else(|| {
+            format!(
+                "{label} request {:?} output gate slice start overflows",
+                sequence.request_id
+            )
+        })?;
+    let residual_start = cache_position.checked_mul(layout.hidden).ok_or_else(|| {
+        format!(
+            "{label} request {:?} residual slice start overflows",
+            sequence.request_id
+        )
+    })?;
+    let q = checked_decode_slice(
+        sequence.q_sequence,
+        q_start,
+        layout.q_token_elements,
+        label,
+        sequence.request_id,
+        "q",
+    )?;
+    let k = checked_decode_slice(
+        sequence.k_sequence,
+        k_start,
+        layout.k_token_elements,
+        label,
+        sequence.request_id,
+        "k",
+    )?;
+    let v = checked_decode_slice(
+        sequence.v_sequence,
+        v_start,
+        layout.v_token_elements,
+        label,
+        sequence.request_id,
+        "v",
+    )?;
+    let output_gate = match sequence.output_gate_sequence {
+        Some(values) => Some(checked_decode_slice(
+            values,
+            gate_start,
+            layout.attention_elements,
+            label,
+            sequence.request_id,
+            "output gate",
+        )?),
+        None => None,
+    };
+    let residual = checked_decode_slice(
+        sequence.residual_sequence,
+        residual_start,
+        layout.hidden,
+        label,
+        sequence.request_id,
+        "residual",
+    )?;
+    Ok(Qwen3DecoderLayerDecodeBatchInput {
+        request_id: sequence.request_id,
+        q,
+        k,
+        v,
+        output_gate,
+        residual,
+    })
 }
 
 impl Qwen3SelfAttnRequestDecodeRunner {
@@ -1147,6 +1164,41 @@ mod tests {
         .expect_err("short q sequence must fail");
 
         assert!(err.contains("q slice [2..4] exceeds 3 values"), "{err}");
+    }
+
+    #[test]
+    fn decoder_layer_prefill_input_from_sequence_slices_timestep() {
+        let layout = Qwen3DecoderLayerDecodeInputLayout {
+            q_token_elements: 2,
+            k_token_elements: 1,
+            v_token_elements: 1,
+            attention_elements: 2,
+            hidden: 3,
+        };
+        let q = vec![10.0, 11.0, 12.0, 13.0];
+        let k = vec![20.0, 21.0];
+        let v = vec![30.0, 31.0];
+        let gate = vec![40.0, 41.0, 42.0, 43.0];
+        let residual = vec![50.0, 51.0, 52.0, 53.0, 54.0, 55.0];
+        let sequence = Qwen3DecoderLayerDecodeSequenceView {
+            request_id: RequestId(11),
+            q_sequence: &q,
+            k_sequence: &k,
+            v_sequence: &v,
+            output_gate_sequence: Some(&gate),
+            residual_sequence: &residual,
+        };
+
+        let input =
+            qwen3_decoder_layer_prefill_input_from_sequence(sequence, 1, layout, "prefill test")
+                .expect("prefill input from sequence");
+
+        assert_eq!(input.request_id, RequestId(11));
+        assert_eq!(input.q, &[12.0, 13.0]);
+        assert_eq!(input.k, &[21.0]);
+        assert_eq!(input.v, &[31.0]);
+        assert_eq!(input.output_gate, Some(&[42.0, 43.0][..]));
+        assert_eq!(input.residual, &[53.0, 54.0, 55.0]);
     }
 
     fn f32_buffer(
