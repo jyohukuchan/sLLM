@@ -8,6 +8,13 @@
 ## 今回の変更点
 
 - goal再開後の当面scopeを、手元で検証できるRDNA2/V620とRDNA4/R9700に限定した。モデルアーキテクチャ対応も、まずはQwen3.5/Qwen3系の一部decoder経路だけで進める。
+- Commit `5efd044 Add request-owned decode runner` で `crates/ullm-engine/src/decode_runner.rs` を追加し、request idごとに `Qwen3SelfAttnDecodeState` とblock tableを保持する `Qwen3SelfAttnRequestDecodeRunner` をlibrary API化した。
+- 新runnerは `insert_request`、`run_prefill_step`、`run_ready_batch`、`read_cache_to_host` を持つ。`run_ready_batch` は `SchedulerDecodeRequest` のrequest id、scheduler active state、allocation block table、runner側 `written_len`、入力request id集合を検証し、decode step成功後に `SchedulerState::advance_decode` を呼ぶ。
+- `runtime-scheduler-paged-decode-smoke` はsmoke-localに `Qwen3SelfAttnDecodeState` を直接持つ実装をやめ、`Qwen3SelfAttnRequestDecodeRunner` 経由でprefill/decode/cache readbackを行うようにした。
+- `decode_runner` unit testを2件追加した。CPUでready batchを実行してcache readbackを検証する成功testと、runner state欠損時に `run_ready_batch` がrejectし、schedulerの `generated_tokens` が進まないことを確認するtest。
+- 5.3-codex-spark explorer Franklinにはrunner配置案を調査させた。提案は `decoder.rs` 追加だったが、scheduler型への依存をlow-level decoder moduleへ入れないため、親側判断で新module `decode_runner.rs` に分離した。
+- 検証は `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine decode_runner -- --test-threads=1` (`2 passed`)、`cargo test -p ullm-engine -- --test-threads=1` (`66 passed`)、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` を通した。
+- `runtime-scheduler-paged-decode-smoke` はrunner置換後もCPU `0`、R9700/RDNA4 `2`、V620/RDNA2 `1` で成功した。CPUは `attention_max_abs_diff=0`、R9700/V620は `attention_max_abs_diff=0.000000030`、全deviceで `first_batch_ready=2`、`second_batch_ready=1`、`final_ready=0`、K/V cache diff `0`。
 - Commit `6e1d374 Add multi-request scheduler decode smoke` で、合成multi-request経路の `runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]` を追加した。
 - 新smokeは3 requestを同じ `SchedulerState` に載せ、request 201/202を最初の `ready_decode_batch(8)` で同時readyにし、request 201だけを次のbatchに残す。request 203は `max_new_tokens=0` としてprefill完了後もdecode batchに入らないことを確認する。
 - 各requestは独立した `Qwen3SelfAttnDecodeState` とscheduler由来block tableを持ち、prefill後にready batchの `cache_position` / `next_cache_len` / `remaining_new_tokens` / allocationを検証してからruntime paged decode stepを実行する。batch内stepが成功した後に `advance_decode` を呼ぶ形にした。
@@ -1021,6 +1028,7 @@
 - `f164e02 Add ready decode batch scheduler API`
 - `75d0c5a Drive paged decode smoke from scheduler batch`
 - `6e1d374 Add multi-request scheduler decode smoke`
+- `5efd044 Add request-owned decode runner`
 
 ## 次の行動
 
@@ -1028,7 +1036,7 @@
 - `Qwen3DecoderLayerStepState` でpaged decode attention、output gate、o projection、residual add、post RMSNorm、MLP、final residual addまでのnarrow layer step APIを作り、CPU、R9700/RDNA4、V620/RDNA2で通した。layer-level resident weights、thin runtime runner、Qwen3 q projection split、Qwen3 self attention runtime shape、Qwen3 self attention projection sequence、Qwen3 self attention runtime prepared sequence、Qwen3 self attention paged decode prepared sequence、Qwen3 self attention block sequence、Qwen3 decoder layer sequence、Qwen3 headwise RMSNorm、Qwen3 RoPE、Qwen3 causal attention、paged K/V cache packは `decoder.rs` へ移したので、次はdeterministic input生成、package materialization境界、またはhost期待値diff集計のどれをlibrary側へ移すか選ぶ。
 - Runtime paged KV writeはCPU、R9700/RDNA4、V620/RDNA2で通り、package self-attn decode smokeとpackage self-attn MLP block smokeでも `decode_step` 経由に置き換え済み。
 - Paged decode attentionのruntime境界はCPU、R9700/RDNA4、V620/RDNA2で通っており、package self-attn decode smokeからも呼べる状態になった。
-- `package-self-attn-block-smoke` と `package-self-attn-mlp-block-smoke` は、どちらもprepared/sequence系の境界からself-attention側diffを集計できるようになった。package self-attention系smokeのpaged block tableは `SchedulerState` 由来になり、active decode request管理とcache_len進行もCLI smoke出力で確認できるようになった。`package-self-attn-decode-smoke` では `ready_decode_batch` を実際に消費してruntime paged decode stepを進め、`runtime-scheduler-paged-decode-smoke` ではmulti-request decode batchを合成runtime stateへ渡せるようになった。次はこの境界をQwen3 decoder layer runnerまたはrequestごとのdecode state管理APIへ広げる。
+- `package-self-attn-block-smoke` と `package-self-attn-mlp-block-smoke` は、どちらもprepared/sequence系の境界からself-attention側diffを集計できるようになった。package self-attention系smokeのpaged block tableは `SchedulerState` 由来になり、active decode request管理とcache_len進行もCLI smoke出力で確認できるようになった。`package-self-attn-decode-smoke` では `ready_decode_batch` を実際に消費してruntime paged decode stepを進め、`runtime-scheduler-paged-decode-smoke` ではmulti-request decode batchを `Qwen3SelfAttnRequestDecodeRunner` 経由のrequest-owned runtime stateへ渡せるようになった。次は同じrunner境界をQwen3 decoder layer runnerかpackage/model pathへ広げる。
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
 - CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、paged decode state/step、paged K/V cache pack、Qwen3 self attention runtime shape、Qwen3 self attention projection sequence、Qwen3 self attention runtime prepared sequence、Qwen3 self attention paged decode prepared sequence、Qwen3 self attention block sequence、Qwen3 decoder layer sequence、Qwen3 self attention q projection split、Qwen3 headwise RMSNorm、Qwen3 RoPE、Qwen3 causal attention、Qwen3 self attention runtime weights、Qwen3 self attention prepared sequence、Qwen3 self-attn block step state、Qwen3 decoder layer step state、Qwen3 post attention runtime weights、Qwen3 decoder layer runtime weights、Qwen3 decoder layer runtime、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。Qwen3.5 self-attn MLP block smokeではpaged decode step出力をlayer-level partial decoder経路へ渡せるようになった。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
