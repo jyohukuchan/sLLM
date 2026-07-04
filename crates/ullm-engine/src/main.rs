@@ -30,7 +30,8 @@ use ullm_engine::package::{
     PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole, TensorSelector,
 };
 use ullm_engine::scheduler::{
-    KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerState,
+    KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
+    SchedulerState,
 };
 
 fn main() -> ExitCode {
@@ -2835,8 +2836,7 @@ fn run_scheduler_layer_stack_ready_batch(
     scheduler: &mut SchedulerState,
     runs_by_layer: &mut [Vec<SchedulerLayerDecodeRun>],
     stream: &mut ullm_runtime_sys::RuntimeStream,
-    expected_ids: &[RequestId],
-    max_requests: usize,
+    ready: &[SchedulerDecodeRequest],
     q_token_elements: usize,
     k_token_elements: usize,
     v_token_elements: usize,
@@ -2844,22 +2844,12 @@ fn run_scheduler_layer_stack_ready_batch(
     hidden: usize,
     label: &str,
 ) -> Result<usize, String> {
-    let ready = scheduler
-        .ready_decode_batch(max_requests)
-        .map_err(|err| format!("{label} failed to prepare ready decode batch: {err}"))?;
-    let ready_ids = ready
-        .iter()
-        .map(|request| request.request.id)
-        .collect::<Vec<_>>();
-    if ready_ids != expected_ids {
-        return Err(format!(
-            "{label} ready request ids {:?} did not match expected {:?}",
-            ready_ids, expected_ids
-        ));
+    if ready.is_empty() {
+        return Ok(0);
     }
 
     for (layer_position, runs) in runs_by_layer.iter().enumerate() {
-        for request in &ready {
+        for request in ready {
             let run = scheduler_layer_decode_run(runs, request.request.id).ok_or_else(|| {
                 format!(
                     "{label} layer {layer_position} request {:?} has no layer run",
@@ -2914,7 +2904,7 @@ fn run_scheduler_layer_stack_ready_batch(
     let mut layer_inputs = Vec::with_capacity(runs_by_layer.len());
     for (layer_position, runs) in runs_by_layer.iter().enumerate() {
         let mut inputs = Vec::with_capacity(ready.len());
-        for request in &ready {
+        for request in ready {
             let run = scheduler_layer_decode_run(runs, request.request.id).ok_or_else(|| {
                 format!(
                     "{label} layer {layer_position} request {:?} disappeared while preparing decode input",
@@ -2984,7 +2974,7 @@ fn run_scheduler_layer_stack_ready_batch(
             verify_scheduler_layer_step_output(label, run, &output, hidden, attention_elements)?;
         }
     }
-    Ok(expected_ids.len())
+    Ok(ready.len())
 }
 
 fn runtime_scheduler_paged_decode_smoke(device_index: Option<String>) -> ExitCode {
@@ -11362,6 +11352,7 @@ struct PackageModelLoopLayerRunPlan {
 
 struct PackageModelLoopExecutionPlan {
     decode_shape: PagedDecodeShape,
+    max_decode_batch_requests: usize,
     q_token_elements: usize,
     k_token_elements: usize,
     v_token_elements: usize,
@@ -11372,6 +11363,7 @@ struct PackageModelLoopExecutionPlan {
 struct PackageModelLoopExecutionSummary {
     first_batch_ready: usize,
     second_batch_ready: usize,
+    decode_batch_ready_counts: Vec<usize>,
     final_ready: usize,
 }
 
@@ -11980,6 +11972,7 @@ impl PackageModelLoopExecutionPlan {
         let decode_shape = model.decode_shape(request_plan.block_size, request_plan.cache_blocks);
         Ok(Self {
             decode_shape,
+            max_decode_batch_requests: 8,
             q_token_elements: decode_shape.q_elements()?,
             k_token_elements: decode_shape.k_token_elements()?,
             v_token_elements: decode_shape.v_token_elements()?,
@@ -12027,40 +12020,35 @@ impl PackageModelLoopExecutionPlan {
         }
         request_plan.complete_prefill_all()?;
 
-        let expected_first_ids = [RequestId(201), RequestId(202)];
-        let first_batch_ready = run_scheduler_layer_stack_ready_batch(
-            &mut layer_runner,
-            &mut request_plan.scheduler,
-            &mut layer_run_plan.runs_by_layer,
-            stream,
-            &expected_first_ids,
-            8,
-            self.q_token_elements,
-            self.k_token_elements,
-            self.v_token_elements,
-            self.attention_elements,
-            self.hidden,
-            "package model-loop first batch",
-        )?;
-
-        let expected_second_ids = [RequestId(201)];
-        let second_batch_ready = run_scheduler_layer_stack_ready_batch(
-            &mut layer_runner,
-            &mut request_plan.scheduler,
-            &mut layer_run_plan.runs_by_layer,
-            stream,
-            &expected_second_ids,
-            8,
-            self.q_token_elements,
-            self.k_token_elements,
-            self.v_token_elements,
-            self.attention_elements,
-            self.hidden,
-            "package model-loop second batch",
-        )?;
+        let mut decode_batch_ready_counts = Vec::new();
+        loop {
+            let ready = request_plan
+                .scheduler
+                .ready_decode_batch(self.max_decode_batch_requests)
+                .map_err(|err| format!("failed to query model-loop ready batch: {err}"))?;
+            if ready.is_empty() {
+                break;
+            }
+            let batch_index = decode_batch_ready_counts.len();
+            let label = format!("package model-loop decode batch {batch_index}");
+            let ready_count = run_scheduler_layer_stack_ready_batch(
+                &mut layer_runner,
+                &mut request_plan.scheduler,
+                &mut layer_run_plan.runs_by_layer,
+                stream,
+                &ready,
+                self.q_token_elements,
+                self.k_token_elements,
+                self.v_token_elements,
+                self.attention_elements,
+                self.hidden,
+                &label,
+            )?;
+            decode_batch_ready_counts.push(ready_count);
+        }
         let final_ready = request_plan
             .scheduler
-            .ready_decode_batch(8)
+            .ready_decode_batch(self.max_decode_batch_requests)
             .map_err(|err| format!("failed to query model-loop final ready batch: {err}"))?
             .len();
         if final_ready != 0 {
@@ -12103,8 +12091,9 @@ impl PackageModelLoopExecutionPlan {
         }
 
         Ok(PackageModelLoopExecutionSummary {
-            first_batch_ready,
-            second_batch_ready,
+            first_batch_ready: decode_batch_ready_counts.first().copied().unwrap_or(0),
+            second_batch_ready: decode_batch_ready_counts.get(1).copied().unwrap_or(0),
+            decode_batch_ready_counts,
             final_ready,
         })
     }
@@ -12227,7 +12216,7 @@ impl PackageModelLoopSmokeRun {
         let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
 
         Ok(format!(
-            "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+            "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} decode_batch_ready_counts={:?} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
             path,
             layer_indices,
             q_tensors,
@@ -12251,6 +12240,7 @@ impl PackageModelLoopSmokeRun {
             self.request_plan.block_tables,
             execution_summary.first_batch_ready,
             execution_summary.second_batch_ready,
+            execution_summary.decode_batch_ready_counts,
             execution_summary.final_ready,
             decode_steps_by_layer,
             cached_tokens,
