@@ -7500,6 +7500,34 @@ fn package_self_attn_block_smoke(
     ExitCode::SUCCESS
 }
 
+struct Qwen3SelfAttnPreparedSequence {
+    residual_sequence: Vec<f32>,
+    q_rope: Vec<f32>,
+    k_rope: Vec<f32>,
+    v_projected: Vec<f32>,
+    q_gate: Option<Vec<f32>>,
+    attention_output: Vec<f32>,
+    expected_paged_k_cache: Vec<f32>,
+    expected_paged_v_cache: Vec<f32>,
+    hidden: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    q_projection_layout: &'static str,
+    q_gate_elements: usize,
+    output_gate_layout: &'static str,
+    q_norm_max_abs_diff: f32,
+    k_norm_max_abs_diff: f32,
+    q_rope_max_abs_diff: f32,
+    k_rope_max_abs_diff: f32,
+    attention_max_abs_diff: f32,
+    paged_block_table: Vec<u32>,
+    paged_block_size: usize,
+    paged_cache_blocks: usize,
+}
+
 struct SelfAttnBlockSmokeRun {
     residual_sequence: Vec<f32>,
     q_rope: Vec<f32>,
@@ -7537,122 +7565,8 @@ struct SelfAttnBlockSmokeRun {
     causal_paged_block_max_abs_diff: f32,
 }
 
-struct Qwen3SelfAttnRuntimeWeights {
-    q_rows: usize,
-    q_cols: usize,
-    k_rows: usize,
-    v_rows: usize,
-    o_rows: usize,
-    o_cols: usize,
-    head_dim: usize,
-    kv_heads: usize,
-    value_dim: usize,
-    q_matrix: ullm_runtime_sys::RuntimeBuffer,
-    k_matrix: ullm_runtime_sys::RuntimeBuffer,
-    v_matrix: ullm_runtime_sys::RuntimeBuffer,
-    o_matrix: ullm_runtime_sys::RuntimeBuffer,
-}
-
-struct Qwen3MlpRuntimeWeights {
-    gate_rows: usize,
-    gate_cols: usize,
-    gate_matrix: ullm_runtime_sys::RuntimeBuffer,
-    up_matrix: ullm_runtime_sys::RuntimeBuffer,
-    down_matrix: ullm_runtime_sys::RuntimeBuffer,
-}
-
-struct Qwen3PostAttentionRuntimeWeights {
-    hidden: usize,
-    intermediate: usize,
-    post_norm_weight: ullm_runtime_sys::RuntimeBuffer,
-    mlp: Qwen3MlpRuntimeWeights,
-}
-
-struct Qwen3DecoderLayerRuntimeWeights {
-    self_attn: Qwen3SelfAttnRuntimeWeights,
-    post_attention: Qwen3PostAttentionRuntimeWeights,
-}
-
-struct Qwen3DecoderLayerRuntime<'weights> {
-    weights: &'weights Qwen3DecoderLayerRuntimeWeights,
-    step_state: Qwen3DecoderLayerStepState,
-}
-
-impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        context: &mut ullm_runtime_sys::RuntimeContext,
-        stream: &mut ullm_runtime_sys::RuntimeStream,
-        weights: &'weights Qwen3DecoderLayerRuntimeWeights,
-        decode_shape: PagedDecodeShape,
-        block_table: Vec<u32>,
-        softmax_scale: f32,
-        mlp_epsilon: f32,
-    ) -> Result<Self, String> {
-        let post_attention = &weights.post_attention;
-        if weights.self_attn.q_cols != post_attention.hidden {
-            return Err(format!(
-                "Qwen3 decoder layer runtime hidden mismatch: self_attn_hidden={} post_attention_hidden={}",
-                weights.self_attn.q_cols, post_attention.hidden
-            ));
-        }
-        if post_attention.mlp.gate_rows != post_attention.intermediate
-            || post_attention.mlp.gate_cols != post_attention.hidden
-        {
-            return Err("Qwen3 decoder layer runtime MLP gate shape is inconsistent".to_string());
-        }
-        let step_state = Qwen3DecoderLayerStepState::new(
-            context,
-            stream,
-            decode_shape,
-            block_table,
-            post_attention.hidden,
-            post_attention.intermediate,
-            softmax_scale,
-            mlp_epsilon,
-        )?;
-
-        Ok(Self {
-            weights,
-            step_state,
-        })
-    }
-
-    fn step(
-        &mut self,
-        stream: &mut ullm_runtime_sys::RuntimeStream,
-        q: &[f32],
-        k: &[f32],
-        v: &[f32],
-        output_gate: Option<&[f32]>,
-        residual: &[f32],
-    ) -> Result<Qwen3DecoderLayerStepOutput, String> {
-        let post_attention = &self.weights.post_attention;
-        self.step_state.step(
-            stream,
-            &self.weights.self_attn.o_matrix,
-            &post_attention.post_norm_weight,
-            &post_attention.mlp.gate_matrix,
-            &post_attention.mlp.up_matrix,
-            &post_attention.mlp.down_matrix,
-            q,
-            k,
-            v,
-            output_gate,
-            residual,
-        )
-    }
-
-    fn read_cache_to_host(
-        &mut self,
-        stream: &mut ullm_runtime_sys::RuntimeStream,
-    ) -> Result<PagedKvCacheReadback, String> {
-        self.step_state.read_cache_to_host(stream)
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
-fn run_self_attn_block_sequence_smoke(
+fn qwen3_self_attn_prepare_sequence_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     self_attn_weights: &Qwen3SelfAttnRuntimeWeights,
@@ -7663,7 +7577,7 @@ fn run_self_attn_block_sequence_smoke(
     q_norm: &PassthroughF32Data,
     k_norm: &PassthroughF32Data,
     label: &str,
-) -> Result<SelfAttnBlockSmokeRun, String> {
+) -> Result<Qwen3SelfAttnPreparedSequence, String> {
     let q_rows = self_attn_weights.q_rows;
     let q_cols = self_attn_weights.q_cols;
     let k_rows = self_attn_weights.k_rows;
@@ -7818,6 +7732,210 @@ fn run_self_attn_block_sequence_smoke(
             head_dim,
             value_dim,
         )?;
+    let output_gate_layout = if q_gate.is_some() {
+        "runtime-sigmoid"
+    } else {
+        "none"
+    };
+
+    Ok(Qwen3SelfAttnPreparedSequence {
+        residual_sequence,
+        q_rope,
+        k_rope,
+        v_projected,
+        q_gate,
+        attention_output,
+        expected_paged_k_cache,
+        expected_paged_v_cache,
+        hidden: q_cols,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_projection_layout,
+        q_gate_elements,
+        output_gate_layout,
+        q_norm_max_abs_diff,
+        k_norm_max_abs_diff,
+        q_rope_max_abs_diff,
+        k_rope_max_abs_diff,
+        attention_max_abs_diff,
+        paged_block_table,
+        paged_block_size,
+        paged_cache_blocks,
+    })
+}
+
+struct Qwen3SelfAttnRuntimeWeights {
+    q_rows: usize,
+    q_cols: usize,
+    k_rows: usize,
+    v_rows: usize,
+    o_rows: usize,
+    o_cols: usize,
+    head_dim: usize,
+    kv_heads: usize,
+    value_dim: usize,
+    q_matrix: ullm_runtime_sys::RuntimeBuffer,
+    k_matrix: ullm_runtime_sys::RuntimeBuffer,
+    v_matrix: ullm_runtime_sys::RuntimeBuffer,
+    o_matrix: ullm_runtime_sys::RuntimeBuffer,
+}
+
+struct Qwen3MlpRuntimeWeights {
+    gate_rows: usize,
+    gate_cols: usize,
+    gate_matrix: ullm_runtime_sys::RuntimeBuffer,
+    up_matrix: ullm_runtime_sys::RuntimeBuffer,
+    down_matrix: ullm_runtime_sys::RuntimeBuffer,
+}
+
+struct Qwen3PostAttentionRuntimeWeights {
+    hidden: usize,
+    intermediate: usize,
+    post_norm_weight: ullm_runtime_sys::RuntimeBuffer,
+    mlp: Qwen3MlpRuntimeWeights,
+}
+
+struct Qwen3DecoderLayerRuntimeWeights {
+    self_attn: Qwen3SelfAttnRuntimeWeights,
+    post_attention: Qwen3PostAttentionRuntimeWeights,
+}
+
+struct Qwen3DecoderLayerRuntime<'weights> {
+    weights: &'weights Qwen3DecoderLayerRuntimeWeights,
+    step_state: Qwen3DecoderLayerStepState,
+}
+
+impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        weights: &'weights Qwen3DecoderLayerRuntimeWeights,
+        decode_shape: PagedDecodeShape,
+        block_table: Vec<u32>,
+        softmax_scale: f32,
+        mlp_epsilon: f32,
+    ) -> Result<Self, String> {
+        let post_attention = &weights.post_attention;
+        if weights.self_attn.q_cols != post_attention.hidden {
+            return Err(format!(
+                "Qwen3 decoder layer runtime hidden mismatch: self_attn_hidden={} post_attention_hidden={}",
+                weights.self_attn.q_cols, post_attention.hidden
+            ));
+        }
+        if post_attention.mlp.gate_rows != post_attention.intermediate
+            || post_attention.mlp.gate_cols != post_attention.hidden
+        {
+            return Err("Qwen3 decoder layer runtime MLP gate shape is inconsistent".to_string());
+        }
+        let step_state = Qwen3DecoderLayerStepState::new(
+            context,
+            stream,
+            decode_shape,
+            block_table,
+            post_attention.hidden,
+            post_attention.intermediate,
+            softmax_scale,
+            mlp_epsilon,
+        )?;
+
+        Ok(Self {
+            weights,
+            step_state,
+        })
+    }
+
+    fn step(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output_gate: Option<&[f32]>,
+        residual: &[f32],
+    ) -> Result<Qwen3DecoderLayerStepOutput, String> {
+        let post_attention = &self.weights.post_attention;
+        self.step_state.step(
+            stream,
+            &self.weights.self_attn.o_matrix,
+            &post_attention.post_norm_weight,
+            &post_attention.mlp.gate_matrix,
+            &post_attention.mlp.up_matrix,
+            &post_attention.mlp.down_matrix,
+            q,
+            k,
+            v,
+            output_gate,
+            residual,
+        )
+    }
+
+    fn read_cache_to_host(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<PagedKvCacheReadback, String> {
+        self.step_state.read_cache_to_host(stream)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_self_attn_block_sequence_smoke(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    self_attn_weights: &Qwen3SelfAttnRuntimeWeights,
+    sequence_len: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    position_offset: usize,
+    q_norm: &PassthroughF32Data,
+    k_norm: &PassthroughF32Data,
+    label: &str,
+) -> Result<SelfAttnBlockSmokeRun, String> {
+    let prepared = qwen3_self_attn_prepare_sequence_smoke(
+        context,
+        stream,
+        self_attn_weights,
+        sequence_len,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        q_norm,
+        k_norm,
+        label,
+    )?;
+    let Qwen3SelfAttnPreparedSequence {
+        residual_sequence,
+        q_rope,
+        k_rope,
+        v_projected,
+        q_gate,
+        attention_output,
+        expected_paged_k_cache,
+        expected_paged_v_cache,
+        hidden,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_projection_layout,
+        q_gate_elements,
+        output_gate_layout,
+        q_norm_max_abs_diff,
+        k_norm_max_abs_diff,
+        q_rope_max_abs_diff,
+        k_rope_max_abs_diff,
+        attention_max_abs_diff,
+        paged_block_table,
+        paged_block_size,
+        paged_cache_blocks,
+    } = prepared;
+
+    let o_rows = self_attn_weights.o_rows;
+    let o_cols = self_attn_weights.o_cols;
     let o_matrix_bytes = o_rows
         .checked_mul(o_cols)
         .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
@@ -7845,7 +7963,7 @@ fn run_self_attn_block_sequence_smoke(
         stream,
         decode_shape,
         paged_block_table.clone(),
-        q_cols,
+        hidden,
         softmax_scale,
     )?;
     let q_token_elements = q_heads * head_dim;
@@ -7863,7 +7981,7 @@ fn run_self_attn_block_sequence_smoke(
     let mut paged_step_attention_output = Vec::with_capacity(sequence_len * attention_elements);
     let mut attention_projection_input = Vec::with_capacity(sequence_len * attention_elements);
     let mut attn_projected = Vec::with_capacity(sequence_len * o_rows);
-    let mut block_output = Vec::with_capacity(sequence_len * q_cols);
+    let mut block_output = Vec::with_capacity(sequence_len * hidden);
     let mut paged_step_attention_max_abs_diff = 0.0_f32;
     let mut output_gate_max_abs_diff = 0.0_f32;
     let mut o_proj_max_abs_diff = 0.0_f32;
@@ -7878,8 +7996,8 @@ fn run_self_attn_block_sequence_smoke(
         let v_end = v_start + v_token_elements;
         let attention_start = timestep * attention_elements;
         let attention_end = attention_start + attention_elements;
-        let residual_start = timestep * q_cols;
-        let residual_end = residual_start + q_cols;
+        let residual_start = timestep * hidden;
+        let residual_end = residual_start + hidden;
         let gate_step = q_gate
             .as_ref()
             .map(|gate| &gate[attention_start..attention_end]);
@@ -8003,11 +8121,6 @@ fn run_self_attn_block_sequence_smoke(
         1e-4,
         1e-4,
     )?;
-    let output_gate_layout = if q_gate.is_some() {
-        "runtime-sigmoid"
-    } else {
-        "none"
-    };
     let causal_attention_projection_input = if let Some(gate) = q_gate.as_ref() {
         runtime_host_sigmoid_mul_f32(gate, &attention_output)
     } else {
@@ -8048,7 +8161,7 @@ fn run_self_attn_block_sequence_smoke(
         paged_block_table,
         paged_block_size,
         paged_cache_blocks,
-        hidden: q_cols,
+        hidden,
         q_heads,
         kv_heads,
         head_dim,
