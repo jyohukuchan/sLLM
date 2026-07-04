@@ -23,7 +23,7 @@ from aq_scale_formats import scale_values
 from safetensors import safe_open
 
 
-SCHEMA_VERSION = "qwen-layer-module-trace-v0.7"
+SCHEMA_VERSION = "qwen-layer-module-trace-v0.8"
 
 
 TOP_ABS_FEATURES = 8
@@ -800,6 +800,7 @@ def projection_row_dot_trace(
         feature_index: int,
         source_row: np.ndarray,
         package_row: np.ndarray | None,
+        group_size: int | None,
     ) -> dict[str, Any]:
         vector = input_values[0, token].astype(np.float64)
         source_dot = float(np.dot(vector, source_row.astype(np.float64)))
@@ -812,12 +813,33 @@ def projection_row_dot_trace(
             "source_row_dot_error": source_dot - output_value,
         }
         if package_row is not None:
-            package_dot = float(np.dot(vector, package_row.astype(np.float64)))
+            package_row_f64 = package_row.astype(np.float64)
+            source_row_f64 = source_row.astype(np.float64)
+            package_dot = float(np.dot(vector, package_row_f64))
+            dot_error_terms = vector * (package_row_f64 - source_row_f64)
+            top_term_indices = top_abs_feature_indices(dot_error_terms.astype(np.float32))
             entry.update(
                 {
                     "package_row_dot": package_dot,
                     "package_row_dot_error_vs_source_row": package_dot - source_dot,
                     "package_row_dot_error_vs_module": package_dot - output_value,
+                    "top_dot_error_terms": [
+                        {
+                            "column_index": int(column_index),
+                            "group_in_row": None
+                            if group_size is None
+                            else int(column_index) // group_size,
+                            "input_value": float(vector[column_index]),
+                            "source_weight": float(source_row_f64[column_index]),
+                            "package_weight": float(package_row_f64[column_index]),
+                            "weight_error": float(
+                                package_row_f64[column_index] - source_row_f64[column_index]
+                            ),
+                            "dot_error_term": float(dot_error_terms[column_index]),
+                            "abs_dot_error_term": float(abs(dot_error_terms[column_index])),
+                        }
+                        for column_index in top_term_indices
+                    ],
                 }
             )
         return entry
@@ -883,12 +905,14 @@ def projection_row_dot_trace(
     for feature_index in selected_features:
         source_row = tensor_to_numpy_f32(source_weight[feature_index])
         package_row = None
+        group_size = None
         if package_dir is not None and package_tensor is not None:
             package_row = dequantize_package_row(package_dir, package_tensor, feature_index)
-        trace = projection_entry(token_index, feature_index, source_row, package_row)
+            group_size = int(package_tensor["group_size"])
+        trace = projection_entry(token_index, feature_index, source_row, package_row, group_size)
         traces.append(trace)
         per_token = [
-            projection_entry(token, feature_index, source_row, package_row)
+            projection_entry(token, feature_index, source_row, package_row, group_size)
             for token in range(module_output.shape[1])
         ]
         per_token_by_feature.append(
