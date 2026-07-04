@@ -1261,3 +1261,32 @@
 ### 次の行動
 
 - `PackageModelLoopLayerSmoke` / `PackageModelLoopSmokeModel::load` 周辺を、Qwen3 package runtime weight loaderを使うlibrary側の薄いmodel-loader境界へ寄せる。
+
+## Qwen3 package decoder layer runtime loader 抽出
+
+### 前回の要点
+
+- `qwen3_loader.rs` にQwen3/Qwen3.5 package tensorからresident self-attention/post-attention/decoder-layer weightsを構築する関数を移した。
+- model-loop側には、layer indexからtensor名を組み立て、q/k/post RMSNorm passthroughを読み、weightsとruntime shapeをまとめる `PackageModelLoopLayerSmoke` がまだ残っていた。
+
+### 今回の変更点
+
+- `qwen3_loader.rs` に `Qwen3PackageDecoderLayerRuntime` と `qwen3_package_decoder_layer_runtime_from_package` を追加した。
+- `PackageModelLoopLayerSmoke` と `load_package_model_loop_layer_smoke` を `main.rs` から削除し、`PackageModelLoopSmokeModel::load` はlibrary側のlayer-index loaderを使うようにした。
+- `main.rs` 側には、layer間shape検証、scheduler/request plan、期待値diff、CLI出力などsmoke固有処理だけを残した。
+- `docs/words.txt` の `Qwen3 package runtime weight loader` 定義を、layer-index単位のpackage decoder layer runtime構築も含む説明へ更新した。
+
+### 検証
+
+- `cargo fmt --all --check`
+- `cargo test -p ullm-engine qwen3_loader -- --test-threads=1`
+- `cargo check -p ullm-engine`
+- `cargo test -p ullm-engine -- --test-threads=1`
+- `cargo test --workspace -- --test-threads=1`
+- `cargo build -p ullm-engine`
+- `git diff --check`
+- 3-layer model-loop smoke on `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d` with `3,7,11 3` passed on CPU `0`, R9700/RDNA4 `2`, and V620/RDNA2 `1`. All devices reported `decode_batch_ready_counts=[2, 1]`, `final_ready=0`, `cached_tokens=[3, 3, 1]`, `generated_tokens=[2, 1, 0]`, and `verified=true`; runtime/cache diffs stayed `0`.
+
+### 次の行動
+
+- `PackageModelLoopSmokeModel::load` 自体をlibrary側のmodel loaderへ寄せるか、先にrequest/execution planをrunner API化するかを選ぶ。現状ではlayer load境界はlibrary側に出たため、次はmodel-level shape consistencyとrunner setupのどちらを切り出すかが分岐点。
