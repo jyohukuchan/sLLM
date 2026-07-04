@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "qwen-module-trace-comparison-v0.1"
+SCHEMA_VERSION = "qwen-module-trace-comparison-v0.2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -17,6 +17,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--package-jsonl", type=Path, required=True)
     parser.add_argument("--fullref-jsonl", type=Path, required=True)
     parser.add_argument("--run-mode", default="golden_before_each_layer")
+    parser.add_argument(
+        "--token-index",
+        type=int,
+        help="Compare this fixed token instead of each package row's max token.",
+    )
+    parser.add_argument(
+        "--hidden-index",
+        type=int,
+        help="Require this hidden index in package and full-reference rows.",
+    )
     parser.add_argument("--summary-json", type=Path, required=True)
     parser.add_argument("--markdown", type=Path)
     return parser.parse_args()
@@ -228,7 +238,29 @@ def compare_feature_items(
     return top_feature_comparison
 
 
-def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[str, Any]], run_mode: str) -> dict[str, Any]:
+def package_trace_for_comparison(
+    row: dict[str, Any],
+    token_index: int | None,
+) -> dict[str, Any]:
+    module = row.get("module_contribution", {})
+    if not isinstance(module, dict):
+        return {}
+    if token_index is None:
+        trace = module.get("max_output_diff_trace", {})
+        return trace if isinstance(trace, dict) else {}
+    for trace in module.get("per_token_hot_hidden_trace", []):
+        if isinstance(trace, dict) and int(trace.get("token_index", -1)) == token_index:
+            return trace
+    return {}
+
+
+def build_summary(
+    package_rows: list[dict[str, Any]],
+    fullref_rows: list[dict[str, Any]],
+    run_mode: str,
+    token_index: int | None = None,
+    hidden_index: int | None = None,
+) -> dict[str, Any]:
     fullref_by_layer = {int(row["layer_index"]): row for row in fullref_rows}
     comparisons: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -241,10 +273,30 @@ def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[st
             skipped.append({"layer_index": layer, "reason": "missing_full_reference"})
             continue
         module = row.get("module_contribution", {})
-        package_trace = module.get("max_output_diff_trace", {})
+        package_trace = package_trace_for_comparison(row, token_index)
+        if not package_trace:
+            skipped.append(
+                {
+                    "layer_index": layer,
+                    "token_index": token_index,
+                    "reason": "missing_package_token",
+                }
+            )
+            continue
         token = int(package_trace.get("token_index"))
-        package_hidden = int(package_trace.get("hidden_index"))
+        package_hidden = int(package_trace.get("hidden_index", module.get("hot_hidden_index", -1)))
         fullref_hidden = int(fullref.get("hidden_index"))
+        if hidden_index is not None and (package_hidden != hidden_index or fullref_hidden != hidden_index):
+            skipped.append(
+                {
+                    "layer_index": layer,
+                    "package_hidden_index": package_hidden,
+                    "fullref_hidden_index": fullref_hidden,
+                    "requested_hidden_index": hidden_index,
+                    "reason": "requested_hidden_mismatch",
+                }
+            )
+            continue
         if package_hidden != fullref_hidden:
             skipped.append(
                 {
@@ -332,6 +384,8 @@ def build_summary(package_rows: list[dict[str, Any]], fullref_rows: list[dict[st
     return {
         "schema_version": SCHEMA_VERSION,
         "run_mode": run_mode,
+        "token_index": token_index,
+        "hidden_index": hidden_index,
         "row_count": len(comparisons),
         "skipped": skipped,
         "worst_actual_delta_error": worst_delta,
@@ -472,7 +526,13 @@ def main() -> int:
     args = parse_args()
     package_rows = read_jsonl(args.package_jsonl)
     fullref_rows = read_jsonl(args.fullref_jsonl)
-    summary = build_summary(package_rows, fullref_rows, args.run_mode)
+    summary = build_summary(
+        package_rows,
+        fullref_rows,
+        args.run_mode,
+        args.token_index,
+        args.hidden_index,
+    )
     args.summary_json.parent.mkdir(parents=True, exist_ok=True)
     args.summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if args.markdown:

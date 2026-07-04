@@ -33,6 +33,14 @@ Generated artifacts:
 - `qwen-layer-module-trace-actual-input-rotary64-layer11-hidden3994-layer6-layer10-p4p46-inproj.md`
 - `qwen-module-trace-comparison-actual-input-rotary64-layer11-hidden3994-layer6-layer10-p4p46-inproj.json`
 - `qwen-module-trace-comparison-actual-input-rotary64-layer11-hidden3994-layer6-layer10-p4p46-inproj.md`
+- `package-golden-prefix-coordinate-chain-rotary64-layer6-layer10-actual-h3994-t7-p4p46-inproj.json`
+- `package-golden-prefix-coordinate-chain-rotary64-layer6-layer10-actual-h3994-t7-p4p46-inproj.md`
+- `qwen-layer-module-trace-actual-input-rotary64-layers7-9-hidden3994-layer6-layer10-p4p46-inproj.jsonl`
+- `qwen-layer-module-trace-actual-input-rotary64-layers7-9-hidden3994-layer6-layer10-p4p46-inproj.md`
+- `qwen-module-trace-comparison-actual-input-rotary64-layers7-9-hidden3994-layer6-layer10-p4p46-inproj.json`
+- `qwen-module-trace-comparison-actual-input-rotary64-layers7-9-hidden3994-layer6-layer10-p4p46-inproj.md`
+- `qwen-module-trace-comparison-actual-input-rotary64-layers7-9-token7-hidden3994-layer6-layer10-p4p46-inproj.json`
+- `qwen-module-trace-comparison-actual-input-rotary64-layers7-9-token7-hidden3994-layer6-layer10-p4p46-inproj.md`
 
 ## Local package error with actual-prefix inputs
 
@@ -234,3 +242,45 @@ Updated next useful target:
   becomes dominant after the hidden `3456` row-scale correction.
 - Keep layer `11` as a propagation observation, not the primary correction
   target.
+
+## Token 7 hidden3994 chain before layer 11
+
+For the fixed coordinate layer `11` max target (`token=7`, `hidden=3994`):
+
+| layer | kind | input diff | delta diff | output diff |
+| ---: | --- | ---: | ---: | ---: |
+| 0 | linear_attention | 0.000000 | 0.069845 | 0.069845 |
+| 1 | linear_attention | 0.069845 | -0.201931 | -0.132087 |
+| 2 | linear_attention | -0.132087 | 0.032112 | -0.099975 |
+| 3 | self_attention | -0.099975 | -0.238869 | -0.338844 |
+| 4 | linear_attention | -0.338844 | 0.154241 | -0.184604 |
+| 5 | linear_attention | -0.184604 | 0.229230 | 0.044626 |
+| 6 | linear_attention | 0.044626 | 0.241776 | 0.286402 |
+| 7 | self_attention | 0.286402 | -0.442692 | -0.156290 |
+| 8 | linear_attention | -0.156290 | 0.452469 | 0.296179 |
+| 9 | linear_attention | 0.296179 | -0.576244 | -0.280066 |
+| 10 | linear_attention | -0.280066 | -0.096926 | -0.376991 |
+| 11 | self_attention | -0.376991 | -0.268347 | -0.645338 |
+
+The package/full-reference comparison on the same actual inputs shows the
+largest local package delta error for this fixed coordinate is layer `8`:
+
+| layer | token | package output diff | fullref delta | package delta | local delta error |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 7 | 7 | -0.156290 | 1.713598 | 1.682308 | -0.031290 |
+| 8 | 7 | 0.296179 | 0.906290 | 1.077469 | 0.171179 |
+| 9 | 7 | -0.280066 | 1.828821 | 1.798756 | -0.030066 |
+| 11 | 7 | -0.645338 | 2.001991 | 1.981653 | -0.020338 |
+
+The hot-input-vector details in the fixed-token comparison are marked
+`token_mismatch` because `package-golden-prefix-smoke` currently stores detailed
+hot vectors for each layer's max token, not for arbitrary requested tokens. The
+delta rows above are still valid because they use per-token hidden traces.
+
+Updated next useful target:
+
+- Inspect layer `8`, token `7`, hidden `3994` under `rotary_dim=64`, especially
+  the linear-attention path and MLP path split (`+0.171179` local delta error).
+- If targeted hot vectors are needed, extend `package-golden-prefix-smoke` to
+  emit per-token hot vectors for requested coordinates instead of only the
+  layer max token.
