@@ -23,7 +23,7 @@ from aq_scale_formats import scale_values
 from safetensors import safe_open
 
 
-SCHEMA_VERSION = "qwen-layer-module-trace-v0.5"
+SCHEMA_VERSION = "qwen-layer-module-trace-v0.6"
 
 
 TOP_ABS_FEATURES = 8
@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--layers", required=True, help="Comma-separated layer indices.")
     parser.add_argument("--hidden-index", type=int, default=3994)
+    parser.add_argument(
+        "--token-index",
+        type=int,
+        help="Token index for hot-vector and projection row-dot traces. Defaults to the max expected delta token per layer.",
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
         "--dtype",
@@ -266,6 +271,20 @@ def to_numpy_f32(tensor: torch.Tensor) -> np.ndarray:
 
 def tensor_to_numpy_f32(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().to(dtype=torch.float32, device="cpu").contiguous().numpy()
+
+
+def selected_token_index(
+    expected_delta_for_hidden: np.ndarray,
+    sequence_len: int,
+    token_index_override: int | None,
+) -> int:
+    if token_index_override is None:
+        return int(np.argmax(np.abs(expected_delta_for_hidden.reshape(-1))) % sequence_len)
+    if token_index_override < 0 or token_index_override >= sequence_len:
+        raise ValueError(
+            f"token index {token_index_override} outside fixture sequence length {sequence_len}"
+        )
+    return int(token_index_override)
 
 
 def point_trace(
@@ -754,6 +773,7 @@ def projection_row_dot_trace(
     package_dir: Path | None,
     package_tensor: dict[str, Any] | None,
     token_index: int,
+    selected_features_override: list[int] | None = None,
 ) -> dict[str, Any]:
     if input_values.ndim != 3:
         raise ValueError(f"{name} input must be [batch,seq,features], got {input_values.shape}")
@@ -762,12 +782,19 @@ def projection_row_dot_trace(
     if source_weight.ndim != 2:
         raise ValueError(f"{name} source weight must be 2D, got {tuple(source_weight.shape)}")
 
-    output_summary = vector_summary(module_output[0, token_index], token_index)
-    selected_features = [
-        int(item["feature_index"])
-        for item in output_summary["top_abs_features"]
-        if isinstance(item, dict) and "feature_index" in item
-    ]
+    if selected_features_override is None:
+        output_summary = vector_summary(module_output[0, token_index], token_index)
+        selected_features = [
+            int(item["feature_index"])
+            for item in output_summary["top_abs_features"]
+            if isinstance(item, dict) and "feature_index" in item
+        ]
+    else:
+        selected_features = [
+            int(feature_index)
+            for feature_index in selected_features_override
+            if 0 <= int(feature_index) < module_output.shape[2]
+        ]
     vector = input_values[0, token_index].astype(np.float64)
     traces = []
     for feature_index in selected_features:
@@ -822,6 +849,7 @@ def run_linear_attention_layer_trace(
     layer: torch.nn.Module,
     layer_index: int,
     hidden_index: int,
+    token_index_override: int | None,
     device: torch.device,
     dtype: torch.dtype,
 ) -> dict[str, Any]:
@@ -940,7 +968,7 @@ def run_linear_attention_layer_trace(
     attention_block_output = before + attention_output
 
     expected_delta_for_hidden = expected_after[:, :, hidden_index] - before[:, :, hidden_index]
-    token_index = int(np.argmax(np.abs(expected_delta_for_hidden.reshape(-1))) % before.shape[1])
+    token_index = selected_token_index(expected_delta_for_hidden, before.shape[1], token_index_override)
     per_token = [
         point_trace(
             token,
@@ -957,6 +985,8 @@ def run_linear_attention_layer_trace(
     ]
     out_tensor_name = f"model.language_model.layers.{layer_index}.linear_attn.out_proj.weight"
     down_tensor_name = f"model.language_model.layers.{layer_index}.mlp.down_proj.weight"
+    mlp_gate_tensor_name = f"model.language_model.layers.{layer_index}.mlp.gate_proj.weight"
+    mlp_up_tensor_name = f"model.language_model.layers.{layer_index}.mlp.up_proj.weight"
     qkv_tensor_name = f"model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight"
     z_tensor_name = f"model.language_model.layers.{layer_index}.linear_attn.in_proj_z.weight"
     a_tensor_name = f"model.language_model.layers.{layer_index}.linear_attn.in_proj_a.weight"
@@ -967,9 +997,13 @@ def run_linear_attention_layer_trace(
     package_z_tensor = None
     package_a_tensor = None
     package_b_tensor = None
+    package_mlp_gate_tensor = None
+    package_mlp_up_tensor = None
     if package_dir is not None and package_tensors is not None:
         package_out_tensor = package_tensors.get(out_tensor_name)
         package_down_tensor = package_tensors.get(down_tensor_name)
+        package_mlp_gate_tensor = package_tensors.get(mlp_gate_tensor_name)
+        package_mlp_up_tensor = package_tensors.get(mlp_up_tensor_name)
         package_qkv_tensor = package_tensors.get(qkv_tensor_name)
         package_z_tensor = package_tensors.get(z_tensor_name)
         package_a_tensor = package_tensors.get(a_tensor_name)
@@ -979,6 +1013,9 @@ def run_linear_attention_layer_trace(
         if package_down_tensor is not None:
             package_down_row = dequantize_package_row(package_dir, package_down_tensor, hidden_index)
 
+    mlp_projection_selected_features = top_abs_feature_indices(
+        mlp_activation[0, token_index].astype(np.float32)
+    )
     row_dot = {
         "attention_out_proj": row_dot_trace(
             "attention_out_proj",
@@ -1033,6 +1070,26 @@ def run_linear_attention_layer_trace(
             package_dir,
             package_b_tensor,
             token_index,
+        ),
+        "mlp_gate_projection": projection_row_dot_trace(
+            "mlp_gate_projection",
+            post_normed,
+            mlp_gate_projection,
+            state["mlp.gate_proj.weight"],
+            package_dir,
+            package_mlp_gate_tensor,
+            token_index,
+            mlp_projection_selected_features,
+        ),
+        "mlp_up_projection": projection_row_dot_trace(
+            "mlp_up_projection",
+            post_normed,
+            mlp_up_projection,
+            state["mlp.up_proj.weight"],
+            package_dir,
+            package_mlp_up_tensor,
+            token_index,
+            mlp_projection_selected_features,
         ),
     }
     hot_input_vectors = hot_input_vector_summaries(
@@ -1213,6 +1270,7 @@ def run_self_attention_layer_trace(
     layer: torch.nn.Module,
     layer_index: int,
     hidden_index: int,
+    token_index_override: int | None,
     device: torch.device,
     dtype: torch.dtype,
     rotary_template: torch.nn.Module | None,
@@ -1320,7 +1378,7 @@ def run_self_attention_layer_trace(
     attention_block_output = before + attention_output
 
     expected_delta_for_hidden = expected_after[:, :, hidden_index] - before[:, :, hidden_index]
-    token_index = int(np.argmax(np.abs(expected_delta_for_hidden.reshape(-1))) % before.shape[1])
+    token_index = selected_token_index(expected_delta_for_hidden, before.shape[1], token_index_override)
     per_token = [
         point_trace(
             token,
@@ -1338,6 +1396,8 @@ def run_self_attention_layer_trace(
 
     o_tensor_name = f"model.language_model.layers.{layer_index}.self_attn.o_proj.weight"
     down_tensor_name = f"model.language_model.layers.{layer_index}.mlp.down_proj.weight"
+    mlp_gate_tensor_name = f"model.language_model.layers.{layer_index}.mlp.gate_proj.weight"
+    mlp_up_tensor_name = f"model.language_model.layers.{layer_index}.mlp.up_proj.weight"
     q_tensor_name = f"model.language_model.layers.{layer_index}.self_attn.q_proj.weight"
     k_tensor_name = f"model.language_model.layers.{layer_index}.self_attn.k_proj.weight"
     v_tensor_name = f"model.language_model.layers.{layer_index}.self_attn.v_proj.weight"
@@ -1346,9 +1406,13 @@ def run_self_attention_layer_trace(
     package_q_tensor = None
     package_k_tensor = None
     package_v_tensor = None
+    package_mlp_gate_tensor = None
+    package_mlp_up_tensor = None
     if package_dir is not None and package_tensors is not None:
         package_o_tensor = package_tensors.get(o_tensor_name)
         package_down_tensor = package_tensors.get(down_tensor_name)
+        package_mlp_gate_tensor = package_tensors.get(mlp_gate_tensor_name)
+        package_mlp_up_tensor = package_tensors.get(mlp_up_tensor_name)
         package_q_tensor = package_tensors.get(q_tensor_name)
         package_k_tensor = package_tensors.get(k_tensor_name)
         package_v_tensor = package_tensors.get(v_tensor_name)
@@ -1357,6 +1421,9 @@ def run_self_attention_layer_trace(
         if package_down_tensor is not None:
             package_down_row = dequantize_package_row(package_dir, package_down_tensor, hidden_index)
 
+    mlp_projection_selected_features = top_abs_feature_indices(
+        mlp_activation[0, token_index].astype(np.float32)
+    )
     row_dot = {
         "self_attention_o_proj": row_dot_trace(
             "self_attention_o_proj",
@@ -1402,6 +1469,26 @@ def run_self_attention_layer_trace(
             package_dir,
             package_v_tensor,
             token_index,
+        ),
+        "mlp_gate_projection": projection_row_dot_trace(
+            "mlp_gate_projection",
+            post_normed,
+            mlp_gate_projection,
+            state["mlp.gate_proj.weight"],
+            package_dir,
+            package_mlp_gate_tensor,
+            token_index,
+            mlp_projection_selected_features,
+        ),
+        "mlp_up_projection": projection_row_dot_trace(
+            "mlp_up_projection",
+            post_normed,
+            mlp_up_projection,
+            state["mlp.up_proj.weight"],
+            package_dir,
+            package_mlp_up_tensor,
+            token_index,
+            mlp_projection_selected_features,
         ),
     }
 
@@ -1565,6 +1652,7 @@ def run_layer_trace(
     layer: torch.nn.Module,
     layer_index: int,
     hidden_index: int,
+    token_index_override: int | None,
     device: torch.device,
     dtype: torch.dtype,
     rotary_template: torch.nn.Module | None,
@@ -1582,6 +1670,7 @@ def run_layer_trace(
             layer,
             layer_index,
             hidden_index,
+            token_index_override,
             device,
             dtype,
         )
@@ -1597,6 +1686,7 @@ def run_layer_trace(
             layer,
             layer_index,
             hidden_index,
+            token_index_override,
             device,
             dtype,
             rotary_template,
@@ -1687,6 +1777,7 @@ def main() -> int:
                 model_layers[layer_index],
                 layer_index,
                 args.hidden_index,
+                args.token_index,
                 device,
                 dtype,
                 rotary_template,
