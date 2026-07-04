@@ -12,6 +12,7 @@ use ullm_engine::loader::{
 use ullm_engine::package::{
     PassthroughPayloadBundle, ReferencedFile, ReferencedFileRole, TensorSelector,
 };
+use ullm_engine::scheduler::{KvBlockAllocator, RequestId};
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -29,6 +30,9 @@ fn main() -> ExitCode {
         Some("runtime-decode-attn-smoke") => runtime_decode_attn_smoke(env::args().nth(2)),
         Some("runtime-paged-decode-attn-smoke") => {
             runtime_paged_decode_attn_smoke(env::args().nth(2))
+        }
+        Some("runtime-kv-paged-decode-smoke") => {
+            runtime_kv_paged_decode_attn_smoke(env::args().nth(2))
         }
         Some("runtime-depthwise-conv1d-smoke") => {
             runtime_depthwise_conv1d_smoke(env::args().nth(2))
@@ -1662,6 +1666,166 @@ fn runtime_paged_decode_attn_smoke(device_index: Option<String>) -> ExitCode {
         kv_heads,
         head_dim,
         value_dim,
+        format_f32_preview(&output)
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_kv_paged_decode_attn_smoke(device_index: Option<String>) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut allocator = KvBlockAllocator::with_block_size(4, 2);
+    let fragment = match allocator.allocate(RequestId(10), 3) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to allocate fragmenting KV blocks: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let freed = allocator.free_request(fragment.request_id);
+    if freed != fragment.blocks.len() {
+        eprintln!(
+            "freed KV block count {freed} does not match allocated fragment blocks {}",
+            fragment.blocks.len()
+        );
+        return ExitCode::from(1);
+    }
+    let cache_len = 3_usize;
+    let block_size = allocator.block_size_tokens() as usize;
+    let block_count = (cache_len - 1) / block_size + 1;
+    let allocation = match allocator.allocate(RequestId(11), block_count) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to allocate decode KV blocks: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let block_table = allocation.blocks;
+    let cache_blocks = allocator.total_blocks() as usize;
+    let stats = allocator.stats();
+
+    let q_heads = 4_usize;
+    let kv_heads = 2_usize;
+    let head_dim = 3_usize;
+    let value_dim = 2_usize;
+    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let q = (0..q_heads * head_dim)
+        .map(|index| (index as f32 - 8.0) / 11.0)
+        .collect::<Vec<_>>();
+    let logical_k = (0..cache_len * kv_heads * head_dim)
+        .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+        .collect::<Vec<_>>();
+    let logical_v = (0..cache_len * kv_heads * value_dim)
+        .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+        .collect::<Vec<_>>();
+    let (paged_k_cache, paged_v_cache) = match pack_paged_decode_kv_cache_for_block_table(
+        &logical_k,
+        &logical_v,
+        &block_table,
+        cache_len,
+        block_size,
+        cache_blocks,
+        kv_heads,
+        head_dim,
+        value_dim,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (output, max_abs_diff) = match runtime_paged_decode_attn_verify(
+        &mut context,
+        &mut stream,
+        &q,
+        &paged_k_cache,
+        &paged_v_cache,
+        &block_table,
+        cache_len,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        "runtime kv paged decode attention smoke",
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let contiguous_expected = runtime_host_decode_attn_f32(
+        &q,
+        &logical_k,
+        &logical_v,
+        cache_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+    );
+    let logical_paged_max_abs_diff = match verify_f32_close(
+        "runtime kv paged decode attention logical-vs-paged",
+        &output,
+        &contiguous_expected,
+        1e-4,
+        1e-4,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    println!(
+        "runtime-kv-paged-decode-smoke backend={} device_index={} name=\"{}\" cache_len={} block_size={} cache_blocks={} allocated_blocks={:?} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} q_heads={} kv_heads={} head_dim={} value_dim={} softmax_scale={softmax_scale:.9} paged_k_cache_preview={} paged_v_cache_preview={} output={} max_abs_diff={max_abs_diff:.9} logical_paged_max_abs_diff={logical_paged_max_abs_diff:.9} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        cache_len,
+        block_size,
+        cache_blocks,
+        block_table,
+        stats.free_blocks,
+        stats.allocated_blocks,
+        stats.free_runs,
+        stats.largest_free_run,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        format_f32_preview(&paged_k_cache[..8.min(paged_k_cache.len())]),
+        format_f32_preview(&paged_v_cache[..8.min(paged_v_cache.len())]),
         format_f32_preview(&output)
     );
     ExitCode::SUCCESS
@@ -15732,7 +15896,7 @@ fn materialize_selected_aq4_matrix(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
@@ -16409,15 +16573,17 @@ fn runtime_host_paged_decode_attn_f32(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn pack_paged_decode_kv_cache(
+fn pack_paged_decode_kv_cache_for_block_table(
     logical_k_cache: &[f32],
     logical_v_cache: &[f32],
+    block_table: &[u32],
     cache_len: usize,
     block_size: usize,
+    cache_blocks: usize,
     kv_heads: usize,
     head_dim: usize,
     value_dim: usize,
-) -> Result<(Vec<f32>, Vec<f32>, Vec<u32>, usize), String> {
+) -> Result<(Vec<f32>, Vec<f32>), String> {
     if cache_len == 0 {
         return Err("paged decode cache_len must be greater than zero".to_string());
     }
@@ -16442,12 +16608,10 @@ fn pack_paged_decode_kv_cache(
         ));
     }
     let block_table_entries = (cache_len - 1) / block_size + 1;
-    let cache_blocks = block_table_entries
-        .checked_add(1)
-        .ok_or_else(|| "paged decode cache_blocks overflows".to_string())?;
-    if block_table_entries > u32::MAX as usize {
+    if block_table.len() != block_table_entries {
         return Err(format!(
-            "paged decode block_table_entries={block_table_entries} exceeds u32 block id range"
+            "paged decode block table length {} does not match expected entries {block_table_entries}",
+            block_table.len()
         ));
     }
     let physical_tokens = cache_blocks
@@ -16455,13 +16619,12 @@ fn pack_paged_decode_kv_cache(
         .ok_or_else(|| "paged decode physical token count overflows".to_string())?;
     let mut physical_k_cache = vec![0.0_f32; physical_tokens * kv_heads * head_dim];
     let mut physical_v_cache = vec![0.0_f32; physical_tokens * kv_heads * value_dim];
-    let mut block_table = (0..block_table_entries)
-        .map(|index| index as u32)
-        .collect::<Vec<_>>();
-    if block_table_entries == 1 {
-        block_table[0] = 1;
-    } else {
-        block_table.swap(0, 1);
+    for (index, block_id) in block_table.iter().copied().enumerate() {
+        if block_id as usize >= cache_blocks {
+            return Err(format!(
+                "paged decode block_table[{index}]={block_id} exceeds cache_blocks={cache_blocks}"
+            ));
+        }
     }
     for timestep in 0..cache_len {
         let logical_block = timestep / block_size;
@@ -16482,6 +16645,53 @@ fn pack_paged_decode_kv_cache(
         physical_v_cache[physical_v_start..physical_v_end]
             .copy_from_slice(&logical_v_cache[logical_v_start..logical_v_end]);
     }
+    Ok((physical_k_cache, physical_v_cache))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_paged_decode_kv_cache(
+    logical_k_cache: &[f32],
+    logical_v_cache: &[f32],
+    cache_len: usize,
+    block_size: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+) -> Result<(Vec<f32>, Vec<f32>, Vec<u32>, usize), String> {
+    if cache_len == 0 {
+        return Err("paged decode cache_len must be greater than zero".to_string());
+    }
+    if block_size == 0 {
+        return Err("paged decode block_size must be greater than zero".to_string());
+    }
+    let block_table_entries = (cache_len - 1) / block_size + 1;
+    let cache_blocks = block_table_entries
+        .checked_add(1)
+        .ok_or_else(|| "paged decode cache_blocks overflows".to_string())?;
+    if block_table_entries > u32::MAX as usize {
+        return Err(format!(
+            "paged decode block_table_entries={block_table_entries} exceeds u32 block id range"
+        ));
+    }
+    let mut block_table = (0..block_table_entries)
+        .map(|index| index as u32)
+        .collect::<Vec<_>>();
+    if block_table_entries == 1 {
+        block_table[0] = 1;
+    } else {
+        block_table.swap(0, 1);
+    }
+    let (physical_k_cache, physical_v_cache) = pack_paged_decode_kv_cache_for_block_table(
+        logical_k_cache,
+        logical_v_cache,
+        &block_table,
+        cache_len,
+        block_size,
+        cache_blocks,
+        kv_heads,
+        head_dim,
+        value_dim,
+    )?;
     Ok((
         physical_k_cache,
         physical_v_cache,
