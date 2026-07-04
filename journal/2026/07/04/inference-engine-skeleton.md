@@ -8,6 +8,10 @@
 ## 今回の変更点
 
 - goal再開後の当面scopeを、手元で検証できるRDNA2/V620とRDNA4/R9700に限定した。モデルアーキテクチャ対応も、まずはQwen3.5/Qwen3系の一部decoder経路だけで進める。
+- Commit `a42f2a1 Add paged decode step API` で `PagedDecodeStepOutput` と `PagedDecodeState::decode_step` を追加した。
+- `decode_step` は1 token分のq/k/vを受け取り、K/Vをruntime paged K/V cacheへ書き込んだ後、その時点のprefix長でpaged decode attentionを実行する。戻り値には `cache_position`、`cache_len`、decode outputを含める。
+- `package-self-attn-decode-smoke` は全timestepの `q_rope` を `runtime_paged_kv_write_decode_verify` へ渡し、helper内部で各timestepに `decode_step` を実行するようにした。各prefixのpaged step decodeをhost paged decodeと比較し、さらにstep output列全体をfull causal attention列と比較する。
+- `package-self-attn-decode-smoke` の出力に `paged_step_decode_max_abs_diff` と `causal_paged_step_decode_max_abs_diff` を追加した。
 - Commit `0e9fbac Add paged decode state API` で `crates/ullm-engine/src/decoder.rs` を追加し、`PagedDecodeShape`、`PagedDecodeState`、`PagedKvCacheReadback` を実装した。
 - `PagedDecodeState` はruntime buffer上のblock table、paged K/V cache、1-token K/V scratch、q/output scratch、`written_len` をまとめて保持する。`write_token` は内部cursorで順次書き込み、`write_token_at` は明示位置へ書き込み、`decode_written` はstate内の `written_len` を使う。
 - `runtime_paged_kv_write_decode_verify` はsmoke専用の手動buffer確保・copy・kernel呼び出しをやめ、`PagedDecodeState` 経由でruntime paged KV writeとruntime paged decode attentionを接続するようにした。CLI出力と検証値は維持した。
@@ -128,6 +132,12 @@
 
 ## 実測・検証
 
+- `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
+- `target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 3`
+  - `decode_step` 経由のCPU fallback package decode smokeが成功した。`paged_step_decode_max_abs_diff=0`、`causal_paged_step_decode_max_abs_diff=0`。
+- `ULLM_REQUIRE_HIP_AQ4_KERNEL=1 ULLM_REQUIRE_HIP_MATVEC_KERNEL=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL=1 ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL=1 target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 2 1048576 3 3`
+  - `decode_step` 経由のR9700/RDNA4 package decode smokeが成功した。`paged_step_decode_max_abs_diff=0.000000238`、`causal_paged_step_decode_max_abs_diff=0`。
+- 同じHIP必須フラグでdevice `1` と `3` のV620/RDNA2でも成功した。各deviceで `paged_step_decode_max_abs_diff=0.000000238`、`causal_paged_step_decode_max_abs_diff=0`。
 - `cargo fmt --all --check`、`cargo check -p ullm-engine`、`cargo test -p ullm-engine -- --test-threads=1`、`cargo build -p ullm-engine`、`cargo test --workspace -- --test-threads=1`、`git diff --check` が成功した。
 - `target/debug/ullm-engine package-self-attn-decode-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d 0 1048576 3 3`
   - `PagedDecodeState` 経由のCPU fallback package decode smokeが成功した。`paged_block_table=[3,0]`、`paged_kv_write_k_max_abs_diff=0`、`paged_kv_write_v_max_abs_diff=0`、`paged_decode_max_abs_diff=0`、`decode_paged_max_abs_diff=0`。
@@ -652,13 +662,14 @@
 - `5ac3fdb Add runtime f32 paged KV write`
 - `74bf5ae Use runtime paged KV writes in package decode smoke`
 - `0e9fbac Add paged decode state API`
+- `a42f2a1 Add paged decode step API`
 
 ## 次の行動
 
 - 当面はRDNA2/V620とRDNA4/R9700のCI相当smokeを優先し、広いhardware対応やfull model architecture対応は後回しにする。
-- `KvBlockAllocator` 由来のblock tableをruntime paged decodeへ渡す最小境界と、package self-attn decode smokeへの統合は通った。次はMLP block側を含むstate境界へ広げる。
-- Runtime paged KV writeはCPU、R9700/RDNA4、V620/RDNA2で通り、package self-attn decode smokeでも `PagedDecodeState` 経由に置き換え済み。次はこのstateをQwen3.5 self-attn decodeのより実運用に近いdecoder-step boundaryへ広げる。
+- `KvBlockAllocator` 由来のblock table、runtime paged KV write、paged decode attentionをまとめた `PagedDecodeState::decode_step` はCPU、R9700/RDNA4、V620/RDNA2で通った。次はMLP block側を含むstate境界へ広げる。
+- Runtime paged KV writeはCPU、R9700/RDNA4、V620/RDNA2で通り、package self-attn decode smokeでも `decode_step` 経由に置き換え済み。次はこのstateをQwen3.5 self-attn decodeのより実運用に近いlayer step boundaryへ広げる。
 - Paged decode attentionのruntime境界はCPU、R9700/RDNA4、V620/RDNA2で通っており、package self-attn decode smokeからも呼べる状態になった。
 - `WeightRegistry` と `LoadedPackage` は後続kernelからpayloadを引ける最小APIまで進んだ。
-- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、paged decode state、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。次はtoken-by-token decoder stepとしてstateの入出力を整理する。
+- CPU fallback、HIP staging fallback、HIPRTC JIT materialize kernel経路に加えて、materialize済みf32 matrixからf32 matvecへつなぐ最小kernel境界、RMSNorm境界、SiLU-mul境界、Sigmoid-mul境界、f32 add境界、runtime RoPE境界、runtime causal attention境界、runtime decode attention境界、runtime paged decode attention境界、paged decode state/step、depthwise conv1d境界、linear attention gate/beta境界、linear attention recurrent境界、実packageのlinear attention/self-attention/MLP部分workflow smokeまで通った。次はtoken-by-token decoder stepとしてstateの入出力を整理する。
 - Qwen3系のattention/MLP最小forwardに必要なkernel境界を、既存推論エンジン実装を参照しながら切り出す。
