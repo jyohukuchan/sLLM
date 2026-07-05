@@ -15,7 +15,8 @@
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
 | CPU | `0`, host CPU fallback | tokens1/tokens101/tokens201/tokens301/tokens401 | accept | 5 | `0.0479898453` | `0.022603035` | `0` |
 | R9700 | `2`, AMD Radeon Graphics | tokens1/tokens101/tokens201/tokens301/tokens401 | accept | 5 | `0.0479856491` | `0.0226106644` | `0` |
-| V620 | `1`, AMD Radeon Pro V620 | tokens1/tokens101/tokens201/tokens301/tokens401 | accept | 5 | `0.0479856491` | `0.0226106644` | `0` |
+| V620-A | `1`, AMD Radeon Pro V620 | tokens1/tokens101/tokens201/tokens301/tokens401 | accept | 5 | `0.0479856491` | `0.0226106644` | `0` |
+| V620-B | `3`, AMD Radeon Pro V620 | tokens1/tokens101/tokens201/tokens301/tokens401 | accept | 5 | `0.0479856491` | `0.0226106644` | `0` |
 
 ## CPU Five-Fixture Detail
 
@@ -47,6 +48,8 @@
 | tokens301 | `1.37132263` | `1.30992317` | `-0.0613994598` | 10 | 12 | 3994 |
 | tokens401 | `0.959306717` | `0.936696053` | `-0.0226106644` | 8 | 9 | 3994 |
 
+Both V620 devices produced the same five-fixture gate table.
+
 ## Artifact Index
 
 - CPU summary: `qwen-prefix-targeted-high-layer8-qkv-mlp-up-five-fixture-summary.json`
@@ -60,3 +63,6 @@
 - V620 additional matrix: `qwen-prefix-smoke-matrix-targeted-high-layer8-qkv-mlp-up-v620-additional-two-fixture/`
 - V620 five-fixture summary: `qwen-prefix-targeted-high-layer8-qkv-mlp-up-v620-five-fixture-summary.json`
 - V620 five-fixture gate: `qwen-prefix-targeted-high-layer8-qkv-mlp-up-v620-five-fixture-gates.json`
+- V620-B matrix: `qwen-prefix-smoke-matrix-targeted-high-layer8-qkv-mlp-up-v620b-five-fixture/`
+- V620-B summary: `qwen-prefix-targeted-high-layer8-qkv-mlp-up-v620b-five-fixture-summary.json`
+- V620-B gate: `qwen-prefix-targeted-high-layer8-qkv-mlp-up-v620b-five-fixture-gates.json`

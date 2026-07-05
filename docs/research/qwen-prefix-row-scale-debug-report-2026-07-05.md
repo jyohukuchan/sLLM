@@ -332,10 +332,11 @@ Combined layer8 qkv + MLP-up high-format package:
   - mean improvement: `0.0479856491`
   - median improvement: `0.0226106644`
   - max regression: `0`
+  - both device index `1` and device index `3` pass with the same gate table
 - Interpretation:
   - qkv high-only and MLP-up high-only each failed in opposite directions.
   - Combining the two exact layer8 tensor promotions resolves that fixture conflict under the fixed gate.
-  - The same candidate remains accepted on R9700 and V620 five-fixture gates, so the fix is not CPU-only.
+  - The same candidate remains accepted on R9700 and both V620 five-fixture gates, so the fix is not CPU-only.
   - This is the first accepted hidden3994 package-level candidate in this branch.
 
 ## Verification
