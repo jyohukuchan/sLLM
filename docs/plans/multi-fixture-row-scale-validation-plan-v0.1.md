@@ -149,6 +149,22 @@ Quantization-policy probe result:
   - main failure: hidden3994 regression on tokens401, `0.959306717 -> 1.22134209`.
 - Therefore, the next package-level candidate must preserve row3456 compensation and address hidden3994 input-drift amplification more directly than a simple p4p65 swap.
 
+Layer8 manifest package probe:
+
+- Evaluated existing layer8 gate/up manifest packages across five fixtures.
+- All four fail the hard gate due to tokens1 regression:
+
+| condition | decision | median improvement | max regression | note |
+| --- | --- | ---: | ---: | --- |
+| `layer8-gateup` | reject | 0 | 0.0102748871 | tokens201 improves, tokens1 worsens |
+| `layer8-gateupfit` | reject | 0 | 0.00478172302 | smaller tokens1 regression |
+| `layer8-up` | reject | 0 | 0.00839996338 | tokens201 improves, tokens1 worsens |
+| `layer8-upfit` | reject | 0 | 0.00354194641 | closest candidate |
+
+- `layer8-upfit` keeps tokens401 within the hard gate (`+0.00014591217`) and improves tokens201 (`-0.00267982483`), but still worsens tokens1 by `+0.00354194641`.
+- A weaker layer8-upfit-style package is a plausible next experiment.
+- Smoke-only CLI row-scale cannot tune `mlp.up_proj.weight`; `package-golden-prefix-smoke` currently accepts only `linear_attn.out_proj.weight`, `self_attn.o_proj.weight`, and `mlp.down_proj.weight`.
+
 ## Deliverables
 
 - `tools/summarize-qwen-prefix-smokes.py`

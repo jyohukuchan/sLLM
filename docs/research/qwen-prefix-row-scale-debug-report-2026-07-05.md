@@ -33,6 +33,7 @@ Input summary:
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-manifest-vs-no-row-scale-five-fixture-gates.md`
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-manifest-vs-p4p65-inproj-five-fixture-gates.md`
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-manifest-vs-p4p65-row3456-five-fixture-gates.md`
+- `benchmarks/results/2026-07-05/engine/qwen-prefix-manifest-vs-layer8-manifest-packages-five-fixture-gates.md`
 
 Gate settings:
 
@@ -69,6 +70,15 @@ Quantization-policy branch:
 | `p4p65-inproj` | reject | 5 | -0.797094345 | 1.39915657 | row3456 manifest compensation is missing |
 | `p4p65-row3456` | reject | 5 | -0.0370130539 | 0.26203537 | row3456 improves, but hidden3994 regresses |
 
+Layer8 manifest package branch:
+
+| condition | decision | fixtures | median improvement | max regression | reason |
+| --- | --- | ---: | ---: | ---: | --- |
+| `layer8-gateup` | reject | 5 | 0 | 0.0102748871 | tokens1 regression exceeds `0.001` |
+| `layer8-gateupfit` | reject | 5 | 0 | 0.00478172302 | tokens1 regression exceeds `0.001` |
+| `layer8-up` | reject | 5 | 0 | 0.00839996338 | tokens1 regression exceeds `0.001` |
+| `layer8-upfit` | reject | 5 | 0 | 0.00354194641 | tokens1 regression exceeds `0.001` |
+
 Interpretation:
 
 - Layer6 hidden3994 row-scale is a real local compensation candidate.
@@ -81,6 +91,7 @@ Interpretation:
 - The current manifest row-scale entries for row3456 are still useful. Removing them worsens four of five fixtures, so the next path is not to remove manifest compensation wholesale.
 - `p4p65-inproj` alone is not a fair replacement because it lacks row3456 compensation and regresses row3456-heavy fixtures.
 - `p4p65` plus the same row3456 smoke overrides still fails, mainly because hidden3994 worsens on tokens401.
+- Existing layer8 gate/up manifest packages are close but still fail: they improve tokens201 slightly and keep tokens401 inside the hard gate, but regress tokens1.
 
 ## Key Evidence
 
@@ -152,6 +163,14 @@ Quantization-policy probe:
   - tokens401: `0.959306717 -> 1.22134209`
 - Interpretation: the next package-level candidate needs to preserve row3456 compensation while targeting hidden3994 input-drift amplification more directly than `p4p65`.
 
+Layer8 manifest package probe:
+
+- The best of the tested layer8 manifest packages is `layer8-upfit`.
+- It improves tokens201 `1.140727997 -> 1.13804817` and tokens301 `1.371309280 -> 1.37123108`.
+- It keeps tokens401 inside the hard gate: `0.959306717 -> 0.959452629`, delta `+0.00014591217`.
+- It fails because tokens1 regresses `0.645338058 -> 0.648880005`, delta `+0.00354194641`.
+- Attempting to tune layer8 `mlp.up_proj.weight[6340]` through smoke-only row-scale is not supported by `package-golden-prefix-smoke`; that path requires manifest package generation or engine support for gate/up smoke overrides.
+
 ## Verification
 
 - `python3 -m py_compile tools/summarize-qwen-prefix-smokes.py`
@@ -161,6 +180,7 @@ Quantization-policy probe:
 - JSON parse checks for generated summary/candidate/gate artifacts.
 - JSON parse checks for five-fixture grid, no-row-scale comparison, coordinate-chain, and module-trace comparison artifacts.
 - JSON parse checks for p4p65 and p4p65+row3456 five-fixture summary/gate artifacts.
+- JSON parse checks for layer8 manifest package five-fixture summary/gate artifacts.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.
@@ -171,5 +191,5 @@ Quantization-policy probe:
 
 1. Treat layer6 hidden3994 MLP row-scale as rejected for unconditional promotion under the five-fixture gate.
 2. Do not promote `p4p65-inproj` or `p4p65+row3456`; both fail five-fixture gates.
-3. Search for a package-level candidate that keeps row3456 compensation and specifically reduces hidden3994 input-drift amplification.
+3. Search for a package-level candidate that keeps row3456 compensation and specifically reduces hidden3994 input-drift amplification. A weaker layer8-upfit-style manifest package is a plausible next experiment, but smoke-only tuning is not supported for `mlp.up_proj.weight`.
 4. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.

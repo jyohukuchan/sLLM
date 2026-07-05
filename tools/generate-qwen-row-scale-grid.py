@@ -13,6 +13,11 @@ from typing import Any
 
 SCHEMA_VERSION = "qwen-row-scale-grid-v0.1"
 SMOKE_SCHEMA_VERSION = "package-row-scale-overrides-v0.1"
+SUPPORTED_SMOKE_TENSOR_SUFFIXES = {
+    "linear_attn.out_proj.weight",
+    "self_attn.o_proj.weight",
+    "mlp.down_proj.weight",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,6 +156,12 @@ def main() -> int:
     tensor_suffix = args.tensor_suffix.strip()
     if not tensor_suffix:
         raise SystemExit("--tensor-suffix must not be empty")
+    if tensor_suffix not in SUPPORTED_SMOKE_TENSOR_SUFFIXES:
+        formatted = ", ".join(sorted(SUPPORTED_SMOKE_TENSOR_SUFFIXES))
+        raise SystemExit(
+            f"--tensor-suffix {tensor_suffix!r} is not supported by package-golden-prefix-smoke "
+            f"row-scale overrides; expected one of: {formatted}"
+        )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     label_prefix = safe_label(args.label_prefix)
