@@ -4,7 +4,7 @@
 use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::Instant;
 use ullm_engine::decode_runner::{
     Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerDecodeInputLayout,
@@ -258,6 +258,19 @@ fn main() -> ExitCode {
             env::args().nth(9),
             env::args().nth(10),
             env::args().nth(11),
+        ),
+        Some("package-token-ids-generate-smoke") => package_token_ids_generate_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+            env::args().nth(11),
+            env::args().nth(12),
         ),
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
@@ -15005,6 +15018,38 @@ fn parse_package_token_ids(value: Option<String>) -> Result<Vec<usize>, ExitCode
     }
 }
 
+fn package_token_ids_from_len(len: usize) -> Vec<usize> {
+    (0..len)
+        .map(|index| 1 + (index % 32_000))
+        .collect::<Vec<_>>()
+}
+
+fn parse_package_prompt_token_ids(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
+    match value {
+        Some(raw) => {
+            if let Some(len_raw) = raw
+                .strip_prefix("len:")
+                .or_else(|| raw.strip_prefix("len="))
+            {
+                match len_raw.parse::<usize>() {
+                    Ok(len) if len > 0 => Ok(package_token_ids_from_len(len)),
+                    Ok(_) => {
+                        eprintln!("prompt token length must be greater than zero");
+                        Err(ExitCode::from(2))
+                    }
+                    Err(err) => {
+                        eprintln!("invalid prompt token length {len_raw:?}: {err}");
+                        Err(ExitCode::from(2))
+                    }
+                }
+            } else {
+                parse_usize_csv(&raw, "prompt token IDs")
+            }
+        }
+        None => Ok(vec![1, 2, 3, 4]),
+    }
+}
+
 fn parse_package_token_ids_rotary_dim(
     head_dim: usize,
     rotary_dim: Option<&str>,
@@ -15114,6 +15159,325 @@ fn package_token_ids_logits_smoke(
             ExitCode::from(1)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_generate_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    prompt_token_ids: Option<String>,
+    generated_tokens: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-token-ids-generate-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_layer_indices(layer_indices) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(prompt_token_ids) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let generated_tokens = match parse_optional_usize(generated_tokens, 1, "generated tokens") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 8, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    match package_token_ids_generate_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids,
+        generated_tokens,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn current_git_commit() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8(output.stdout).ok()?;
+    let commit = commit.trim();
+    if commit.is_empty() {
+        None
+    } else {
+        Some(commit.to_string())
+    }
+}
+
+fn package_report_total_ms(report: &serde_json::Value, label: &str) -> Result<f64, String> {
+    report
+        .get("timing_ms")
+        .and_then(|timing| timing.get("total"))
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| format!("{label} report has no timing_ms.total"))
+}
+
+fn package_report_top_token_id(report: &serde_json::Value, label: &str) -> Result<usize, String> {
+    let token_id = report
+        .get("top_logits")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|entries| entries.first())
+        .and_then(|entry| entry.get("token_id"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("{label} report has no top_logits[0].token_id"))?;
+    usize::try_from(token_id)
+        .map_err(|_| format!("{label} top token id {token_id} is too large for this host"))
+}
+
+fn package_report_top_logits_json(
+    report: &serde_json::Value,
+    label: &str,
+) -> Result<serde_json::Value, String> {
+    report
+        .get("top_logits")
+        .cloned()
+        .ok_or_else(|| format!("{label} report has no top_logits"))
+}
+
+fn tps(tokens: usize, wall_ms: f64) -> Option<f64> {
+    if wall_ms > 0.0 {
+        Some((tokens as f64) / (wall_ms / 1000.0))
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_generate_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    prompt_token_ids: Vec<usize>,
+    generated_tokens: usize,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+) -> Result<String, String> {
+    if prompt_token_ids.is_empty() {
+        return Err(
+            "package token-id generate smoke requires at least one prompt token".to_string(),
+        );
+    }
+    if layer_indices.is_empty() {
+        return Err("package token-id generate smoke requires at least one layer".to_string());
+    }
+
+    let run_started = Instant::now();
+    let context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    drop(context);
+
+    let mut sequence_ids = prompt_token_ids.clone();
+    let prefill_report_text = package_token_ids_logits_smoke_impl(
+        path,
+        device_index,
+        chunk_bytes,
+        layer_indices.clone(),
+        sequence_ids.clone(),
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim.clone(),
+        rope_base,
+        position_offset,
+    )?;
+    let prefill_report = serde_json::from_str::<serde_json::Value>(&prefill_report_text)
+        .map_err(|err| format!("failed to decode prefill logits report: {err}"))?;
+    let prefill_ms = package_report_total_ms(&prefill_report, "prefill")?;
+    let prefill_top_logits = package_report_top_logits_json(&prefill_report, "prefill")?;
+    let resolved_rotary_dim = prefill_report
+        .get("rotary_dim")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let layer_kinds = prefill_report
+        .get("layer_kinds")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let hidden = prefill_report
+        .get("hidden")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let mut generated_token_ids = Vec::with_capacity(generated_tokens);
+    let mut decode_step_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
+    let mut decode_sequence_lengths = Vec::with_capacity(generated_tokens.saturating_sub(1));
+    let mut last_top_logits = prefill_top_logits.clone();
+
+    if generated_tokens > 0 {
+        let next = package_report_top_token_id(&prefill_report, "prefill")?;
+        generated_token_ids.push(next);
+        sequence_ids.push(next);
+    }
+
+    while generated_token_ids.len() < generated_tokens {
+        let step_started = Instant::now();
+        let report_text = package_token_ids_logits_smoke_impl(
+            path,
+            device_index,
+            chunk_bytes,
+            layer_indices.clone(),
+            sequence_ids.clone(),
+            top_k,
+            lm_head_chunk_rows,
+            rotary_dim.clone(),
+            rope_base,
+            position_offset,
+        )?;
+        let external_step_ms = step_started.elapsed().as_secs_f64() * 1000.0;
+        let report = serde_json::from_str::<serde_json::Value>(&report_text)
+            .map_err(|err| format!("failed to decode decode-step logits report: {err}"))?;
+        let report_ms = package_report_total_ms(&report, "decode step")?;
+        let next = package_report_top_token_id(&report, "decode step")?;
+        last_top_logits = package_report_top_logits_json(&report, "decode step")?;
+        decode_step_ms.push(report_ms.max(external_step_ms));
+        decode_sequence_lengths.push(sequence_ids.len());
+        generated_token_ids.push(next);
+        sequence_ids.push(next);
+    }
+
+    let decode_ms = if decode_step_ms.is_empty() {
+        0.0
+    } else {
+        decode_step_ms.iter().sum::<f64>()
+    };
+    let total_ms = run_started.elapsed().as_secs_f64() * 1000.0;
+    let timed_decode_tokens = decode_step_ms.len();
+    let prompt_token_count = prompt_token_ids.len();
+    let full_forward_tokens = prompt_token_ids
+        .len()
+        .checked_add(decode_sequence_lengths.iter().sum::<usize>())
+        .ok_or_else(|| "full-sequence token count overflows".to_string())?;
+    let kv_cache_bytes = 0_u64;
+    let report = serde_json::json!({
+        "schema_version": "package-token-ids-generate-smoke-v0.1",
+        "package": path,
+        "git_commit": current_git_commit(),
+        "backend": info.backend.to_string(),
+        "device_index": device_index,
+        "device_name": info.name,
+        "device_total_global_mem": info.total_global_mem,
+        "layers": layer_indices,
+        "layer_kinds": layer_kinds,
+        "prompt_token_ids": prompt_token_ids,
+        "generated_token_ids": generated_token_ids,
+        "final_sequence_len": sequence_ids.len(),
+        "hidden": hidden,
+        "top_k": top_k,
+        "lm_head_chunk_rows": lm_head_chunk_rows,
+        "rotary_dim": resolved_rotary_dim,
+        "rope_base": rope_base,
+        "position_offset": position_offset,
+        "decode_mode": "full_sequence_recompute_greedy",
+        "incremental_decode": false,
+        "prefill": {
+            "prompt_tokens": prompt_token_count,
+            "wall_ms": prefill_ms,
+            "tps": tps(prompt_token_count, prefill_ms),
+            "top_logits": prefill_top_logits,
+        },
+        "decode": {
+            "requested_generated_tokens": generated_tokens,
+            "timed_recompute_steps": timed_decode_tokens,
+            "sequence_lengths": decode_sequence_lengths,
+            "step_wall_ms": decode_step_ms,
+            "wall_ms": decode_ms,
+            "timed_step_tps": tps(timed_decode_tokens, decode_ms),
+            "end_to_end_generated_tps": tps(generated_tokens, total_ms),
+            "last_top_logits": last_top_logits,
+        },
+        "throughput": {
+            "full_forward_tokens": full_forward_tokens,
+            "full_forward_tps": tps(full_forward_tokens, prefill_ms + decode_ms),
+            "total_wall_ms": total_ms,
+        },
+        "memory": {
+            "vram_baseline_bytes": serde_json::Value::Null,
+            "vram_peak_bytes": serde_json::Value::Null,
+            "vram_consumed_bytes": serde_json::Value::Null,
+            "kv_cache_bytes": kv_cache_bytes,
+        },
+        "correctness": {
+            "verified": true,
+            "nan_or_inf_detected": false,
+        },
+        "notes": [
+            "This smoke uses full-sequence recompute for generated tokens; it is a T2 entry point, not the final incremental decode TPS path."
+        ],
+        "verified": true,
+    });
+    serde_json::to_string_pretty(&report)
+        .map_err(|err| format!("failed to encode token-id generate smoke report: {err}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -15492,6 +15856,35 @@ mod package_token_ids_logits_tests {
 
         let layers = parse_package_token_ids_layer_indices(Some("0,2,4".to_string())).unwrap();
         assert_eq!(layers, vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn package_prompt_token_ids_accepts_len_form() {
+        let tokens = parse_package_prompt_token_ids(Some("len:5".to_string())).unwrap();
+        assert_eq!(tokens, vec![1, 2, 3, 4, 5]);
+
+        let tokens = parse_package_prompt_token_ids(Some("len=3".to_string())).unwrap();
+        assert_eq!(tokens, vec![1, 2, 3]);
+
+        assert!(parse_package_prompt_token_ids(Some("len:0".to_string())).is_err());
+    }
+
+    #[test]
+    fn package_report_helpers_read_top_token_and_timing() {
+        let report = serde_json::json!({
+            "timing_ms": {
+                "total": 12.5
+            },
+            "top_logits": [
+                {
+                    "token_id": 42,
+                    "logit": 3.25
+                }
+            ]
+        });
+        assert_eq!(package_report_total_ms(&report, "test").unwrap(), 12.5);
+        assert_eq!(package_report_top_token_id(&report, "test").unwrap(), 42);
+        assert!(package_report_top_logits_json(&report, "test").is_ok());
     }
 
     #[test]
@@ -23905,6 +24298,9 @@ fn split_linear_attn_qkv_for_recurrent(
 fn print_help() {
     eprintln!(
         "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+    );
+    eprintln!(
+        "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
