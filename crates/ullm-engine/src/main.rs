@@ -21501,6 +21501,9 @@ fn package_linear_attn_stateful_step_smoke_impl(
         format!("model.language_model.layers.{layer_index}.linear_attn.conv1d.weight");
     let a_log_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.A_log");
     let dt_bias_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.dt_bias");
+    let norm_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.norm.weight");
+    let out_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.out_proj.weight");
     let conv = read_named_passthrough_f32(path, &conv_tensor, chunk_bytes)?;
     if conv.shape.len() != 3 || conv.shape[1] != 1 {
         return Err(format!(
@@ -21529,6 +21532,13 @@ fn package_linear_attn_stateful_step_smoke_impl(
         return Err(format!(
             "dt_bias length must match value_heads={value_heads}: len={}",
             dt_bias.values.len()
+        ));
+    }
+    let attn_norm = read_named_passthrough_f32(path, &norm_tensor, chunk_bytes)?;
+    if attn_norm.values.len() != value_dim {
+        return Err(format!(
+            "linear attention norm length must match value_dim={value_dim}: len={}",
+            attn_norm.values.len()
         ));
     }
 
@@ -21914,8 +21924,276 @@ fn package_linear_attn_stateful_step_smoke_impl(
         1e-5,
     )?;
 
+    let hidden_bytes = hidden
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention hidden byte size overflows".to_string())?;
+    let value_dim_bytes = value_dim
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention value dim byte size overflows".to_string())?;
+    let attn_norm_weight_bytes = encode_f32_to_bytes(&attn_norm.values);
+    let mut registry = WeightRegistry::new();
+    let (out_rows, out_cols, out_matrix) = materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &out_tensor,
+        chunk_bytes,
+    )?;
+    if out_rows != hidden || out_cols != hidden {
+        return Err(format!(
+            "linear attention out projection shape must be [{hidden},{hidden}], got [{out_rows},{out_cols}]"
+        ));
+    }
+
+    let mut attn_norm_weight_buffer =
+        context
+            .alloc_buffer(attn_norm_weight_bytes.len())
+            .map_err(|err| {
+                format!("failed to allocate stateful linear attention norm weight buffer: {err}")
+            })?;
+    let mut attn_norm_input_buffer = context.alloc_buffer(value_dim_bytes).map_err(|err| {
+        format!("failed to allocate stateful linear attention norm input buffer: {err}")
+    })?;
+    let mut attn_norm_output_buffer = context.alloc_buffer(value_dim_bytes).map_err(|err| {
+        format!("failed to allocate stateful linear attention norm output buffer: {err}")
+    })?;
+    let mut z_step_buffer = context
+        .alloc_buffer(hidden_bytes)
+        .map_err(|err| format!("failed to allocate stateful linear attention z buffer: {err}"))?;
+    let mut attn_normed_step_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        format!("failed to allocate stateful linear attention normed step buffer: {err}")
+    })?;
+    let mut attn_projection_input_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        format!("failed to allocate stateful linear attention projection input buffer: {err}")
+    })?;
+    let mut attn_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        format!("failed to allocate stateful linear attention output buffer: {err}")
+    })?;
+    let mut residual_step_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        format!("failed to allocate stateful linear attention residual buffer: {err}")
+    })?;
+    let mut attn_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        format!("failed to allocate stateful linear attention block buffer: {err}")
+    })?;
+    attn_norm_weight_buffer
+        .copy_from_host(0, &attn_norm_weight_bytes, Some(&mut stream))
+        .map_err(|err| format!("failed to copy stateful linear attention norm weight: {err}"))?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize stateful linear attention norm weight copy: {err}")
+    })?;
+
+    let mut runtime_attention_normed = Vec::with_capacity(run.attention_normed.len());
+    let mut runtime_attention_projection_input =
+        Vec::with_capacity(run.attention_projection_input.len());
+    let mut runtime_attention_output = Vec::with_capacity(run.attention_output.len());
+    let mut runtime_attention_block_output = Vec::with_capacity(run.attention_block_output.len());
+    for timestep in 0..sequence_len {
+        let hidden_start = timestep * hidden;
+        let hidden_end = hidden_start + hidden;
+        let recurrent_step_bytes =
+            encode_f32_to_bytes(&runtime_recurrent[hidden_start..hidden_end]);
+        let mut normed_step_bytes = vec![0_u8; hidden_bytes];
+        for value_head in 0..value_heads {
+            let row_element_start = value_head * value_dim;
+            let row_byte_start = row_element_start * std::mem::size_of::<f32>();
+            let row_byte_end = row_byte_start + value_dim_bytes;
+            attn_norm_input_buffer
+                .copy_from_host(
+                    0,
+                    &recurrent_step_bytes[row_byte_start..row_byte_end],
+                    Some(&mut stream),
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to copy stateful linear attention norm row {value_head} timestep {timestep}: {err}"
+                    )
+                })?;
+            ullm_runtime_sys::rmsnorm_f32(
+                &attn_norm_input_buffer,
+                &attn_norm_weight_buffer,
+                value_dim,
+                1e-6_f32,
+                &mut attn_norm_output_buffer,
+                Some(&mut stream),
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to run stateful linear attention norm row {value_head} timestep {timestep}: {err}"
+                )
+            })?;
+            stream.synchronize().map_err(|err| {
+                format!(
+                    "failed to synchronize stateful linear attention norm row {value_head} timestep {timestep}: {err}"
+                )
+            })?;
+            attn_norm_output_buffer
+                .copy_to_host(
+                    0,
+                    &mut normed_step_bytes[row_byte_start..row_byte_end],
+                    Some(&mut stream),
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to copy stateful linear attention norm row {value_head} timestep {timestep}: {err}"
+                    )
+                })?;
+            stream.synchronize().map_err(|err| {
+                format!(
+                    "failed to synchronize stateful linear attention norm copy row {value_head} timestep {timestep}: {err}"
+                )
+            })?;
+        }
+        runtime_attention_normed.extend(decode_f32_le_values(&normed_step_bytes));
+
+        z_step_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&run.attention_z_projection[hidden_start..hidden_end]),
+                Some(&mut stream),
+            )
+            .map_err(|err| {
+                format!("failed to copy stateful linear attention z timestep {timestep}: {err}")
+            })?;
+        attn_normed_step_buffer
+            .copy_from_host(0, &normed_step_bytes, Some(&mut stream))
+            .map_err(|err| {
+                format!(
+                    "failed to copy stateful linear attention normed timestep {timestep}: {err}"
+                )
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!(
+                "failed to synchronize stateful linear attention projection input timestep {timestep}: {err}"
+            )
+        })?;
+        ullm_runtime_sys::silu_mul_f32(
+            &z_step_buffer,
+            &attn_normed_step_buffer,
+            hidden,
+            &mut attn_projection_input_buffer,
+            Some(&mut stream),
+        )
+        .map_err(|err| {
+            format!("failed to run stateful linear attention SiLU-mul timestep {timestep}: {err}")
+        })?;
+        stream.synchronize().map_err(|err| {
+            format!(
+                "failed to synchronize stateful linear attention SiLU-mul timestep {timestep}: {err}"
+            )
+        })?;
+        let mut projection_input_bytes = vec![0_u8; hidden_bytes];
+        attn_projection_input_buffer
+            .copy_to_host(0, &mut projection_input_bytes, Some(&mut stream))
+            .map_err(|err| {
+                format!(
+                    "failed to copy stateful linear attention projection input timestep {timestep}: {err}"
+                )
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!(
+                "failed to synchronize stateful linear attention projection input copy timestep {timestep}: {err}"
+            )
+        })?;
+        runtime_attention_projection_input.extend(decode_f32_le_values(&projection_input_bytes));
+
+        ullm_runtime_sys::matvec_f32(
+            &out_matrix,
+            &attn_projection_input_buffer,
+            out_rows,
+            out_cols,
+            &mut attn_output_buffer,
+            Some(&mut stream),
+        )
+        .map_err(|err| {
+            format!(
+                "failed to run stateful linear attention out projection timestep {timestep}: {err}"
+            )
+        })?;
+        stream.synchronize().map_err(|err| {
+            format!(
+                "failed to synchronize stateful linear attention out projection timestep {timestep}: {err}"
+            )
+        })?;
+        let mut attention_output_bytes = vec![0_u8; hidden_bytes];
+        attn_output_buffer
+            .copy_to_host(0, &mut attention_output_bytes, Some(&mut stream))
+            .map_err(|err| {
+                format!(
+                    "failed to copy stateful linear attention output timestep {timestep}: {err}"
+                )
+            })?;
+        runtime_attention_output.extend(decode_f32_le_values(&attention_output_bytes));
+
+        let residual_step = linear_attn_step_input(&base_residual, timestep);
+        residual_step_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&residual_step), Some(&mut stream))
+            .map_err(|err| {
+                format!(
+                    "failed to copy stateful linear attention residual timestep {timestep}: {err}"
+                )
+            })?;
+        ullm_runtime_sys::add_f32(
+            &residual_step_buffer,
+            &attn_output_buffer,
+            hidden,
+            &mut attn_block_output_buffer,
+            Some(&mut stream),
+        )
+        .map_err(|err| {
+            format!(
+                "failed to run stateful linear attention residual add timestep {timestep}: {err}"
+            )
+        })?;
+        stream.synchronize().map_err(|err| {
+            format!(
+                "failed to synchronize stateful linear attention residual add timestep {timestep}: {err}"
+            )
+        })?;
+        let mut attention_block_bytes = vec![0_u8; hidden_bytes];
+        attn_block_output_buffer
+            .copy_to_host(0, &mut attention_block_bytes, Some(&mut stream))
+            .map_err(|err| {
+                format!("failed to copy stateful linear attention block timestep {timestep}: {err}")
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!(
+                "failed to synchronize stateful linear attention block copy timestep {timestep}: {err}"
+            )
+        })?;
+        runtime_attention_block_output.extend(decode_f32_le_values(&attention_block_bytes));
+    }
+    let runtime_attention_normed_max_abs_diff = verify_f32_close(
+        "package linear attention stateful runtime attention norm",
+        &runtime_attention_normed,
+        &run.attention_normed,
+        1e-3,
+        1e-5,
+    )?;
+    let runtime_attention_projection_input_max_abs_diff = verify_f32_close(
+        "package linear attention stateful runtime projection input",
+        &runtime_attention_projection_input,
+        &run.attention_projection_input,
+        1e-3,
+        1e-5,
+    )?;
+    let runtime_attention_output_max_abs_diff = verify_f32_close(
+        "package linear attention stateful runtime attention output",
+        &runtime_attention_output,
+        &run.attention_output,
+        3e-3,
+        2e-5,
+    )?;
+    let runtime_attention_block_max_abs_diff = verify_f32_close(
+        "package linear attention stateful runtime attention block",
+        &runtime_attention_block_output,
+        &run.attention_block_output,
+        3e-3,
+        2e-5,
+    )?;
+
     Ok(format!(
-        "package-linear-attn-stateful-step-smoke package={} layer={} sequence_len={} kernel_size={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} qkv_step_elements={} backend={} device_index={} name=\"{}\" conv_step_max_abs_diff={conv_step_max_abs_diff:.9} runtime_conv_step_max_abs_diff={runtime_conv_step_max_abs_diff:.9} conv_activation_step_max_abs_diff={conv_activation_step_max_abs_diff:.9} q_step_max_abs_diff={q_step_max_abs_diff:.9} k_step_max_abs_diff={k_step_max_abs_diff:.9} v_step_max_abs_diff={v_step_max_abs_diff:.9} gate_step_max_abs_diff={gate_step_max_abs_diff:.9} beta_step_max_abs_diff={beta_step_max_abs_diff:.9} recurrent_step_max_abs_diff={recurrent_step_max_abs_diff:.9} runtime_recurrent_step_max_abs_diff={runtime_recurrent_step_max_abs_diff:.9} verified=true",
+        "package-linear-attn-stateful-step-smoke package={} layer={} sequence_len={} kernel_size={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} qkv_step_elements={} backend={} device_index={} name=\"{}\" conv_step_max_abs_diff={conv_step_max_abs_diff:.9} runtime_conv_step_max_abs_diff={runtime_conv_step_max_abs_diff:.9} conv_activation_step_max_abs_diff={conv_activation_step_max_abs_diff:.9} q_step_max_abs_diff={q_step_max_abs_diff:.9} k_step_max_abs_diff={k_step_max_abs_diff:.9} v_step_max_abs_diff={v_step_max_abs_diff:.9} gate_step_max_abs_diff={gate_step_max_abs_diff:.9} beta_step_max_abs_diff={beta_step_max_abs_diff:.9} recurrent_step_max_abs_diff={recurrent_step_max_abs_diff:.9} runtime_recurrent_step_max_abs_diff={runtime_recurrent_step_max_abs_diff:.9} runtime_attention_normed_max_abs_diff={runtime_attention_normed_max_abs_diff:.9} runtime_attention_projection_input_max_abs_diff={runtime_attention_projection_input_max_abs_diff:.9} runtime_attention_output_max_abs_diff={runtime_attention_output_max_abs_diff:.9} runtime_attention_block_max_abs_diff={runtime_attention_block_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         sequence_len,
