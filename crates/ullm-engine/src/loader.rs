@@ -8,7 +8,7 @@ use crate::package::{
 };
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 use ullm_runtime_sys::{RuntimeBuffer, RuntimeContext, RuntimeStream};
@@ -62,6 +62,15 @@ pub struct PassthroughF32Data {
     pub values: Vec<f32>,
     pub dtype: String,
     pub shape: Vec<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PassthroughF32Rows {
+    pub values: Vec<f32>,
+    pub dtype: String,
+    pub shape: Vec<u64>,
+    pub row_indices: Vec<usize>,
+    pub columns: usize,
 }
 
 pub fn effective_rmsnorm_weight_values(tensor_name: &str, values: &[f32]) -> Vec<f32> {
@@ -196,6 +205,29 @@ pub fn read_named_passthrough_f32(
         values,
         dtype,
         shape: bundle.shape,
+    })
+}
+
+pub fn read_named_passthrough_f32_rows(
+    package_path: impl AsRef<Path>,
+    tensor_name: &str,
+    row_indices: &[usize],
+) -> Result<PassthroughF32Rows, String> {
+    let selector = TensorSelector::Name(tensor_name.to_string());
+    let bundle = select_passthrough_payload_bundle(package_path, &selector).map_err(|err| {
+        format!("failed to select package passthrough tensor {tensor_name}: {err}")
+    })?;
+    validate_passthrough_shape_elements(&bundle)
+        .map_err(|err| format!("invalid passthrough shape for {tensor_name}: {err}"))?;
+    let dtype = resolve_passthrough_dtype(&bundle, tensor_name)?.to_string();
+    let (columns, values) = read_passthrough_payload_f32_rows(&bundle, &dtype, row_indices)
+        .map_err(|err| format!("failed to read passthrough rows for {tensor_name}: {err}"))?;
+    Ok(PassthroughF32Rows {
+        values,
+        dtype,
+        shape: bundle.shape,
+        row_indices: row_indices.to_vec(),
+        columns,
     })
 }
 
@@ -400,7 +432,7 @@ pub fn resolve_passthrough_dtype<'a>(
 ) -> Result<&'a str, String> {
     if let Some(dtype) = bundle.dtype.as_deref() {
         return match dtype {
-            "BF16" | "F32" => Ok(dtype),
+            "BF16" | "F16" | "F32" => Ok(dtype),
             _ => Err(format!(
                 "unsupported passthrough dtype \"{dtype}\" for tensor {tensor_name}"
             )),
@@ -453,11 +485,22 @@ pub fn validate_passthrough_shape_elements(
     Ok(())
 }
 
+fn validate_passthrough_payload_encoding(bundle: &PassthroughPayloadBundle) -> Result<(), String> {
+    match bundle.payload_encoding.as_deref() {
+        None | Some("raw_safetensors_payload") => Ok(()),
+        Some(payload_encoding) => Err(format!(
+            "passthrough tensor {} has unsupported payload encoding {payload_encoding}",
+            bundle.tensor_name
+        )),
+    }
+}
+
 pub fn read_passthrough_payload_f32_bytes(
     bundle: &PassthroughPayloadBundle,
     chunk_bytes: usize,
     dtype: &str,
 ) -> Result<Vec<f32>, String> {
+    validate_passthrough_payload_encoding(bundle)?;
     let mut file = File::open(&bundle.payload_file.absolute_path).map_err(|err| {
         format!(
             "failed to open {}: {err}",
@@ -475,16 +518,7 @@ pub fn read_passthrough_payload_f32_bytes(
             bundle.tensor_name, payload_bytes, bundle.payload_file.bytes
         ));
     }
-    let element_size = match dtype {
-        "BF16" => 2_usize,
-        "F32" => 4_usize,
-        _ => {
-            return Err(format!(
-                "unsupported passthrough dtype {dtype} for tensor {}",
-                bundle.tensor_name
-            ));
-        }
-    };
+    let element_size = passthrough_element_size(dtype, &bundle.tensor_name)?;
     if chunk_bytes == 0 {
         return Err("chunk bytes must be greater than zero".to_string());
     }
@@ -507,11 +541,42 @@ pub fn read_passthrough_payload_f32_bytes(
         ));
     }
 
-    let mut values = Vec::with_capacity(expected_elements);
-    let mut scratch = vec![0_u8; chunk_bytes];
+    let mut values = Vec::new();
+    values.try_reserve(expected_elements).map_err(|err| {
+        format!(
+            "failed to reserve decoded passthrough values for tensor {}: {err}",
+            bundle.tensor_name
+        )
+    })?;
+    let mut scratch = Vec::new();
+    scratch.try_reserve(chunk_bytes).map_err(|err| {
+        format!(
+            "failed to reserve passthrough read buffer for tensor {}: {err}",
+            bundle.tensor_name
+        )
+    })?;
+    scratch.resize(chunk_bytes, 0_u8);
     let mut read_bytes = 0_usize;
-    let mut carry = Vec::with_capacity(element_size - 1);
-    let mut merge = Vec::with_capacity(chunk_bytes + element_size);
+    let mut carry = Vec::new();
+    carry.try_reserve(element_size - 1).map_err(|err| {
+        format!(
+            "failed to reserve passthrough carry buffer for tensor {}: {err}",
+            bundle.tensor_name
+        )
+    })?;
+    let merge_capacity = chunk_bytes.checked_add(element_size).ok_or_else(|| {
+        format!(
+            "passthrough tensor {} merge buffer size overflows",
+            bundle.tensor_name
+        )
+    })?;
+    let mut merge = Vec::new();
+    merge.try_reserve(merge_capacity).map_err(|err| {
+        format!(
+            "failed to reserve passthrough merge buffer for tensor {}: {err}",
+            bundle.tensor_name
+        )
+    })?;
     loop {
         let read = file.read(&mut scratch).map_err(|err| {
             format!(
@@ -541,15 +606,7 @@ pub fn read_passthrough_payload_f32_bytes(
 
         let decode_end = (merge.len() / element_size) * element_size;
         for bytes in merge[..decode_end].chunks_exact(element_size) {
-            let value = match dtype {
-                "BF16" => {
-                    let raw = u16::from_le_bytes([bytes[0], bytes[1]]);
-                    f32::from_bits(u32::from(raw) << 16)
-                }
-                "F32" => f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-                _ => unreachable!(),
-            };
-            values.push(value);
+            values.push(decode_passthrough_element(dtype, bytes));
         }
         if decode_end < merge.len() {
             carry.extend_from_slice(&merge[decode_end..]);
@@ -570,6 +627,192 @@ pub fn read_passthrough_payload_f32_bytes(
         ));
     }
     Ok(values)
+}
+
+pub fn read_passthrough_payload_f32_rows(
+    bundle: &PassthroughPayloadBundle,
+    dtype: &str,
+    row_indices: &[usize],
+) -> Result<(usize, Vec<f32>), String> {
+    validate_passthrough_payload_encoding(bundle)?;
+    let shape = match bundle.shape.as_slice() {
+        [rows, columns] => (*rows, *columns),
+        _ => {
+            return Err(format!(
+                "passthrough tensor {} must be 2D for row reads",
+                bundle.tensor_name
+            ));
+        }
+    };
+    let rows = usize::try_from(shape.0).map_err(|_| {
+        format!(
+            "passthrough tensor {} row count is too large",
+            bundle.tensor_name
+        )
+    })?;
+    let columns = usize::try_from(shape.1).map_err(|_| {
+        format!(
+            "passthrough tensor {} column count is too large",
+            bundle.tensor_name
+        )
+    })?;
+    let expected_elements = rows
+        .checked_mul(columns)
+        .ok_or_else(|| format!("passthrough tensor {} shape overflows", bundle.tensor_name))?;
+    if u64::try_from(expected_elements).ok() != Some(bundle.elements) {
+        return Err(format!(
+            "passthrough tensor {} shape has {expected_elements} elements, expected {}",
+            bundle.tensor_name, bundle.elements
+        ));
+    }
+    let element_size = passthrough_element_size(dtype, &bundle.tensor_name)?;
+    let row_bytes = columns.checked_mul(element_size).ok_or_else(|| {
+        format!(
+            "passthrough tensor {} row byte size overflows",
+            bundle.tensor_name
+        )
+    })?;
+    let payload_bytes = if bundle.payload_bytes == 0 {
+        bundle.payload_file.bytes
+    } else {
+        bundle.payload_bytes
+    };
+    if payload_bytes != bundle.payload_file.bytes {
+        return Err(format!(
+            "passthrough tensor {} payload bytes mismatch: declared {} actual {}",
+            bundle.tensor_name, payload_bytes, bundle.payload_file.bytes
+        ));
+    }
+    let expected_bytes = u64::try_from(expected_elements)
+        .ok()
+        .and_then(|elements| elements.checked_mul(u64::try_from(element_size).ok()?))
+        .ok_or_else(|| {
+            format!(
+                "passthrough tensor {} expected payload byte size overflows",
+                bundle.tensor_name
+            )
+        })?;
+    if payload_bytes != expected_bytes {
+        return Err(format!(
+            "passthrough tensor {} payload bytes mismatch: expected {} got {}",
+            bundle.tensor_name, expected_bytes, payload_bytes
+        ));
+    }
+
+    let mut file = File::open(&bundle.payload_file.absolute_path).map_err(|err| {
+        format!(
+            "failed to open {}: {err}",
+            bundle.payload_file.absolute_path.display()
+        )
+    })?;
+    let mut row_bytes_buf = Vec::new();
+    row_bytes_buf.try_reserve(row_bytes).map_err(|err| {
+        format!(
+            "failed to reserve passthrough row buffer for tensor {}: {err}",
+            bundle.tensor_name
+        )
+    })?;
+    row_bytes_buf.resize(row_bytes, 0_u8);
+    let output_elements = row_indices.len().checked_mul(columns).ok_or_else(|| {
+        format!(
+            "passthrough tensor {} row output overflows",
+            bundle.tensor_name
+        )
+    })?;
+    let mut values = Vec::new();
+    values.try_reserve(output_elements).map_err(|err| {
+        format!(
+            "failed to reserve decoded passthrough row values for tensor {}: {err}",
+            bundle.tensor_name
+        )
+    })?;
+    for row_index in row_indices {
+        if *row_index >= rows {
+            return Err(format!(
+                "passthrough tensor {} row index {} is out of range 0..{}",
+                bundle.tensor_name, row_index, rows
+            ));
+        }
+        let byte_offset = row_index
+            .checked_mul(row_bytes)
+            .and_then(|offset| u64::try_from(offset).ok())
+            .ok_or_else(|| {
+                format!(
+                    "passthrough tensor {} row byte offset overflows",
+                    bundle.tensor_name
+                )
+            })?;
+        file.seek(SeekFrom::Start(byte_offset)).map_err(|err| {
+            format!(
+                "failed to seek {} to row {}: {err}",
+                bundle.payload_file.absolute_path.display(),
+                row_index
+            )
+        })?;
+        file.read_exact(&mut row_bytes_buf).map_err(|err| {
+            format!(
+                "failed to read row {} from {}: {err}",
+                row_index,
+                bundle.payload_file.absolute_path.display()
+            )
+        })?;
+        for bytes in row_bytes_buf.chunks_exact(element_size) {
+            values.push(decode_passthrough_element(dtype, bytes));
+        }
+    }
+    Ok((columns, values))
+}
+
+fn passthrough_element_size(dtype: &str, tensor_name: &str) -> Result<usize, String> {
+    match dtype {
+        "BF16" => Ok(2),
+        "F16" => Ok(2),
+        "F32" => Ok(4),
+        _ => Err(format!(
+            "unsupported passthrough dtype {dtype} for tensor {tensor_name}"
+        )),
+    }
+}
+
+fn f16_to_f32(raw: u16) -> f32 {
+    let sign = (u32::from(raw & 0x8000)) << 16;
+    let exp = (raw >> 10) & 0x1f;
+    let frac = raw & 0x03ff;
+    let bits = if exp == 0 {
+        if frac == 0 {
+            sign
+        } else {
+            let mut frac_norm = frac;
+            let mut exp_unbiased = -14_i32;
+            while (frac_norm & 0x0400) == 0 {
+                frac_norm <<= 1;
+                exp_unbiased -= 1;
+            }
+            frac_norm &= 0x03ff;
+            sign | (((exp_unbiased + 127) as u32) << 23) | (u32::from(frac_norm) << 13)
+        }
+    } else if exp == 0x1f {
+        sign | 0x7f80_0000 | (u32::from(frac) << 13)
+    } else {
+        let exp_f32 = i32::from(exp) - 15 + 127;
+        sign | ((exp_f32 as u32) << 23) | (u32::from(frac) << 13)
+    };
+    f32::from_bits(bits)
+}
+
+fn decode_passthrough_element(dtype: &str, bytes: &[u8]) -> f32 {
+    match dtype {
+        "BF16" => {
+            let raw = u16::from_le_bytes([bytes[0], bytes[1]]);
+            f32::from_bits(u32::from(raw) << 16)
+        }
+        "F16" => {
+            let raw = u16::from_le_bytes([bytes[0], bytes[1]]);
+            f16_to_f32(raw)
+        }
+        "F32" => f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        _ => unreachable!(),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1019,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn read_named_passthrough_f32_decodes_bf16_and_f32_payloads() {
+    fn read_named_passthrough_f32_decodes_bf16_f16_and_f32_payloads() {
         let root = std::env::temp_dir().join(format!(
             "ullm-engine-loader-passthrough-f32-test-{}",
             SystemTime::now()
@@ -1031,6 +1274,11 @@ mod tests {
         fs::write(
             root.join("passthrough/bf16.raw"),
             [0x80_u8, 0x3f, 0x00, 0xc0],
+        )
+        .unwrap();
+        fs::write(
+            root.join("passthrough/f16.raw"),
+            [0x00_u8, 0x3e, 0x00, 0xb4],
         )
         .unwrap();
         fs::write(
@@ -1047,6 +1295,14 @@ mod tests {
                 "elements": 2,
                 "payload_bytes": 4,
                 "payload_file": "passthrough/bf16.raw"
+              }, {
+                "name": "model.layers.0.input_layernorm.bias",
+                "dtype": "F16",
+                "shape": [2],
+                "elements": 2,
+                "payload_bytes": 4,
+                "payload_encoding": "raw_safetensors_payload",
+                "payload_file": "passthrough/f16.raw"
               }, {
                 "name": "model.layers.0.linear_attn.dt_bias",
                 "dtype": "F32",
@@ -1065,11 +1321,131 @@ mod tests {
         assert_eq!(bf16.shape, vec![2]);
         assert_eq!(bf16.values, vec![1.0_f32, -2.0_f32]);
 
+        let f16 =
+            read_named_passthrough_f32(&root, "model.layers.0.input_layernorm.bias", 3).unwrap();
+        assert_eq!(f16.dtype, "F16");
+        assert_eq!(f16.shape, vec![2]);
+        assert_eq!(f16.values, vec![1.5_f32, -0.25_f32]);
+
         let f32 =
             read_named_passthrough_f32(&root, "model.layers.0.linear_attn.dt_bias", 3).unwrap();
         assert_eq!(f32.dtype, "F32");
         assert_eq!(f32.shape, vec![2]);
         assert_eq!(f32.values, vec![1.25_f32, -0.5_f32]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_named_passthrough_f32_rows_reads_selected_2d_rows() {
+        fn bf16_bytes(values: &[f32]) -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|value| ((value.to_bits() >> 16) as u16).to_le_bytes())
+                .collect()
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-passthrough-f32-rows-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("passthrough")).unwrap();
+        fs::write(
+            root.join("passthrough/embed.raw"),
+            bf16_bytes(&[1.0, 2.0, 3.0, 4.0, -1.0, -2.0]),
+        )
+        .unwrap();
+        fs::write(
+            root.join("passthrough/head.raw"),
+            [
+                0.25_f32.to_le_bytes(),
+                0.5_f32.to_le_bytes(),
+                0.75_f32.to_le_bytes(),
+                1.0_f32.to_le_bytes(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "passthrough_tensors": [{
+                "name": "model.embed_tokens.weight",
+                "dtype": "BF16",
+                "shape": [3, 2],
+                "elements": 6,
+                "payload_bytes": 12,
+                "payload_encoding": "raw_safetensors_payload",
+                "payload_file": "passthrough/embed.raw"
+              }, {
+                "name": "lm_head.weight",
+                "dtype": "F32",
+                "shape": [2, 2],
+                "elements": 4,
+                "payload_bytes": 16,
+                "payload_file": "passthrough/head.raw"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let rows = read_named_passthrough_f32_rows(&root, "model.embed_tokens.weight", &[2, 0, 2])
+            .unwrap();
+        assert_eq!(rows.dtype, "BF16");
+        assert_eq!(rows.shape, vec![3, 2]);
+        assert_eq!(rows.row_indices, vec![2, 0, 2]);
+        assert_eq!(rows.columns, 2);
+        assert_eq!(rows.values, vec![-1.0, -2.0, 1.0, 2.0, -1.0, -2.0]);
+
+        let rows = read_named_passthrough_f32_rows(&root, "lm_head.weight", &[1]).unwrap();
+        assert_eq!(rows.dtype, "F32");
+        assert_eq!(rows.columns, 2);
+        assert_eq!(rows.values, vec![0.75, 1.0]);
+
+        let err =
+            read_named_passthrough_f32_rows(&root, "model.embed_tokens.weight", &[3]).unwrap_err();
+        assert!(err.contains("out of range"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_named_passthrough_f32_rows_rejects_unsupported_payload_encoding() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-passthrough-encoding-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("passthrough")).unwrap();
+        fs::write(
+            root.join("passthrough/embed.raw"),
+            [0x80_u8, 0x3f, 0x00, 0x40],
+        )
+        .unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "passthrough_tensors": [{
+                "name": "model.embed_tokens.weight",
+                "dtype": "BF16",
+                "shape": [1, 2],
+                "elements": 2,
+                "payload_bytes": 4,
+                "payload_encoding": "compressed_payload",
+                "payload_file": "passthrough/embed.raw"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let err =
+            read_named_passthrough_f32_rows(&root, "model.embed_tokens.weight", &[0]).unwrap_err();
+        assert!(err.contains("unsupported payload encoding"));
 
         fs::remove_dir_all(root).unwrap();
     }

@@ -61,6 +61,8 @@ pub struct PassthroughPayloadBundle {
     pub shape: Vec<u64>,
     pub elements: u64,
     pub payload_bytes: u64,
+    pub payload_encoding: Option<String>,
+    pub payload_sha256: Option<String>,
     pub payload_file: ReferencedFile,
 }
 
@@ -182,6 +184,8 @@ struct PassthroughTensor {
     elements: u64,
     #[serde(default)]
     payload_bytes: u64,
+    payload_encoding: Option<String>,
+    payload_sha256: Option<String>,
     payload_file: Option<String>,
 }
 
@@ -443,6 +447,8 @@ fn passthrough_payload_bundle_from_manifest(
         shape: tensor.shape.clone(),
         elements: tensor.elements,
         payload_bytes: tensor.payload_bytes,
+        payload_encoding: tensor.payload_encoding.clone(),
+        payload_sha256: tensor.payload_sha256.clone(),
         payload_file,
     })
 }
@@ -800,6 +806,8 @@ mod tests {
                 "shape": [4],
                 "elements": 4,
                 "payload_bytes": 4,
+                "payload_encoding": "raw_safetensors_payload",
+                "payload_sha256": "unit-test-sha256",
                 "payload_file": "tensors/b.raw"
               }],
               "codebooks": [{
@@ -889,6 +897,14 @@ mod tests {
         assert_eq!(passthrough_bundle.shape, vec![4]);
         assert_eq!(passthrough_bundle.elements, 4);
         assert_eq!(passthrough_bundle.payload_bytes, 4);
+        assert_eq!(
+            passthrough_bundle.payload_encoding.as_deref(),
+            Some("raw_safetensors_payload")
+        );
+        assert_eq!(
+            passthrough_bundle.payload_sha256.as_deref(),
+            Some("unit-test-sha256")
+        );
         assert_eq!(
             passthrough_bundle.payload_file.relative_path,
             "tensors/b.raw"
