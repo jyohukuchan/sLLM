@@ -98,3 +98,35 @@ Prefilter:
 The candidate is useful evidence but not a solution: exact layer8 `mlp.up_proj.weight`
 high promotion improves tokens1 and worsens tokens401, so it preserves the same
 cross-fixture sign conflict.
+
+## Targeted Layer8 QKV Package
+
+Built package:
+
+- package: `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-qkv-high-row-scale-layer6-layer10.ullm.d`
+- plan: `qwen-hidden3994-policy-p4p46-plus-layer8-qkv-tensor-plan.json`
+- package summary: `ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-qkv-high-row-scale-layer6-layer10-jobs64.json`
+- verify log: `ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-qkv-high-row-scale-layer6-layer10-jobs64-verify.log`
+
+Build and verify:
+
+- selected tensors: `255`
+- passthrough tensors: `520`
+- codebooks: `13`
+- conversion failures: `0`
+- build wall time: `1:40.36`
+- max RSS: `3743064` KiB
+- independent verify: `255` quantized tensors and `520` passthrough tensors, exit `0`
+
+Prefilter:
+
+- matrix: `qwen-prefix-smoke-matrix-targeted-high-layer8-qkv-prefilter/summary.json`
+- summary: `qwen-prefix-targeted-high-layer8-qkv-prefilter-summary.json`
+- gate: `qwen-prefix-targeted-high-layer8-qkv-prefilter-gates.json`
+- tokens1: `0.645338058 -> 0.651521683`
+- tokens401: `0.959306717 -> 0.919565201`
+- decision: `reject`, max regression `0.00618362427`
+
+This candidate is also not a solution by itself. It moves the hard fixture in
+the desired direction while regressing tokens1, making combined qkv+MLP-up a
+more targeted follow-up than broad family promotion.

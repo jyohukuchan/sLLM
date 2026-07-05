@@ -463,6 +463,23 @@ Targeted package prefilter:
   - do not run the five-fixture matrix for layer8 `mlp.up_proj.weight` high-only.
   - the tokens401 sign conflict remains, so the next targeted policy probe should move to another tensor or upstream source.
 
+Targeted layer8 qkv prefilter:
+
+- Built `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-qkv-high-row-scale-layer6-layer10.ullm.d`.
+- The package also keeps the existing layer6/layer10 row3456 manifest compensation.
+- Package build:
+  - selected tensors: `255`
+  - passthrough tensors: `520`
+  - failures: `0`
+  - package verify: `255` quantized tensors and `520` passthrough tensors passed.
+- Prefilter result:
+  - tokens1 regresses: `0.645338058 -> 0.651521683`
+  - tokens401 improves: `0.959306717 -> 0.919565201`
+  - gate decision: `reject`, max regression `0.00618362427`
+- Decision:
+  - do not run the five-fixture matrix for layer8 `linear_attn.in_proj_qkv.weight` high-only.
+  - because qkv improves tokens401 while MLP-up improves tokens1, the next targeted policy probe should test their combination.
+
 ## Expected Outcome
 
 `layer8-upfit` の弱倍率はhard gate内には収まるが、aggregate improvementが不足し、tokens401を改善しないことが分かった。

@@ -1,0 +1,53 @@
+{
+  "baseline_condition": "baseline",
+  "candidates": [
+    {
+      "comparisons": [
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens1-baseline",
+          "baseline_layer": 11,
+          "baseline_max_abs_diff": 0.6453380584716797,
+          "baseline_token_index": 7,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens1-targeted-high-layer8-qkv",
+          "candidate_layer": 11,
+          "candidate_max_abs_diff": 0.6515216827392578,
+          "candidate_token_index": 7,
+          "delta": 0.006183624267578125,
+          "fixture": "tokens1",
+          "improvement": -0.006183624267578125
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens401-baseline",
+          "baseline_layer": 8,
+          "baseline_max_abs_diff": 0.9593067169189453,
+          "baseline_token_index": 9,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens401-targeted-high-layer8-qkv",
+          "candidate_layer": 8,
+          "candidate_max_abs_diff": 0.9195652008056641,
+          "candidate_token_index": 9,
+          "delta": -0.03974151611328125,
+          "fixture": "tokens401",
+          "improvement": 0.03974151611328125
+        }
+      ],
+      "condition": "targeted-high-layer8-qkv",
+      "decision": "reject",
+      "fixture_count": 2,
+      "max_regression": 0.006183624267578125,
+      "mean_improvement": 0.016778945922851562,
+      "median_improvement": 0.016778945922851562,
+      "reason": "fixture regression exceeds 0.001"
+    }
+  ],
+  "gates": {
+    "max_fixture_worsen": 0.001,
+    "min_fixture_count": 2,
+    "min_median_improvement": 0.005
+  },
+  "schema_version": "qwen-prefix-candidate-gates-v0.1",
+  "source_summary": "benchmarks/results/2026-07-05/engine/qwen-prefix-targeted-high-layer8-qkv-prefilter-summary.json"
+}
