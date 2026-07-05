@@ -25011,6 +25011,80 @@ fn runtime_host_depthwise_conv1d_f32(
     output
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct LinearAttnConv1dStepState {
+    channels: usize,
+    kernel_size: usize,
+    history: Vec<f32>,
+    seen_tokens: usize,
+}
+
+#[cfg(test)]
+impl LinearAttnConv1dStepState {
+    fn new(channels: usize, kernel_size: usize) -> Result<Self, String> {
+        if channels == 0 {
+            return Err("linear attention conv1d step channels must be greater than zero".into());
+        }
+        if kernel_size == 0 {
+            return Err(
+                "linear attention conv1d step kernel_size must be greater than zero".into(),
+            );
+        }
+        let history_len = channels
+            .checked_mul(kernel_size)
+            .ok_or_else(|| "linear attention conv1d step history size overflows".to_string())?;
+        Ok(Self {
+            channels,
+            kernel_size,
+            history: vec![0.0_f32; history_len],
+            seen_tokens: 0,
+        })
+    }
+
+    fn step(&mut self, current: &[f32], weight: &[f32]) -> Result<Vec<f32>, String> {
+        if current.len() != self.channels {
+            return Err(format!(
+                "linear attention conv1d step input length mismatch: got {} expected {}",
+                current.len(),
+                self.channels
+            ));
+        }
+        let expected_weight = self
+            .channels
+            .checked_mul(self.kernel_size)
+            .ok_or_else(|| "linear attention conv1d step weight size overflows".to_string())?;
+        if weight.len() != expected_weight {
+            return Err(format!(
+                "linear attention conv1d step weight length mismatch: got {} expected {}",
+                weight.len(),
+                expected_weight
+            ));
+        }
+
+        if self.kernel_size > 1 {
+            self.history.rotate_left(self.channels);
+        }
+        let latest_start = (self.kernel_size - 1) * self.channels;
+        self.history[latest_start..latest_start + self.channels].copy_from_slice(current);
+        self.seen_tokens = self
+            .seen_tokens
+            .checked_add(1)
+            .ok_or_else(|| "linear attention conv1d step count overflows".to_string())?;
+
+        let mut output = vec![0.0_f32; self.channels];
+        for channel in 0..self.channels {
+            let mut value = 0.0_f32;
+            for kernel in 0..self.kernel_size {
+                value += self.history[kernel * self.channels + channel]
+                    * weight[channel * self.kernel_size + kernel];
+            }
+            output[channel] = value;
+        }
+        Ok(output)
+    }
+}
+
 fn runtime_host_linear_attn_gate_beta_f32(
     a: &[f32],
     b: &[f32],
@@ -25139,6 +25213,184 @@ fn runtime_host_linear_attn_recurrent_f32(
         }
     }
     output
+}
+
+#[cfg(test)]
+mod linear_attn_step_state_tests {
+    use super::*;
+
+    #[test]
+    fn linear_attn_conv1d_step_matches_full_causal_conv() {
+        let channels = 5_usize;
+        let sequence_len = 6_usize;
+        let kernel_size = 3_usize;
+        let input = (0..channels * sequence_len)
+            .map(|index| ((index as f32) + 1.0) * 0.125)
+            .collect::<Vec<_>>();
+        let weight = (0..channels * kernel_size)
+            .map(|index| ((index as f32) - 3.0) * 0.0625)
+            .collect::<Vec<_>>();
+        let expected =
+            runtime_host_depthwise_conv1d_f32(&input, &weight, channels, sequence_len, kernel_size);
+
+        let mut state = LinearAttnConv1dStepState::new(channels, kernel_size).unwrap();
+        let mut stepped = Vec::with_capacity(input.len());
+        for current in input.chunks_exact(channels) {
+            stepped.extend(state.step(current, &weight).unwrap());
+        }
+
+        let diff = verify_f32_close(
+            "linear attention conv1d step",
+            &stepped,
+            &expected,
+            1e-6,
+            1e-6,
+        )
+        .unwrap();
+        assert_eq!(diff, 0.0);
+        assert_eq!(state.seen_tokens, sequence_len);
+    }
+
+    #[test]
+    fn linear_attn_stateful_host_steps_match_full_recurrent() {
+        let key_heads = 2_usize;
+        let value_heads = 4_usize;
+        let key_dim = 3_usize;
+        let value_dim = 2_usize;
+        let sequence_len = 5_usize;
+        let kernel_size = 3_usize;
+        let q_elements_per_step = key_heads * key_dim;
+        let k_elements_per_step = key_heads * key_dim;
+        let v_elements_per_step = value_heads * value_dim;
+        let qkv_step_elements = q_elements_per_step + k_elements_per_step + v_elements_per_step;
+        let q_scale = 1.0_f32 / (key_dim as f32).sqrt();
+
+        let qkv_input = (0..sequence_len * qkv_step_elements)
+            .map(|index| ((index % 17) as f32 + 1.0) * 0.03125)
+            .collect::<Vec<_>>();
+        let conv_weight = (0..qkv_step_elements * kernel_size)
+            .map(|index| ((index % 11) as f32 - 5.0) * 0.015625)
+            .collect::<Vec<_>>();
+        let a = (0..sequence_len * value_heads)
+            .map(|index| ((index % 7) as f32 - 2.0) * 0.125)
+            .collect::<Vec<_>>();
+        let b = (0..sequence_len * value_heads)
+            .map(|index| ((index % 5) as f32 - 1.0) * 0.09375)
+            .collect::<Vec<_>>();
+        let a_log = (0..value_heads)
+            .map(|index| -2.0 + (index as f32) * 0.125)
+            .collect::<Vec<_>>();
+        let dt_bias = (0..value_heads)
+            .map(|index| -0.25 + (index as f32) * 0.0625)
+            .collect::<Vec<_>>();
+
+        let full_conv = runtime_host_depthwise_conv1d_f32(
+            &qkv_input,
+            &conv_weight,
+            qkv_step_elements,
+            sequence_len,
+            kernel_size,
+        );
+        let full_conv_activated = runtime_host_silu_f32(&full_conv);
+        let full_qkv = split_linear_attn_qkv_for_recurrent(
+            &full_conv_activated,
+            sequence_len,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            true,
+            q_scale,
+        )
+        .unwrap();
+        let (full_gate, full_beta) = runtime_host_linear_attn_gate_beta_f32(
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            value_heads,
+            sequence_len,
+        );
+        let mut full_state = vec![0.0_f32; value_heads * key_dim * value_dim];
+        let full_recurrent = runtime_host_linear_attn_recurrent_f32(
+            &full_qkv.q,
+            &full_qkv.k,
+            &full_qkv.v,
+            &full_gate,
+            &full_beta,
+            key_heads,
+            value_heads,
+            sequence_len,
+            key_dim,
+            value_dim,
+            &mut full_state,
+        );
+
+        let mut conv_state =
+            LinearAttnConv1dStepState::new(qkv_step_elements, kernel_size).unwrap();
+        let mut recurrent_state = vec![0.0_f32; value_heads * key_dim * value_dim];
+        let mut stepped_recurrent = Vec::with_capacity(full_recurrent.len());
+        for timestep in 0..sequence_len {
+            let qkv_start = timestep * qkv_step_elements;
+            let qkv_end = qkv_start + qkv_step_elements;
+            let conv_step = conv_state
+                .step(&qkv_input[qkv_start..qkv_end], &conv_weight)
+                .unwrap();
+            let conv_step_activated = runtime_host_silu_f32(&conv_step);
+            let split = split_linear_attn_qkv_for_recurrent(
+                &conv_step_activated,
+                1,
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+                true,
+                q_scale,
+            )
+            .unwrap();
+            let gate_start = timestep * value_heads;
+            let gate_end = gate_start + value_heads;
+            let (gate_step, beta_step) = runtime_host_linear_attn_gate_beta_f32(
+                &a[gate_start..gate_end],
+                &b[gate_start..gate_end],
+                &a_log,
+                &dt_bias,
+                value_heads,
+                1,
+            );
+            let recurrent_step = runtime_host_linear_attn_recurrent_f32(
+                &split.q,
+                &split.k,
+                &split.v,
+                &gate_step,
+                &beta_step,
+                key_heads,
+                value_heads,
+                1,
+                key_dim,
+                value_dim,
+                &mut recurrent_state,
+            );
+            stepped_recurrent.extend(recurrent_step);
+        }
+
+        verify_f32_close(
+            "linear attention recurrent step output",
+            &stepped_recurrent,
+            &full_recurrent,
+            1e-6,
+            1e-6,
+        )
+        .unwrap();
+        verify_f32_close(
+            "linear attention recurrent step state",
+            &recurrent_state,
+            &full_state,
+            1e-6,
+            1e-6,
+        )
+        .unwrap();
+    }
 }
 
 fn format_f32_preview(values: &[f32]) -> String {
