@@ -1,0 +1,37 @@
+{
+  "dry_run": false,
+  "output_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-mlp-up-high-row-scale-layer6-layer10.ullm.d",
+  "row_scale_entry_count": 4,
+  "row_scale_overrides": {
+    "entries": [
+      {
+        "row_index": 3456,
+        "scale": 1.032273364777375,
+        "source": "golden-prefix-row-dot-sensitivity-layer6",
+        "tensor_name": "model.language_model.layers.6.linear_attn.out_proj.weight"
+      },
+      {
+        "row_index": 3456,
+        "scale": 1.036585679248007,
+        "source": "golden-prefix-row-dot-sensitivity-layer6",
+        "tensor_name": "model.language_model.layers.6.mlp.down_proj.weight"
+      },
+      {
+        "row_index": 3456,
+        "scale": 1.0230717930961908,
+        "source": "golden-prefix-row-dot-sensitivity-layer10",
+        "tensor_name": "model.language_model.layers.10.linear_attn.out_proj.weight"
+      },
+      {
+        "row_index": 3456,
+        "scale": 1.0416570117172528,
+        "source": "golden-prefix-row-dot-sensitivity-layer10",
+        "tensor_name": "model.language_model.layers.10.mlp.down_proj.weight"
+      }
+    ],
+    "schema_version": "row-scale-overrides-v0.1"
+  },
+  "row_scale_overrides_json": "benchmarks/results/2026-07-05/engine/package-row-scale-overrides-layer6-layer10-hidden3456-p4p46-inproj.json",
+  "schema_version": "qwen-row-scale-manifest-package-build-v0.1",
+  "source_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-mlp-up-high-reservoir65536-jobs64.ullm.d"
+}

@@ -65,3 +65,36 @@ The next policy experiment should be one of:
 3. Add row-aware or activation-aware policy input instead of family-wide high assignment.
 
 Given the weak layer8-up6340 result, option 2 or 3 is more aligned with the evidence than a broad family-wide package.
+
+## Targeted Layer8 MLP Up Package
+
+Built package:
+
+- quantizer package: `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-mlp-up-high-reservoir65536-jobs64.ullm.d`
+- row-scale manifest package: `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-mlp-up-high-row-scale-layer6-layer10.ullm.d`
+- package summary: `ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-mlp-up-high-reservoir65536-jobs64.json`
+- verify log: `ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-mlp-up-high-reservoir65536-jobs64-verify.log`
+- row-scale package build: `qwen-targeted-high-tensor-row-scale-layer6-layer10-package-build.json`
+
+Build and verify:
+
+- selected tensors: `255`
+- passthrough tensors: `520`
+- codebooks: `13`
+- conversion failures: `0`
+- build wall time: `1:34.98`
+- max RSS: `3734884` KiB
+- independent verify: `255` quantized tensors and `520` passthrough tensors, exit `0`
+
+Prefilter:
+
+- matrix: `qwen-prefix-smoke-matrix-targeted-high-layer8-mlp-up-prefilter/summary.json`
+- summary: `qwen-prefix-targeted-high-layer8-mlp-up-prefilter-summary.json`
+- gate: `qwen-prefix-targeted-high-layer8-mlp-up-prefilter-gates.json`
+- tokens1: `0.645338058 -> 0.627647400`
+- tokens401: `0.959306717 -> 0.974622726`
+- decision: `reject`, max regression `0.0153160095`
+
+The candidate is useful evidence but not a solution: exact layer8 `mlp.up_proj.weight`
+high promotion improves tokens1 and worsens tokens401, so it preserves the same
+cross-fixture sign conflict.

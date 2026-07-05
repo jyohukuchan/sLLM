@@ -235,6 +235,32 @@ Per-tensor high-format override:
   - estimated output increase over baseline: `3145728` bytes
 - This confirms the next experiment can promote the target layer8 tensor without raising every `mlp_up` tensor.
 
+Targeted layer8 `mlp.up_proj.weight` high-format package:
+
+- Package with existing layer6/layer10 row3456 manifest compensation:
+  - `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-mlp-up-high-row-scale-layer6-layer10.ullm.d`
+- Build result:
+  - selected tensors: `255`
+  - passthrough tensors: `520`
+  - codebooks: `13`
+  - failures: `0`
+  - total file bytes: `9125754993`
+  - build wall time: `1:34.98`
+  - max RSS: `3734884` KiB
+- Independent package verify:
+  - quantized tensors: `255`
+  - passthrough tensors: `520`
+  - passthrough payload bytes: `5049777120`
+  - wall time: `0:51.78`
+  - exit status: `0`
+- Two-fixture prefilter:
+  - tokens1: `0.645338058 -> 0.627647400` (`-0.0176906586`)
+  - tokens401: `0.959306717 -> 0.974622726` (`+0.0153160095`)
+  - decision: `reject`
+- Interpretation:
+  - exact layer8 `mlp.up_proj.weight` high-format promotion helps tokens1 but worsens tokens401.
+  - This is the same fixture sign-conflict pattern seen in manifest row-scale work, so this candidate is not a solution.
+
 ## Verification
 
 - `python3 -m py_compile tools/summarize-qwen-prefix-smokes.py`
@@ -248,6 +274,7 @@ Per-tensor high-format override:
 - JSON parse checks for weak layer8-up6340 manifest grid, selected five-fixture summary/gate artifacts, chain comparison, and tokens401 layer8 local prefilter artifacts.
 - JSON parse checks for quantizer policy dry-run plan artifacts.
 - `cargo fmt --all --check`, `cargo check -p ullm-quant`, and `cargo test -p ullm-quant -- --test-threads=1` for the per-tensor high-format override.
+- Targeted layer8 `mlp.up_proj.weight` high-format package build, independent package verify, and two-fixture prefilter gate.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.
@@ -260,5 +287,6 @@ Per-tensor high-format override:
 2. Do not promote `p4p65-inproj` or `p4p65+row3456`; both fail five-fixture gates.
 3. Do not promote weak `layer8-up6340`; it is hard-gate safe at low scale but aggregate effect is too small and tokens401 does not improve.
 4. Do not continue direct tokens401 layer8 local row-scale as a general fix; it strongly regresses tokens1.
-5. Prefer a narrower tensor override policy or activation-aware / row-aware quantizer policy over broad family-wide row-scale work.
-6. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.
+5. Do not promote exact layer8 `mlp.up_proj.weight` high-format override; it improves tokens1 but fails tokens401 prefilter.
+6. Prefer another targeted upstream tensor probe or activation-aware / row-aware quantizer policy over broad family-wide row-scale work.
+7. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.
