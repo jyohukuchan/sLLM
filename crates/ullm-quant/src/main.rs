@@ -114,6 +114,7 @@ struct Options {
     scale_window: usize,
     aq_policy: String,
     aq_high_families: Vec<String>,
+    aq_high_tensors: Vec<String>,
     aq_low_format: String,
     aq_high_format: String,
     aq_codebook_max_elements: Option<usize>,
@@ -248,6 +249,8 @@ struct AqPolicyPlan {
     low_format: String,
     high_format: String,
     high_families: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    high_tensors: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -571,6 +574,7 @@ fn parse_options() -> Result<Options, String> {
         scale_window: 0,
         aq_policy: "all-g16".to_string(),
         aq_high_families: Vec::new(),
+        aq_high_tensors: Vec::new(),
         aq_low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
         aq_high_format: "aq4_e4m3_g8_ts_flloyd16".to_string(),
         aq_codebook_max_elements: None,
@@ -755,6 +759,12 @@ fn parse_options() -> Result<Options, String> {
                         .ok_or_else(|| "--aq-high-family requires a value".to_string())?,
                 );
             }
+            "--aq-high-tensor" => {
+                options.aq_high_tensors.push(
+                    args.next()
+                        .ok_or_else(|| "--aq-high-tensor requires a value".to_string())?,
+                );
+            }
             "--aq-low-format" => {
                 options.aq_low_format = args
                     .next()
@@ -853,6 +863,9 @@ fn print_help() {
         "  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, p4p46_inproj, p4p65_inproj, or custom"
     );
     println!("  --aq-high-family <FAMILY>     high-format family for custom policy; repeatable");
+    println!(
+        "  --aq-high-tensor <NAME>       exact tensor name to force to high format; repeatable"
+    );
     println!("  --aq-low-format <ID>          low-budget aq candidate id");
     println!("  --aq-high-format <ID>         high-budget aq candidate id");
     println!("  --aq-codebook-max-elements <N> split plan codebook scopes at about N parameters");
@@ -1003,11 +1016,21 @@ fn resolve_aq_policy(options: &Options) -> Result<AqPolicyPlan, String> {
             unknown_families.join(",")
         ));
     }
+    let high_tensors: BTreeSet<String> = options.aq_high_tensors.iter().cloned().collect();
+    let empty_high_tensors: Vec<_> = high_tensors
+        .iter()
+        .filter(|name| name.is_empty())
+        .cloned()
+        .collect();
+    if !empty_high_tensors.is_empty() {
+        return Err("--aq-high-tensor values must not be empty".to_string());
+    }
     Ok(AqPolicyPlan {
         policy_id: options.aq_policy.clone(),
         low_format: options.aq_low_format.clone(),
         high_format: options.aq_high_format.clone(),
         high_families: high_families.into_iter().collect(),
+        high_tensors: high_tensors.into_iter().collect(),
     })
 }
 
@@ -1017,13 +1040,16 @@ fn is_supported_input(dtype: &str, shape: &[usize], family: &str) -> bool {
 
 fn quant_assignment(
     supported_input: bool,
+    tensor_name: &str,
     family: &str,
     policy: &AqPolicyPlan,
 ) -> (Option<String>, Option<String>) {
     if !supported_input {
         return (None, None);
     }
-    if policy.high_families.iter().any(|item| item == family) {
+    if policy.high_tensors.iter().any(|item| item == tensor_name)
+        || policy.high_families.iter().any(|item| item == family)
+    {
         (Some(policy.high_format.clone()), Some("high".to_string()))
     } else {
         (Some(policy.low_format.clone()), Some("low".to_string()))
@@ -3718,7 +3744,8 @@ fn build_model_plan(
                 tensor_payload_bytes(&header).map_err(|err| format!("{err} for tensor {name}"))?;
             let family = family_for_tensor(&name).to_string();
             let supported_input = is_supported_input(&header.dtype, &header.shape, &family);
-            let (quant_format, quant_role) = quant_assignment(supported_input, &family, aq_policy);
+            let (quant_format, quant_role) =
+                quant_assignment(supported_input, &name, &family, aq_policy);
             let estimated_output_bytes =
                 estimate_output_bytes(n_elements, n_bytes, quant_format.as_deref())?;
             let estimated_effective_bpp = effective_bpp(n_elements, estimated_output_bytes);
@@ -3840,6 +3867,7 @@ fn run() -> Result<(), String> {
     println!("aq_low_format={}", aq_policy.low_format);
     println!("aq_high_format={}", aq_policy.high_format);
     println!("aq_high_families={}", aq_policy.high_families.join(","));
+    println!("aq_high_tensors={}", aq_policy.high_tensors.join(","));
     println!("dry_run={}", options.dry_run);
     println!("pack_smoke=ok {packed:?}");
     if let Some(plan) = &plan {
@@ -4475,6 +4503,7 @@ mod tests {
             scale_window: 0,
             aq_policy: policy.to_string(),
             aq_high_families: Vec::new(),
+            aq_high_tensors: Vec::new(),
             aq_low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
             aq_high_format: "aq4_e4m3_g8_ts_flloyd16".to_string(),
             aq_codebook_max_elements: None,
@@ -4485,11 +4514,17 @@ mod tests {
     #[test]
     fn p4p6_assigns_attention_to_high_and_mlp_up_to_low() {
         let policy = resolve_aq_policy(&test_options("p4p6")).expect("p4p6 policy");
-        let (format, role) = quant_assignment(true, "attn_k", &policy);
+        let (format, role) = quant_assignment(
+            true,
+            "model.layers.0.self_attn.k_proj.weight",
+            "attn_k",
+            &policy,
+        );
         assert_eq!(format.as_deref(), Some("aq4_e4m3_g8_ts_flloyd16"));
         assert_eq!(role.as_deref(), Some("high"));
 
-        let (format, role) = quant_assignment(true, "mlp_up", &policy);
+        let (format, role) =
+            quant_assignment(true, "model.layers.0.mlp.up_proj.weight", "mlp_up", &policy);
         assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
         assert_eq!(role.as_deref(), Some("low"));
     }
@@ -4497,10 +4532,20 @@ mod tests {
     #[test]
     fn inproj_policy_presets_assign_expected_families() {
         let policy = resolve_aq_policy(&test_options("p4p46_inproj")).expect("p4p46 policy");
-        let (format, role) = quant_assignment(true, "linear_attn_a", &policy);
+        let (format, role) = quant_assignment(
+            true,
+            "model.language_model.layers.0.linear_attn.in_proj_a.weight",
+            "linear_attn_a",
+            &policy,
+        );
         assert_eq!(format.as_deref(), Some("aq4_e4m3_g8_ts_flloyd16"));
         assert_eq!(role.as_deref(), Some("high"));
-        let (format, role) = quant_assignment(true, "linear_attn_qkv", &policy);
+        let (format, role) = quant_assignment(
+            true,
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+            "linear_attn_qkv",
+            &policy,
+        );
         assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
         assert_eq!(role.as_deref(), Some("low"));
 
@@ -4508,14 +4553,51 @@ mod tests {
         assert_eq!(policy.high_families, alias_policy.high_families);
 
         let policy = resolve_aq_policy(&test_options("p4p65_inproj")).expect("p4p65 policy");
-        let (format, role) = quant_assignment(true, "linear_attn_qkv", &policy);
+        let (format, role) = quant_assignment(
+            true,
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+            "linear_attn_qkv",
+            &policy,
+        );
         assert_eq!(format.as_deref(), Some("aq4_e4m3_g8_ts_flloyd16"));
         assert_eq!(role.as_deref(), Some("high"));
-        let (format, role) = quant_assignment(true, "linear_attn_z", &policy);
+        let (format, role) = quant_assignment(
+            true,
+            "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+            "linear_attn_z",
+            &policy,
+        );
         assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
         assert_eq!(role.as_deref(), Some("low"));
         let alias_policy = resolve_aq_policy(&test_options("p4p65")).expect("p4p65 alias");
         assert_eq!(policy.high_families, alias_policy.high_families);
+    }
+
+    #[test]
+    fn high_tensor_override_promotes_exact_tensor_only() {
+        let target = "model.language_model.layers.8.mlp.up_proj.weight";
+        let mut options = test_options("p4p46_inproj");
+        options.aq_high_tensors.push(target.to_string());
+        let policy = resolve_aq_policy(&options).expect("policy with tensor override");
+
+        assert_eq!(policy.high_tensors, vec![target.to_string()]);
+
+        let (format, role) = quant_assignment(true, target, "mlp_up", &policy);
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g8_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("high"));
+
+        let (format, role) = quant_assignment(
+            true,
+            "model.language_model.layers.9.mlp.up_proj.weight",
+            "mlp_up",
+            &policy,
+        );
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("low"));
+
+        let (format, role) = quant_assignment(false, target, "mlp_up", &policy);
+        assert_eq!(format, None);
+        assert_eq!(role, None);
     }
 
     #[test]
@@ -4552,6 +4634,7 @@ mod tests {
                 low_format: "aq4_e4m3_g16_ts_flloyd16".to_string(),
                 high_format: "aq4_e4m3_g8_ts_flloyd16".to_string(),
                 high_families: vec!["attn_k".to_string()],
+                high_tensors: Vec::new(),
             },
             codebook_scope_max_elements: None,
             tensor_count: 5,

@@ -7,15 +7,16 @@ The next branch is quantizer policy, starting with dry-run cost checks before bu
 
 ## Current Policy Boundary
 
-`ullm-quant` currently assigns AQ formats at tensor-family granularity.
+`ullm-quant` originally assigned AQ formats at tensor-family granularity.
 
 - policy resolution: `resolve_aq_policy`
 - family detection: `family_for_tensor`
 - format assignment: `quant_assignment`
 - direct package conversion boundary: `run_one_direct_package_convert`
 
-There is no row-level or activation-stat input in the current quantizer path.
-The smallest existing policy experiment is therefore a custom family-level policy.
+There is still no row-level or activation-stat input in the current quantizer
+path. A repeatable exact-name override, `--aq-high-tensor <TENSOR_NAME>`, was
+added as the smallest narrower policy branch before building another package.
 
 ## Dry-Run Candidates
 
@@ -40,6 +41,18 @@ Custom `p4p46 + mlp_up`:
 - estimated output bytes: `9225731040`
 - estimated output increase: `103809024` bytes
 
+Targeted `p4p46 + layer8 mlp.up_proj.weight`:
+
+- command output: `qwen-hidden3994-policy-p4p46-plus-layer8-mlp-up-tensor-dry-run.txt`
+- plan: `qwen-hidden3994-policy-p4p46-plus-layer8-mlp-up-tensor-plan.json`
+- high tensors: baseline p4p46 high tensors plus `model.language_model.layers.8.mlp.up_proj.weight`
+- supported tensors: `255`
+- high tensors: `115`
+- low tensors: `140`
+- estimated output bytes: `9125067744`
+- estimated output increase over baseline: `3145728` bytes
+- exact override check: layer8 `mlp.up_proj.weight` is high, while layer9 `mlp.up_proj.weight` remains low.
+
 ## Interpretation
 
 Raising all `mlp_up` tensors is cheap in estimated package size, but it is broad.
@@ -48,7 +61,7 @@ It is not activation-aware and may repeat the same problem seen with `p4p65`: fa
 The next policy experiment should be one of:
 
 1. Build `p4p46 + mlp_up` only if a broad family probe is acceptable.
-2. Add a narrower tensor override policy, such as high-format only for selected `model.language_model.layers.N.mlp.up_proj.weight` tensors.
+2. Build and smoke the narrower tensor override package.
 3. Add row-aware or activation-aware policy input instead of family-wide high assignment.
 
 Given the weak layer8-up6340 result, option 2 or 3 is more aligned with the evidence than a broad family-wide package.

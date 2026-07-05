@@ -436,6 +436,16 @@ Quantizer policy dry-run:
   - family-wide `mlp_up` high assignment is not expensive in size, but it is broad and not activation-aware.
   - A narrower tensor override policy or activation-aware row policy is more aligned with the current evidence than another broad family-wide package.
 
+Per-tensor policy override implementation:
+
+- Added repeatable `--aq-high-tensor <TENSOR_NAME>` to `ullm-quant`.
+- Dry-run `p4p46_inproj + model.language_model.layers.8.mlp.up_proj.weight`:
+  - high tensors: `115`
+  - low tensors: `140`
+  - estimated output bytes: `9125067744`
+  - estimated output increase over baseline: `3145728` bytes
+- The layer8 `mlp.up_proj.weight` tensor is high format while the neighboring layer9 `mlp.up_proj.weight` remains low format.
+
 ## Expected Outcome
 
 `layer8-upfit` の弱倍率はhard gate内には収まるが、aggregate improvementが不足し、tokens401を改善しないことが分かった。

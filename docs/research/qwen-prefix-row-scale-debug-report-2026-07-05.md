@@ -225,6 +225,16 @@ Quantizer policy branch dry-run:
   - It is still broad and not activation-aware, so it may repeat the p4p65 pattern of cross-fixture regressions.
   - The evidence now favors a narrower tensor override policy or activation-aware row policy over another broad family-wide package.
 
+Per-tensor high-format override:
+
+- Added repeatable `--aq-high-tensor <TENSOR_NAME>` to `ullm-quant`.
+- Dry-run `p4p46_inproj + model.language_model.layers.8.mlp.up_proj.weight`:
+  - high tensors: `115`
+  - low tensors: `140`
+  - estimated output bytes: `9125067744`
+  - estimated output increase over baseline: `3145728` bytes
+- This confirms the next experiment can promote the target layer8 tensor without raising every `mlp_up` tensor.
+
 ## Verification
 
 - `python3 -m py_compile tools/summarize-qwen-prefix-smokes.py`
@@ -237,6 +247,7 @@ Quantizer policy branch dry-run:
 - JSON parse checks for layer8 manifest package five-fixture summary/gate artifacts.
 - JSON parse checks for weak layer8-up6340 manifest grid, selected five-fixture summary/gate artifacts, chain comparison, and tokens401 layer8 local prefilter artifacts.
 - JSON parse checks for quantizer policy dry-run plan artifacts.
+- `cargo fmt --all --check`, `cargo check -p ullm-quant`, and `cargo test -p ullm-quant -- --test-threads=1` for the per-tensor high-format override.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.

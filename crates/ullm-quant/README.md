@@ -150,3 +150,7 @@ Policy presets:
   `linear_attn_b`, `linear_attn_out`, and `linear_attn_qkv` use the
   high-budget format.
 - `custom`: use repeated `--aq-high-family <FAMILY>`.
+
+`--aq-high-tensor <TENSOR_NAME>` can be repeated with any policy to force exact
+supported tensor names to the high-budget format without promoting the whole
+tensor family.
