@@ -15005,6 +15005,31 @@ fn parse_package_token_ids(value: Option<String>) -> Result<Vec<usize>, ExitCode
     }
 }
 
+fn parse_package_token_ids_rotary_dim(
+    head_dim: usize,
+    rotary_dim: Option<&str>,
+) -> Result<usize, String> {
+    let rotary_dim = match rotary_dim {
+        Some(raw) => raw
+            .parse::<usize>()
+            .map_err(|err| format!("invalid rotary dim {raw:?}: {err}"))?,
+        None => {
+            let candidate = if head_dim >= 4 {
+                head_dim / 4
+            } else {
+                head_dim
+            };
+            candidate - (candidate % 2)
+        }
+    };
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        return Err(format!(
+            "rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim}, head_dim={head_dim}"
+        ));
+    }
+    Ok(rotary_dim)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn package_token_ids_logits_smoke(
     path: Option<String>,
@@ -15121,31 +15146,29 @@ fn package_token_ids_logits_smoke_impl(
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
 
-    let load_started = Instant::now();
-    let model = Qwen3PackageModelRuntime::load(
-        &mut context,
-        &mut stream,
-        path,
-        chunk_bytes,
-        &layer_indices,
-    )
-    .map_err(|err| format!("failed to load Qwen3 package model runtime: {err}"))?;
-    let model_load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
-    let rotary_dim = parse_package_model_loop_rotary_dim(&model, rotary_dim)?;
-
     let embed_started = Instant::now();
     let embedding_rows =
         read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &token_ids)
             .map_err(|err| format!("failed to read token embedding rows: {err}"))?;
-    if embedding_rows.columns != model.hidden {
+    let hidden = embedding_rows.columns;
+    if hidden == 0 {
+        return Err("embedding hidden size must be greater than zero".to_string());
+    }
+    if embedding_rows.shape.len() != 2 {
         return Err(format!(
-            "embedding hidden size mismatch: columns={} model_hidden={}",
-            embedding_rows.columns, model.hidden
+            "embedding tensor must be 2D, got shape {:?}",
+            embedding_rows.shape
+        ));
+    }
+    if embedding_rows.columns != hidden {
+        return Err(format!(
+            "embedding hidden size mismatch: columns={} hidden={hidden}",
+            embedding_rows.columns
         ));
     }
     let sequence_len = token_ids.len();
     let expected_embedding_values = sequence_len
-        .checked_mul(model.hidden)
+        .checked_mul(hidden)
         .ok_or_else(|| "embedding output size overflows".to_string())?;
     if embedding_rows.values.len() != expected_embedding_values {
         return Err(format!(
@@ -15159,54 +15182,131 @@ fn package_token_ids_logits_smoke_impl(
     let block_size = sequence_len;
     let cache_blocks = 1_usize;
     let block_table = vec![0_u32];
-    let decode_shape =
-        Qwen3PackageModelDecodePlan::from_model(&model, block_size, cache_blocks)?.decode_shape;
     let mut residual_sequence = embedding_rows.values;
 
+    let mut layer_kinds = Vec::with_capacity(layer_indices.len());
+    let mut self_attn_shape = None;
+    let mut self_attn_rotary_dim = None;
+    let mut layer_load_ms = 0.0_f64;
     let layer_started = Instant::now();
-    for (layer_position, layer) in model.layers.iter().enumerate() {
-        let prepared = qwen3_self_attn_prepare_model_loop_sequence_smoke(
-            &mut context,
-            &mut stream,
-            &layer.weights.self_attn,
-            residual_sequence,
-            sequence_len,
-            rotary_dim,
-            rope_base,
-            position_offset,
-            &layer.input_norm,
-            &layer.q_norm,
-            &layer.k_norm,
-            &block_table,
-            block_size,
-            cache_blocks,
-            &format!(
-                "package-token-ids-logits-smoke layer {} position {}",
-                layer.layer_index, layer_position
-            ),
-        )?;
-        let layer_output = qwen3_decoder_layer_sequence_to_host_f32(
-            &layer.weights,
-            &mut context,
-            &mut stream,
-            decode_shape,
-            &block_table,
-            prepared.softmax_scale,
-            model.mlp_epsilon,
-            &prepared.q_rope,
-            &prepared.k_rope,
-            &prepared.v_projected,
-            prepared.q_gate.as_deref(),
-            &prepared.residual_sequence,
-            sequence_len,
-        )
-        .map_err(|err| {
-            format!(
-                "failed to run package token-id logits layer {}: {err}",
-                layer.layer_index
-            )
-        })?;
-        residual_sequence = layer_output.layer_output;
+    for (layer_position, &layer_index) in layer_indices.iter().enumerate() {
+        let layer_kind = package_decoder_layer_kind(path, layer_index)
+            .map_err(|err| format!("failed to identify package layer {layer_index}: {err}"))?;
+        layer_kinds.push(layer_kind.as_str());
+        match layer_kind {
+            PackageDecoderLayerKind::SelfAttention => {
+                let layer_load_started = Instant::now();
+                let layer = qwen3_package_decoder_layer_runtime_from_package(
+                    &mut context,
+                    &mut stream,
+                    path,
+                    chunk_bytes,
+                    layer_index,
+                )
+                .map_err(|err| {
+                    format!("failed to load self-attn package layer {layer_index}: {err}")
+                })?;
+                layer_load_ms += layer_load_started.elapsed().as_secs_f64() * 1000.0;
+                if layer.runtime_shape.hidden != hidden {
+                    return Err(format!(
+                        "self-attn layer {layer_index} hidden mismatch: layer_hidden={} embedding_hidden={hidden}",
+                        layer.runtime_shape.hidden
+                    ));
+                }
+                let rotary_dim = parse_package_token_ids_rotary_dim(
+                    layer.runtime_shape.head_dim,
+                    rotary_dim.as_deref(),
+                )?;
+                if let Some(previous) = self_attn_rotary_dim {
+                    if previous != rotary_dim {
+                        return Err(format!(
+                            "self-attn rotary dim changed: previous={previous} current={rotary_dim}"
+                        ));
+                    }
+                } else {
+                    self_attn_rotary_dim = Some(rotary_dim);
+                }
+                if self_attn_shape.is_none() {
+                    self_attn_shape = Some(serde_json::json!({
+                        "q_heads": layer.runtime_shape.q_heads,
+                        "kv_heads": layer.runtime_shape.kv_heads,
+                        "head_dim": layer.runtime_shape.head_dim,
+                        "value_dim": layer.runtime_shape.value_dim,
+                        "rotary_dim": rotary_dim,
+                    }));
+                }
+                let decode_shape = PagedDecodeShape {
+                    block_size,
+                    cache_blocks,
+                    q_heads: layer.runtime_shape.q_heads,
+                    kv_heads: layer.runtime_shape.kv_heads,
+                    head_dim: layer.runtime_shape.head_dim,
+                    value_dim: layer.runtime_shape.value_dim,
+                };
+                let prepared = qwen3_self_attn_prepare_model_loop_sequence_smoke(
+                    &mut context,
+                    &mut stream,
+                    &layer.weights.self_attn,
+                    residual_sequence,
+                    sequence_len,
+                    rotary_dim,
+                    rope_base,
+                    position_offset,
+                    &layer.input_norm,
+                    &layer.q_norm,
+                    &layer.k_norm,
+                    &block_table,
+                    block_size,
+                    cache_blocks,
+                    &format!(
+                        "package-token-ids-logits-smoke layer {} position {}",
+                        layer.layer_index, layer_position
+                    ),
+                )?;
+                let layer_output = qwen3_decoder_layer_sequence_to_host_f32(
+                    &layer.weights,
+                    &mut context,
+                    &mut stream,
+                    decode_shape,
+                    &block_table,
+                    prepared.softmax_scale,
+                    1e-5_f32,
+                    &prepared.q_rope,
+                    &prepared.k_rope,
+                    &prepared.v_projected,
+                    prepared.q_gate.as_deref(),
+                    &prepared.residual_sequence,
+                    sequence_len,
+                )
+                .map_err(|err| {
+                    format!("failed to run package token-id logits layer {layer_index}: {err}")
+                })?;
+                residual_sequence = layer_output.layer_output;
+            }
+            PackageDecoderLayerKind::LinearAttention => {
+                let run = package_linear_attn_mlp_block_sequence_run(
+                    path,
+                    device_index,
+                    chunk_bytes,
+                    layer_index,
+                    sequence_len,
+                    residual_sequence,
+                    None,
+                    None,
+                )
+                .map_err(|err| {
+                    format!("failed to run linear-attn package layer {layer_index}: {err}")
+                })?;
+                if run.layer_output.len() != expected_embedding_values {
+                    return Err(format!(
+                        "linear-attn layer {layer_index} output length mismatch: got {} expected {}",
+                        run.layer_output.len(),
+                        expected_embedding_values
+                    ));
+                }
+                residual_sequence = run.layer_output;
+            }
+        }
     }
     let layer_ms = layer_started.elapsed().as_secs_f64() * 1000.0;
 
@@ -15215,22 +15315,22 @@ fn package_token_ids_logits_smoke_impl(
         .map_err(|err| format!("failed to read final RMSNorm tensor: {err}"))?;
     final_norm.values =
         effective_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
-    if final_norm.values.len() != model.hidden {
+    if final_norm.values.len() != hidden {
         return Err(format!(
-            "final RMSNorm length mismatch: len={} model_hidden={}",
+            "final RMSNorm length mismatch: len={} hidden={}",
             final_norm.values.len(),
-            model.hidden
+            hidden
         ));
     }
     let final_token_start = (sequence_len - 1)
-        .checked_mul(model.hidden)
+        .checked_mul(hidden)
         .ok_or_else(|| "final token slice start overflows".to_string())?;
     let final_token_end = final_token_start
-        .checked_add(model.hidden)
+        .checked_add(hidden)
         .ok_or_else(|| "final token slice end overflows".to_string())?;
     let final_hidden = &residual_sequence[final_token_start..final_token_end];
     let final_normed = runtime_host_rmsnorm_f32(final_hidden, &final_norm.values, 1e-6_f32);
-    if final_normed.len() != model.hidden || final_normed.iter().any(|value| !value.is_finite()) {
+    if final_normed.len() != hidden || final_normed.iter().any(|value| !value.is_finite()) {
         return Err("final normalized hidden state contains invalid values".to_string());
     }
     let final_norm_ms = final_started.elapsed().as_secs_f64() * 1000.0;
@@ -15257,14 +15357,12 @@ fn package_token_ids_logits_smoke_impl(
         "device_index": device_index,
         "device_name": info.name,
         "layers": layer_indices,
+        "layer_kinds": layer_kinds,
         "token_ids": token_ids,
         "sequence_len": sequence_len,
-        "hidden": model.hidden,
-        "q_heads": model.q_heads,
-        "kv_heads": model.kv_heads,
-        "head_dim": model.head_dim,
-        "value_dim": model.value_dim,
-        "rotary_dim": rotary_dim,
+        "hidden": hidden,
+        "self_attn": self_attn_shape,
+        "rotary_dim": self_attn_rotary_dim,
         "rope_base": rope_base,
         "position_offset": position_offset,
         "embedding": {
@@ -15287,7 +15385,7 @@ fn package_token_ids_logits_smoke_impl(
         "top_k": top_k,
         "top_logits": top_logits_json,
         "timing_ms": {
-            "model_load": model_load_ms,
+            "layer_load": layer_load_ms,
             "embedding_read": embed_ms,
             "layers": layer_ms,
             "final_norm": final_norm_ms,

@@ -1,0 +1,79 @@
+{
+  "backend": "cpu",
+  "device_index": 0,
+  "device_name": "host CPU fallback",
+  "embedding": {
+    "dtype": "BF16",
+    "shape": [
+      248320,
+      4096
+    ],
+    "tensor": "model.language_model.embed_tokens.weight"
+  },
+  "final_norm": {
+    "dtype": "BF16",
+    "shape": [
+      4096
+    ],
+    "tensor": "model.language_model.norm.weight"
+  },
+  "hidden": 4096,
+  "layer_kinds": [
+    "linear_attention",
+    "self_attention"
+  ],
+  "layers": [
+    0,
+    3
+  ],
+  "lm_head": {
+    "chunk_rows": 4096,
+    "dtype": "BF16",
+    "shape": [
+      248320,
+      4096
+    ],
+    "tensor": "lm_head.weight",
+    "vocab": 248320
+  },
+  "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d",
+  "position_offset": 0,
+  "rope_base": 10000000.0,
+  "rotary_dim": 64,
+  "schema_version": "package-token-ids-logits-smoke-v0.1",
+  "self_attn": {
+    "head_dim": 256,
+    "kv_heads": 4,
+    "q_heads": 16,
+    "rotary_dim": 64,
+    "value_dim": 256
+  },
+  "sequence_len": 1,
+  "timing_ms": {
+    "embedding_read": 17.111439,
+    "final_norm": 17.438184,
+    "layer_load": 2008.5194729999998,
+    "layers": 6601.816271,
+    "lm_head_top_k": 89276.984113,
+    "total": 96043.625111
+  },
+  "token_ids": [
+    1
+  ],
+  "top_k": 3,
+  "top_logits": [
+    {
+      "logit": 4.322238445281982,
+      "token_id": 188789
+    },
+    {
+      "logit": 4.263642311096191,
+      "token_id": 63548
+    },
+    {
+      "logit": 4.192176818847656,
+      "token_id": 137091
+    }
+  ],
+  "verified": true
+}
