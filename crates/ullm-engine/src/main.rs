@@ -30,7 +30,7 @@ use ullm_engine::loader::{
     LoadOptions, LoadedPayload, PassthroughF32Data, WeightRegistry,
     effective_rmsnorm_weight_values, load_package_tensor_prefix, materialize_config,
     materialize_selected_aq4_matrix, matrix_shape_rows_cols, read_named_passthrough_f32,
-    read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,
+    read_named_passthrough_f32_rows, read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,
     validate_passthrough_shape_elements,
 };
 use ullm_engine::package::{
@@ -246,6 +246,18 @@ fn main() -> ExitCode {
                 env::args().nth(10),
             )
         }
+        Some("package-token-ids-logits-smoke") => package_token_ids_logits_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+            env::args().nth(11),
+        ),
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -14965,6 +14977,477 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
     smoke_run.format_output(path, device_index, &info)
 }
 
+const QWEN3_EMBED_TOKENS_TENSOR: &str = "model.language_model.embed_tokens.weight";
+const QWEN3_FINAL_NORM_TENSOR: &str = "model.language_model.norm.weight";
+const QWEN3_LM_HEAD_TENSOR: &str = "lm_head.weight";
+const QWEN35_DEFAULT_LAYER_COUNT: usize = 36;
+
+#[derive(Debug, Clone)]
+struct PackageTokenLogit {
+    token_id: usize,
+    logit: f32,
+}
+
+fn parse_package_token_ids_layer_indices(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
+    match value.as_deref() {
+        None | Some("") | Some("all") | Some("default") => {
+            Ok((0..QWEN35_DEFAULT_LAYER_COUNT).collect())
+        }
+        Some(raw) => parse_usize_csv(raw, "layer list"),
+    }
+}
+
+fn parse_package_token_ids(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
+    match value {
+        Some(raw) => parse_usize_csv(&raw, "token IDs"),
+        None => Ok(vec![1, 2, 3, 4]),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_logits_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    token_ids: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-token-ids-logits-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_layer_indices(layer_indices) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let token_ids = match parse_package_token_ids(token_ids) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 8, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    match package_token_ids_logits_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        token_ids,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_logits_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    token_ids: Vec<usize>,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+) -> Result<String, String> {
+    if token_ids.is_empty() {
+        return Err("package token-id logits smoke requires at least one token ID".to_string());
+    }
+    if layer_indices.is_empty() {
+        return Err("package token-id logits smoke requires at least one layer".to_string());
+    }
+
+    let run_started = Instant::now();
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let load_started = Instant::now();
+    let model = Qwen3PackageModelRuntime::load(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        &layer_indices,
+    )
+    .map_err(|err| format!("failed to load Qwen3 package model runtime: {err}"))?;
+    let model_load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+    let rotary_dim = parse_package_model_loop_rotary_dim(&model, rotary_dim)?;
+
+    let embed_started = Instant::now();
+    let embedding_rows =
+        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &token_ids)
+            .map_err(|err| format!("failed to read token embedding rows: {err}"))?;
+    if embedding_rows.columns != model.hidden {
+        return Err(format!(
+            "embedding hidden size mismatch: columns={} model_hidden={}",
+            embedding_rows.columns, model.hidden
+        ));
+    }
+    let sequence_len = token_ids.len();
+    let expected_embedding_values = sequence_len
+        .checked_mul(model.hidden)
+        .ok_or_else(|| "embedding output size overflows".to_string())?;
+    if embedding_rows.values.len() != expected_embedding_values {
+        return Err(format!(
+            "embedding output length mismatch: expected {} got {}",
+            expected_embedding_values,
+            embedding_rows.values.len()
+        ));
+    }
+    let embed_ms = embed_started.elapsed().as_secs_f64() * 1000.0;
+
+    let block_size = sequence_len;
+    let cache_blocks = 1_usize;
+    let block_table = vec![0_u32];
+    let decode_shape =
+        Qwen3PackageModelDecodePlan::from_model(&model, block_size, cache_blocks)?.decode_shape;
+    let mut residual_sequence = embedding_rows.values;
+
+    let layer_started = Instant::now();
+    for (layer_position, layer) in model.layers.iter().enumerate() {
+        let prepared = qwen3_self_attn_prepare_model_loop_sequence_smoke(
+            &mut context,
+            &mut stream,
+            &layer.weights.self_attn,
+            residual_sequence,
+            sequence_len,
+            rotary_dim,
+            rope_base,
+            position_offset,
+            &layer.input_norm,
+            &layer.q_norm,
+            &layer.k_norm,
+            &block_table,
+            block_size,
+            cache_blocks,
+            &format!(
+                "package-token-ids-logits-smoke layer {} position {}",
+                layer.layer_index, layer_position
+            ),
+        )?;
+        let layer_output = qwen3_decoder_layer_sequence_to_host_f32(
+            &layer.weights,
+            &mut context,
+            &mut stream,
+            decode_shape,
+            &block_table,
+            prepared.softmax_scale,
+            model.mlp_epsilon,
+            &prepared.q_rope,
+            &prepared.k_rope,
+            &prepared.v_projected,
+            prepared.q_gate.as_deref(),
+            &prepared.residual_sequence,
+            sequence_len,
+        )
+        .map_err(|err| {
+            format!(
+                "failed to run package token-id logits layer {}: {err}",
+                layer.layer_index
+            )
+        })?;
+        residual_sequence = layer_output.layer_output;
+    }
+    let layer_ms = layer_started.elapsed().as_secs_f64() * 1000.0;
+
+    let final_started = Instant::now();
+    let mut final_norm = read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, chunk_bytes)
+        .map_err(|err| format!("failed to read final RMSNorm tensor: {err}"))?;
+    final_norm.values =
+        effective_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
+    if final_norm.values.len() != model.hidden {
+        return Err(format!(
+            "final RMSNorm length mismatch: len={} model_hidden={}",
+            final_norm.values.len(),
+            model.hidden
+        ));
+    }
+    let final_token_start = (sequence_len - 1)
+        .checked_mul(model.hidden)
+        .ok_or_else(|| "final token slice start overflows".to_string())?;
+    let final_token_end = final_token_start
+        .checked_add(model.hidden)
+        .ok_or_else(|| "final token slice end overflows".to_string())?;
+    let final_hidden = &residual_sequence[final_token_start..final_token_end];
+    let final_normed = runtime_host_rmsnorm_f32(final_hidden, &final_norm.values, 1e-6_f32);
+    if final_normed.len() != model.hidden || final_normed.iter().any(|value| !value.is_finite()) {
+        return Err("final normalized hidden state contains invalid values".to_string());
+    }
+    let final_norm_ms = final_started.elapsed().as_secs_f64() * 1000.0;
+
+    let lm_head_started = Instant::now();
+    let (lm_head_vocab, lm_head_dtype, lm_head_shape, top_logits) =
+        package_lm_head_top_k_from_rows(path, &final_normed, top_k, lm_head_chunk_rows)?;
+    let lm_head_ms = lm_head_started.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = run_started.elapsed().as_secs_f64() * 1000.0;
+
+    let top_logits_json = top_logits
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "token_id": entry.token_id,
+                "logit": entry.logit,
+            })
+        })
+        .collect::<Vec<_>>();
+    let report = serde_json::json!({
+        "schema_version": "package-token-ids-logits-smoke-v0.1",
+        "package": path,
+        "backend": info.backend.to_string(),
+        "device_index": device_index,
+        "device_name": info.name,
+        "layers": layer_indices,
+        "token_ids": token_ids,
+        "sequence_len": sequence_len,
+        "hidden": model.hidden,
+        "q_heads": model.q_heads,
+        "kv_heads": model.kv_heads,
+        "head_dim": model.head_dim,
+        "value_dim": model.value_dim,
+        "rotary_dim": rotary_dim,
+        "rope_base": rope_base,
+        "position_offset": position_offset,
+        "embedding": {
+            "tensor": QWEN3_EMBED_TOKENS_TENSOR,
+            "dtype": embedding_rows.dtype,
+            "shape": embedding_rows.shape,
+        },
+        "final_norm": {
+            "tensor": QWEN3_FINAL_NORM_TENSOR,
+            "dtype": final_norm.dtype,
+            "shape": final_norm.shape,
+        },
+        "lm_head": {
+            "tensor": QWEN3_LM_HEAD_TENSOR,
+            "dtype": lm_head_dtype,
+            "shape": lm_head_shape,
+            "vocab": lm_head_vocab,
+            "chunk_rows": lm_head_chunk_rows,
+        },
+        "top_k": top_k,
+        "top_logits": top_logits_json,
+        "timing_ms": {
+            "model_load": model_load_ms,
+            "embedding_read": embed_ms,
+            "layers": layer_ms,
+            "final_norm": final_norm_ms,
+            "lm_head_top_k": lm_head_ms,
+            "total": total_ms,
+        },
+        "verified": true,
+    });
+    serde_json::to_string_pretty(&report)
+        .map_err(|err| format!("failed to encode token-id logits smoke report: {err}"))
+}
+
+fn package_lm_head_top_k_from_rows(
+    path: &str,
+    hidden: &[f32],
+    top_k: usize,
+    chunk_rows: usize,
+) -> Result<(usize, String, Vec<u64>, Vec<PackageTokenLogit>), String> {
+    if hidden.is_empty() {
+        return Err("lm_head top-k hidden vector must not be empty".to_string());
+    }
+    if top_k == 0 || chunk_rows == 0 {
+        return Err("lm_head top-k and chunk_rows must be greater than zero".to_string());
+    }
+    let first_row = read_named_passthrough_f32_rows(path, QWEN3_LM_HEAD_TENSOR, &[0])
+        .map_err(|err| format!("failed to read lm_head first row: {err}"))?;
+    if first_row.shape.len() != 2 {
+        return Err(format!(
+            "lm_head must be 2D, got shape {:?}",
+            first_row.shape
+        ));
+    }
+    let vocab = usize::try_from(first_row.shape[0])
+        .map_err(|_| "lm_head vocab size is too large for this host".to_string())?;
+    if first_row.columns != hidden.len() {
+        return Err(format!(
+            "lm_head hidden size mismatch: columns={} hidden={}",
+            first_row.columns,
+            hidden.len()
+        ));
+    }
+
+    let mut top_logits = Vec::new();
+    let mut start = 0_usize;
+    while start < vocab {
+        let end = start
+            .checked_add(chunk_rows)
+            .map(|candidate| candidate.min(vocab))
+            .ok_or_else(|| "lm_head chunk end overflows".to_string())?;
+        let row_indices = (start..end).collect::<Vec<_>>();
+        let rows = read_named_passthrough_f32_rows(path, QWEN3_LM_HEAD_TENSOR, &row_indices)
+            .map_err(|err| format!("failed to read lm_head rows {start}..{end}: {err}"))?;
+        if rows.columns != hidden.len() || rows.shape != first_row.shape {
+            return Err(format!(
+                "lm_head chunk shape changed for rows {start}..{end}: columns={} shape={:?}",
+                rows.columns, rows.shape
+            ));
+        }
+        for (offset, row) in rows.values.chunks_exact(hidden.len()).enumerate() {
+            let mut logit = 0.0_f32;
+            for (weight, value) in row.iter().zip(hidden.iter()) {
+                logit += weight * value;
+            }
+            if !logit.is_finite() {
+                return Err(format!(
+                    "lm_head logit for token {} is not finite",
+                    start + offset
+                ));
+            }
+            top_logits.push(PackageTokenLogit {
+                token_id: start + offset,
+                logit,
+            });
+        }
+        top_logits.sort_by(|left, right| {
+            right
+                .logit
+                .total_cmp(&left.logit)
+                .then_with(|| left.token_id.cmp(&right.token_id))
+        });
+        top_logits.truncate(top_k);
+        start = end;
+    }
+
+    Ok((vocab, first_row.dtype, first_row.shape, top_logits))
+}
+
+#[cfg(test)]
+mod package_token_ids_logits_tests {
+    use super::*;
+
+    #[test]
+    fn package_token_ids_layer_indices_default_to_qwen35_layers() {
+        let layers = parse_package_token_ids_layer_indices(None).unwrap();
+        assert_eq!(layers.len(), QWEN35_DEFAULT_LAYER_COUNT);
+        assert_eq!(layers.first().copied(), Some(0));
+        assert_eq!(layers.last().copied(), Some(QWEN35_DEFAULT_LAYER_COUNT - 1));
+
+        let layers = parse_package_token_ids_layer_indices(Some("all".to_string())).unwrap();
+        assert_eq!(layers.len(), QWEN35_DEFAULT_LAYER_COUNT);
+
+        let layers = parse_package_token_ids_layer_indices(Some("0,2,4".to_string())).unwrap();
+        assert_eq!(layers, vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn package_lm_head_top_k_from_rows_reads_chunked_passthrough() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-package-token-lm-head-top-k-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("passthrough")).unwrap();
+        fs::write(
+            root.join("passthrough/lm_head.raw"),
+            [
+                1.0_f32.to_le_bytes(),
+                0.0_f32.to_le_bytes(),
+                0.0_f32.to_le_bytes(),
+                3.0_f32.to_le_bytes(),
+                2.0_f32.to_le_bytes(),
+                2.0_f32.to_le_bytes(),
+                (-1.0_f32).to_le_bytes(),
+                10.0_f32.to_le_bytes(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "passthrough_tensors": [{
+                "name": "lm_head.weight",
+                "dtype": "F32",
+                "shape": [4, 2],
+                "elements": 8,
+                "payload_bytes": 32,
+                "payload_encoding": "raw_safetensors_payload",
+                "payload_file": "passthrough/lm_head.raw"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let (vocab, dtype, shape, top_logits) =
+            package_lm_head_top_k_from_rows(root.to_str().unwrap(), &[1.0, 1.0], 2, 2).unwrap();
+        assert_eq!(vocab, 4);
+        assert_eq!(dtype, "F32");
+        assert_eq!(shape, vec![4, 2]);
+        assert_eq!(top_logits.len(), 2);
+        assert_eq!(top_logits[0].token_id, 3);
+        assert_eq!(top_logits[0].logit, 9.0);
+        assert_eq!(top_logits[1].token_id, 2);
+        assert_eq!(top_logits[1].logit, 4.0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 fn package_linear_attn_aux_smoke(
     path: Option<String>,
     device_index: Option<String>,
@@ -23319,7 +23802,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
