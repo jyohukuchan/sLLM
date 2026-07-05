@@ -354,6 +354,13 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-linear-attn-stateful-step-smoke") => package_linear_attn_stateful_step_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+        ),
         Some("package-linear-attn-aux-smoke") => package_linear_attn_aux_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -21417,6 +21424,272 @@ fn package_linear_attn_mlp_block_sequence_smoke_impl(
     Ok(run.line)
 }
 
+fn package_linear_attn_stateful_step_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    sequence_len: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-stateful-step-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 3, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_linear_attn_stateful_step_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        sequence_len,
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn package_linear_attn_stateful_step_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    sequence_len: usize,
+) -> Result<String, String> {
+    let key_heads = 16_usize;
+    let value_heads = 32_usize;
+    let key_dim = 128_usize;
+    let value_dim = 128_usize;
+    let hidden = value_heads * value_dim;
+    let q_elements_per_step = key_heads * key_dim;
+    let k_elements_per_step = key_heads * key_dim;
+    let v_elements_per_step = hidden;
+    let qkv_step_elements = q_elements_per_step + k_elements_per_step + v_elements_per_step;
+    let q_scale = 1.0_f32 / (key_dim as f32).sqrt();
+    let qk_l2_norm = true;
+
+    let conv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.conv1d.weight");
+    let a_log_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.A_log");
+    let dt_bias_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.dt_bias");
+    let conv = read_named_passthrough_f32(path, &conv_tensor, chunk_bytes)?;
+    if conv.shape.len() != 3 || conv.shape[1] != 1 {
+        return Err(format!(
+            "conv1d tensor shape must be [channels,1,kernel], got {}",
+            format_u64_shape(&conv.shape)
+        ));
+    }
+    let conv_channels = usize::try_from(conv.shape[0])
+        .map_err(|_| "conv1d channel count is too large for this host".to_string())?;
+    let kernel_size = usize::try_from(conv.shape[2])
+        .map_err(|_| "conv1d kernel size is too large for this host".to_string())?;
+    if conv_channels != qkv_step_elements {
+        return Err(format!(
+            "conv1d channels must match q/k/v layout: conv_channels={conv_channels}, expected={qkv_step_elements}"
+        ));
+    }
+    let a_log = read_named_passthrough_f32(path, &a_log_tensor, chunk_bytes)?;
+    if a_log.values.len() != value_heads {
+        return Err(format!(
+            "A_log length must match value_heads={value_heads}: len={}",
+            a_log.values.len()
+        ));
+    }
+    let dt_bias = read_named_passthrough_f32(path, &dt_bias_tensor, chunk_bytes)?;
+    if dt_bias.values.len() != value_heads {
+        return Err(format!(
+            "dt_bias length must match value_heads={value_heads}: len={}",
+            dt_bias.values.len()
+        ));
+    }
+
+    let base_residual = deterministic_f32_vector(hidden);
+    let mut residual_sequence = Vec::with_capacity(sequence_len * hidden);
+    for timestep in 0..sequence_len {
+        residual_sequence.extend(linear_attn_step_input(&base_residual, timestep));
+    }
+    let run = package_linear_attn_mlp_block_sequence_run(
+        path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        sequence_len,
+        residual_sequence,
+        None,
+        None,
+    )?;
+    if run.attention_qkv_projection_dim != qkv_step_elements
+        || run.attention_gate_dim != value_heads
+        || run.attention_recurrent_qk_dim != key_heads * key_dim
+    {
+        return Err(format!(
+            "linear attention stateful step metadata mismatch: qkv_dim={} gate_dim={} qk_dim={}",
+            run.attention_qkv_projection_dim,
+            run.attention_gate_dim,
+            run.attention_recurrent_qk_dim
+        ));
+    }
+
+    let mut conv_state = LinearAttnConv1dStepState::new(qkv_step_elements, kernel_size)?;
+    let mut stepped_conv = Vec::with_capacity(run.attention_conv_pre_silu.len());
+    for qkv_step in run.attention_qkv_projection.chunks_exact(qkv_step_elements) {
+        stepped_conv.extend(conv_state.step(qkv_step, &conv.values)?);
+    }
+    let conv_step_max_abs_diff = verify_f32_close(
+        "package linear attention stateful conv1d step",
+        &stepped_conv,
+        &run.attention_conv_pre_silu,
+        1e-4,
+        1e-5,
+    )?;
+    let stepped_conv_activated = runtime_host_silu_f32(&stepped_conv);
+    let conv_activation_step_max_abs_diff = verify_f32_close(
+        "package linear attention stateful conv activation",
+        &stepped_conv_activated,
+        &run.attention_conv,
+        1e-4,
+        1e-5,
+    )?;
+
+    let split_full = split_linear_attn_qkv_for_recurrent(
+        &stepped_conv_activated,
+        sequence_len,
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        qk_l2_norm,
+        q_scale,
+    )?;
+    let q_step_max_abs_diff = verify_f32_close(
+        "package linear attention stateful recurrent q",
+        &split_full.q,
+        &run.attention_recurrent_q,
+        1e-4,
+        1e-5,
+    )?;
+    let k_step_max_abs_diff = verify_f32_close(
+        "package linear attention stateful recurrent k",
+        &split_full.k,
+        &run.attention_recurrent_k,
+        1e-4,
+        1e-5,
+    )?;
+    let v_step_max_abs_diff = verify_f32_close(
+        "package linear attention stateful recurrent v",
+        &split_full.v,
+        &run.attention_recurrent_v,
+        1e-4,
+        1e-5,
+    )?;
+    let (gate, beta) = runtime_host_linear_attn_gate_beta_f32(
+        &run.attention_a_projection,
+        &run.attention_b_projection,
+        &a_log.values,
+        &dt_bias.values,
+        value_heads,
+        sequence_len,
+    );
+    let gate_step_max_abs_diff = verify_f32_close(
+        "package linear attention stateful gate",
+        &gate,
+        &run.attention_gate,
+        1e-4,
+        1e-5,
+    )?;
+    let beta_step_max_abs_diff = verify_f32_close(
+        "package linear attention stateful beta",
+        &beta,
+        &run.attention_beta,
+        1e-4,
+        1e-5,
+    )?;
+
+    let mut recurrent_state = vec![0.0_f32; value_heads * key_dim * value_dim];
+    let mut stepped_recurrent = Vec::with_capacity(run.attention_recurrent.len());
+    for timestep in 0..sequence_len {
+        let conv_start = timestep * qkv_step_elements;
+        let conv_end = conv_start + qkv_step_elements;
+        let split = split_linear_attn_qkv_for_recurrent(
+            &stepped_conv_activated[conv_start..conv_end],
+            1,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            qk_l2_norm,
+            q_scale,
+        )?;
+        let gate_start = timestep * value_heads;
+        let gate_end = gate_start + value_heads;
+        let recurrent_step = runtime_host_linear_attn_recurrent_f32(
+            &split.q,
+            &split.k,
+            &split.v,
+            &gate[gate_start..gate_end],
+            &beta[gate_start..gate_end],
+            key_heads,
+            value_heads,
+            1,
+            key_dim,
+            value_dim,
+            &mut recurrent_state,
+        );
+        stepped_recurrent.extend(recurrent_step);
+    }
+    let recurrent_step_max_abs_diff = verify_f32_close(
+        "package linear attention stateful recurrent",
+        &stepped_recurrent,
+        &run.attention_recurrent,
+        1e-3,
+        1e-5,
+    )?;
+
+    Ok(format!(
+        "package-linear-attn-stateful-step-smoke package={} layer={} sequence_len={} kernel_size={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} qkv_step_elements={} backend_device={} conv_step_max_abs_diff={conv_step_max_abs_diff:.9} conv_activation_step_max_abs_diff={conv_activation_step_max_abs_diff:.9} q_step_max_abs_diff={q_step_max_abs_diff:.9} k_step_max_abs_diff={k_step_max_abs_diff:.9} v_step_max_abs_diff={v_step_max_abs_diff:.9} gate_step_max_abs_diff={gate_step_max_abs_diff:.9} beta_step_max_abs_diff={beta_step_max_abs_diff:.9} recurrent_step_max_abs_diff={recurrent_step_max_abs_diff:.9} verified=true",
+        path,
+        layer_index,
+        sequence_len,
+        kernel_size,
+        hidden,
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        qkv_step_elements,
+        device_index,
+    ))
+}
+
 const PACKAGE_ROW_SCALE_OVERRIDES_SCHEMA_VERSION: &str = "package-row-scale-overrides-v0.1";
 const PACKAGE_CELL_DELTA_OVERRIDES_SCHEMA_VERSION: &str = "package-cell-delta-overrides-v0.1";
 
@@ -24302,6 +24575,9 @@ fn print_help() {
     eprintln!(
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
+    eprintln!(
+        "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"
+    );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
     eprintln!(
@@ -25011,7 +25287,6 @@ fn runtime_host_depthwise_conv1d_f32(
     output
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone)]
 struct LinearAttnConv1dStepState {
     channels: usize,
@@ -25020,7 +25295,6 @@ struct LinearAttnConv1dStepState {
     seen_tokens: usize,
 }
 
-#[cfg(test)]
 impl LinearAttnConv1dStepState {
     fn new(channels: usize, kernel_size: usize) -> Result<Self, String> {
         if channels == 0 {
