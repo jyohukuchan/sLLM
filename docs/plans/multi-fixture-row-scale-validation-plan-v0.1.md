@@ -92,6 +92,63 @@ The lower tokens101-selected MLP scale reduces the tokens201 regression slightly
 Adding the layer6 attention row-scale improves tokens1/tokens101 but increases the tokens201 regression relative to MLP-only.
 The three-row extracted candidate bundle confirms the same rule: row-dot candidates should feed a gated search loop, not direct bundle promotion.
 
+Additional five-fixture result:
+
+- Added token ids `301..316` and `401..416` as extra golden fixtures.
+- Baseline worst coordinate remains hidden `3994` in all five fixtures:
+  - `tokens1`: `0.645338058`, layer11 token7 hidden3994
+  - `tokens101`: `1.080525398`, layer7 token12 hidden3994
+  - `tokens201`: `1.140727997`, layer11 token13 hidden3994
+  - `tokens301`: `1.371309280`, layer10 token12 hidden3994
+  - `tokens401`: `0.959306717`, layer8 token9 hidden3994
+- Implemented `tools/generate-qwen-row-scale-grid.py` and generated a layer6 MLP hidden3994 grid for scales `1.000`, `1.004`, `1.008`, `1.012`, `1.016`, `1.020`, `1.023383096`, and `1.026471714`.
+- Five-fixture grid result:
+
+| condition | decision | fixtures | median improvement | max regression | reason |
+| --- | --- | ---: | ---: | ---: | --- |
+| `layer6-mlp-h3994-s1p004` | reject | 5 | 0.000791549683 | 0.00535869598 | tokens401 regression exceeds `0.001` |
+| `layer6-mlp-h3994-s1p008` | reject | 5 | 0.00157546997 | 0.0107059479 | tokens201 and tokens401 regress |
+| `layer6-mlp-h3994-s1p026471714` | reject | 5 | 0.00524330139 | 0.0354146957 | tokens401 regression dominates |
+
+The important update is that tokens401 is now the strongest counterexample for layer6 MLP hidden3994 scaling.
+Scale `1.004` would have stayed within the tokens201 hard gate, but it still worsens tokens401 by `0.00535869598`.
+Therefore, layer6 MLP hidden3994 row-scale is rejected as an unconditional package candidate under the five-fixture gate.
+
+No-row-scale comparison:
+
+- The existing manifest row-scale entries target row3456, not hidden3994.
+- Removing manifest row-scale worsens four of five fixtures:
+  - tokens1: `0.645338058 -> 1.74426651`
+  - tokens101: `1.080525398 -> 1.50819016`
+  - tokens301: `1.371309280 -> 2.50828171`
+  - tokens401: `0.959306717 -> 1.45381165`
+- Keep the existing row3456 manifest compensation while investigating hidden3994.
+
+Tokens401 localization:
+
+- Layer8 token9 hidden3994 is the baseline max coordinate for tokens401.
+- Actual-prefix layer8 input at token9 hidden3994 is already low by `-0.464719772`.
+- Full-reference layer8 replay on that actual input outputs `-1.0` vs the golden fixture output.
+- Package-vs-full-reference actual-input delta error at layer8 token9 hidden3994 is only `+0.0406933`, so the major issue is input-drift amplification rather than a layer8 row-quantization-only miss.
+- Layer7 token10 hidden3994 shows the same pattern: full-reference actual-input replay is already `-0.875`, while package-vs-full-reference delta error is `-0.0277519`.
+
+Next branch:
+
+- Evaluate package-level quantization policy candidates, starting with the existing `p4p65-inproj` package.
+- Only return to paired row-scale candidates if a candidate addresses tokens401 without worsening tokens1/tokens101/tokens201/tokens301.
+
+Quantization-policy probe result:
+
+- `p4p65-inproj` without row3456 compensation fails the five-fixture gate:
+  - median improvement: `-0.797094345`
+  - max regression: `1.39915657`
+  - main failure: row3456 regressions on tokens1/tokens101/tokens301/tokens401.
+- `p4p65` with the existing row3456 smoke overrides also fails:
+  - median improvement: `-0.0370130539`
+  - max regression: `0.26203537`
+  - main failure: hidden3994 regression on tokens401, `0.959306717 -> 1.22134209`.
+- Therefore, the next package-level candidate must preserve row3456 compensation and address hidden3994 input-drift amplification more directly than a simple p4p65 swap.
+
 ## Deliverables
 
 - `tools/summarize-qwen-prefix-smokes.py`

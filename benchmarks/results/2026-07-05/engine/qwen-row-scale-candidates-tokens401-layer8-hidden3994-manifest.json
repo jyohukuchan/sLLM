@@ -1,0 +1,17 @@
+{
+  "entries": [
+    {
+      "row_index": 3994,
+      "scale": 0.9727276122005596,
+      "source": "qwen-layer-module-trace-scale-fit:tokens401-layer8:attention_out_proj",
+      "tensor_name": "model.language_model.layers.8.linear_attn.out_proj.weight"
+    },
+    {
+      "row_index": 3994,
+      "scale": 1.012138640209781,
+      "source": "qwen-layer-module-trace-scale-fit:tokens401-layer8:mlp_down_proj",
+      "tensor_name": "model.language_model.layers.8.mlp.down_proj.weight"
+    }
+  ],
+  "schema_version": "row-scale-overrides-v0.1"
+}

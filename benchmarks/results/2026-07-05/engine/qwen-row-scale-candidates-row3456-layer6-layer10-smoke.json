@@ -1,0 +1,29 @@
+{
+  "schema_version": "package-row-scale-overrides-v0.1",
+  "overrides": [
+    {
+      "layer_index": 6,
+      "tensor_suffix": "linear_attn.out_proj.weight",
+      "row_index": 3456,
+      "scale": 1.032273364777375
+    },
+    {
+      "layer_index": 6,
+      "tensor_suffix": "mlp.down_proj.weight",
+      "row_index": 3456,
+      "scale": 1.036585679248007
+    },
+    {
+      "layer_index": 10,
+      "tensor_suffix": "linear_attn.out_proj.weight",
+      "row_index": 3456,
+      "scale": 1.0230717930961908
+    },
+    {
+      "layer_index": 10,
+      "tensor_suffix": "mlp.down_proj.weight",
+      "row_index": 3456,
+      "scale": 1.0416570117172528
+    }
+  ]
+}

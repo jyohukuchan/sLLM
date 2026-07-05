@@ -1,0 +1,12 @@
+{
+  "dtype": "float32",
+  "file": "layer-0010-input.f32",
+  "layer_index": 10,
+  "run_mode": "actual_prefix",
+  "schema_version": "package-golden-prefix-input-dump-v0.1",
+  "shape": [
+    1,
+    16,
+    4096
+  ]
+}

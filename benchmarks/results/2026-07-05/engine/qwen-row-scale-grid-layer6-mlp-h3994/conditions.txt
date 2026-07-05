@@ -1,0 +1,8 @@
+--condition layer6-mlp-h3994-s1,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1.json
+--condition layer6-mlp-h3994-s1p004,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p004.json
+--condition layer6-mlp-h3994-s1p008,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p008.json
+--condition layer6-mlp-h3994-s1p012,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p012.json
+--condition layer6-mlp-h3994-s1p016,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p016.json
+--condition layer6-mlp-h3994-s1p02,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p02.json
+--condition layer6-mlp-h3994-s1p023383096,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p023383096.json
+--condition layer6-mlp-h3994-s1p026471714,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p026471714.json

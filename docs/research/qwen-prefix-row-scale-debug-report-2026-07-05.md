@@ -29,6 +29,10 @@ Input summary:
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-extracted-candidate-gates.md`
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-layer6-attn-mlp-gates.md`
 - `benchmarks/results/2026-07-05/engine/qwen-prefix-layer6-mlp-selected-gates.md`
+- `benchmarks/results/2026-07-05/engine/qwen-prefix-layer6-mlp-grid5-gates.md`
+- `benchmarks/results/2026-07-05/engine/qwen-prefix-manifest-vs-no-row-scale-five-fixture-gates.md`
+- `benchmarks/results/2026-07-05/engine/qwen-prefix-manifest-vs-p4p65-inproj-five-fixture-gates.md`
+- `benchmarks/results/2026-07-05/engine/qwen-prefix-manifest-vs-p4p65-row3456-five-fixture-gates.md`
 
 Gate settings:
 
@@ -44,6 +48,27 @@ Gate settings:
 | `combined` | needs_more_fixtures | 1 | 0.0343608856 | 0 | only one paired fixture |
 | `extracted` | reject | 3 | -0.0312900543 | 0.0727806091 | tokens1 and tokens201 regress |
 
+Five-fixture layer6 MLP grid:
+
+| condition | decision | fixtures | median improvement | max regression | reason |
+| --- | --- | ---: | ---: | ---: | --- |
+| `layer6-mlp-h3994-s1p004` | reject | 5 | 0.000791549683 | 0.00535869598 | tokens401 regression exceeds `0.001` |
+| `layer6-mlp-h3994-s1p008` | reject | 5 | 0.00157546997 | 0.0107059479 | tokens201 and tokens401 regress |
+| `layer6-mlp-h3994-s1p026471714` | reject | 5 | 0.00524330139 | 0.0354146957 | tokens401 regression dominates |
+
+Manifest baseline vs no-row-scale:
+
+| condition | decision | fixtures | median improvement | max regression | reason |
+| --- | --- | ---: | ---: | ---: | --- |
+| `no-row-scale` | reject | 5 | -0.494504929 | 1.13697243 | row3456 manifest compensation is still needed |
+
+Quantization-policy branch:
+
+| condition | decision | fixtures | median improvement | max regression | reason |
+| --- | --- | ---: | ---: | ---: | --- |
+| `p4p65-inproj` | reject | 5 | -0.797094345 | 1.39915657 | row3456 manifest compensation is missing |
+| `p4p65-row3456` | reject | 5 | -0.0370130539 | 0.26203537 | row3456 improves, but hidden3994 regresses |
+
 Interpretation:
 
 - Layer6 hidden3994 row-scale is a real local compensation candidate.
@@ -52,6 +77,10 @@ Interpretation:
 - Adding layer6 attention row-scale to layer6 MLP row-scale improves tokens1/tokens101 but worsens tokens201 more than MLP-only.
 - Layer8 QKV V845 cell remains smoke-only because current paired fixture coverage is insufficient.
 - The automatically extracted candidate set is worse than layer6-only, so candidate extraction must feed a gated search loop rather than direct promotion.
+- Adding two new fixtures changes the rejection reason: tokens401 is a stronger counterexample than tokens201 for layer6 MLP hidden3994 scaling.
+- The current manifest row-scale entries for row3456 are still useful. Removing them worsens four of five fixtures, so the next path is not to remove manifest compensation wholesale.
+- `p4p65-inproj` alone is not a fair replacement because it lacks row3456 compensation and regresses row3456-heavy fixtures.
+- `p4p65` plus the same row3456 smoke overrides still fails, mainly because hidden3994 worsens on tokens401.
 
 ## Key Evidence
 
@@ -92,6 +121,37 @@ The layer6 attention+MLP candidate set was also tested:
 
 This means the local correction is real, but it changes later propagation in a way that the current policy cannot accept.
 
+Five-fixture layer6 MLP grid:
+
+- token ids `1..16`: scale `1.026471714` improves `0.645338058 -> 0.637172699`
+- token ids `101..116`: scale `1.026471714` improves `1.080525398 -> 1.043153763`
+- token ids `201..216`: scale `1.004` stays within the old hard gate, but larger scales regress; scale `1.026471714` worsens `1.140727997 -> 1.145284653`
+- token ids `301..316`: scale `1.026471714` improves `1.371309280 -> 1.366065979`
+- token ids `401..416`: every positive layer6 MLP scale worsens; scale `1.004` worsens `0.959306717 -> 0.964665413`, scale `1.026471714` worsens `0.959306717 -> 0.994721413`
+
+Tokens401 localization:
+
+- Baseline worst coordinate is layer8 token9 hidden `3994`: `actual=15.915693283`, `expected=16.875`, diff `-0.959306717`.
+- Layer8 input for the same token/hidden is already low: `15.160280228` vs `15.625`, diff `-0.464719772`.
+- Full-reference layer8 with the package actual input outputs `15.875`, exactly `-1.0` from the golden fixture output.
+- Package layer8 with the same actual input is slightly less bad than full-reference actual-input replay: package delta error vs full-reference actual-input is `+0.0406933`.
+- Layer7 token10 hidden `3994` shows the same pattern: full-reference actual-input replay is already `-0.875`, while package-vs-fullref delta error is only `-0.0277519`.
+- Interpretation: tokens401 is mainly an input-drift amplification case, not a layer8 row-quantization-only case.
+
+Quantization-policy probe:
+
+- `p4p65-inproj` without row3456 compensation regresses:
+  - tokens1: `0.645338058 -> 1.78714752`
+  - tokens301: `1.371309280 -> 2.77046585`
+  - tokens401: `0.959306717 -> 1.75640106`
+- Adding the existing row3456 smoke overrides to p4p65 reduces the row3456 failures but does not pass:
+  - tokens1: `0.645338058 -> 0.790296555`
+  - tokens101: `1.080525398 -> 1.11753845`
+  - tokens201: `1.140727997 -> 1.13527489`
+  - tokens301: `1.371309280 -> 1.37655067`
+  - tokens401: `0.959306717 -> 1.22134209`
+- Interpretation: the next package-level candidate needs to preserve row3456 compensation while targeting hidden3994 input-drift amplification more directly than `p4p65`.
+
 ## Verification
 
 - `python3 -m py_compile tools/summarize-qwen-prefix-smokes.py`
@@ -99,6 +159,8 @@ This means the local correction is real, but it changes later propagation in a w
 - `python3 -m py_compile tools/evaluate-qwen-prefix-candidate-gates.py`
 - `python3 -m py_compile tools/run-qwen-prefix-smoke-matrix.py`
 - JSON parse checks for generated summary/candidate/gate artifacts.
+- JSON parse checks for five-fixture grid, no-row-scale comparison, coordinate-chain, and module-trace comparison artifacts.
+- JSON parse checks for p4p65 and p4p65+row3456 five-fixture summary/gate artifacts.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.
@@ -107,7 +169,7 @@ This means the local correction is real, but it changes later propagation in a w
 
 ## Next Action
 
-1. Use `tools/run-qwen-prefix-smoke-matrix.py` for a three-fixture candidate matrix rather than running ad hoc smokes.
-2. Regenerate missing v0.10 traces for token ids `1..16` and additional tokens201 layer11 candidates.
-3. Search paired candidates that reduce tokens201 layer11 without increasing tokens1/tokens101 final max.
-4. Keep layer6 hidden3994 and layer8 QKV V845 as candidates, not promoted package policy, until the gate passes.
+1. Treat layer6 hidden3994 MLP row-scale as rejected for unconditional promotion under the five-fixture gate.
+2. Do not promote `p4p65-inproj` or `p4p65+row3456`; both fail five-fixture gates.
+3. Search for a package-level candidate that keeps row3456 compensation and specifically reduces hidden3994 input-drift amplification.
+4. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.

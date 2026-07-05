@@ -21,6 +21,13 @@ def parse_args() -> argparse.Namespace:
         metavar="LABEL=PATH",
         help="Named package-golden-prefix-smoke JSONL report. May be repeated.",
     )
+    parser.add_argument(
+        "--matrix-summary-json",
+        action="append",
+        default=[],
+        type=Path,
+        help="package-golden-prefix smoke matrix summary JSON. May be repeated.",
+    )
     parser.add_argument("--summary-json", type=Path, required=True)
     parser.add_argument("--markdown", type=Path)
     return parser.parse_args()
@@ -34,6 +41,32 @@ def parse_report_spec(spec: str) -> tuple[str, Path]:
     if not label:
         raise SystemExit(f"--report label must not be empty: {spec!r}")
     return label, Path(path)
+
+
+def parse_matrix_summary(path: Path) -> list[tuple[str, Path]]:
+    with path.open("r", encoding="utf-8") as handle:
+        summary = json.load(handle)
+    if not isinstance(summary, dict):
+        raise ValueError(f"matrix summary must be a JSON object: {path}")
+    runs = summary.get("runs")
+    if not isinstance(runs, list):
+        raise ValueError(f"matrix summary has no runs array: {path}")
+    reports = []
+    for index, run in enumerate(runs):
+        if not isinstance(run, dict):
+            raise ValueError(f"matrix summary run must be a JSON object: {path}:{index}")
+        fixture_label = run.get("fixture_label")
+        condition = run.get("condition")
+        report_path = run.get("report_path")
+        returncode = run.get("returncode")
+        if returncode not in (None, 0):
+            continue
+        if not isinstance(fixture_label, str) or not isinstance(condition, str):
+            raise ValueError(f"matrix run is missing fixture_label or condition: {path}:{index}")
+        if not isinstance(report_path, str) or not report_path:
+            raise ValueError(f"matrix run is missing report_path: {path}:{index}")
+        reports.append((f"{fixture_label}-{condition}", Path(report_path)))
+    return reports
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -191,9 +224,20 @@ def markdown(summary: dict[str, Any]) -> str:
 
 def main() -> int:
     args = parse_args()
-    if not args.report:
-        raise SystemExit("at least one --report is required")
-    reports = [summarize_report(label, path) for label, path in map(parse_report_spec, args.report)]
+    report_specs = [parse_report_spec(spec) for spec in args.report]
+    for matrix_summary_json in args.matrix_summary_json:
+        report_specs.extend(parse_matrix_summary(matrix_summary_json))
+    if not report_specs:
+        raise SystemExit("at least one --report or --matrix-summary-json is required")
+    labels = set()
+    duplicate_labels = []
+    for label, _ in report_specs:
+        if label in labels:
+            duplicate_labels.append(label)
+        labels.add(label)
+    if duplicate_labels:
+        raise SystemExit(f"duplicate report labels: {', '.join(sorted(duplicate_labels))}")
+    reports = [summarize_report(label, path) for label, path in report_specs]
     summary = {
         "schema_version": SCHEMA_VERSION,
         "reports": reports,

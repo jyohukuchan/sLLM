@@ -1,0 +1,98 @@
+{
+  "baseline_condition": "baseline",
+  "candidates": [
+    {
+      "comparisons": [
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens1-baseline",
+          "baseline_layer": 11,
+          "baseline_max_abs_diff": 0.6453380584716797,
+          "baseline_token_index": 7,
+          "candidate_hidden_index": 3456,
+          "candidate_label": "tokens1-p4p65-inproj",
+          "candidate_layer": 10,
+          "candidate_max_abs_diff": 1.7871475219726562,
+          "candidate_token_index": 0,
+          "delta": 1.1418094635009766,
+          "fixture": "tokens1",
+          "improvement": -1.1418094635009766
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens101-baseline",
+          "baseline_layer": 7,
+          "baseline_max_abs_diff": 1.0805253982543945,
+          "baseline_token_index": 12,
+          "candidate_hidden_index": 3456,
+          "candidate_label": "tokens101-p4p65-inproj",
+          "candidate_layer": 10,
+          "candidate_max_abs_diff": 1.7911033630371094,
+          "candidate_token_index": 0,
+          "delta": 0.7105779647827148,
+          "fixture": "tokens101",
+          "improvement": -0.7105779647827148
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens201-baseline",
+          "baseline_layer": 11,
+          "baseline_max_abs_diff": 1.1407279968261719,
+          "baseline_token_index": 13,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens201-p4p65-inproj",
+          "candidate_layer": 7,
+          "candidate_max_abs_diff": 1.1808643341064453,
+          "candidate_token_index": 0,
+          "delta": 0.04013633728027344,
+          "fixture": "tokens201",
+          "improvement": -0.04013633728027344
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens301-baseline",
+          "baseline_layer": 10,
+          "baseline_max_abs_diff": 1.3713092803955078,
+          "baseline_token_index": 12,
+          "candidate_hidden_index": 3456,
+          "candidate_label": "tokens301-p4p65-inproj",
+          "candidate_layer": 11,
+          "candidate_max_abs_diff": 2.770465850830078,
+          "candidate_token_index": 0,
+          "delta": 1.3991565704345703,
+          "fixture": "tokens301",
+          "improvement": -1.3991565704345703
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens401-baseline",
+          "baseline_layer": 8,
+          "baseline_max_abs_diff": 0.9593067169189453,
+          "baseline_token_index": 9,
+          "candidate_hidden_index": 3456,
+          "candidate_label": "tokens401-p4p65-inproj",
+          "candidate_layer": 10,
+          "candidate_max_abs_diff": 1.7564010620117188,
+          "candidate_token_index": 0,
+          "delta": 0.7970943450927734,
+          "fixture": "tokens401",
+          "improvement": -0.7970943450927734
+        }
+      ],
+      "condition": "p4p65-inproj",
+      "decision": "reject",
+      "fixture_count": 5,
+      "max_regression": 1.3991565704345703,
+      "mean_improvement": -0.8177549362182617,
+      "median_improvement": -0.7970943450927734,
+      "reason": "fixture regression exceeds 0.001"
+    }
+  ],
+  "gates": {
+    "max_fixture_worsen": 0.001,
+    "min_fixture_count": 5,
+    "min_median_improvement": 0.005
+  },
+  "schema_version": "qwen-prefix-candidate-gates-v0.1",
+  "source_summary": "benchmarks/results/2026-07-05/engine/qwen-prefix-manifest-vs-p4p65-inproj-five-fixture-summary.json"
+}

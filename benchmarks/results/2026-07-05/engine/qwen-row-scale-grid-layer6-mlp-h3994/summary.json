@@ -1,0 +1,57 @@
+{
+  "conditions": [
+    {
+      "condition": "layer6-mlp-h3994-s1",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1.json",
+      "runner_condition": "layer6-mlp-h3994-s1,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1.json",
+      "scale": 1.0
+    },
+    {
+      "condition": "layer6-mlp-h3994-s1p004",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p004.json",
+      "runner_condition": "layer6-mlp-h3994-s1p004,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p004.json",
+      "scale": 1.004
+    },
+    {
+      "condition": "layer6-mlp-h3994-s1p008",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p008.json",
+      "runner_condition": "layer6-mlp-h3994-s1p008,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p008.json",
+      "scale": 1.008
+    },
+    {
+      "condition": "layer6-mlp-h3994-s1p012",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p012.json",
+      "runner_condition": "layer6-mlp-h3994-s1p012,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p012.json",
+      "scale": 1.012
+    },
+    {
+      "condition": "layer6-mlp-h3994-s1p016",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p016.json",
+      "runner_condition": "layer6-mlp-h3994-s1p016,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p016.json",
+      "scale": 1.016
+    },
+    {
+      "condition": "layer6-mlp-h3994-s1p02",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p02.json",
+      "runner_condition": "layer6-mlp-h3994-s1p02,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p02.json",
+      "scale": 1.02
+    },
+    {
+      "condition": "layer6-mlp-h3994-s1p023383096",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p023383096.json",
+      "runner_condition": "layer6-mlp-h3994-s1p023383096,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p023383096.json",
+      "scale": 1.0233830958654118
+    },
+    {
+      "condition": "layer6-mlp-h3994-s1p026471714",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p026471714.json",
+      "runner_condition": "layer6-mlp-h3994-s1p026471714,row_scale=benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994/layer6-mlp-h3994-s1p026471714.json",
+      "scale": 1.0264717135497252
+    }
+  ],
+  "layer_index": 6,
+  "output_dir": "benchmarks/results/2026-07-05/engine/qwen-row-scale-grid-layer6-mlp-h3994",
+  "row_index": 3994,
+  "schema_version": "qwen-row-scale-grid-v0.1",
+  "tensor_suffix": "mlp.down_proj.weight"
+}
