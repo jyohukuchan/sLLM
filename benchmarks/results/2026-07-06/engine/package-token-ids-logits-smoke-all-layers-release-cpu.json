@@ -1,0 +1,139 @@
+{
+  "backend": "cpu",
+  "device_index": 0,
+  "device_name": "host CPU fallback",
+  "embedding": {
+    "dtype": "BF16",
+    "shape": [
+      248320,
+      4096
+    ],
+    "tensor": "model.language_model.embed_tokens.weight"
+  },
+  "final_norm": {
+    "dtype": "BF16",
+    "shape": [
+      4096
+    ],
+    "tensor": "model.language_model.norm.weight"
+  },
+  "hidden": 4096,
+  "layer_kinds": [
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "self_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "self_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "self_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "self_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "self_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "self_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "self_attention",
+    "linear_attention",
+    "linear_attention",
+    "linear_attention",
+    "self_attention"
+  ],
+  "layers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31
+  ],
+  "lm_head": {
+    "chunk_rows": 8192,
+    "dtype": "BF16",
+    "shape": [
+      248320,
+      4096
+    ],
+    "tensor": "lm_head.weight",
+    "vocab": 248320
+  },
+  "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d",
+  "position_offset": 0,
+  "rope_base": 10000000.0,
+  "rotary_dim": 64,
+  "schema_version": "package-token-ids-logits-smoke-v0.1",
+  "self_attn": {
+    "head_dim": 256,
+    "kv_heads": 4,
+    "q_heads": 16,
+    "rotary_dim": 64,
+    "value_dim": 256
+  },
+  "sequence_len": 1,
+  "timing_ms": {
+    "embedding_read": 2.041007,
+    "final_norm": 1.1479949999999999,
+    "layer_load": 13951.68437,
+    "layers": 68484.48471599999,
+    "lm_head_top_k": 6295.389955,
+    "total": 74910.642709
+  },
+  "token_ids": [
+    1
+  ],
+  "top_k": 3,
+  "top_logits": [
+    {
+      "logit": 5.938885688781738,
+      "token_id": 5328
+    },
+    {
+      "logit": 5.219421863555908,
+      "token_id": 7734
+    },
+    {
+      "logit": 5.1810197830200195,
+      "token_id": 12195
+    }
+  ],
+  "verified": true
+}

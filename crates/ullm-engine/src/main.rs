@@ -14981,7 +14981,7 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
 const QWEN3_EMBED_TOKENS_TENSOR: &str = "model.language_model.embed_tokens.weight";
 const QWEN3_FINAL_NORM_TENSOR: &str = "model.language_model.norm.weight";
 const QWEN3_LM_HEAD_TENSOR: &str = "lm_head.weight";
-const QWEN35_DEFAULT_LAYER_COUNT: usize = 36;
+const QWEN35_9B_DEFAULT_LAYER_COUNT: usize = 32;
 
 #[derive(Debug, Clone)]
 struct PackageTokenLogit {
@@ -14992,7 +14992,7 @@ struct PackageTokenLogit {
 fn parse_package_token_ids_layer_indices(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
     match value.as_deref() {
         None | Some("") | Some("all") | Some("default") => {
-            Ok((0..QWEN35_DEFAULT_LAYER_COUNT).collect())
+            Ok((0..QWEN35_9B_DEFAULT_LAYER_COUNT).collect())
         }
         Some(raw) => parse_usize_csv(raw, "layer list"),
     }
@@ -15480,12 +15480,15 @@ mod package_token_ids_logits_tests {
     #[test]
     fn package_token_ids_layer_indices_default_to_qwen35_layers() {
         let layers = parse_package_token_ids_layer_indices(None).unwrap();
-        assert_eq!(layers.len(), QWEN35_DEFAULT_LAYER_COUNT);
+        assert_eq!(layers.len(), QWEN35_9B_DEFAULT_LAYER_COUNT);
         assert_eq!(layers.first().copied(), Some(0));
-        assert_eq!(layers.last().copied(), Some(QWEN35_DEFAULT_LAYER_COUNT - 1));
+        assert_eq!(
+            layers.last().copied(),
+            Some(QWEN35_9B_DEFAULT_LAYER_COUNT - 1)
+        );
 
         let layers = parse_package_token_ids_layer_indices(Some("all".to_string())).unwrap();
-        assert_eq!(layers.len(), QWEN35_DEFAULT_LAYER_COUNT);
+        assert_eq!(layers.len(), QWEN35_9B_DEFAULT_LAYER_COUNT);
 
         let layers = parse_package_token_ids_layer_indices(Some("0,2,4".to_string())).unwrap();
         assert_eq!(layers, vec![0, 2, 4]);
