@@ -154,6 +154,9 @@ At minimum:
 - prefill tokens/s
 - decode tokens/s
 - total tokens/s
+- prefill wall time in seconds
+- decode wall time in seconds
+- total wall time in seconds
 - VRAM baseline before the command
 - peak VRAM during the command
 - consumed VRAM, defined as peak total used bytes minus baseline total used bytes
@@ -161,6 +164,18 @@ At minimum:
 - unsupported/OOM reason if metrics are unavailable
 
 Latency and power metrics are optional in v0.1.
+
+For uLLM pre-sq runtime runs, extend `metrics` with these optional fields:
+
+```json
+{
+  "prefill_wall_time_seconds": 0.0,
+  "decode_wall_time_seconds": 0.0,
+  "total_wall_time_seconds": 0.0,
+  "time_to_first_token_ms": null,
+  "time_per_output_token_ms": null
+}
+```
 
 ## Memory Semantics
 
@@ -180,3 +195,40 @@ Tables derived from this schema should include:
 - `decode tokens/s * consumed VRAM GiB`
 
 The product is only a reference column. It is not a quality score by itself.
+
+For uLLM pre-sq runtime runs, extend `memory` with KV cache accounting:
+
+```json
+{
+  "kv_cache_bytes": null,
+  "kv_cache_allocated_blocks": null,
+  "kv_cache_free_blocks": null,
+  "kv_cache_block_size": null
+}
+```
+
+## Correctness
+
+uLLM pre-sq runtime runs should include a top-level optional `correctness`
+object. Long throughput runs do not need full reference comparison, but they
+must record enough sanity data to detect broken runs.
+
+```json
+{
+  "reference": "hf|golden_fixture|none",
+  "reference_artifact": null,
+  "logits_relative_mse": null,
+  "logits_max_abs_diff": null,
+  "top_k": 10,
+  "top_k_agreement": null,
+  "generated_prefix_matches_reference": null,
+  "nan_count": 0,
+  "inf_count": 0,
+  "logit_min": null,
+  "logit_max": null
+}
+```
+
+For short correctness cases, prefer `hf` or `golden_fixture` and fill the
+logits/top-k fields. For long TPS cases, `reference` may be `none`, but
+`nan_count`, `inf_count`, and logit range should still be recorded.

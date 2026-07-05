@@ -1,0 +1,110 @@
+{
+  "schema_version": "inference-benchmark-result-v0.1",
+  "run_id": "2026-07-06-presq-runtime-tps",
+  "case_id": "ullm-qwen35-9b-hidden3994-r9700-ctx768-b1-pp512-tg256",
+  "status": "skipped",
+  "engine": {
+    "name": "uLLM",
+    "version": null,
+    "commit": "1eda85ada3b967895cd49dd79d0ea7327bb77bd7"
+  },
+  "model": {
+    "name": "Qwen3.5-9B",
+    "source": "local-safetensors",
+    "revision": null,
+    "format": "ullm.d",
+    "quantization": "qwen35_9b_p4p46_hidden3994_v1",
+    "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d"
+  },
+  "hardware": {
+    "host": "homelab1-WRX80-Creator",
+    "gpu_count": 1,
+    "gpus": [
+      {
+        "name": "AMD Radeon Graphics",
+        "gfx": "gfx1201",
+        "vram_bytes": 34208743424,
+        "ullm_device_index": 2,
+        "runtime_backend": "hip",
+        "runtime_id": 1
+      }
+    ],
+    "cpu": null,
+    "driver": "6.16.13",
+    "runtime": "ROCm"
+  },
+  "parallelism": {
+    "tensor_parallel": 1,
+    "pipeline_parallel": 1,
+    "data_parallel": 1
+  },
+  "workload": {
+    "context_length": 768,
+    "prompt_tokens": 512,
+    "generated_tokens": 256,
+    "batch_size": 1,
+    "concurrent_requests": 1,
+    "kv_cache_dtype": "f16",
+    "sampling": "greedy"
+  },
+  "metrics": {
+    "prefill_tokens_per_second": null,
+    "decode_tokens_per_second": null,
+    "total_tokens_per_second": null,
+    "prefill_wall_time_seconds": null,
+    "decode_wall_time_seconds": null,
+    "total_wall_time_seconds": null,
+    "time_to_first_token_ms": null,
+    "time_per_output_token_ms": null,
+    "latency_p50_ms": null,
+    "latency_p95_ms": null,
+    "vram_baseline_bytes": null,
+    "vram_peak_bytes": null,
+    "vram_consumed_bytes": null,
+    "decode_tokens_per_second_times_vram_consumed_gib": null,
+    "power_watts_avg": null
+  },
+  "memory": {
+    "backend": "rocm-smi",
+    "sample_interval_seconds": 1.0,
+    "sample_count": 0,
+    "baseline_total_bytes": null,
+    "peak_total_bytes": null,
+    "consumed_total_bytes": null,
+    "baseline_by_card_bytes": {},
+    "peak_by_card_bytes": {},
+    "consumed_by_card_bytes": {},
+    "kv_cache_bytes": null,
+    "kv_cache_allocated_blocks": null,
+    "kv_cache_free_blocks": null,
+    "kv_cache_block_size": null,
+    "log": null
+  },
+  "correctness": {
+    "reference": "none",
+    "reference_artifact": null,
+    "logits_relative_mse": null,
+    "logits_max_abs_diff": null,
+    "top_k": 10,
+    "top_k_agreement": null,
+    "generated_prefix_matches_reference": null,
+    "nan_count": null,
+    "inf_count": null,
+    "logit_min": null,
+    "logit_max": null
+  },
+  "artifacts": {
+    "command": "target/debug/ullm-engine package-token-ids-bench /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d --device-index 2 --prompt-tokens 512 --generated-tokens 256 --batch-size 1 --tensor-parallel 1",
+    "stdout_log": null,
+    "stderr_log": null,
+    "memory_log": null
+  },
+  "error": {
+    "type": "not_implemented",
+    "message": "T0 benchmark contract example; package-token-ids-bench is a T3 deliverable."
+  },
+  "notes": [
+    "Example record for pre-sq runtime TPS runs.",
+    "Use status=ok and fill metrics once package-token-ids-bench exists."
+  ]
+}
