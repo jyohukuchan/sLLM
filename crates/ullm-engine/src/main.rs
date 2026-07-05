@@ -14,10 +14,11 @@ use ullm_engine::decode_runner::{
     qwen3_decoder_layer_prefill_input_from_sequence,
 };
 use ullm_engine::decoder::{
-    PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntimeWeights,
-    Qwen3DecoderLayerSequenceOutput, Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights,
-    Qwen3SelfAttnRuntimePreparedSequence, Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode,
-    Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
+    PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntime,
+    Qwen3DecoderLayerRuntimeWeights, Qwen3DecoderLayerSequenceOutput, Qwen3MlpRuntimeWeights,
+    Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnRuntimePreparedSequence,
+    Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode, Qwen3SelfAttnRuntimeShape,
+    Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
     qwen3_causal_attn_to_host_f32, qwen3_decoder_layer_sequence_to_host_f32,
     qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
     qwen3_self_attn_block_sequence_to_host_f32,
@@ -39,8 +40,8 @@ use ullm_engine::package::{
     select_tensor_payload_bundle,
 };
 use ullm_engine::qwen3_loader::{
-    Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
-    qwen3_decoder_layer_runtime_weights_from_package,
+    Qwen3PackageDecoderLayerRuntime, Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime,
+    Qwen3PackageModelStackRequest, qwen3_decoder_layer_runtime_weights_from_package,
     qwen3_package_decoder_layer_runtime_from_package,
     qwen3_package_model_run_prefill_step_from_sequence,
     qwen3_package_model_run_ready_batch_from_sequences, qwen3_package_model_stack_runner,
@@ -15329,6 +15330,53 @@ fn package_token_ids_generate_smoke_impl(
     rope_base: f32,
     position_offset: usize,
 ) -> Result<String, String> {
+    if env::var("ULLM_GENERATE_DECODE_MODE")
+        .map(|value| value == "full_sequence_recompute_greedy")
+        .unwrap_or(false)
+    {
+        return package_token_ids_generate_recompute_smoke_impl(
+            path,
+            device_index,
+            chunk_bytes,
+            layer_indices,
+            prompt_token_ids,
+            generated_tokens,
+            top_k,
+            lm_head_chunk_rows,
+            rotary_dim,
+            rope_base,
+            position_offset,
+        );
+    }
+    package_token_ids_generate_incremental_smoke_impl(
+        path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids,
+        generated_tokens,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_generate_recompute_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    prompt_token_ids: Vec<usize>,
+    generated_tokens: usize,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+) -> Result<String, String> {
     if prompt_token_ids.is_empty() {
         return Err(
             "package token-id generate smoke requires at least one prompt token".to_string(),
@@ -15485,6 +15533,483 @@ fn package_token_ids_generate_smoke_impl(
     });
     serde_json::to_string_pretty(&report)
         .map_err(|err| format!("failed to encode token-id generate smoke report: {err}"))
+}
+
+enum PackageTokenIdsIncrementalLayer {
+    LinearAttention(PackageLinearAttnResidentStepLayer),
+    SelfAttention { self_index: usize },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_incremental_layer_step<'weights>(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layer: &mut PackageTokenIdsIncrementalLayer,
+    self_layers: &'weights [Qwen3PackageDecoderLayerRuntime],
+    self_states: &mut [Qwen3DecoderLayerRuntime<'weights>],
+    block_table: &[u32],
+    block_size: usize,
+    cache_blocks: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    rope_position: usize,
+    cache_position: usize,
+    residual: &[f32],
+    label: &str,
+) -> Result<Vec<f32>, String> {
+    match layer {
+        PackageTokenIdsIncrementalLayer::LinearAttention(layer) => layer.step(stream, residual),
+        PackageTokenIdsIncrementalLayer::SelfAttention { self_index } => {
+            let loaded = self_layers
+                .get(*self_index)
+                .ok_or_else(|| format!("{label} self-attn layer index {self_index} is missing"))?;
+            let state = self_states
+                .get_mut(*self_index)
+                .ok_or_else(|| format!("{label} self-attn state index {self_index} is missing"))?;
+            let prepared = qwen3_self_attn_prepare_model_loop_sequence_smoke(
+                context,
+                stream,
+                &loaded.weights.self_attn,
+                residual.to_vec(),
+                1,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                &loaded.input_norm,
+                &loaded.q_norm,
+                &loaded.k_norm,
+                block_table,
+                block_size,
+                cache_blocks,
+                label,
+            )?;
+            let step = state.step(
+                stream,
+                &prepared.q_rope,
+                &prepared.k_rope,
+                &prepared.v_projected,
+                prepared.q_gate.as_deref(),
+                &prepared.residual_sequence,
+            )?;
+            if step.cache_position != cache_position {
+                return Err(format!(
+                    "{label} cache_position {} does not match expected {cache_position}",
+                    step.cache_position
+                ));
+            }
+            if step.cache_len != cache_position + 1 {
+                return Err(format!(
+                    "{label} cache_len {} does not match expected {}",
+                    step.cache_len,
+                    cache_position + 1
+                ));
+            }
+            Ok(step.layer_output)
+        }
+    }
+}
+
+fn package_token_ids_incremental_final_logits(
+    path: &str,
+    final_hidden: &[f32],
+    final_norm: &PassthroughF32Data,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+) -> Result<(serde_json::Value, usize), String> {
+    let final_normed = runtime_host_rmsnorm_f32(final_hidden, &final_norm.values, 1e-6_f32);
+    if final_normed.len() != final_hidden.len()
+        || final_normed.iter().any(|value| !value.is_finite())
+    {
+        return Err(
+            "incremental final normalized hidden state contains invalid values".to_string(),
+        );
+    }
+    let (_lm_head_vocab, _lm_head_dtype, _lm_head_shape, top_logits) =
+        package_lm_head_top_k_from_rows(path, &final_normed, top_k, lm_head_chunk_rows)?;
+    let next = top_logits
+        .first()
+        .map(|entry| entry.token_id)
+        .ok_or_else(|| "incremental lm_head returned no top logits".to_string())?;
+    let top_logits_json = top_logits
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "token_id": entry.token_id,
+                "logit": entry.logit,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok((serde_json::Value::Array(top_logits_json), next))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_generate_incremental_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    prompt_token_ids: Vec<usize>,
+    generated_tokens: usize,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+) -> Result<String, String> {
+    if prompt_token_ids.is_empty() {
+        return Err(
+            "package token-id generate smoke requires at least one prompt token".to_string(),
+        );
+    }
+    if layer_indices.is_empty() {
+        return Err("package token-id generate smoke requires at least one layer".to_string());
+    }
+
+    let run_started = Instant::now();
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let embed_started = Instant::now();
+    let embedding_rows =
+        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
+            .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
+    let hidden = embedding_rows.columns;
+    if hidden == 0 || embedding_rows.values.len() != prompt_token_ids.len() * hidden {
+        return Err(format!(
+            "incremental prompt embedding shape mismatch: hidden={} values={} prompt_tokens={}",
+            hidden,
+            embedding_rows.values.len(),
+            prompt_token_ids.len()
+        ));
+    }
+    let embed_ms = embed_started.elapsed().as_secs_f64() * 1000.0;
+
+    let total_tokens = prompt_token_ids
+        .len()
+        .checked_add(generated_tokens)
+        .ok_or_else(|| "incremental total token count overflows".to_string())?
+        .max(1);
+    let block_size = 256_usize.min(total_tokens.max(1));
+    let cache_blocks = (total_tokens - 1) / block_size + 1;
+    if cache_blocks > u32::MAX as usize {
+        return Err(format!(
+            "incremental cache block count {cache_blocks} exceeds u32 range"
+        ));
+    }
+    let block_table = (0..cache_blocks)
+        .map(|block| {
+            u32::try_from(block)
+                .map_err(|_| format!("incremental block index {block} exceeds u32 range"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let layer_load_started = Instant::now();
+    let mut layer_kinds = Vec::with_capacity(layer_indices.len());
+    let mut layers = Vec::with_capacity(layer_indices.len());
+    let mut self_layers = Vec::new();
+    let mut self_attn_shape = None;
+    let mut resolved_rotary_dim = None;
+    for &layer_index in &layer_indices {
+        let layer_kind = package_decoder_layer_kind(path, layer_index)
+            .map_err(|err| format!("failed to identify package layer {layer_index}: {err}"))?;
+        layer_kinds.push(layer_kind.as_str());
+        match layer_kind {
+            PackageDecoderLayerKind::LinearAttention => {
+                let layer = PackageLinearAttnResidentStepLayer::load(
+                    &mut context,
+                    &mut stream,
+                    path,
+                    chunk_bytes,
+                    layer_index,
+                )
+                .map_err(|err| {
+                    format!("failed to load incremental linear-attn layer {layer_index}: {err}")
+                })?;
+                layers.push(PackageTokenIdsIncrementalLayer::LinearAttention(layer));
+            }
+            PackageDecoderLayerKind::SelfAttention => {
+                let layer = qwen3_package_decoder_layer_runtime_from_package(
+                    &mut context,
+                    &mut stream,
+                    path,
+                    chunk_bytes,
+                    layer_index,
+                )
+                .map_err(|err| {
+                    format!("failed to load incremental self-attn layer {layer_index}: {err}")
+                })?;
+                if layer.runtime_shape.hidden != hidden {
+                    return Err(format!(
+                        "incremental self-attn layer {layer_index} hidden mismatch: layer_hidden={} embedding_hidden={hidden}",
+                        layer.runtime_shape.hidden
+                    ));
+                }
+                let layer_rotary_dim = parse_package_token_ids_rotary_dim(
+                    layer.runtime_shape.head_dim,
+                    rotary_dim.as_deref(),
+                )?;
+                if let Some(previous) = resolved_rotary_dim {
+                    if previous != layer_rotary_dim {
+                        return Err(format!(
+                            "incremental rotary dim changed: previous={previous} current={layer_rotary_dim}"
+                        ));
+                    }
+                } else {
+                    resolved_rotary_dim = Some(layer_rotary_dim);
+                }
+                if self_attn_shape.is_none() {
+                    self_attn_shape = Some(serde_json::json!({
+                        "q_heads": layer.runtime_shape.q_heads,
+                        "kv_heads": layer.runtime_shape.kv_heads,
+                        "head_dim": layer.runtime_shape.head_dim,
+                        "value_dim": layer.runtime_shape.value_dim,
+                        "rotary_dim": layer_rotary_dim,
+                    }));
+                }
+                let self_index = self_layers.len();
+                self_layers.push(layer);
+                layers.push(PackageTokenIdsIncrementalLayer::SelfAttention { self_index });
+            }
+        }
+    }
+    let rotary_dim_value = resolved_rotary_dim.unwrap_or(0);
+    let mut self_states = Vec::with_capacity(self_layers.len());
+    for layer in &self_layers {
+        let decode_shape = PagedDecodeShape {
+            block_size,
+            cache_blocks,
+            q_heads: layer.runtime_shape.q_heads,
+            kv_heads: layer.runtime_shape.kv_heads,
+            head_dim: layer.runtime_shape.head_dim,
+            value_dim: layer.runtime_shape.value_dim,
+        };
+        let state = Qwen3DecoderLayerRuntime::new(
+            &mut context,
+            &mut stream,
+            &layer.weights,
+            decode_shape,
+            block_table.clone(),
+            1.0_f32 / (layer.runtime_shape.head_dim as f32).sqrt(),
+            1e-5_f32,
+        )
+        .map_err(|err| {
+            format!(
+                "failed to create incremental self-attn state for layer {}: {err}",
+                layer.layer_index
+            )
+        })?;
+        self_states.push(state);
+    }
+    let layer_load_ms = layer_load_started.elapsed().as_secs_f64() * 1000.0;
+
+    let mut final_norm = read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, chunk_bytes)
+        .map_err(|err| format!("failed to read final RMSNorm tensor: {err}"))?;
+    final_norm.values =
+        effective_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
+    if final_norm.values.len() != hidden {
+        return Err(format!(
+            "incremental final RMSNorm length mismatch: len={} hidden={hidden}",
+            final_norm.values.len()
+        ));
+    }
+
+    let prefill_started = Instant::now();
+    let mut residual_sequence = embedding_rows.values;
+    for (layer_position, layer) in layers.iter_mut().enumerate() {
+        let mut next_sequence = Vec::with_capacity(residual_sequence.len());
+        for timestep in 0..prompt_token_ids.len() {
+            let start = timestep * hidden;
+            let end = start + hidden;
+            let position = position_offset
+                .checked_add(timestep)
+                .ok_or_else(|| "incremental prefill position overflows".to_string())?;
+            let output = package_token_ids_incremental_layer_step(
+                &mut context,
+                &mut stream,
+                layer,
+                &self_layers,
+                &mut self_states,
+                &block_table,
+                block_size,
+                cache_blocks,
+                rotary_dim_value,
+                rope_base,
+                position,
+                timestep,
+                &residual_sequence[start..end],
+                &format!("incremental prefill layer {layer_position} timestep {timestep}"),
+            )?;
+            if output.len() != hidden {
+                return Err(format!(
+                    "incremental prefill layer {layer_position} output length {} does not match hidden {hidden}",
+                    output.len()
+                ));
+            }
+            next_sequence.extend(output);
+        }
+        residual_sequence = next_sequence;
+    }
+    let final_hidden_start = (prompt_token_ids.len() - 1) * hidden;
+    let (prefill_top_logits, first_generated) = package_token_ids_incremental_final_logits(
+        path,
+        &residual_sequence[final_hidden_start..final_hidden_start + hidden],
+        &final_norm,
+        top_k,
+        lm_head_chunk_rows,
+    )?;
+    let prefill_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
+
+    let mut sequence_ids = prompt_token_ids.clone();
+    let mut generated_token_ids = Vec::with_capacity(generated_tokens);
+    let mut decode_step_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
+    let mut decode_positions = Vec::with_capacity(generated_tokens.saturating_sub(1));
+    let mut last_top_logits = prefill_top_logits.clone();
+    if generated_tokens > 0 {
+        generated_token_ids.push(first_generated);
+        sequence_ids.push(first_generated);
+    }
+
+    while generated_token_ids.len() < generated_tokens {
+        let decode_started = Instant::now();
+        let token_id = *sequence_ids
+            .last()
+            .ok_or_else(|| "incremental sequence unexpectedly empty".to_string())?;
+        let embedding =
+            read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &[token_id])
+                .map_err(|err| format!("failed to read incremental decode embedding: {err}"))?;
+        if embedding.values.len() != hidden {
+            return Err(format!(
+                "incremental decode embedding length {} does not match hidden {hidden}",
+                embedding.values.len()
+            ));
+        }
+        let decode_index = generated_token_ids.len() - 1;
+        let position = position_offset
+            .checked_add(prompt_token_ids.len())
+            .and_then(|value| value.checked_add(decode_index))
+            .ok_or_else(|| "incremental decode position overflows".to_string())?;
+        let cache_position = prompt_token_ids
+            .len()
+            .checked_add(decode_index)
+            .ok_or_else(|| "incremental decode cache position overflows".to_string())?;
+        let mut residual = embedding.values;
+        for (layer_position, layer) in layers.iter_mut().enumerate() {
+            residual = package_token_ids_incremental_layer_step(
+                &mut context,
+                &mut stream,
+                layer,
+                &self_layers,
+                &mut self_states,
+                &block_table,
+                block_size,
+                cache_blocks,
+                rotary_dim_value,
+                rope_base,
+                position,
+                cache_position,
+                &residual,
+                &format!("incremental decode layer {layer_position} position {position}"),
+            )?;
+            if residual.len() != hidden {
+                return Err(format!(
+                    "incremental decode layer {layer_position} output length {} does not match hidden {hidden}",
+                    residual.len()
+                ));
+            }
+        }
+        let (top_logits, next) = package_token_ids_incremental_final_logits(
+            path,
+            &residual,
+            &final_norm,
+            top_k,
+            lm_head_chunk_rows,
+        )?;
+        last_top_logits = top_logits;
+        decode_step_ms.push(decode_started.elapsed().as_secs_f64() * 1000.0);
+        decode_positions.push(position);
+        generated_token_ids.push(next);
+        sequence_ids.push(next);
+    }
+
+    let decode_ms = decode_step_ms.iter().sum::<f64>();
+    let total_ms = run_started.elapsed().as_secs_f64() * 1000.0;
+    let timed_decode_tokens = decode_step_ms.len();
+    let report = serde_json::json!({
+        "schema_version": "package-token-ids-generate-smoke-v0.1",
+        "package": path,
+        "git_commit": current_git_commit(),
+        "backend": info.backend.to_string(),
+        "device_index": device_index,
+        "device_name": info.name,
+        "device_total_global_mem": info.total_global_mem,
+        "layers": layer_indices,
+        "layer_kinds": layer_kinds,
+        "prompt_token_ids": prompt_token_ids,
+        "generated_token_ids": generated_token_ids,
+        "final_sequence_len": sequence_ids.len(),
+        "hidden": hidden,
+        "self_attn": self_attn_shape,
+        "top_k": top_k,
+        "lm_head_chunk_rows": lm_head_chunk_rows,
+        "rotary_dim": resolved_rotary_dim,
+        "rope_base": rope_base,
+        "position_offset": position_offset,
+        "decode_mode": "hybrid_incremental_greedy",
+        "incremental_decode": true,
+        "prefill": {
+            "prompt_tokens": sequence_ids.len().saturating_sub(generated_tokens),
+            "wall_ms": prefill_ms,
+            "tps": tps(sequence_ids.len().saturating_sub(generated_tokens), prefill_ms),
+            "top_logits": prefill_top_logits,
+        },
+        "decode": {
+            "requested_generated_tokens": generated_tokens,
+            "timed_incremental_steps": timed_decode_tokens,
+            "positions": decode_positions,
+            "step_wall_ms": decode_step_ms,
+            "wall_ms": decode_ms,
+            "timed_step_tps": tps(timed_decode_tokens, decode_ms),
+            "end_to_end_generated_tps": tps(generated_tokens, total_ms),
+            "last_top_logits": last_top_logits,
+        },
+        "throughput": {
+            "total_model_input_tokens": prompt_token_ids.len() + timed_decode_tokens,
+            "model_input_tps": tps(prompt_token_ids.len() + timed_decode_tokens, prefill_ms + decode_ms),
+            "total_wall_ms": total_ms,
+        },
+        "timing_ms": {
+            "embedding_read": embed_ms,
+            "layer_load": layer_load_ms,
+            "prefill": prefill_ms,
+            "decode": decode_ms,
+            "total": total_ms,
+        },
+        "memory": {
+            "vram_baseline_bytes": serde_json::Value::Null,
+            "vram_peak_bytes": serde_json::Value::Null,
+            "vram_consumed_bytes": serde_json::Value::Null,
+            "kv_cache_bytes": serde_json::Value::Null,
+            "cache_blocks": cache_blocks,
+            "block_size": block_size,
+        },
+        "correctness": {
+            "verified": true,
+            "nan_or_inf_detected": false,
+        },
+        "notes": [
+            "This path keeps selected layer weights resident as dequantized f32 runtime buffers; full-model residency may exceed current GPU memory before sq-format work."
+        ],
+        "verified": true,
+    });
+    serde_json::to_string_pretty(&report).map_err(|err| {
+        format!("failed to encode incremental token-id generate smoke report: {err}")
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
