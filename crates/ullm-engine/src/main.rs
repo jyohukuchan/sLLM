@@ -30,7 +30,8 @@ use ullm_engine::loader::{
     LoadOptions, LoadedPayload, PassthroughF32Data, WeightRegistry,
     effective_rmsnorm_weight_values, load_package_tensor_prefix, materialize_config,
     materialize_selected_aq4_matrix, matrix_shape_rows_cols, read_named_passthrough_f32,
-    read_named_passthrough_f32_rows, read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,
+    read_named_passthrough_f32_row_range, read_named_passthrough_f32_rows,
+    read_passthrough_payload_f32_bytes, resolve_passthrough_dtype,
     validate_passthrough_shape_elements,
 };
 use ullm_engine::package::{
@@ -15311,7 +15312,7 @@ fn package_lm_head_top_k_from_rows(
     if top_k == 0 || chunk_rows == 0 {
         return Err("lm_head top-k and chunk_rows must be greater than zero".to_string());
     }
-    let first_row = read_named_passthrough_f32_rows(path, QWEN3_LM_HEAD_TENSOR, &[0])
+    let first_row = read_named_passthrough_f32_row_range(path, QWEN3_LM_HEAD_TENSOR, 0, 1)
         .map_err(|err| format!("failed to read lm_head first row: {err}"))?;
     if first_row.shape.len() != 2 {
         return Err(format!(
@@ -15336,9 +15337,9 @@ fn package_lm_head_top_k_from_rows(
             .checked_add(chunk_rows)
             .map(|candidate| candidate.min(vocab))
             .ok_or_else(|| "lm_head chunk end overflows".to_string())?;
-        let row_indices = (start..end).collect::<Vec<_>>();
-        let rows = read_named_passthrough_f32_rows(path, QWEN3_LM_HEAD_TENSOR, &row_indices)
-            .map_err(|err| format!("failed to read lm_head rows {start}..{end}: {err}"))?;
+        let rows =
+            read_named_passthrough_f32_row_range(path, QWEN3_LM_HEAD_TENSOR, start, end - start)
+                .map_err(|err| format!("failed to read lm_head rows {start}..{end}: {err}"))?;
         if rows.columns != hidden.len() || rows.shape != first_row.shape {
             return Err(format!(
                 "lm_head chunk shape changed for rows {start}..{end}: columns={} shape={:?}",

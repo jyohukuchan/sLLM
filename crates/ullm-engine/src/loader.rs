@@ -73,6 +73,16 @@ pub struct PassthroughF32Rows {
     pub columns: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct PassthroughF32RowRange {
+    pub values: Vec<f32>,
+    pub dtype: String,
+    pub shape: Vec<u64>,
+    pub start_row: usize,
+    pub row_count: usize,
+    pub columns: usize,
+}
+
 pub fn effective_rmsnorm_weight_values(tensor_name: &str, values: &[f32]) -> Vec<f32> {
     if uses_additive_rmsnorm_weight(tensor_name, values) {
         values.iter().map(|value| value + 1.0_f32).collect()
@@ -227,6 +237,33 @@ pub fn read_named_passthrough_f32_rows(
         dtype,
         shape: bundle.shape,
         row_indices: row_indices.to_vec(),
+        columns,
+    })
+}
+
+pub fn read_named_passthrough_f32_row_range(
+    package_path: impl AsRef<Path>,
+    tensor_name: &str,
+    start_row: usize,
+    row_count: usize,
+) -> Result<PassthroughF32RowRange, String> {
+    let selector = TensorSelector::Name(tensor_name.to_string());
+    let bundle = select_passthrough_payload_bundle(package_path, &selector).map_err(|err| {
+        format!("failed to select package passthrough tensor {tensor_name}: {err}")
+    })?;
+    validate_passthrough_shape_elements(&bundle)
+        .map_err(|err| format!("invalid passthrough shape for {tensor_name}: {err}"))?;
+    let dtype = resolve_passthrough_dtype(&bundle, tensor_name)?.to_string();
+    let (columns, values) = read_passthrough_payload_f32_row_range(
+        &bundle, &dtype, start_row, row_count,
+    )
+    .map_err(|err| format!("failed to read passthrough row range for {tensor_name}: {err}"))?;
+    Ok(PassthroughF32RowRange {
+        values,
+        dtype,
+        shape: bundle.shape,
+        start_row,
+        row_count,
         columns,
     })
 }
@@ -759,6 +796,162 @@ pub fn read_passthrough_payload_f32_rows(
         for bytes in row_bytes_buf.chunks_exact(element_size) {
             values.push(decode_passthrough_element(dtype, bytes));
         }
+    }
+    Ok((columns, values))
+}
+
+pub fn read_passthrough_payload_f32_row_range(
+    bundle: &PassthroughPayloadBundle,
+    dtype: &str,
+    start_row: usize,
+    row_count: usize,
+) -> Result<(usize, Vec<f32>), String> {
+    validate_passthrough_payload_encoding(bundle)?;
+    if row_count == 0 {
+        return Err(format!(
+            "passthrough tensor {} row range count must be greater than zero",
+            bundle.tensor_name
+        ));
+    }
+    let shape = match bundle.shape.as_slice() {
+        [rows, columns] => (*rows, *columns),
+        _ => {
+            return Err(format!(
+                "passthrough tensor {} must be 2D for row range reads",
+                bundle.tensor_name
+            ));
+        }
+    };
+    let rows = usize::try_from(shape.0).map_err(|_| {
+        format!(
+            "passthrough tensor {} row count is too large",
+            bundle.tensor_name
+        )
+    })?;
+    let columns = usize::try_from(shape.1).map_err(|_| {
+        format!(
+            "passthrough tensor {} column count is too large",
+            bundle.tensor_name
+        )
+    })?;
+    let end_row = start_row.checked_add(row_count).ok_or_else(|| {
+        format!(
+            "passthrough tensor {} row range end overflows",
+            bundle.tensor_name
+        )
+    })?;
+    if start_row >= rows || end_row > rows {
+        return Err(format!(
+            "passthrough tensor {} row range {}..{} is out of range 0..{}",
+            bundle.tensor_name, start_row, end_row, rows
+        ));
+    }
+    let expected_elements = rows
+        .checked_mul(columns)
+        .ok_or_else(|| format!("passthrough tensor {} shape overflows", bundle.tensor_name))?;
+    if u64::try_from(expected_elements).ok() != Some(bundle.elements) {
+        return Err(format!(
+            "passthrough tensor {} shape has {expected_elements} elements, expected {}",
+            bundle.tensor_name, bundle.elements
+        ));
+    }
+    let element_size = passthrough_element_size(dtype, &bundle.tensor_name)?;
+    let row_bytes = columns.checked_mul(element_size).ok_or_else(|| {
+        format!(
+            "passthrough tensor {} row byte size overflows",
+            bundle.tensor_name
+        )
+    })?;
+    let payload_bytes = if bundle.payload_bytes == 0 {
+        bundle.payload_file.bytes
+    } else {
+        bundle.payload_bytes
+    };
+    if payload_bytes != bundle.payload_file.bytes {
+        return Err(format!(
+            "passthrough tensor {} payload bytes mismatch: declared {} actual {}",
+            bundle.tensor_name, payload_bytes, bundle.payload_file.bytes
+        ));
+    }
+    let expected_bytes = u64::try_from(expected_elements)
+        .ok()
+        .and_then(|elements| elements.checked_mul(u64::try_from(element_size).ok()?))
+        .ok_or_else(|| {
+            format!(
+                "passthrough tensor {} expected payload byte size overflows",
+                bundle.tensor_name
+            )
+        })?;
+    if payload_bytes != expected_bytes {
+        return Err(format!(
+            "passthrough tensor {} payload bytes mismatch: expected {} got {}",
+            bundle.tensor_name, expected_bytes, payload_bytes
+        ));
+    }
+
+    let range_bytes = row_count.checked_mul(row_bytes).ok_or_else(|| {
+        format!(
+            "passthrough tensor {} row range byte size overflows",
+            bundle.tensor_name
+        )
+    })?;
+    let output_elements = row_count.checked_mul(columns).ok_or_else(|| {
+        format!(
+            "passthrough tensor {} row range output overflows",
+            bundle.tensor_name
+        )
+    })?;
+    let byte_offset = start_row
+        .checked_mul(row_bytes)
+        .and_then(|offset| u64::try_from(offset).ok())
+        .ok_or_else(|| {
+            format!(
+                "passthrough tensor {} row range byte offset overflows",
+                bundle.tensor_name
+            )
+        })?;
+
+    let mut file = File::open(&bundle.payload_file.absolute_path).map_err(|err| {
+        format!(
+            "failed to open {}: {err}",
+            bundle.payload_file.absolute_path.display()
+        )
+    })?;
+    file.seek(SeekFrom::Start(byte_offset)).map_err(|err| {
+        format!(
+            "failed to seek {} to row range {}..{}: {err}",
+            bundle.payload_file.absolute_path.display(),
+            start_row,
+            end_row
+        )
+    })?;
+
+    let mut range_bytes_buf = Vec::new();
+    range_bytes_buf.try_reserve(range_bytes).map_err(|err| {
+        format!(
+            "failed to reserve passthrough row range buffer for tensor {}: {err}",
+            bundle.tensor_name
+        )
+    })?;
+    range_bytes_buf.resize(range_bytes, 0_u8);
+    file.read_exact(&mut range_bytes_buf).map_err(|err| {
+        format!(
+            "failed to read row range {}..{} from {}: {err}",
+            start_row,
+            end_row,
+            bundle.payload_file.absolute_path.display()
+        )
+    })?;
+
+    let mut values = Vec::new();
+    values.try_reserve(output_elements).map_err(|err| {
+        format!(
+            "failed to reserve decoded passthrough row range values for tensor {}: {err}",
+            bundle.tensor_name
+        )
+    })?;
+    for bytes in range_bytes_buf.chunks_exact(element_size) {
+        values.push(decode_passthrough_element(dtype, bytes));
     }
     Ok((columns, values))
 }
@@ -1405,8 +1598,21 @@ mod tests {
         assert_eq!(rows.columns, 2);
         assert_eq!(rows.values, vec![0.75, 1.0]);
 
+        let range =
+            read_named_passthrough_f32_row_range(&root, "model.embed_tokens.weight", 1, 2).unwrap();
+        assert_eq!(range.dtype, "BF16");
+        assert_eq!(range.shape, vec![3, 2]);
+        assert_eq!(range.start_row, 1);
+        assert_eq!(range.row_count, 2);
+        assert_eq!(range.columns, 2);
+        assert_eq!(range.values, vec![3.0, 4.0, -1.0, -2.0]);
+
         let err =
             read_named_passthrough_f32_rows(&root, "model.embed_tokens.weight", &[3]).unwrap_err();
+        assert!(err.contains("out of range"));
+
+        let err = read_named_passthrough_f32_row_range(&root, "model.embed_tokens.weight", 2, 2)
+            .unwrap_err();
         assert!(err.contains("out of range"));
 
         fs::remove_dir_all(root).unwrap();
