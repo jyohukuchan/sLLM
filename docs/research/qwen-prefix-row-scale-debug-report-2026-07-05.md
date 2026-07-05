@@ -209,6 +209,22 @@ Tokens401-derived layer8 local candidate:
   - delta: `+0.017654419`
 - This reinforces that layer8 local row-scale can overfit tokens401 and conflict with tokens1.
 
+Quantizer policy branch dry-run:
+
+- Baseline `p4p46_inproj`:
+  - high tensors: `114`
+  - low tensors: `141`
+  - estimated output bytes: `9121922016`
+- Custom `p4p46 + mlp_up`:
+  - high tensors: `147`
+  - low tensors: `108`
+  - estimated output bytes: `9225731040`
+  - estimated output increase: `103809024` bytes
+- Interpretation:
+  - family-wide `mlp_up` high assignment is cheap enough to build if needed.
+  - It is still broad and not activation-aware, so it may repeat the p4p65 pattern of cross-fixture regressions.
+  - The evidence now favors a narrower tensor override policy or activation-aware row policy over another broad family-wide package.
+
 ## Verification
 
 - `python3 -m py_compile tools/summarize-qwen-prefix-smokes.py`
@@ -220,6 +236,7 @@ Tokens401-derived layer8 local candidate:
 - JSON parse checks for p4p65 and p4p65+row3456 five-fixture summary/gate artifacts.
 - JSON parse checks for layer8 manifest package five-fixture summary/gate artifacts.
 - JSON parse checks for weak layer8-up6340 manifest grid, selected five-fixture summary/gate artifacts, chain comparison, and tokens401 layer8 local prefilter artifacts.
+- JSON parse checks for quantizer policy dry-run plan artifacts.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.
@@ -232,5 +249,5 @@ Tokens401-derived layer8 local candidate:
 2. Do not promote `p4p65-inproj` or `p4p65+row3456`; both fail five-fixture gates.
 3. Do not promote weak `layer8-up6340`; it is hard-gate safe at low scale but aggregate effect is too small and tokens401 does not improve.
 4. Do not continue direct tokens401 layer8 local row-scale as a general fix; it strongly regresses tokens1.
-5. Search upstream of tokens401 layer8 input drift, or switch to activation-aware / row-aware quantizer policy.
+5. Prefer a narrower tensor override policy or activation-aware / row-aware quantizer policy over broad family-wide row-scale work.
 6. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.

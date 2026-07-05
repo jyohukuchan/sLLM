@@ -421,6 +421,21 @@ Updated decision:
   - either identify an upstream candidate that affects tokens401 before layer8 without the tokens1 sign conflict,
   - or move to activation-aware / row-aware quantizer policy investigation.
 
+Quantizer policy dry-run:
+
+- Baseline `p4p46_inproj` plan:
+  - high tensors: `114`
+  - low tensors: `141`
+  - estimated output bytes: `9121922016`
+- Custom `p4p46 + mlp_up` plan:
+  - high tensors: `147`
+  - low tensors: `108`
+  - estimated output bytes: `9225731040`
+  - estimated output increase: `103809024` bytes
+- Interpretation:
+  - family-wide `mlp_up` high assignment is not expensive in size, but it is broad and not activation-aware.
+  - A narrower tensor override policy or activation-aware row policy is more aligned with the current evidence than another broad family-wide package.
+
 ## Expected Outcome
 
 `layer8-upfit` の弱倍率はhard gate内には収まるが、aggregate improvementが不足し、tokens401を改善しないことが分かった。
