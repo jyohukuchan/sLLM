@@ -21571,6 +21571,99 @@ fn package_linear_attn_stateful_step_smoke_impl(
         1e-4,
         1e-5,
     )?;
+    let mut conv_context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime conv context: {err}"))?;
+    let mut conv_stream = conv_context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime conv stream: {err}"))?;
+    let qkv_step_bytes = qkv_step_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention qkv step byte size overflows".to_string())?;
+    let conv_history_elements = qkv_step_elements
+        .checked_mul(kernel_size)
+        .ok_or_else(|| "linear attention conv history element count overflows".to_string())?;
+    let conv_history_bytes = conv_history_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention conv history byte size overflows".to_string())?;
+    let mut conv_history_buffer = conv_context
+        .alloc_buffer(conv_history_bytes)
+        .map_err(|err| format!("failed to allocate runtime conv history buffer: {err}"))?;
+    let mut conv_weight_buffer = conv_context
+        .alloc_buffer(
+            conv.values
+                .len()
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "linear attention conv weight byte size overflows".to_string())?,
+        )
+        .map_err(|err| format!("failed to allocate runtime conv weight buffer: {err}"))?;
+    let mut conv_output_buffer = conv_context
+        .alloc_buffer(conv_history_bytes)
+        .map_err(|err| format!("failed to allocate runtime conv output buffer: {err}"))?;
+    conv_weight_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&conv.values),
+            Some(&mut conv_stream),
+        )
+        .map_err(|err| format!("failed to copy runtime conv weight: {err}"))?;
+    conv_stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize runtime conv weight copy: {err}"))?;
+    let mut runtime_conv_history = vec![0.0_f32; conv_history_elements];
+    let mut runtime_stepped_conv = Vec::with_capacity(run.attention_conv_pre_silu.len());
+    for qkv_step in run.attention_qkv_projection.chunks_exact(qkv_step_elements) {
+        if kernel_size > 1 {
+            runtime_conv_history.rotate_left(qkv_step_elements);
+        }
+        let latest_start = (kernel_size - 1) * qkv_step_elements;
+        runtime_conv_history[latest_start..latest_start + qkv_step_elements]
+            .copy_from_slice(qkv_step);
+        conv_history_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&runtime_conv_history),
+                Some(&mut conv_stream),
+            )
+            .map_err(|err| format!("failed to copy runtime conv history: {err}"))?;
+        conv_stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize runtime conv history copy: {err}"))?;
+        ullm_runtime_sys::depthwise_conv1d_f32(
+            &conv_history_buffer,
+            &conv_weight_buffer,
+            qkv_step_elements,
+            kernel_size,
+            kernel_size,
+            &mut conv_output_buffer,
+            Some(&mut conv_stream),
+        )
+        .map_err(|err| format!("failed to run runtime conv step: {err}"))?;
+        conv_stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize runtime conv step: {err}"))?;
+        let mut conv_step_bytes = vec![0_u8; qkv_step_bytes];
+        let latest_byte_start = latest_start
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "linear attention conv latest byte offset overflows".to_string())?;
+        conv_output_buffer
+            .copy_to_host(
+                latest_byte_start,
+                &mut conv_step_bytes,
+                Some(&mut conv_stream),
+            )
+            .map_err(|err| format!("failed to copy runtime conv step output: {err}"))?;
+        conv_stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize runtime conv output copy: {err}"))?;
+        runtime_stepped_conv.extend(decode_f32_le_values(&conv_step_bytes));
+    }
+    let runtime_conv_step_max_abs_diff = verify_f32_close(
+        "package linear attention runtime conv1d step",
+        &runtime_stepped_conv,
+        &run.attention_conv_pre_silu,
+        1e-4,
+        1e-5,
+    )?;
     let stepped_conv_activated = runtime_host_silu_f32(&stepped_conv);
     let conv_activation_step_max_abs_diff = verify_f32_close(
         "package linear attention stateful conv activation",
@@ -21822,7 +21915,7 @@ fn package_linear_attn_stateful_step_smoke_impl(
     )?;
 
     Ok(format!(
-        "package-linear-attn-stateful-step-smoke package={} layer={} sequence_len={} kernel_size={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} qkv_step_elements={} backend={} device_index={} name=\"{}\" conv_step_max_abs_diff={conv_step_max_abs_diff:.9} conv_activation_step_max_abs_diff={conv_activation_step_max_abs_diff:.9} q_step_max_abs_diff={q_step_max_abs_diff:.9} k_step_max_abs_diff={k_step_max_abs_diff:.9} v_step_max_abs_diff={v_step_max_abs_diff:.9} gate_step_max_abs_diff={gate_step_max_abs_diff:.9} beta_step_max_abs_diff={beta_step_max_abs_diff:.9} recurrent_step_max_abs_diff={recurrent_step_max_abs_diff:.9} runtime_recurrent_step_max_abs_diff={runtime_recurrent_step_max_abs_diff:.9} verified=true",
+        "package-linear-attn-stateful-step-smoke package={} layer={} sequence_len={} kernel_size={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} qkv_step_elements={} backend={} device_index={} name=\"{}\" conv_step_max_abs_diff={conv_step_max_abs_diff:.9} runtime_conv_step_max_abs_diff={runtime_conv_step_max_abs_diff:.9} conv_activation_step_max_abs_diff={conv_activation_step_max_abs_diff:.9} q_step_max_abs_diff={q_step_max_abs_diff:.9} k_step_max_abs_diff={k_step_max_abs_diff:.9} v_step_max_abs_diff={v_step_max_abs_diff:.9} gate_step_max_abs_diff={gate_step_max_abs_diff:.9} beta_step_max_abs_diff={beta_step_max_abs_diff:.9} recurrent_step_max_abs_diff={recurrent_step_max_abs_diff:.9} runtime_recurrent_step_max_abs_diff={runtime_recurrent_step_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         sequence_len,
