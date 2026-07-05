@@ -1,0 +1,18 @@
+# Qwen Prefix Smoke Matrix Run
+
+- schema: `qwen-prefix-smoke-matrix-run-v0.1`
+- dry run: `False`
+- run count: `10`
+
+| fixture | condition | returncode | report | log |
+| --- | --- | ---: | --- | --- |
+| tokens1 | baseline | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens1-baseline.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens1-baseline.txt |
+| tokens1 | qwen35-hidden3994-policy | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens1-qwen35-hidden3994-policy.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens1-qwen35-hidden3994-policy.txt |
+| tokens101 | baseline | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens101-baseline.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens101-baseline.txt |
+| tokens101 | qwen35-hidden3994-policy | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens101-qwen35-hidden3994-policy.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens101-qwen35-hidden3994-policy.txt |
+| tokens201 | baseline | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens201-baseline.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens201-baseline.txt |
+| tokens201 | qwen35-hidden3994-policy | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens201-qwen35-hidden3994-policy.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens201-qwen35-hidden3994-policy.txt |
+| tokens301 | baseline | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens301-baseline.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens301-baseline.txt |
+| tokens301 | qwen35-hidden3994-policy | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens301-qwen35-hidden3994-policy.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens301-qwen35-hidden3994-policy.txt |
+| tokens401 | baseline | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens401-baseline.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens401-baseline.txt |
+| tokens401 | qwen35-hidden3994-policy | 0 | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens401-qwen35-hidden3994-policy.jsonl | benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/package-golden-prefix-tokens401-qwen35-hidden3994-policy.txt |

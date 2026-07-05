@@ -1,0 +1,23 @@
+ullm-quant skeleton
+kernel_version=0.1.0
+threads=64
+io_threads=2
+max_working_memory_mib=4096
+aq_policy=all-g16
+aq_low_format=aq4_e4m3_g16_ts_flloyd16
+aq_high_format=aq4_e4m3_g8_ts_flloyd16
+aq_high_families=
+aq_high_tensors=
+dry_run=true
+pack_smoke=ok [16, 33, 15, 120]
+convert_package_plan_json=benchmarks/results/2026-07-05/engine/qwen-hidden3994-policy-qwen35-9b-p4p46-hidden3994-v1-plan.json
+convert_package_aq_policy=qwen35_9b_p4p46_hidden3994_v1
+convert_package_output_dir=/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d
+convert_package_summary_output=benchmarks/results/2026-07-05/engine/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10-jobs64.json
+convert_package_selected_count=255
+convert_package_jobs=64
+convert_package_tensor_count=255
+convert_package_passthrough_tensor_count=520
+convert_package_codebook_count=14
+convert_package_total_file_bytes=9127853385
+convert_package_failure_count=0

@@ -543,3 +543,46 @@ Updated decision:
 一方で、targeted layer8 qkv + MLP-up high-format packageはCPU five-fixture gateを通り、R9700/V620でも同じ方向の改善を示した。
 
 したがって、現時点の結論は「まだ闇雲にデバッグを続ける」ではなく、「受入済みのpackage-level候補を、durableなquantizer policyとしてどう表現するかを決める」段階である。
+
+## 18:30 JST Named Policy Implementation
+
+- `ullm-quant` に `qwen35_9b_p4p46_hidden3994_v1` を追加した。
+- このpolicyは `p4p46_inproj` のhigh familyを維持し、次の2つのexact tensorだけを追加でhigh形式にする。
+  - `model.language_model.layers.8.linear_attn.in_proj_qkv.weight`
+  - `model.language_model.layers.8.mlp.up_proj.weight`
+- 汎用 `p4p46_inproj` は変更していない。
+- dry-run plan:
+  - `benchmarks/results/2026-07-05/engine/qwen-hidden3994-policy-qwen35-9b-p4p46-hidden3994-v1-plan.json`
+  - supported tensors: `255`
+  - passthrough tensors: `520`
+  - high tensors: `116`
+  - low tensors: `139`
+  - estimated output bytes: `9127164896`
+- named-policy package:
+  - `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d`
+  - selected tensors: `255`
+  - passthrough tensors: `520`
+  - codebooks: `14`
+  - failures: `0`
+  - total file bytes: `9127853385`
+  - build wall time: `1:34.67`
+  - max RSS: `3739852` KiB
+- Independent package verify passed.
+- CPU five-fixture rerun:
+  - matrix: `benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/summary.json`
+  - summary: `benchmarks/results/2026-07-05/engine/qwen-prefix-qwen35-hidden3994-policy-cpu-five-fixture-summary.json`
+  - gate: `benchmarks/results/2026-07-05/engine/qwen-prefix-qwen35-hidden3994-policy-cpu-five-fixture-gates.json`
+  - decision: `accept`
+  - mean improvement: `0.0479898453`
+  - median improvement: `0.022603035`
+  - max regression: `0`
+- Unit coverage verifies that the named policy:
+  - matches `p4p46_inproj` high families,
+  - promotes only the two intended layer8 tensors,
+  - leaves neighboring layer9 qkv and MLP-up tensors low,
+  - preserves ordinary p4p46 high-family behavior such as `linear_attn_a`.
+
+Updated conclusion:
+
+- The hidden3994 fix is now expressible as a named model-specific quantizer policy, not an ad hoc command-line override.
+- The accepted policy remains intentionally narrow; broader family promotion is still rejected/insufficient evidence.

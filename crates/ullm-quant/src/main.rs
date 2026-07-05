@@ -253,6 +253,12 @@ struct AqPolicyPlan {
     high_tensors: Vec<String>,
 }
 
+const QWEN35_9B_P4P46_HIDDEN3994_POLICY: &str = "qwen35_9b_p4p46_hidden3994_v1";
+const QWEN35_9B_HIDDEN3994_LAYER8_QKV_TENSOR: &str =
+    "model.language_model.layers.8.linear_attn.in_proj_qkv.weight";
+const QWEN35_9B_HIDDEN3994_LAYER8_MLP_UP_TENSOR: &str =
+    "model.language_model.layers.8.mlp.up_proj.weight";
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ModelPlan {
     schema_version: String,
@@ -859,8 +865,9 @@ fn print_help() {
     );
     println!("  --chunk-bytes <N>             payload chunk size for inspection/conversion");
     println!("  --scale-window <N>            try +/- N scale entries during quant dry-run");
+    println!("  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, p4p46_inproj,");
     println!(
-        "  --aq-policy <ID>              all-g16, all-g8, p4p6, p4p9, p4p46_inproj, p4p65_inproj, or custom"
+        "                                 p4p65_inproj, qwen35_9b_p4p46_hidden3994_v1, or custom"
     );
     println!("  --aq-high-family <FAMILY>     high-format family for custom policy; repeatable");
     println!(
@@ -951,7 +958,37 @@ fn default_quant_families() -> BTreeSet<String> {
     .collect()
 }
 
+fn p4p46_inproj_high_families() -> BTreeSet<String> {
+    [
+        "attn_o",
+        "attn_v",
+        "linear_attn_a",
+        "linear_attn_b",
+        "linear_attn_out",
+        "linear_attn_z",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn p4p65_inproj_high_families() -> BTreeSet<String> {
+    [
+        "attn_k",
+        "attn_o",
+        "attn_v",
+        "linear_attn_a",
+        "linear_attn_b",
+        "linear_attn_out",
+        "linear_attn_qkv",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 fn resolve_aq_policy(options: &Options) -> Result<AqPolicyPlan, String> {
+    let mut preset_high_tensors = BTreeSet::new();
     let high_families: BTreeSet<String> = match options.aq_policy.as_str() {
         "all-g16" => BTreeSet::new(),
         "all-g8" => default_quant_families(),
@@ -971,33 +1008,17 @@ fn resolve_aq_policy(options: &Options) -> Result<AqPolicyPlan, String> {
         .into_iter()
         .map(str::to_string)
         .collect(),
-        "p4p46" | "p4p46_inproj" => [
-            "attn_o",
-            "attn_v",
-            "linear_attn_a",
-            "linear_attn_b",
-            "linear_attn_out",
-            "linear_attn_z",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-        "p4p65" | "p4p65_inproj" => [
-            "attn_k",
-            "attn_o",
-            "attn_v",
-            "linear_attn_a",
-            "linear_attn_b",
-            "linear_attn_out",
-            "linear_attn_qkv",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
+        "p4p46" | "p4p46_inproj" => p4p46_inproj_high_families(),
+        "p4p65" | "p4p65_inproj" => p4p65_inproj_high_families(),
+        QWEN35_9B_P4P46_HIDDEN3994_POLICY => {
+            preset_high_tensors.insert(QWEN35_9B_HIDDEN3994_LAYER8_QKV_TENSOR.to_string());
+            preset_high_tensors.insert(QWEN35_9B_HIDDEN3994_LAYER8_MLP_UP_TENSOR.to_string());
+            p4p46_inproj_high_families()
+        }
         "custom" => options.aq_high_families.iter().cloned().collect(),
         unknown => {
             return Err(format!(
-                "unknown --aq-policy {unknown}; expected all-g16, all-g8, p4p6, p4p9, p4p46_inproj, p4p65_inproj, or custom"
+                "unknown --aq-policy {unknown}; expected all-g16, all-g8, p4p6, p4p9, p4p46_inproj, p4p65_inproj, qwen35_9b_p4p46_hidden3994_v1, or custom"
             ));
         }
     };
@@ -1016,7 +1037,8 @@ fn resolve_aq_policy(options: &Options) -> Result<AqPolicyPlan, String> {
             unknown_families.join(",")
         ));
     }
-    let high_tensors: BTreeSet<String> = options.aq_high_tensors.iter().cloned().collect();
+    let mut high_tensors: BTreeSet<String> = options.aq_high_tensors.iter().cloned().collect();
+    high_tensors.extend(preset_high_tensors);
     let empty_high_tensors: Vec<_> = high_tensors
         .iter()
         .filter(|name| name.is_empty())
@@ -4293,13 +4315,14 @@ fn main() -> ExitCode {
 mod tests {
     use super::{
         AqPolicyPlan, AqQuantMetrics, AqQuantizeChunkRequestV1, CodebookEntry, CodebookExport,
-        ModelPlan, Options, PrototypeManifest, TensorPlan, TensorScaleEstimator,
-        TensorScaleSampleCollector, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16, aq_scale_format,
-        assign_codebook_scopes, bytes_to_lower_hex, choose_best_scale_index_for_group,
-        decode_numeric_value, default_threads, effective_bpp, empty_aq_quant_metrics,
-        estimate_output_bytes, family_for_tensor, lower_median, max_codebook_abs,
-        merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats, new_numeric_stats,
-        new_quant_dry_run_stats, numeric_element_size, parse_scale_window,
+        ModelPlan, Options, PrototypeManifest, QWEN35_9B_HIDDEN3994_LAYER8_MLP_UP_TENSOR,
+        QWEN35_9B_HIDDEN3994_LAYER8_QKV_TENSOR, QWEN35_9B_P4P46_HIDDEN3994_POLICY, TensorPlan,
+        TensorScaleEstimator, TensorScaleSampleCollector, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16,
+        aq_scale_format, assign_codebook_scopes, bytes_to_lower_hex,
+        choose_best_scale_index_for_group, decode_numeric_value, default_threads, effective_bpp,
+        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, lower_median,
+        max_codebook_abs, merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats,
+        new_numeric_stats, new_quant_dry_run_stats, numeric_element_size, parse_scale_window,
         parse_tensor_scale_estimator, quant_assignment, read_safetensors_metadata,
         read_tensor_payload_chunk, resolve_aq_policy, run_direct_prototype_package,
         scale_format_dominates, scale_table_contains_all, scale_values, select_codebook,
@@ -4598,6 +4621,68 @@ mod tests {
         let (format, role) = quant_assignment(false, target, "mlp_up", &policy);
         assert_eq!(format, None);
         assert_eq!(role, None);
+    }
+
+    #[test]
+    fn qwen35_hidden3994_policy_promotes_layer8_qkv_and_mlp_up_only() {
+        let policy = resolve_aq_policy(&test_options(QWEN35_9B_P4P46_HIDDEN3994_POLICY))
+            .expect("qwen hidden3994 policy");
+        let p4p46_policy = resolve_aq_policy(&test_options("p4p46_inproj")).expect("p4p46 policy");
+
+        assert_eq!(policy.high_families, p4p46_policy.high_families);
+        assert_eq!(p4p46_policy.high_tensors, Vec::<String>::new());
+        assert_eq!(
+            policy.high_tensors,
+            vec![
+                QWEN35_9B_HIDDEN3994_LAYER8_QKV_TENSOR.to_string(),
+                QWEN35_9B_HIDDEN3994_LAYER8_MLP_UP_TENSOR.to_string(),
+            ]
+        );
+
+        let (format, role) = quant_assignment(
+            true,
+            QWEN35_9B_HIDDEN3994_LAYER8_QKV_TENSOR,
+            "linear_attn_qkv",
+            &policy,
+        );
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g8_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("high"));
+
+        let (format, role) = quant_assignment(
+            true,
+            "model.language_model.layers.9.linear_attn.in_proj_qkv.weight",
+            "linear_attn_qkv",
+            &policy,
+        );
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("low"));
+
+        let (format, role) = quant_assignment(
+            true,
+            QWEN35_9B_HIDDEN3994_LAYER8_MLP_UP_TENSOR,
+            "mlp_up",
+            &policy,
+        );
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g8_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("high"));
+
+        let (format, role) = quant_assignment(
+            true,
+            "model.language_model.layers.9.mlp.up_proj.weight",
+            "mlp_up",
+            &policy,
+        );
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("low"));
+
+        let (format, role) = quant_assignment(
+            true,
+            "model.language_model.layers.8.linear_attn.in_proj_a.weight",
+            "linear_attn_a",
+            &policy,
+        );
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g8_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("high"));
     }
 
     #[test]

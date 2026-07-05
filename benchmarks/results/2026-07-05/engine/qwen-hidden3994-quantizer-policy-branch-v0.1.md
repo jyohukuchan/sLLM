@@ -189,3 +189,68 @@ Interpretation:
 - Promoting both exact tensors resolves the sign conflict under the fixed five-fixture CPU gate.
 - The same candidate remains accepted on R9700 and both V620 five-fixture gates, so the observed improvement is not a CPU-only artifact.
 - This is the first package-level hidden3994 fix in this branch that satisfies the current acceptance criteria.
+
+## Named Qwen3.5-9B Policy
+
+The accepted exact-tensor override is now represented as a durable quantizer
+policy preset:
+
+```text
+qwen35_9b_p4p46_hidden3994_v1
+```
+
+Policy definition:
+
+- base policy: `p4p46_inproj`
+- additional high tensors:
+  - `model.language_model.layers.8.linear_attn.in_proj_qkv.weight`
+  - `model.language_model.layers.8.mlp.up_proj.weight`
+- unchanged boundary: generic `p4p46_inproj` does not include these exact tensor promotions.
+
+Named-policy dry-run:
+
+- command output: `qwen-hidden3994-policy-qwen35-9b-p4p46-hidden3994-v1-dry-run.txt`
+- plan: `qwen-hidden3994-policy-qwen35-9b-p4p46-hidden3994-v1-plan.json`
+- supported tensors: `255`
+- passthrough tensors: `520`
+- high tensors: `116`
+- low tensors: `139`
+- estimated output bytes: `9127164896`
+
+Named-policy package:
+
+- package: `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d`
+- package summary: `ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10-jobs64.json`
+- verify log: `ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10-jobs64-verify.log`
+- selected tensors: `255`
+- passthrough tensors: `520`
+- codebooks: `14`
+- conversion failures: `0`
+- total file bytes: `9127853385`
+- build wall time: `1:34.67`
+- max RSS: `3739852` KiB
+
+The regenerated package has the same policy shape and package byte size as the
+accepted manual override package, but no longer requires passing
+`--aq-high-tensor` on the command line.
+
+Named-policy CPU five-fixture rerun:
+
+- matrix: `qwen-prefix-smoke-matrix-qwen35-hidden3994-policy-cpu-five-fixture/summary.json`
+- summary: `qwen-prefix-qwen35-hidden3994-policy-cpu-five-fixture-summary.json`
+- gate: `qwen-prefix-qwen35-hidden3994-policy-cpu-five-fixture-gates.json`
+- decision: `accept`
+- fixtures: `5`
+- mean improvement: `0.0479898453`
+- median improvement: `0.022603035`
+- max regression: `0`
+
+Per-fixture result:
+
+| fixture | baseline | candidate | delta |
+| --- | ---: | ---: | ---: |
+| `tokens1` | `0.645338058` | `0.629640579` | `-0.0156974792` |
+| `tokens101` | `1.0805254` | `1.0805254` | `0` |
+| `tokens201` | `1.140728` | `1.00050735` | `-0.140220642` |
+| `tokens301` | `1.37130928` | `1.30988121` | `-0.0614280701` |
+| `tokens401` | `0.959306717` | `0.936703682` | `-0.022603035` |

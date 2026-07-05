@@ -339,6 +339,36 @@ Combined layer8 qkv + MLP-up high-format package:
   - The same candidate remains accepted on R9700 and both V620 five-fixture gates, so the fix is not CPU-only.
   - This is the first accepted hidden3994 package-level candidate in this branch.
 
+Named Qwen3.5-9B quantizer policy:
+
+- Added `qwen35_9b_p4p46_hidden3994_v1` to `ullm-quant`.
+- The named policy keeps the `p4p46_inproj` high families and adds only these exact high tensors:
+  - `model.language_model.layers.8.linear_attn.in_proj_qkv.weight`
+  - `model.language_model.layers.8.mlp.up_proj.weight`
+- Generic `p4p46_inproj` remains unchanged.
+- Dry-run plan:
+  - `qwen-hidden3994-policy-qwen35-9b-p4p46-hidden3994-v1-plan.json`
+  - supported tensors: `255`
+  - passthrough tensors: `520`
+  - high tensors: `116`
+  - low tensors: `139`
+  - estimated output bytes: `9127164896`
+- Regenerated named-policy package:
+  - `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d`
+  - package summary: `ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10-jobs64.json`
+  - selected tensors: `255`
+  - passthrough tensors: `520`
+  - codebooks: `14`
+  - conversion failures: `0`
+  - total file bytes: `9127853385`
+- Independent package verify passed with `255` quantized tensors and `520` passthrough tensors.
+- CPU five-fixture rerun for the named-policy package:
+  - decision: `accept`
+  - mean improvement: `0.0479898453`
+  - median improvement: `0.022603035`
+  - max regression: `0`
+  - gate: `qwen-prefix-qwen35-hidden3994-policy-cpu-five-fixture-gates.json`
+
 ## Verification
 
 - `python3 -m py_compile tools/summarize-qwen-prefix-smokes.py`
@@ -352,9 +382,11 @@ Combined layer8 qkv + MLP-up high-format package:
 - JSON parse checks for weak layer8-up6340 manifest grid, selected five-fixture summary/gate artifacts, chain comparison, and tokens401 layer8 local prefilter artifacts.
 - JSON parse checks for quantizer policy dry-run plan artifacts.
 - `cargo fmt --all --check`, `cargo check -p ullm-quant`, and `cargo test -p ullm-quant -- --test-threads=1` for the per-tensor high-format override.
+- `cargo fmt --all --check`, `cargo check -p ullm-quant`, `cargo test -p ullm-quant -- --test-threads=1`, and `cargo build -p ullm-quant` for the named Qwen3.5-9B hidden3994 policy.
 - Targeted layer8 `mlp.up_proj.weight` high-format package build, independent package verify, and two-fixture prefilter gate.
 - Targeted layer8 `linear_attn.in_proj_qkv.weight` high-format package build, independent package verify, and two-fixture prefilter gate.
 - Combined layer8 qkv + MLP-up high-format package build, independent package verify, CPU five-fixture gate, R9700 five-fixture gate, and V620 five-fixture gate.
+- Named-policy package build, independent package verify, CPU five-fixture matrix, summary, and gate.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.
@@ -363,7 +395,7 @@ Combined layer8 qkv + MLP-up high-format package:
 
 ## Next Action
 
-1. Treat combined layer8 qkv + MLP-up high-format as the accepted package-level candidate for hidden3994 under the current fixed gate.
+1. Treat `qwen35_9b_p4p46_hidden3994_v1` as the durable named-policy form of the accepted package-level candidate for hidden3994 under the current fixed gate.
 2. Keep layer6 hidden3994 MLP row-scale, `p4p65-inproj`, `p4p65+row3456`, weak `layer8-up6340`, exact MLP-up high-only, and exact qkv high-only as rejected/insufficient evidence.
-3. Before promoting this beyond debug artifacts, decide whether the durable policy should remain exact tensor override or be generalized into a small named quantizer policy.
+3. Keep the scope model-specific; do not change the semantics of the generic `p4p46_inproj` preset from this evidence alone.
 4. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.
