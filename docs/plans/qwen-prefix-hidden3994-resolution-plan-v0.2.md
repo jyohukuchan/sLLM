@@ -480,11 +480,67 @@ Targeted layer8 qkv prefilter:
   - do not run the five-fixture matrix for layer8 `linear_attn.in_proj_qkv.weight` high-only.
   - because qkv improves tokens401 while MLP-up improves tokens1, the next targeted policy probe should test their combination.
 
+## Progress 2026-07-05 17:20 JST
+
+Combined targeted policy:
+
+- Built `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-qkv-mlp-up-high-row-scale-layer6-layer10.ullm.d`.
+- The package keeps the existing layer6/layer10 row3456 manifest compensation.
+- Exact high-format tensor overrides:
+  - `model.language_model.layers.8.linear_attn.in_proj_qkv.weight`
+  - `model.language_model.layers.8.mlp.up_proj.weight`
+- Package build:
+  - selected tensors: `255`
+  - passthrough tensors: `520`
+  - codebooks: `14`
+  - failures: `0`
+  - total file bytes: `9127853385`
+  - build wall time: `1:33.17`
+  - max RSS: `3743712` KiB
+- Independent package verify:
+  - quantized tensors: `255`
+  - passthrough tensors: `520`
+  - passthrough payload bytes: `5049777120`
+  - wall time: `0:51.99`
+  - exit status: `0`
+
+CPU five-fixture gate:
+
+| fixture | baseline | candidate | delta |
+| --- | ---: | ---: | ---: |
+| `tokens1` | `0.645338058` | `0.629640579` | `-0.0156974792` |
+| `tokens101` | `1.0805254` | `1.0805254` | `0` |
+| `tokens201` | `1.140728` | `1.00050735` | `-0.140220642` |
+| `tokens301` | `1.37130928` | `1.30988121` | `-0.0614280701` |
+| `tokens401` | `0.959306717` | `0.936703682` | `-0.022603035` |
+
+Gate decision:
+
+- CPU five-fixture: `accept`
+  - mean improvement: `0.0479898453`
+  - median improvement: `0.022603035`
+  - max regression: `0`
+- R9700 five-fixture: `accept`
+  - device index `2`, backend `hip`, `AMD Radeon Graphics`
+  - mean improvement: `0.0479856491`
+  - median improvement: `0.0226106644`
+  - max regression: `0`
+- V620 representative three-fixture: `accept`
+  - device index `1`, backend `hip`, `AMD Radeon Pro V620`
+  - fixtures: `tokens1`, `tokens201`, `tokens401`
+  - mean improvement: `0.0595095952`
+  - median improvement: `0.0226106644`
+  - max regression: `0`
+
+Updated decision:
+
+- This plan now has an accepted package-level candidate for the hidden3994 issue under the fixed CPU five-fixture gate.
+- Backend verification on R9700 and the representative V620 subset also passes.
+- The next implementation decision is whether to keep this as explicit `--aq-high-tensor` overrides or name it as a small durable quantizer policy preset.
+
 ## Expected Outcome
 
 `layer8-upfit` の弱倍率はhard gate内には収まるが、aggregate improvementが不足し、tokens401を改善しないことが分かった。
-したがって、短期の単独manifest fixとしては弱い。
+一方で、targeted layer8 qkv + MLP-up high-format packageはCPU five-fixture gateを通り、R9700/V620でも同じ方向の改善を示した。
 
-今後の有力な解は、tokens401のlayer8入力ドリフトを上流で抑えるcandidate、またはactivation-aware / row-awareなquantizer policyである可能性が高い。
-
-この計画では、どちらの場合でも「まだ闇雲にデバッグする」状態を避ける。accepted packageを得るか、manifest補正では足りない根拠を揃えてquantizer policyへ進む。
+したがって、現時点の結論は「まだ闇雲にデバッグを続ける」ではなく、「受入済みのpackage-level候補を、durableなquantizer policyとしてどう表現するかを決める」段階である。

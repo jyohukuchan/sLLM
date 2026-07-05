@@ -130,3 +130,61 @@ Prefilter:
 This candidate is also not a solution by itself. It moves the hard fixture in
 the desired direction while regressing tokens1, making combined qkv+MLP-up a
 more targeted follow-up than broad family promotion.
+
+## Combined Layer8 QKV + MLP Up Package
+
+Built package:
+
+- package: `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-qkv-mlp-up-high-row-scale-layer6-layer10.ullm.d`
+- plan: `qwen-hidden3994-policy-p4p46-plus-layer8-qkv-mlp-up-tensor-plan.json`
+- package summary: `ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-qkv-mlp-up-high-row-scale-layer6-layer10-jobs64.json`
+- verify log: `ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-qkv-mlp-up-high-row-scale-layer6-layer10-jobs64-verify.log`
+
+Build and verify:
+
+- selected tensors: `255`
+- passthrough tensors: `520`
+- codebooks: `14`
+- conversion failures: `0`
+- total file bytes: `9127853385`
+- build wall time: `1:33.17`
+- max RSS: `3743712` KiB
+- independent verify: `255` quantized tensors and `520` passthrough tensors, exit `0`
+
+Five-fixture CPU gate:
+
+- summary: `qwen-prefix-targeted-high-layer8-qkv-mlp-up-five-fixture-summary.json`
+- gate: `qwen-prefix-targeted-high-layer8-qkv-mlp-up-five-fixture-gates.json`
+- decision: `accept`
+- fixtures: `5`
+- mean improvement: `0.0479898453`
+- median improvement: `0.022603035`
+- max regression: `0`
+
+Per-fixture CPU result:
+
+| fixture | baseline | candidate | delta |
+| --- | ---: | ---: | ---: |
+| `tokens1` | `0.645338058` | `0.629640579` | `-0.0156974792` |
+| `tokens101` | `1.0805254` | `1.0805254` | `0` |
+| `tokens201` | `1.140728` | `1.00050735` | `-0.140220642` |
+| `tokens301` | `1.37130928` | `1.30988121` | `-0.0614280701` |
+| `tokens401` | `0.959306717` | `0.936703682` | `-0.022603035` |
+
+Backend verification:
+
+- R9700 device index `2`, backend `hip`, five-fixture gate: `accept`
+- V620 device index `1`, backend `hip`, representative three-fixture gate: `accept`
+- R9700 five-fixture mean improvement: `0.0479856491`
+- R9700 five-fixture median improvement: `0.0226106644`
+- V620 representative mean improvement: `0.0595095952`
+- V620 representative median improvement: `0.0226106644`
+
+Interpretation:
+
+- The separate targeted high-format probes exposed a useful split:
+  - layer8 `mlp.up_proj.weight` high improves tokens1 but regresses tokens401.
+  - layer8 `linear_attn.in_proj_qkv.weight` high improves tokens401 but regresses tokens1.
+- Promoting both exact tensors resolves the sign conflict under the fixed five-fixture CPU gate.
+- The same candidate remains accepted on R9700 and on the representative V620 subset, so the observed improvement is not a CPU-only artifact.
+- This is the first package-level hidden3994 fix in this branch that satisfies the current acceptance criteria.

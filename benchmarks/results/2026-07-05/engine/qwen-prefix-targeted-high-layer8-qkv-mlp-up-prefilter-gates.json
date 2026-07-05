@@ -1,0 +1,53 @@
+{
+  "baseline_condition": "baseline",
+  "candidates": [
+    {
+      "comparisons": [
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens1-baseline",
+          "baseline_layer": 11,
+          "baseline_max_abs_diff": 0.6453380584716797,
+          "baseline_token_index": 7,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens1-targeted-high-layer8-qkv-mlp-up",
+          "candidate_layer": 11,
+          "candidate_max_abs_diff": 0.6296405792236328,
+          "candidate_token_index": 7,
+          "delta": -0.015697479248046875,
+          "fixture": "tokens1",
+          "improvement": 0.015697479248046875
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens401-baseline",
+          "baseline_layer": 8,
+          "baseline_max_abs_diff": 0.9593067169189453,
+          "baseline_token_index": 9,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens401-targeted-high-layer8-qkv-mlp-up",
+          "candidate_layer": 8,
+          "candidate_max_abs_diff": 0.9367036819458008,
+          "candidate_token_index": 9,
+          "delta": -0.02260303497314453,
+          "fixture": "tokens401",
+          "improvement": 0.02260303497314453
+        }
+      ],
+      "condition": "targeted-high-layer8-qkv-mlp-up",
+      "decision": "accept",
+      "fixture_count": 2,
+      "max_regression": 0.0,
+      "mean_improvement": 0.019150257110595703,
+      "median_improvement": 0.019150257110595703,
+      "reason": "aggregate and median gates passed"
+    }
+  ],
+  "gates": {
+    "max_fixture_worsen": 0.001,
+    "min_fixture_count": 2,
+    "min_median_improvement": 0.005
+  },
+  "schema_version": "qwen-prefix-candidate-gates-v0.1",
+  "source_summary": "benchmarks/results/2026-07-05/engine/qwen-prefix-targeted-high-layer8-qkv-mlp-up-prefilter-summary.json"
+}

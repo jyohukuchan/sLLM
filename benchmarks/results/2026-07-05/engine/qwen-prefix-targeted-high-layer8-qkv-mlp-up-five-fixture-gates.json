@@ -1,0 +1,98 @@
+{
+  "baseline_condition": "baseline",
+  "candidates": [
+    {
+      "comparisons": [
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens1-baseline",
+          "baseline_layer": 11,
+          "baseline_max_abs_diff": 0.6453380584716797,
+          "baseline_token_index": 7,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens1-targeted-high-layer8-qkv-mlp-up",
+          "candidate_layer": 11,
+          "candidate_max_abs_diff": 0.6296405792236328,
+          "candidate_token_index": 7,
+          "delta": -0.015697479248046875,
+          "fixture": "tokens1",
+          "improvement": 0.015697479248046875
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens101-baseline",
+          "baseline_layer": 7,
+          "baseline_max_abs_diff": 1.0805253982543945,
+          "baseline_token_index": 12,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens101-targeted-high-layer8-qkv-mlp-up",
+          "candidate_layer": 7,
+          "candidate_max_abs_diff": 1.0805253982543945,
+          "candidate_token_index": 12,
+          "delta": 0.0,
+          "fixture": "tokens101",
+          "improvement": 0.0
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens201-baseline",
+          "baseline_layer": 11,
+          "baseline_max_abs_diff": 1.1407279968261719,
+          "baseline_token_index": 13,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens201-targeted-high-layer8-qkv-mlp-up",
+          "candidate_layer": 11,
+          "candidate_max_abs_diff": 1.0005073547363281,
+          "candidate_token_index": 13,
+          "delta": -0.14022064208984375,
+          "fixture": "tokens201",
+          "improvement": 0.14022064208984375
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens301-baseline",
+          "baseline_layer": 10,
+          "baseline_max_abs_diff": 1.3713092803955078,
+          "baseline_token_index": 12,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens301-targeted-high-layer8-qkv-mlp-up",
+          "candidate_layer": 10,
+          "candidate_max_abs_diff": 1.3098812103271484,
+          "candidate_token_index": 12,
+          "delta": -0.061428070068359375,
+          "fixture": "tokens301",
+          "improvement": 0.061428070068359375
+        },
+        {
+          "baseline_hidden_index": 3994,
+          "baseline_label": "tokens401-baseline",
+          "baseline_layer": 8,
+          "baseline_max_abs_diff": 0.9593067169189453,
+          "baseline_token_index": 9,
+          "candidate_hidden_index": 3994,
+          "candidate_label": "tokens401-targeted-high-layer8-qkv-mlp-up",
+          "candidate_layer": 8,
+          "candidate_max_abs_diff": 0.9367036819458008,
+          "candidate_token_index": 9,
+          "delta": -0.02260303497314453,
+          "fixture": "tokens401",
+          "improvement": 0.02260303497314453
+        }
+      ],
+      "condition": "targeted-high-layer8-qkv-mlp-up",
+      "decision": "accept",
+      "fixture_count": 5,
+      "max_regression": 0.0,
+      "mean_improvement": 0.047989845275878906,
+      "median_improvement": 0.02260303497314453,
+      "reason": "aggregate and median gates passed"
+    }
+  ],
+  "gates": {
+    "max_fixture_worsen": 0.001,
+    "min_fixture_count": 5,
+    "min_median_improvement": 0.005
+  },
+  "schema_version": "qwen-prefix-candidate-gates-v0.1",
+  "source_summary": "benchmarks/results/2026-07-05/engine/qwen-prefix-targeted-high-layer8-qkv-mlp-up-five-fixture-summary.json"
+}

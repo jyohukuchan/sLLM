@@ -287,6 +287,58 @@ Targeted layer8 `linear_attn.in_proj_qkv.weight` high-format package:
   - exact layer8 qkv high-format promotion improves tokens401 but worsens tokens1.
   - This is the inverse of layer8 MLP-up high-format promotion, so a combined qkv+MLP-up policy is the next useful probe.
 
+Combined layer8 qkv + MLP-up high-format package:
+
+- Package with existing layer6/layer10 row3456 manifest compensation:
+  - `/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-layer8-qkv-mlp-up-high-row-scale-layer6-layer10.ullm.d`
+- Policy change:
+  - layer8 `linear_attn.in_proj_qkv.weight` high
+  - layer8 `mlp.up_proj.weight` high
+  - all other p4p46 assignments unchanged
+- Build result:
+  - selected tensors: `255`
+  - passthrough tensors: `520`
+  - codebooks: `14`
+  - failures: `0`
+  - total file bytes: `9127853385`
+  - build wall time: `1:33.17`
+  - max RSS: `3743712` KiB
+- Independent package verify:
+  - quantized tensors: `255`
+  - passthrough tensors: `520`
+  - passthrough payload bytes: `5049777120`
+  - wall time: `0:51.99`
+  - exit status: `0`
+- CPU five-fixture gate:
+
+| fixture | baseline | candidate | delta |
+| --- | ---: | ---: | ---: |
+| `tokens1` | `0.645338058` | `0.629640579` | `-0.0156974792` |
+| `tokens101` | `1.0805254` | `1.0805254` | `0` |
+| `tokens201` | `1.140728` | `1.00050735` | `-0.140220642` |
+| `tokens301` | `1.37130928` | `1.30988121` | `-0.0614280701` |
+| `tokens401` | `0.959306717` | `0.936703682` | `-0.022603035` |
+
+- CPU gate decision: `accept`
+  - fixtures: `5`
+  - mean improvement: `0.0479898453`
+  - median improvement: `0.022603035`
+  - max regression: `0`
+- R9700 five-fixture gate: `accept`
+  - mean improvement: `0.0479856491`
+  - median improvement: `0.0226106644`
+  - max regression: `0`
+- V620 representative three-fixture gate: `accept`
+  - fixtures: `tokens1`, `tokens201`, `tokens401`
+  - mean improvement: `0.0595095952`
+  - median improvement: `0.0226106644`
+  - max regression: `0`
+- Interpretation:
+  - qkv high-only and MLP-up high-only each failed in opposite directions.
+  - Combining the two exact layer8 tensor promotions resolves that fixture conflict under the fixed gate.
+  - The same candidate remains accepted on R9700 and on the V620 representative subset, so the fix is not CPU-only.
+  - This is the first accepted hidden3994 package-level candidate in this branch.
+
 ## Verification
 
 - `python3 -m py_compile tools/summarize-qwen-prefix-smokes.py`
@@ -302,6 +354,7 @@ Targeted layer8 `linear_attn.in_proj_qkv.weight` high-format package:
 - `cargo fmt --all --check`, `cargo check -p ullm-quant`, and `cargo test -p ullm-quant -- --test-threads=1` for the per-tensor high-format override.
 - Targeted layer8 `mlp.up_proj.weight` high-format package build, independent package verify, and two-fixture prefilter gate.
 - Targeted layer8 `linear_attn.in_proj_qkv.weight` high-format package build, independent package verify, and two-fixture prefilter gate.
+- Combined layer8 qkv + MLP-up high-format package build, independent package verify, CPU five-fixture gate, R9700 five-fixture gate, and V620 representative three-fixture gate.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.
@@ -310,11 +363,7 @@ Targeted layer8 `linear_attn.in_proj_qkv.weight` high-format package:
 
 ## Next Action
 
-1. Treat layer6 hidden3994 MLP row-scale as rejected for unconditional promotion under the five-fixture gate.
-2. Do not promote `p4p65-inproj` or `p4p65+row3456`; both fail five-fixture gates.
-3. Do not promote weak `layer8-up6340`; it is hard-gate safe at low scale but aggregate effect is too small and tokens401 does not improve.
-4. Do not continue direct tokens401 layer8 local row-scale as a general fix; it strongly regresses tokens1.
-5. Do not promote exact layer8 `mlp.up_proj.weight` high-format override; it improves tokens1 but fails tokens401 prefilter.
-6. Do not promote exact layer8 `linear_attn.in_proj_qkv.weight` high-format override alone; it improves tokens401 but fails tokens1 prefilter.
-7. Test combined layer8 qkv + MLP-up targeted high-format before moving to broader activation-aware / row-aware policy.
-8. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.
+1. Treat combined layer8 qkv + MLP-up high-format as the accepted package-level candidate for hidden3994 under the current fixed gate.
+2. Keep layer6 hidden3994 MLP row-scale, `p4p65-inproj`, `p4p65+row3456`, weak `layer8-up6340`, exact MLP-up high-only, and exact qkv high-only as rejected/insufficient evidence.
+3. Before promoting this beyond debug artifacts, decide whether the durable policy should remain exact tensor override or be generalized into a small named quantizer policy.
+4. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.

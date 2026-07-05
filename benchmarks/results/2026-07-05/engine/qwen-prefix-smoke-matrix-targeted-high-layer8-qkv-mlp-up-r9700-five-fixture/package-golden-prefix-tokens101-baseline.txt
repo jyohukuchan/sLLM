@@ -1,0 +1,6 @@
+$ target/debug/ullm-engine package-golden-prefix-smoke /tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens101-116 2 1048576 0 12 64 10000000 0 benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-targeted-high-layer8-qkv-mlp-up-r9700-five-fixture/package-golden-prefix-tokens101-baseline.jsonl actual_prefix none none none none
+
+[stdout]
+package-golden-prefix-smoke package=/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d fixture=benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens101-116 layers=0..12 layer_count=12 sequence_len=16 hidden=4096 run_mode=actual_prefix block_size=16 cache_blocks=1 block_table=[0] rotary_dim=64 position_offset=0 rope_base=10000000 row_scale_overrides=none cell_delta_overrides=none manifest_row_scale_overrides=4 input_dump_dir=none sampled_tokens=none backend=hip device_index=2 name="AMD Radeon Graphics" max_mse=0.007146490051 max_mean_abs_diff=0.064191593 max_abs_diff=1.080535889 min_cosine_similarity=0.987557567 report=benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-targeted-high-layer8-qkv-mlp-up-r9700-five-fixture/package-golden-prefix-tokens101-baseline.jsonl verified=true
+
+[stderr]
