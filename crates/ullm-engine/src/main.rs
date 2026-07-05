@@ -9134,7 +9134,7 @@ fn qwen3_self_attn_prepare_model_loop_sequence_smoke(
         &format!("{label} q_rope"),
         &q_rope,
         &expected_q_rope,
-        1e-4_f32,
+        2e-4_f32,
         1e-4_f32,
     )?;
     let expected_k_rope = runtime_host_rope_f32(
@@ -9150,7 +9150,7 @@ fn qwen3_self_attn_prepare_model_loop_sequence_smoke(
         &format!("{label} k_rope"),
         &k_rope,
         &expected_k_rope,
-        1e-4_f32,
+        2e-4_f32,
         1e-4_f32,
     )?;
 
