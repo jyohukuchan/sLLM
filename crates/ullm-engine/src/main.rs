@@ -21674,8 +21674,155 @@ fn package_linear_attn_stateful_step_smoke_impl(
         1e-5,
     )?;
 
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let q_step_bytes = q_elements_per_step
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention q step byte size overflows".to_string())?;
+    let k_step_bytes = q_step_bytes;
+    let v_step_bytes = v_elements_per_step
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention v step byte size overflows".to_string())?;
+    let gate_beta_step_bytes = value_heads
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention gate/beta step byte size overflows".to_string())?;
+    let state_elements = value_heads
+        .checked_mul(key_dim)
+        .and_then(|value| value.checked_mul(value_dim))
+        .ok_or_else(|| "linear attention recurrent state size overflows".to_string())?;
+    let state_bytes = state_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "linear attention recurrent state byte size overflows".to_string())?;
+    let mut q_buffer = context
+        .alloc_buffer(q_step_bytes)
+        .map_err(|err| format!("failed to allocate recurrent q step buffer: {err}"))?;
+    let mut k_buffer = context
+        .alloc_buffer(k_step_bytes)
+        .map_err(|err| format!("failed to allocate recurrent k step buffer: {err}"))?;
+    let mut v_buffer = context
+        .alloc_buffer(v_step_bytes)
+        .map_err(|err| format!("failed to allocate recurrent v step buffer: {err}"))?;
+    let mut gate_buffer = context
+        .alloc_buffer(gate_beta_step_bytes)
+        .map_err(|err| format!("failed to allocate recurrent gate step buffer: {err}"))?;
+    let mut beta_buffer = context
+        .alloc_buffer(gate_beta_step_bytes)
+        .map_err(|err| format!("failed to allocate recurrent beta step buffer: {err}"))?;
+    let mut state_buffer = context
+        .alloc_buffer(state_bytes)
+        .map_err(|err| format!("failed to allocate recurrent state buffer: {err}"))?;
+    let mut output_buffer = context
+        .alloc_buffer(v_step_bytes)
+        .map_err(|err| format!("failed to allocate recurrent output step buffer: {err}"))?;
+    let zero_state = vec![0.0_f32; state_elements];
+    let zero_state_bytes = encode_f32_to_bytes(&zero_state);
+    state_buffer
+        .copy_from_host(0, &zero_state_bytes, Some(&mut stream))
+        .map_err(|err| format!("failed to initialize recurrent runtime state: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize after recurrent state init: {err}"))?;
+
+    let mut runtime_recurrent_bytes = vec![
+        0_u8;
+        v_step_bytes.checked_mul(sequence_len).ok_or_else(
+            || { "linear attention runtime recurrent output byte size overflows".to_string() }
+        )?
+    ];
+    for timestep in 0..sequence_len {
+        let q_start = timestep * q_elements_per_step;
+        let q_end = q_start + q_elements_per_step;
+        let v_start = timestep * v_elements_per_step;
+        let v_end = v_start + v_elements_per_step;
+        let gate_start = timestep * value_heads;
+        let gate_end = gate_start + value_heads;
+        q_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&split_full.q[q_start..q_end]),
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to copy recurrent q step {timestep}: {err}"))?;
+        k_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&split_full.k[q_start..q_end]),
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to copy recurrent k step {timestep}: {err}"))?;
+        v_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&split_full.v[v_start..v_end]),
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to copy recurrent v step {timestep}: {err}"))?;
+        gate_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&gate[gate_start..gate_end]),
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to copy recurrent gate step {timestep}: {err}"))?;
+        beta_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&beta[gate_start..gate_end]),
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to copy recurrent beta step {timestep}: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize recurrent step {timestep} inputs: {err}")
+        })?;
+        ullm_runtime_sys::linear_attn_recurrent_f32(
+            &q_buffer,
+            &k_buffer,
+            &v_buffer,
+            &gate_buffer,
+            &beta_buffer,
+            key_heads,
+            value_heads,
+            1,
+            key_dim,
+            value_dim,
+            &mut state_buffer,
+            &mut output_buffer,
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to run recurrent runtime step {timestep}: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize recurrent runtime step {timestep}: {err}")
+        })?;
+        let byte_start = timestep * v_step_bytes;
+        let byte_end = byte_start + v_step_bytes;
+        output_buffer
+            .copy_to_host(
+                0,
+                &mut runtime_recurrent_bytes[byte_start..byte_end],
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to copy recurrent runtime step {timestep}: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize recurrent runtime copy {timestep}: {err}")
+        })?;
+    }
+    let runtime_recurrent = decode_f32_le_values(&runtime_recurrent_bytes);
+    let runtime_recurrent_step_max_abs_diff = verify_f32_close(
+        "package linear attention stateful runtime recurrent",
+        &runtime_recurrent,
+        &run.attention_recurrent,
+        1e-3,
+        1e-5,
+    )?;
+
     Ok(format!(
-        "package-linear-attn-stateful-step-smoke package={} layer={} sequence_len={} kernel_size={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} qkv_step_elements={} backend_device={} conv_step_max_abs_diff={conv_step_max_abs_diff:.9} conv_activation_step_max_abs_diff={conv_activation_step_max_abs_diff:.9} q_step_max_abs_diff={q_step_max_abs_diff:.9} k_step_max_abs_diff={k_step_max_abs_diff:.9} v_step_max_abs_diff={v_step_max_abs_diff:.9} gate_step_max_abs_diff={gate_step_max_abs_diff:.9} beta_step_max_abs_diff={beta_step_max_abs_diff:.9} recurrent_step_max_abs_diff={recurrent_step_max_abs_diff:.9} verified=true",
+        "package-linear-attn-stateful-step-smoke package={} layer={} sequence_len={} kernel_size={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} qkv_step_elements={} backend={} device_index={} name=\"{}\" conv_step_max_abs_diff={conv_step_max_abs_diff:.9} conv_activation_step_max_abs_diff={conv_activation_step_max_abs_diff:.9} q_step_max_abs_diff={q_step_max_abs_diff:.9} k_step_max_abs_diff={k_step_max_abs_diff:.9} v_step_max_abs_diff={v_step_max_abs_diff:.9} gate_step_max_abs_diff={gate_step_max_abs_diff:.9} beta_step_max_abs_diff={beta_step_max_abs_diff:.9} recurrent_step_max_abs_diff={recurrent_step_max_abs_diff:.9} runtime_recurrent_step_max_abs_diff={runtime_recurrent_step_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         sequence_len,
@@ -21686,7 +21833,9 @@ fn package_linear_attn_stateful_step_smoke_impl(
         key_dim,
         value_dim,
         qkv_step_elements,
+        info.backend,
         device_index,
+        info.name,
     ))
 }
 
