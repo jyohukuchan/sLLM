@@ -1,0 +1,73 @@
+{
+  "default_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d",
+  "dry_run": false,
+  "engine_bin": "target/debug/ullm-engine",
+  "output_dir": "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-baseline-extra",
+  "runs": [
+    {
+      "cell_delta": "none",
+      "command": [
+        "target/debug/ullm-engine",
+        "package-golden-prefix-smoke",
+        "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d",
+        "benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens301-316",
+        "0",
+        "1048576",
+        "0",
+        "12",
+        "64",
+        "10000000",
+        "0",
+        "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-baseline-extra/package-golden-prefix-tokens301-baseline.jsonl",
+        "actual_prefix",
+        "none",
+        "none",
+        "none",
+        "none"
+      ],
+      "condition": "baseline",
+      "fixture_label": "tokens301",
+      "fixture_path": "benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens301-316",
+      "log_path": "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-baseline-extra/package-golden-prefix-tokens301-baseline.txt",
+      "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d",
+      "report_path": "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-baseline-extra/package-golden-prefix-tokens301-baseline.jsonl",
+      "returncode": 0,
+      "row_scale": "none",
+      "stderr_tail": "",
+      "stdout_tail": "package-golden-prefix-smoke package=/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d fixture=benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens301-316 layers=0..12 layer_count=12 sequence_len=16 hidden=4096 run_mode=actual_prefix block_size=16 cache_blocks=1 block_table=[0] rotary_dim=64 position_offset=0 rope_base=10000000 row_scale_overrides=none cell_delta_overrides=none manifest_row_scale_overrides=4 input_dump_dir=none sampled_tokens=none backend=cpu device_index=0 name=\"host CPU fallback\" max_mse=0.004509293516 max_mean_abs_diff=0.050256436 max_abs_diff=1.371309280 min_cosine_similarity=0.992514463 report=benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-baseline-extra/package-golden-prefix-tokens301-baseline.jsonl verified=true\n"
+    },
+    {
+      "cell_delta": "none",
+      "command": [
+        "target/debug/ullm-engine",
+        "package-golden-prefix-smoke",
+        "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d",
+        "benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens401-416",
+        "0",
+        "1048576",
+        "0",
+        "12",
+        "64",
+        "10000000",
+        "0",
+        "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-baseline-extra/package-golden-prefix-tokens401-baseline.jsonl",
+        "actual_prefix",
+        "none",
+        "none",
+        "none",
+        "none"
+      ],
+      "condition": "baseline",
+      "fixture_label": "tokens401",
+      "fixture_path": "benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens401-416",
+      "log_path": "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-baseline-extra/package-golden-prefix-tokens401-baseline.txt",
+      "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d",
+      "report_path": "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-baseline-extra/package-golden-prefix-tokens401-baseline.jsonl",
+      "returncode": 0,
+      "row_scale": "none",
+      "stderr_tail": "",
+      "stdout_tail": "package-golden-prefix-smoke package=/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d fixture=benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens401-416 layers=0..12 layer_count=12 sequence_len=16 hidden=4096 run_mode=actual_prefix block_size=16 cache_blocks=1 block_table=[0] rotary_dim=64 position_offset=0 rope_base=10000000 row_scale_overrides=none cell_delta_overrides=none manifest_row_scale_overrides=4 input_dump_dir=none sampled_tokens=none backend=cpu device_index=0 name=\"host CPU fallback\" max_mse=0.004646064703 max_mean_abs_diff=0.051947473 max_abs_diff=0.959306717 min_cosine_similarity=0.991814471 report=benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-baseline-extra/package-golden-prefix-tokens401-baseline.jsonl verified=true\n"
+    }
+  ],
+  "schema_version": "qwen-prefix-smoke-matrix-run-v0.1"
+}
