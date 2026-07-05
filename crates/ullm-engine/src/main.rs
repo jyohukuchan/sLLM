@@ -22524,9 +22524,31 @@ fn package_linear_attn_stateful_step_smoke_impl(
         3e-3,
         2e-5,
     )?;
+    let mut resident_step_layer = PackageLinearAttnResidentStepLayer::load(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        layer_index,
+    )?;
+    let mut resident_layer_output = Vec::with_capacity(run.layer_output.len());
+    for timestep in 0..sequence_len {
+        let step_output = resident_step_layer.step(
+            &mut stream,
+            &linear_attn_step_input(&base_residual, timestep),
+        )?;
+        resident_layer_output.extend(step_output);
+    }
+    let resident_step_layer_output_max_abs_diff = verify_f32_close(
+        "package linear attention resident stateful layer output",
+        &resident_layer_output,
+        &run.layer_output,
+        3e-3,
+        2e-5,
+    )?;
 
     Ok(format!(
-        "package-linear-attn-stateful-step-smoke package={} layer={} sequence_len={} kernel_size={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} qkv_step_elements={} mlp_intermediate={} backend={} device_index={} name=\"{}\" conv_step_max_abs_diff={conv_step_max_abs_diff:.9} runtime_conv_step_max_abs_diff={runtime_conv_step_max_abs_diff:.9} conv_activation_step_max_abs_diff={conv_activation_step_max_abs_diff:.9} q_step_max_abs_diff={q_step_max_abs_diff:.9} k_step_max_abs_diff={k_step_max_abs_diff:.9} v_step_max_abs_diff={v_step_max_abs_diff:.9} gate_step_max_abs_diff={gate_step_max_abs_diff:.9} beta_step_max_abs_diff={beta_step_max_abs_diff:.9} recurrent_step_max_abs_diff={recurrent_step_max_abs_diff:.9} runtime_recurrent_step_max_abs_diff={runtime_recurrent_step_max_abs_diff:.9} runtime_attention_normed_max_abs_diff={runtime_attention_normed_max_abs_diff:.9} runtime_attention_projection_input_max_abs_diff={runtime_attention_projection_input_max_abs_diff:.9} runtime_attention_output_max_abs_diff={runtime_attention_output_max_abs_diff:.9} runtime_attention_block_max_abs_diff={runtime_attention_block_max_abs_diff:.9} runtime_post_normed_max_abs_diff={runtime_post_normed_max_abs_diff:.9} runtime_mlp_gate_projection_max_abs_diff={runtime_mlp_gate_projection_max_abs_diff:.9} runtime_mlp_up_projection_max_abs_diff={runtime_mlp_up_projection_max_abs_diff:.9} runtime_mlp_activation_max_abs_diff={runtime_mlp_activation_max_abs_diff:.9} runtime_mlp_output_max_abs_diff={runtime_mlp_output_max_abs_diff:.9} runtime_layer_output_max_abs_diff={runtime_layer_output_max_abs_diff:.9} verified=true",
+        "package-linear-attn-stateful-step-smoke package={} layer={} sequence_len={} kernel_size={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} qkv_step_elements={} mlp_intermediate={} backend={} device_index={} name=\"{}\" conv_step_max_abs_diff={conv_step_max_abs_diff:.9} runtime_conv_step_max_abs_diff={runtime_conv_step_max_abs_diff:.9} conv_activation_step_max_abs_diff={conv_activation_step_max_abs_diff:.9} q_step_max_abs_diff={q_step_max_abs_diff:.9} k_step_max_abs_diff={k_step_max_abs_diff:.9} v_step_max_abs_diff={v_step_max_abs_diff:.9} gate_step_max_abs_diff={gate_step_max_abs_diff:.9} beta_step_max_abs_diff={beta_step_max_abs_diff:.9} recurrent_step_max_abs_diff={recurrent_step_max_abs_diff:.9} runtime_recurrent_step_max_abs_diff={runtime_recurrent_step_max_abs_diff:.9} runtime_attention_normed_max_abs_diff={runtime_attention_normed_max_abs_diff:.9} runtime_attention_projection_input_max_abs_diff={runtime_attention_projection_input_max_abs_diff:.9} runtime_attention_output_max_abs_diff={runtime_attention_output_max_abs_diff:.9} runtime_attention_block_max_abs_diff={runtime_attention_block_max_abs_diff:.9} runtime_post_normed_max_abs_diff={runtime_post_normed_max_abs_diff:.9} runtime_mlp_gate_projection_max_abs_diff={runtime_mlp_gate_projection_max_abs_diff:.9} runtime_mlp_up_projection_max_abs_diff={runtime_mlp_up_projection_max_abs_diff:.9} runtime_mlp_activation_max_abs_diff={runtime_mlp_activation_max_abs_diff:.9} runtime_mlp_output_max_abs_diff={runtime_mlp_output_max_abs_diff:.9} runtime_layer_output_max_abs_diff={runtime_layer_output_max_abs_diff:.9} resident_step_layer_output_max_abs_diff={resident_step_layer_output_max_abs_diff:.9} verified=true",
         path,
         layer_index,
         sequence_len,
@@ -26210,6 +26232,848 @@ impl LinearAttnConv1dStepState {
             output[channel] = value;
         }
         Ok(output)
+    }
+}
+
+fn checked_f32_byte_len(elements: usize, label: &str) -> Result<usize, String> {
+    elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| format!("{label} byte size overflows"))
+}
+
+fn read_runtime_buffer_f32(
+    buffer: &ullm_runtime_sys::RuntimeBuffer,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    elements: usize,
+    label: &str,
+) -> Result<Vec<f32>, String> {
+    let mut bytes = vec![0_u8; checked_f32_byte_len(elements, label)?];
+    buffer
+        .copy_to_host(0, &mut bytes, Some(stream))
+        .map_err(|err| format!("failed to copy {label} from runtime: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize {label} runtime copy: {err}"))?;
+    Ok(decode_f32_le_values(&bytes))
+}
+
+struct PackageLinearAttnResidentStepLayer {
+    layer_index: usize,
+    key_heads: usize,
+    value_heads: usize,
+    key_dim: usize,
+    value_dim: usize,
+    hidden: usize,
+    qkv_step_elements: usize,
+    q_scale: f32,
+    qk_l2_norm: bool,
+    kernel_size: usize,
+    intermediate: usize,
+    a_log: Vec<f32>,
+    dt_bias: Vec<f32>,
+    conv_history: Vec<f32>,
+    input_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    conv_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attn_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    post_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    qkv_matrix: ullm_runtime_sys::RuntimeBuffer,
+    a_matrix: ullm_runtime_sys::RuntimeBuffer,
+    b_matrix: ullm_runtime_sys::RuntimeBuffer,
+    z_matrix: ullm_runtime_sys::RuntimeBuffer,
+    out_matrix: ullm_runtime_sys::RuntimeBuffer,
+    mlp_gate_matrix: ullm_runtime_sys::RuntimeBuffer,
+    mlp_up_matrix: ullm_runtime_sys::RuntimeBuffer,
+    mlp_down_matrix: ullm_runtime_sys::RuntimeBuffer,
+    input_buffer: ullm_runtime_sys::RuntimeBuffer,
+    input_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
+    qkv_buffer: ullm_runtime_sys::RuntimeBuffer,
+    a_buffer: ullm_runtime_sys::RuntimeBuffer,
+    b_buffer: ullm_runtime_sys::RuntimeBuffer,
+    z_buffer: ullm_runtime_sys::RuntimeBuffer,
+    conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
+    conv_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    recurrent_q_buffer: ullm_runtime_sys::RuntimeBuffer,
+    recurrent_k_buffer: ullm_runtime_sys::RuntimeBuffer,
+    recurrent_v_buffer: ullm_runtime_sys::RuntimeBuffer,
+    recurrent_gate_buffer: ullm_runtime_sys::RuntimeBuffer,
+    recurrent_beta_buffer: ullm_runtime_sys::RuntimeBuffer,
+    recurrent_state_buffer: ullm_runtime_sys::RuntimeBuffer,
+    recurrent_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attn_norm_input_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attn_norm_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attn_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attn_projection_input_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attn_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attn_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
+    mlp_gate_buffer: ullm_runtime_sys::RuntimeBuffer,
+    mlp_up_buffer: ullm_runtime_sys::RuntimeBuffer,
+    mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
+    mlp_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+}
+
+impl PackageLinearAttnResidentStepLayer {
+    fn load(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+    ) -> Result<Self, String> {
+        let key_heads = 16_usize;
+        let value_heads = 32_usize;
+        let key_dim = 128_usize;
+        let value_dim = 128_usize;
+        let hidden = value_heads * value_dim;
+        let q_elements_per_step = key_heads * key_dim;
+        let k_elements_per_step = q_elements_per_step;
+        let v_elements_per_step = hidden;
+        let qkv_step_elements = q_elements_per_step + k_elements_per_step + v_elements_per_step;
+        let q_scale = 1.0_f32 / (key_dim as f32).sqrt();
+        let qk_l2_norm = true;
+
+        let input_norm_tensor =
+            format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
+        let qkv_tensor =
+            format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
+        let conv_tensor =
+            format!("model.language_model.layers.{layer_index}.linear_attn.conv1d.weight");
+        let a_tensor =
+            format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_a.weight");
+        let b_tensor =
+            format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_b.weight");
+        let a_log_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.A_log");
+        let dt_bias_tensor =
+            format!("model.language_model.layers.{layer_index}.linear_attn.dt_bias");
+        let z_tensor =
+            format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_z.weight");
+        let norm_tensor =
+            format!("model.language_model.layers.{layer_index}.linear_attn.norm.weight");
+        let out_tensor =
+            format!("model.language_model.layers.{layer_index}.linear_attn.out_proj.weight");
+        let post_norm_tensor =
+            format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+        let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+        let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+        let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+        let input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)?;
+        if input_norm.values.len() != hidden {
+            return Err(format!(
+                "linear-attn resident input norm length mismatch: got {} expected {hidden}",
+                input_norm.values.len()
+            ));
+        }
+        let conv = read_named_passthrough_f32(path, &conv_tensor, chunk_bytes)?;
+        if conv.shape.len() != 3 || conv.shape[1] != 1 {
+            return Err(format!(
+                "linear-attn resident conv1d tensor shape must be [channels,1,kernel], got {}",
+                format_u64_shape(&conv.shape)
+            ));
+        }
+        let conv_channels = usize::try_from(conv.shape[0])
+            .map_err(|_| "linear-attn resident conv channels are too large".to_string())?;
+        let kernel_size = usize::try_from(conv.shape[2])
+            .map_err(|_| "linear-attn resident conv kernel is too large".to_string())?;
+        if conv_channels != qkv_step_elements {
+            return Err(format!(
+                "linear-attn resident conv channels mismatch: got {conv_channels} expected {qkv_step_elements}"
+            ));
+        }
+        if conv.values.len() != conv_channels * kernel_size {
+            return Err(format!(
+                "linear-attn resident conv element count mismatch: got {} expected {}",
+                conv.values.len(),
+                conv_channels * kernel_size
+            ));
+        }
+        let a_log = read_named_passthrough_f32(path, &a_log_tensor, chunk_bytes)?;
+        if a_log.values.len() != value_heads {
+            return Err(format!(
+                "linear-attn resident A_log length mismatch: got {} expected {value_heads}",
+                a_log.values.len()
+            ));
+        }
+        let dt_bias = read_named_passthrough_f32(path, &dt_bias_tensor, chunk_bytes)?;
+        if dt_bias.values.len() != value_heads {
+            return Err(format!(
+                "linear-attn resident dt_bias length mismatch: got {} expected {value_heads}",
+                dt_bias.values.len()
+            ));
+        }
+        let attn_norm = read_named_passthrough_f32(path, &norm_tensor, chunk_bytes)?;
+        if attn_norm.values.len() != value_dim {
+            return Err(format!(
+                "linear-attn resident norm length mismatch: got {} expected {value_dim}",
+                attn_norm.values.len()
+            ));
+        }
+        let post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
+        if post_norm.values.len() != hidden {
+            return Err(format!(
+                "linear-attn resident post norm length mismatch: got {} expected {hidden}",
+                post_norm.values.len()
+            ));
+        }
+        let input_norm_weight_values =
+            effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+        let post_norm_weight_values =
+            effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+
+        let mut registry = WeightRegistry::new();
+        let (qkv_rows, qkv_cols, qkv_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &qkv_tensor,
+            chunk_bytes,
+        )?;
+        let (a_rows, a_cols, a_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &a_tensor,
+            chunk_bytes,
+        )?;
+        let (b_rows, b_cols, b_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &b_tensor,
+            chunk_bytes,
+        )?;
+        let (z_rows, z_cols, z_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &z_tensor,
+            chunk_bytes,
+        )?;
+        let (out_rows, out_cols, out_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &out_tensor,
+            chunk_bytes,
+        )?;
+        let (gate_rows, gate_cols, mlp_gate_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &gate_tensor,
+            chunk_bytes,
+        )?;
+        let (up_rows, up_cols, mlp_up_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &up_tensor,
+            chunk_bytes,
+        )?;
+        let (down_rows, down_cols, mlp_down_matrix) = materialize_selected_aq4_matrix(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &down_tensor,
+            chunk_bytes,
+        )?;
+        if qkv_rows != qkv_step_elements || qkv_cols != hidden {
+            return Err(format!(
+                "linear-attn resident qkv shape mismatch: got [{qkv_rows},{qkv_cols}] expected [{qkv_step_elements},{hidden}]"
+            ));
+        }
+        if a_rows != value_heads || b_rows != value_heads || a_cols != hidden || b_cols != hidden {
+            return Err(format!(
+                "linear-attn resident a/b shape mismatch: a=[{a_rows},{a_cols}] b=[{b_rows},{b_cols}] expected [{value_heads},{hidden}]"
+            ));
+        }
+        if z_rows != hidden || z_cols != hidden || out_rows != hidden || out_cols != hidden {
+            return Err(format!(
+                "linear-attn resident z/out shape mismatch: z=[{z_rows},{z_cols}] out=[{out_rows},{out_cols}] expected [{hidden},{hidden}]"
+            ));
+        }
+        if gate_rows != up_rows || gate_cols != up_cols || gate_cols != hidden {
+            return Err(format!(
+                "linear-attn resident MLP gate/up shape mismatch: gate=[{gate_rows},{gate_cols}] up=[{up_rows},{up_cols}] hidden={hidden}"
+            ));
+        }
+        if down_rows != hidden || down_cols != gate_rows {
+            return Err(format!(
+                "linear-attn resident MLP down shape mismatch: got [{down_rows},{down_cols}] expected [{hidden},{gate_rows}]"
+            ));
+        }
+        let intermediate = gate_rows;
+
+        let hidden_bytes = checked_f32_byte_len(hidden, "linear-attn resident hidden")?;
+        let qkv_step_bytes =
+            checked_f32_byte_len(qkv_step_elements, "linear-attn resident qkv step")?;
+        let gate_beta_step_bytes =
+            checked_f32_byte_len(value_heads, "linear-attn resident gate/beta step")?;
+        let value_dim_bytes = checked_f32_byte_len(value_dim, "linear-attn resident value dim")?;
+        let intermediate_bytes =
+            checked_f32_byte_len(intermediate, "linear-attn resident intermediate")?;
+        let conv_history_elements =
+            qkv_step_elements.checked_mul(kernel_size).ok_or_else(|| {
+                "linear-attn resident conv history element count overflows".to_string()
+            })?;
+        let conv_history_bytes =
+            checked_f32_byte_len(conv_history_elements, "linear-attn resident conv history")?;
+        let state_elements = value_heads
+            .checked_mul(key_dim)
+            .and_then(|value| value.checked_mul(value_dim))
+            .ok_or_else(|| {
+                "linear-attn resident recurrent state element count overflows".to_string()
+            })?;
+        let state_bytes = checked_f32_byte_len(state_elements, "linear-attn resident state")?;
+
+        let mut input_norm_weight_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                input_norm_weight_values.len(),
+                "linear-attn resident input norm weight",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate linear-attn resident input norm weight: {err}")
+            })?;
+        let mut conv_weight_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                conv.values.len(),
+                "linear-attn resident conv weight",
+            )?)
+            .map_err(|err| format!("failed to allocate linear-attn resident conv weight: {err}"))?;
+        let mut attn_norm_weight_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                attn_norm.values.len(),
+                "linear-attn resident attention norm weight",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate linear-attn resident attention norm weight: {err}")
+            })?;
+        let mut post_norm_weight_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                post_norm_weight_values.len(),
+                "linear-attn resident post norm weight",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate linear-attn resident post norm weight: {err}")
+            })?;
+
+        let input_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident input: {err}"))?;
+        let input_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident input normed: {err}")
+        })?;
+        let qkv_buffer = context
+            .alloc_buffer(qkv_step_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident qkv: {err}"))?;
+        let a_buffer = context
+            .alloc_buffer(gate_beta_step_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident a: {err}"))?;
+        let b_buffer = context
+            .alloc_buffer(gate_beta_step_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident b: {err}"))?;
+        let z_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident z: {err}"))?;
+        let conv_history_buffer = context.alloc_buffer(conv_history_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident conv history: {err}")
+        })?;
+        let conv_output_buffer = context
+            .alloc_buffer(conv_history_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident conv output: {err}"))?;
+        let recurrent_q_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                q_elements_per_step,
+                "linear-attn resident recurrent q",
+            )?)
+            .map_err(|err| format!("failed to allocate linear-attn resident q: {err}"))?;
+        let recurrent_k_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                k_elements_per_step,
+                "linear-attn resident recurrent k",
+            )?)
+            .map_err(|err| format!("failed to allocate linear-attn resident k: {err}"))?;
+        let recurrent_v_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident v: {err}"))?;
+        let recurrent_gate_buffer = context
+            .alloc_buffer(gate_beta_step_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident gate: {err}"))?;
+        let recurrent_beta_buffer = context
+            .alloc_buffer(gate_beta_step_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident beta: {err}"))?;
+        let mut recurrent_state_buffer = context
+            .alloc_buffer(state_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident state: {err}"))?;
+        let recurrent_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident recurrent output: {err}")
+        })?;
+        let attn_norm_input_buffer = context.alloc_buffer(value_dim_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident attention norm input: {err}")
+        })?;
+        let attn_norm_output_buffer = context.alloc_buffer(value_dim_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident attention norm output: {err}")
+        })?;
+        let attn_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident attention normed: {err}")
+        })?;
+        let attn_projection_input_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident attention projection input: {err}")
+        })?;
+        let attn_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident attention output: {err}")
+        })?;
+        let attn_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident attention block: {err}")
+        })?;
+        let post_normed_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident post normed: {err}"))?;
+        let mlp_gate_buffer = context
+            .alloc_buffer(intermediate_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident MLP gate: {err}"))?;
+        let mlp_up_buffer = context
+            .alloc_buffer(intermediate_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident MLP up: {err}"))?;
+        let mlp_activation_buffer = context.alloc_buffer(intermediate_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident MLP activation: {err}")
+        })?;
+        let mlp_output_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident MLP output: {err}"))?;
+        let layer_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident layer output: {err}")
+        })?;
+
+        input_norm_weight_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&input_norm_weight_values),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to copy linear-attn resident input norm: {err}"))?;
+        conv_weight_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&conv.values), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident conv weight: {err}"))?;
+        attn_norm_weight_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&attn_norm.values), Some(stream))
+            .map_err(|err| {
+                format!("failed to copy linear-attn resident attention norm weight: {err}")
+            })?;
+        post_norm_weight_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&post_norm_weight_values),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to copy linear-attn resident post norm: {err}"))?;
+        recurrent_state_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; state_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to initialize linear-attn resident state: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn resident layer setup: {err}")
+        })?;
+
+        Ok(Self {
+            layer_index,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            hidden,
+            qkv_step_elements,
+            q_scale,
+            qk_l2_norm,
+            kernel_size,
+            intermediate,
+            a_log: a_log.values,
+            dt_bias: dt_bias.values,
+            conv_history: vec![0.0_f32; conv_history_elements],
+            input_norm_weight_buffer,
+            conv_weight_buffer,
+            attn_norm_weight_buffer,
+            post_norm_weight_buffer,
+            qkv_matrix,
+            a_matrix,
+            b_matrix,
+            z_matrix,
+            out_matrix,
+            mlp_gate_matrix,
+            mlp_up_matrix,
+            mlp_down_matrix,
+            input_buffer,
+            input_normed_buffer,
+            qkv_buffer,
+            a_buffer,
+            b_buffer,
+            z_buffer,
+            conv_history_buffer,
+            conv_output_buffer,
+            recurrent_q_buffer,
+            recurrent_k_buffer,
+            recurrent_v_buffer,
+            recurrent_gate_buffer,
+            recurrent_beta_buffer,
+            recurrent_state_buffer,
+            recurrent_output_buffer,
+            attn_norm_input_buffer,
+            attn_norm_output_buffer,
+            attn_normed_buffer,
+            attn_projection_input_buffer,
+            attn_output_buffer,
+            attn_block_output_buffer,
+            post_normed_buffer,
+            mlp_gate_buffer,
+            mlp_up_buffer,
+            mlp_activation_buffer,
+            mlp_output_buffer,
+            layer_output_buffer,
+        })
+    }
+
+    fn step(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        if residual.len() != self.hidden {
+            return Err(format!(
+                "linear-attn resident layer {} residual length mismatch: got {} expected {}",
+                self.layer_index,
+                residual.len(),
+                self.hidden
+            ));
+        }
+        let hidden_bytes = checked_f32_byte_len(self.hidden, "linear-attn resident step hidden")?;
+        let qkv_step_bytes =
+            checked_f32_byte_len(self.qkv_step_elements, "linear-attn resident step qkv")?;
+        let value_dim_bytes =
+            checked_f32_byte_len(self.value_dim, "linear-attn resident step value dim")?;
+
+        self.input_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(residual), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident residual: {err}"))?;
+        ullm_runtime_sys::rmsnorm_f32(
+            &self.input_buffer,
+            &self.input_norm_weight_buffer,
+            self.hidden,
+            1e-6_f32,
+            &mut self.input_normed_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident input RMSNorm: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn resident input norm: {err}")
+        })?;
+
+        ullm_runtime_sys::matvec_f32(
+            &self.qkv_matrix,
+            &self.input_normed_buffer,
+            self.qkv_step_elements,
+            self.hidden,
+            &mut self.qkv_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident qkv projection: {err}"))?;
+        ullm_runtime_sys::matvec_f32(
+            &self.a_matrix,
+            &self.input_normed_buffer,
+            self.value_heads,
+            self.hidden,
+            &mut self.a_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident a projection: {err}"))?;
+        ullm_runtime_sys::matvec_f32(
+            &self.b_matrix,
+            &self.input_normed_buffer,
+            self.value_heads,
+            self.hidden,
+            &mut self.b_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident b projection: {err}"))?;
+        ullm_runtime_sys::matvec_f32(
+            &self.z_matrix,
+            &self.input_normed_buffer,
+            self.hidden,
+            self.hidden,
+            &mut self.z_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident z projection: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn resident projections: {err}")
+        })?;
+
+        let qkv_step = read_runtime_buffer_f32(
+            &self.qkv_buffer,
+            stream,
+            self.qkv_step_elements,
+            "linear-attn resident qkv",
+        )?;
+        let a_step = read_runtime_buffer_f32(
+            &self.a_buffer,
+            stream,
+            self.value_heads,
+            "linear-attn resident a",
+        )?;
+        let b_step = read_runtime_buffer_f32(
+            &self.b_buffer,
+            stream,
+            self.value_heads,
+            "linear-attn resident b",
+        )?;
+
+        if self.kernel_size > 1 {
+            self.conv_history.rotate_left(self.qkv_step_elements);
+        }
+        let latest_start = (self.kernel_size - 1) * self.qkv_step_elements;
+        self.conv_history[latest_start..latest_start + self.qkv_step_elements]
+            .copy_from_slice(&qkv_step);
+        self.conv_history_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&self.conv_history), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident conv history: {err}"))?;
+        ullm_runtime_sys::depthwise_conv1d_f32(
+            &self.conv_history_buffer,
+            &self.conv_weight_buffer,
+            self.qkv_step_elements,
+            self.kernel_size,
+            self.kernel_size,
+            &mut self.conv_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident conv: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize linear-attn resident conv: {err}"))?;
+        let latest_byte_start =
+            checked_f32_byte_len(latest_start, "linear-attn resident latest conv offset")?;
+        let mut conv_step_bytes = vec![0_u8; qkv_step_bytes];
+        self.conv_output_buffer
+            .copy_to_host(latest_byte_start, &mut conv_step_bytes, Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident conv output: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn resident conv copy: {err}")
+        })?;
+        let conv_step = runtime_host_silu_f32(&decode_f32_le_values(&conv_step_bytes));
+        let qkv_split = split_linear_attn_qkv_for_recurrent(
+            &conv_step,
+            1,
+            self.key_heads,
+            self.value_heads,
+            self.key_dim,
+            self.value_dim,
+            self.qk_l2_norm,
+            self.q_scale,
+        )?;
+        let (gate, beta) = runtime_host_linear_attn_gate_beta_f32(
+            &a_step,
+            &b_step,
+            &self.a_log,
+            &self.dt_bias,
+            self.value_heads,
+            1,
+        );
+        self.recurrent_q_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&qkv_split.q), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident recurrent q: {err}"))?;
+        self.recurrent_k_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&qkv_split.k), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident recurrent k: {err}"))?;
+        self.recurrent_v_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&qkv_split.v), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident recurrent v: {err}"))?;
+        self.recurrent_gate_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&gate), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident recurrent gate: {err}"))?;
+        self.recurrent_beta_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&beta), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident recurrent beta: {err}"))?;
+        ullm_runtime_sys::linear_attn_recurrent_f32(
+            &self.recurrent_q_buffer,
+            &self.recurrent_k_buffer,
+            &self.recurrent_v_buffer,
+            &self.recurrent_gate_buffer,
+            &self.recurrent_beta_buffer,
+            self.key_heads,
+            self.value_heads,
+            1,
+            self.key_dim,
+            self.value_dim,
+            &mut self.recurrent_state_buffer,
+            &mut self.recurrent_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident recurrent step: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn resident recurrent step: {err}")
+        })?;
+
+        let recurrent_step = read_runtime_buffer_f32(
+            &self.recurrent_output_buffer,
+            stream,
+            self.hidden,
+            "linear-attn resident recurrent output",
+        )?;
+        let mut attn_normed_bytes = vec![0_u8; hidden_bytes];
+        let recurrent_bytes = encode_f32_to_bytes(&recurrent_step);
+        for value_head in 0..self.value_heads {
+            let row_element_start = value_head * self.value_dim;
+            let row_byte_start = row_element_start * std::mem::size_of::<f32>();
+            let row_byte_end = row_byte_start + value_dim_bytes;
+            self.attn_norm_input_buffer
+                .copy_from_host(
+                    0,
+                    &recurrent_bytes[row_byte_start..row_byte_end],
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to copy linear-attn resident attention norm row {value_head}: {err}"
+                    )
+                })?;
+            ullm_runtime_sys::rmsnorm_f32(
+                &self.attn_norm_input_buffer,
+                &self.attn_norm_weight_buffer,
+                self.value_dim,
+                1e-6_f32,
+                &mut self.attn_norm_output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to run linear-attn resident attention norm row {value_head}: {err}")
+            })?;
+            stream.synchronize().map_err(|err| {
+                format!(
+                    "failed to synchronize linear-attn resident attention norm row {value_head}: {err}"
+                )
+            })?;
+            self.attn_norm_output_buffer
+                .copy_to_host(
+                    0,
+                    &mut attn_normed_bytes[row_byte_start..row_byte_end],
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to copy linear-attn resident attention norm row {value_head}: {err}"
+                    )
+                })?;
+            stream.synchronize().map_err(|err| {
+                format!(
+                    "failed to synchronize linear-attn resident attention norm copy row {value_head}: {err}"
+                )
+            })?;
+        }
+        self.attn_normed_buffer
+            .copy_from_host(0, &attn_normed_bytes, Some(stream))
+            .map_err(|err| {
+                format!("failed to copy linear-attn resident normed attention: {err}")
+            })?;
+        ullm_runtime_sys::silu_mul_f32(
+            &self.z_buffer,
+            &self.attn_normed_buffer,
+            self.hidden,
+            &mut self.attn_projection_input_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident attention SiLU-mul: {err}"))?;
+        ullm_runtime_sys::matvec_f32(
+            &self.out_matrix,
+            &self.attn_projection_input_buffer,
+            self.hidden,
+            self.hidden,
+            &mut self.attn_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident out projection: {err}"))?;
+        ullm_runtime_sys::add_f32(
+            &self.input_buffer,
+            &self.attn_output_buffer,
+            self.hidden,
+            &mut self.attn_block_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident attention residual: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn resident attention block: {err}")
+        })?;
+
+        ullm_runtime_sys::rmsnorm_f32(
+            &self.attn_block_output_buffer,
+            &self.post_norm_weight_buffer,
+            self.hidden,
+            1e-5_f32,
+            &mut self.post_normed_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident post RMSNorm: {err}"))?;
+        ullm_runtime_sys::matvec_f32(
+            &self.mlp_gate_matrix,
+            &self.post_normed_buffer,
+            self.intermediate,
+            self.hidden,
+            &mut self.mlp_gate_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident MLP gate: {err}"))?;
+        ullm_runtime_sys::matvec_f32(
+            &self.mlp_up_matrix,
+            &self.post_normed_buffer,
+            self.intermediate,
+            self.hidden,
+            &mut self.mlp_up_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident MLP up: {err}"))?;
+        ullm_runtime_sys::silu_mul_f32(
+            &self.mlp_gate_buffer,
+            &self.mlp_up_buffer,
+            self.intermediate,
+            &mut self.mlp_activation_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident MLP activation: {err}"))?;
+        ullm_runtime_sys::matvec_f32(
+            &self.mlp_down_matrix,
+            &self.mlp_activation_buffer,
+            self.hidden,
+            self.intermediate,
+            &mut self.mlp_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident MLP down: {err}"))?;
+        ullm_runtime_sys::add_f32(
+            &self.attn_block_output_buffer,
+            &self.mlp_output_buffer,
+            self.hidden,
+            &mut self.layer_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident layer residual: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize linear-attn resident layer: {err}"))?;
+        read_runtime_buffer_f32(
+            &self.layer_output_buffer,
+            stream,
+            self.hidden,
+            "linear-attn resident layer output",
+        )
     }
 }
 
