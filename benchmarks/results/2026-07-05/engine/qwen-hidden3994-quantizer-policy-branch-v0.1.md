@@ -174,11 +174,11 @@ Per-fixture CPU result:
 Backend verification:
 
 - R9700 device index `2`, backend `hip`, five-fixture gate: `accept`
-- V620 device index `1`, backend `hip`, representative three-fixture gate: `accept`
+- V620 device index `1`, backend `hip`, five-fixture gate: `accept`
 - R9700 five-fixture mean improvement: `0.0479856491`
 - R9700 five-fixture median improvement: `0.0226106644`
-- V620 representative mean improvement: `0.0595095952`
-- V620 representative median improvement: `0.0226106644`
+- V620 five-fixture mean improvement: `0.0479856491`
+- V620 five-fixture median improvement: `0.0226106644`
 
 Interpretation:
 
@@ -186,5 +186,5 @@ Interpretation:
   - layer8 `mlp.up_proj.weight` high improves tokens1 but regresses tokens401.
   - layer8 `linear_attn.in_proj_qkv.weight` high improves tokens401 but regresses tokens1.
 - Promoting both exact tensors resolves the sign conflict under the fixed five-fixture CPU gate.
-- The same candidate remains accepted on R9700 and on the representative V620 subset, so the observed improvement is not a CPU-only artifact.
+- The same candidate remains accepted on R9700 and V620 five-fixture gates, so the observed improvement is not a CPU-only artifact.
 - This is the first package-level hidden3994 fix in this branch that satisfies the current acceptance criteria.

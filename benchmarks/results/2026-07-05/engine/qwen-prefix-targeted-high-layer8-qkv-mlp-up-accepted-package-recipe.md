@@ -78,4 +78,4 @@ Accepted result from the completed run:
 
 - CPU five-fixture gate: `accept`
 - R9700 five-fixture gate: `accept`
-- V620 representative three-fixture gate: `accept`
+- V620 five-fixture gate: `accept`

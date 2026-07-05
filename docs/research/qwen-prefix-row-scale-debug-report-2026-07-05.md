@@ -328,15 +328,14 @@ Combined layer8 qkv + MLP-up high-format package:
   - mean improvement: `0.0479856491`
   - median improvement: `0.0226106644`
   - max regression: `0`
-- V620 representative three-fixture gate: `accept`
-  - fixtures: `tokens1`, `tokens201`, `tokens401`
-  - mean improvement: `0.0595095952`
+- V620 five-fixture gate: `accept`
+  - mean improvement: `0.0479856491`
   - median improvement: `0.0226106644`
   - max regression: `0`
 - Interpretation:
   - qkv high-only and MLP-up high-only each failed in opposite directions.
   - Combining the two exact layer8 tensor promotions resolves that fixture conflict under the fixed gate.
-  - The same candidate remains accepted on R9700 and on the V620 representative subset, so the fix is not CPU-only.
+  - The same candidate remains accepted on R9700 and V620 five-fixture gates, so the fix is not CPU-only.
   - This is the first accepted hidden3994 package-level candidate in this branch.
 
 ## Verification
@@ -354,7 +353,7 @@ Combined layer8 qkv + MLP-up high-format package:
 - `cargo fmt --all --check`, `cargo check -p ullm-quant`, and `cargo test -p ullm-quant -- --test-threads=1` for the per-tensor high-format override.
 - Targeted layer8 `mlp.up_proj.weight` high-format package build, independent package verify, and two-fixture prefilter gate.
 - Targeted layer8 `linear_attn.in_proj_qkv.weight` high-format package build, independent package verify, and two-fixture prefilter gate.
-- Combined layer8 qkv + MLP-up high-format package build, independent package verify, CPU five-fixture gate, R9700 five-fixture gate, and V620 representative three-fixture gate.
+- Combined layer8 qkv + MLP-up high-format package build, independent package verify, CPU five-fixture gate, R9700 five-fixture gate, and V620 five-fixture gate.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.

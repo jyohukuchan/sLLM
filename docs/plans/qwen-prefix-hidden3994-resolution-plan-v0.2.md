@@ -525,17 +525,16 @@ Gate decision:
   - mean improvement: `0.0479856491`
   - median improvement: `0.0226106644`
   - max regression: `0`
-- V620 representative three-fixture: `accept`
+- V620 five-fixture: `accept`
   - device index `1`, backend `hip`, `AMD Radeon Pro V620`
-  - fixtures: `tokens1`, `tokens201`, `tokens401`
-  - mean improvement: `0.0595095952`
+  - mean improvement: `0.0479856491`
   - median improvement: `0.0226106644`
   - max regression: `0`
 
 Updated decision:
 
 - This plan now has an accepted package-level candidate for the hidden3994 issue under the fixed CPU five-fixture gate.
-- Backend verification on R9700 and the representative V620 subset also passes.
+- Backend verification on R9700 and V620 five-fixture gates also passes.
 - The next implementation decision is whether to keep this as explicit `--aq-high-tensor` overrides or name it as a small durable quantizer policy preset.
 
 ## Expected Outcome
