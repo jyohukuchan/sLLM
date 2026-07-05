@@ -1,0 +1,2 @@
+--condition layer8-up6340-s1p004,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p004.ullm.d
+--condition layer8-up6340-s1p008,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p008.ullm.d

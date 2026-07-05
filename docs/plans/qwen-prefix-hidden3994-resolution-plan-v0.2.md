@@ -354,8 +354,78 @@ Exit Criteria:
   - runtime hard-codeは禁止する。
   - manifest metadataまたはquantizer policyとして再現可能にする。
 
+## Progress 2026-07-05 16:10 JST
+
+Implemented:
+
+- `tools/build-qwen-row-scale-manifest-package.py`
+  - manifest row-scale JSONを検証し、hardlink package copyへ `row_scale_overrides` を差し込む。
+  - destination `manifest.json` はhardlinkを切ってから書く。
+- `tools/generate-qwen-manifest-row-scale-grid.py`
+  - base row3456 manifestにtarget row-scale entryを追加・置換し、grid JSONとpackage condition listを出す。
+- `benchmarks/results/2026-07-05/engine/qwen-hidden3994-resolution-v0.2/artifact-index.md`
+
+Important implementation note:
+
+- 初期builderでは `manifest.json` もhardlinkされたまま書いてしまい、source package manifestを一時的に汚染した。
+- 修正後はdestination側の `manifest.json` を `unlink()` してから書く。
+- source baseline packageはrow3456の4-entry manifestへ復旧し、link count `1` を確認した。
+
+Weak layer8-upfit grid:
+
+- Generated layer8 `mlp.up_proj.weight[6340]` weak scales:
+  - `1.000`, `1.004`, `1.008`, `1.012`, `1.016`, `1.020`, `1.024`, `1.028`, `1.032`, `1.0351020731907503`
+- tokens1 prefilter showed:
+  - `1.004`: `0.645338058 -> 0.645746231`, hard gate内
+  - `1.008`: `0.645338058 -> 0.646137238`, hard gate内
+  - `1.012`: `0.645338058 -> 0.646537781`, hard gate超え
+- Therefore, only `1.004` and `1.008` were promoted to full five-fixture matrix.
+
+Five-fixture selected gate:
+
+| condition | decision | fixtures | median improvement | max regression | interpretation |
+| --- | --- | ---: | ---: | ---: | --- |
+| `layer8-up6340-s1p004` | hold | 5 | `0` | `0.000408172607` | hard gate safe but aggregate effect too small |
+| `layer8-up6340-s1p008` | hold | 5 | `0` | `0.000799179077` | hard gate safe but aggregate effect too small |
+
+Key per-fixture effects for `layer8-up6340-s1p008`:
+
+- tokens1 worsens `+0.000799179077`.
+- tokens101 is neutral.
+- tokens201 improves `-0.000621795654`.
+- tokens301 improves `-0.0000190734863`.
+- tokens401 worsens `+0.000033378601`.
+
+T3 chain comparison:
+
+- tokens1 layer8 hidden3994 baseline output diff is positive at layer8.
+- tokens401 layer8 hidden3994 baseline output diff is negative and is the final worst coordinate.
+- `layer8-up6340-s1p008` changes tokens401 layer8 hidden3994 by only `+0.000033378601` in the wrong direction.
+- This confirms weak layer8-upfit mainly tweaks the tokens201 path and does not address tokens401 input-drift amplification.
+
+T4 local tokens401 layer8 candidate:
+
+- Existing tokens401-derived layer8 row-scale candidate:
+  - layer8 `linear_attn.out_proj.weight[3994]` scale `0.9727276122005596`
+  - layer8 `mlp.down_proj.weight[3994]` scale `1.012138640209781`
+- It was rejected by a tokens1 prefilter:
+  - tokens1 baseline `0.645338058`
+  - candidate `0.662992477`
+  - delta `+0.017654419`
+
+Updated decision:
+
+- Do not promote weak `layer8-up6340` as a standalone manifest fix.
+- Do not continue direct tokens401 layer8 local row-scale as a general fix.
+- The next useful branch is upstream drift/quantizer policy:
+  - either identify an upstream candidate that affects tokens401 before layer8 without the tokens1 sign conflict,
+  - or move to activation-aware / row-aware quantizer policy investigation.
+
 ## Expected Outcome
 
-最も可能性が高い短期解は、`layer8-upfit` の弱倍率または小さいpaired manifest candidateである。ただし、tokens401は入力ドリフト増幅が主因なので、最終的にはactivation-awareなquantizer policyが必要になる可能性がある。
+`layer8-upfit` の弱倍率はhard gate内には収まるが、aggregate improvementが不足し、tokens401を改善しないことが分かった。
+したがって、短期の単独manifest fixとしては弱い。
+
+今後の有力な解は、tokens401のlayer8入力ドリフトを上流で抑えるcandidate、またはactivation-aware / row-awareなquantizer policyである可能性が高い。
 
 この計画では、どちらの場合でも「まだ闇雲にデバッグする」状態を避ける。accepted packageを得るか、manifest補正では足りない根拠を揃えてquantizer policyへ進む。

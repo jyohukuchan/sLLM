@@ -1,0 +1,16 @@
+{
+  "baseline_max_abs": 0.6453380584716797,
+  "candidate": "tokens401-layer8-local",
+  "candidate_max_abs": 0.6629924774169922,
+  "candidate_row_scale": "benchmarks/results/2026-07-05/engine/qwen-row-scale-candidates-tokens401-layer8-hidden3994-smoke.json",
+  "decision": "reject",
+  "delta": 0.0176544189453125,
+  "fixture": "tokens1",
+  "max_fixture_worsen": 0.001,
+  "reason": "tokens1 regression exceeds 0.001 before completing five-fixture matrix",
+  "reports": {
+    "baseline": "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-tokens401-layer8-local-five-fixture/package-golden-prefix-tokens1-baseline.jsonl",
+    "candidate": "benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-tokens401-layer8-local-five-fixture/package-golden-prefix-tokens1-tokens401-layer8-local.jsonl"
+  },
+  "schema_version": "qwen-prefix-prefilter-decision-v0.1"
+}

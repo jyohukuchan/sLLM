@@ -1,0 +1,81 @@
+{
+  "base_row_scale_json": "benchmarks/results/2026-07-05/engine/package-row-scale-overrides-layer6-layer10-hidden3456-p4p46-inproj.json",
+  "conditions": [
+    {
+      "condition": "layer8-up6340-s1",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1.json",
+      "runner_condition": "layer8-up6340-s1,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1.ullm.d",
+      "scale": 1.0
+    },
+    {
+      "condition": "layer8-up6340-s1p004",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p004.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1p004.json",
+      "runner_condition": "layer8-up6340-s1p004,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p004.ullm.d",
+      "scale": 1.004
+    },
+    {
+      "condition": "layer8-up6340-s1p008",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p008.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1p008.json",
+      "runner_condition": "layer8-up6340-s1p008,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p008.ullm.d",
+      "scale": 1.008
+    },
+    {
+      "condition": "layer8-up6340-s1p012",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p012.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1p012.json",
+      "runner_condition": "layer8-up6340-s1p012,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p012.ullm.d",
+      "scale": 1.012
+    },
+    {
+      "condition": "layer8-up6340-s1p016",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p016.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1p016.json",
+      "runner_condition": "layer8-up6340-s1p016,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p016.ullm.d",
+      "scale": 1.016
+    },
+    {
+      "condition": "layer8-up6340-s1p02",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p02.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1p02.json",
+      "runner_condition": "layer8-up6340-s1p02,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p02.ullm.d",
+      "scale": 1.02
+    },
+    {
+      "condition": "layer8-up6340-s1p024",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p024.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1p024.json",
+      "runner_condition": "layer8-up6340-s1p024,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p024.ullm.d",
+      "scale": 1.024
+    },
+    {
+      "condition": "layer8-up6340-s1p028",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p028.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1p028.json",
+      "runner_condition": "layer8-up6340-s1p028,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p028.ullm.d",
+      "scale": 1.028
+    },
+    {
+      "condition": "layer8-up6340-s1p032",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p032.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1p032.json",
+      "runner_condition": "layer8-up6340-s1p032,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p032.ullm.d",
+      "scale": 1.032
+    },
+    {
+      "condition": "layer8-up6340-s1p035102073",
+      "package_path": "/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p035102073.ullm.d",
+      "row_scale_json": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak/layer8-up6340-s1p035102073.json",
+      "runner_condition": "layer8-up6340-s1p035102073,package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p035102073.ullm.d",
+      "scale": 1.0351020731907503
+    }
+  ],
+  "output_dir": "benchmarks/results/2026-07-05/engine/qwen-manifest-row-scale-grid-layer8-up6340-weak",
+  "package_output_dir": "/tmp/ullm-qwen35-layer8-up6340-weak-grid",
+  "schema_version": "qwen-manifest-row-scale-grid-v0.1",
+  "target_row_index": 6340,
+  "target_source_prefix": "golden-prefix-layer8-up6340-weak-fit",
+  "target_tensor_name": "model.language_model.layers.8.mlp.up_proj.weight"
+}

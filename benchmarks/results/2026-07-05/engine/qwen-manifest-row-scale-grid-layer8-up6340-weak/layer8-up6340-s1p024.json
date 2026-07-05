@@ -1,0 +1,35 @@
+{
+  "entries": [
+    {
+      "row_index": 3456,
+      "scale": 1.032273364777375,
+      "source": "golden-prefix-row-dot-sensitivity-layer6",
+      "tensor_name": "model.language_model.layers.6.linear_attn.out_proj.weight"
+    },
+    {
+      "row_index": 3456,
+      "scale": 1.036585679248007,
+      "source": "golden-prefix-row-dot-sensitivity-layer6",
+      "tensor_name": "model.language_model.layers.6.mlp.down_proj.weight"
+    },
+    {
+      "row_index": 3456,
+      "scale": 1.0230717930961908,
+      "source": "golden-prefix-row-dot-sensitivity-layer10",
+      "tensor_name": "model.language_model.layers.10.linear_attn.out_proj.weight"
+    },
+    {
+      "row_index": 3456,
+      "scale": 1.0416570117172528,
+      "source": "golden-prefix-row-dot-sensitivity-layer10",
+      "tensor_name": "model.language_model.layers.10.mlp.down_proj.weight"
+    },
+    {
+      "row_index": 6340,
+      "scale": 1.024,
+      "source": "golden-prefix-layer8-up6340-weak-fit-s1p024",
+      "tensor_name": "model.language_model.layers.8.mlp.up_proj.weight"
+    }
+  ],
+  "schema_version": "row-scale-overrides-v0.1"
+}

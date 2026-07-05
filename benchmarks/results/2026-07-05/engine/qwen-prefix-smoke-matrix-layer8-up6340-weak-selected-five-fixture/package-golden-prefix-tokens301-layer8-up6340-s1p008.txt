@@ -1,0 +1,6 @@
+$ target/debug/ullm-engine package-golden-prefix-smoke /tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p008.ullm.d benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens301-316 0 1048576 0 12 64 10000000 0 benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-layer8-up6340-weak-selected-five-fixture/package-golden-prefix-tokens301-layer8-up6340-s1p008.jsonl actual_prefix none none none none
+
+[stdout]
+package-golden-prefix-smoke package=/tmp/ullm-qwen35-layer8-up6340-weak-grid/qwen35-p4p46-row-scale-layer8-up6340-s1p008.ullm.d fixture=benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16-tokens301-316 layers=0..12 layer_count=12 sequence_len=16 hidden=4096 run_mode=actual_prefix block_size=16 cache_blocks=1 block_table=[0] rotary_dim=64 position_offset=0 rope_base=10000000 row_scale_overrides=none cell_delta_overrides=none manifest_row_scale_overrides=5 input_dump_dir=none sampled_tokens=none backend=cpu device_index=0 name="host CPU fallback" max_mse=0.004509300075 max_mean_abs_diff=0.050256449 max_abs_diff=1.371290207 min_cosine_similarity=0.992514463 report=benchmarks/results/2026-07-05/engine/qwen-prefix-smoke-matrix-layer8-up6340-weak-selected-five-fixture/package-golden-prefix-tokens301-layer8-up6340-s1p008.jsonl verified=true
+
+[stderr]

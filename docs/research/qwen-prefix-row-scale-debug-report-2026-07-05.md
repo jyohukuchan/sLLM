@@ -171,6 +171,44 @@ Layer8 manifest package probe:
 - It fails because tokens1 regresses `0.645338058 -> 0.648880005`, delta `+0.00354194641`.
 - Attempting to tune layer8 `mlp.up_proj.weight[6340]` through smoke-only row-scale is not supported by `package-golden-prefix-smoke`; that path requires manifest package generation or engine support for gate/up smoke overrides.
 
+Weak layer8-upfit manifest grid:
+
+- Added `tools/build-qwen-row-scale-manifest-package.py` and `tools/generate-qwen-manifest-row-scale-grid.py`.
+- Important package-builder fix: hardlink package copies must unlink destination `manifest.json` before writing, otherwise the source package manifest is mutated through the hardlink.
+- Generated weak layer8 `mlp.up_proj.weight[6340]` manifest packages on top of the existing row3456 compensation.
+- tokens1 prefilter:
+  - scale `1.004`: `0.645338058 -> 0.645746231`, hard gate内
+  - scale `1.008`: `0.645338058 -> 0.646137238`, hard gate内
+  - scale `1.012`: `0.645338058 -> 0.646537781`, hard gate超え
+- Full five-fixture gate:
+
+| condition | decision | fixtures | median improvement | max regression | reason |
+| --- | --- | ---: | ---: | ---: | --- |
+| `layer8-up6340-s1p004` | hold | 5 | `0` | `0.000408172607` | aggregate effect too small |
+| `layer8-up6340-s1p008` | hold | 5 | `0` | `0.000799179077` | aggregate effect too small |
+
+Key interpretation:
+
+- The weaker scale avoids the large tokens1 regression from full `layer8-upfit`.
+- However, it only improves tokens201 slightly:
+  - `1.004`: `1.140727997 -> 1.140417099`
+  - `1.008`: `1.140727997 -> 1.140106201`
+- It does not fix tokens401:
+  - `1.004`: `0.959306717 -> 0.959323883`
+  - `1.008`: `0.959306717 -> 0.959340096`
+- The chain comparison confirms this: `layer8-up6340-s1p008` changes tokens401 layer8 hidden3994 by only `+0.000033378601`, in the wrong direction.
+
+Tokens401-derived layer8 local candidate:
+
+- Existing tokens401 layer8 row-scale candidates were tested as a prefilter:
+  - layer8 `linear_attn.out_proj.weight[3994]` scale `0.9727276122005596`
+  - layer8 `mlp.down_proj.weight[3994]` scale `1.012138640209781`
+- This candidate was rejected before full five-fixture completion because tokens1 regressed:
+  - baseline: `0.645338058`
+  - candidate: `0.662992477`
+  - delta: `+0.017654419`
+- This reinforces that layer8 local row-scale can overfit tokens401 and conflict with tokens1.
+
 ## Verification
 
 - `python3 -m py_compile tools/summarize-qwen-prefix-smokes.py`
@@ -181,6 +219,7 @@ Layer8 manifest package probe:
 - JSON parse checks for five-fixture grid, no-row-scale comparison, coordinate-chain, and module-trace comparison artifacts.
 - JSON parse checks for p4p65 and p4p65+row3456 five-fixture summary/gate artifacts.
 - JSON parse checks for layer8 manifest package five-fixture summary/gate artifacts.
+- JSON parse checks for weak layer8-up6340 manifest grid, selected five-fixture summary/gate artifacts, chain comparison, and tokens401 layer8 local prefilter artifacts.
 - `tools/run-qwen-prefix-smoke-matrix.py` dry-run with tokens1/tokens101 and baseline/layer6 conditions.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for the extracted three-row candidate set across tokens1/tokens101/tokens201.
 - `tools/run-qwen-prefix-smoke-matrix.py` real run for layer6 attention+MLP across tokens1/tokens101/tokens201.
@@ -191,5 +230,7 @@ Layer8 manifest package probe:
 
 1. Treat layer6 hidden3994 MLP row-scale as rejected for unconditional promotion under the five-fixture gate.
 2. Do not promote `p4p65-inproj` or `p4p65+row3456`; both fail five-fixture gates.
-3. Search for a package-level candidate that keeps row3456 compensation and specifically reduces hidden3994 input-drift amplification. A weaker layer8-upfit-style manifest package is a plausible next experiment, but smoke-only tuning is not supported for `mlp.up_proj.weight`.
-4. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.
+3. Do not promote weak `layer8-up6340`; it is hard-gate safe at low scale but aggregate effect is too small and tokens401 does not improve.
+4. Do not continue direct tokens401 layer8 local row-scale as a general fix; it strongly regresses tokens1.
+5. Search upstream of tokens401 layer8 input drift, or switch to activation-aware / row-aware quantizer policy.
+6. Keep row-dot extraction as a proposal mechanism only; full-prefix multi-fixture gate remains authoritative.
