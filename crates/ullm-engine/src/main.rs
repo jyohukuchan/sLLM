@@ -28011,7 +28011,7 @@ struct PackageLinearAttnResidentStepLayer {
     conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
     a_log_buffer: ullm_runtime_sys::RuntimeBuffer,
     dt_bias_buffer: ullm_runtime_sys::RuntimeBuffer,
-    attn_norm_weight: Vec<f32>,
+    attn_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
     post_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
     qkv_matrix: PackageAq4ResidentMatvec,
     a_matrix: PackageAq4ResidentMatvec,
@@ -28300,6 +28300,14 @@ impl PackageLinearAttnResidentStepLayer {
             .map_err(|err| {
                 format!("failed to allocate linear-attn resident post norm weight: {err}")
             })?;
+        let mut attn_norm_weight_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                attn_norm.values.len(),
+                "linear-attn resident attention norm weight",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate linear-attn resident attention norm weight: {err}")
+            })?;
         let mut conv_weight_buffer = context
             .alloc_buffer(conv_history_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident conv weight: {err}"))?;
@@ -28387,6 +28395,11 @@ impl PackageLinearAttnResidentStepLayer {
                 Some(stream),
             )
             .map_err(|err| format!("failed to copy linear-attn resident post norm: {err}"))?;
+        attn_norm_weight_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&attn_norm.values), Some(stream))
+            .map_err(|err| {
+                format!("failed to copy linear-attn resident attention norm weight: {err}")
+            })?;
         conv_weight_buffer
             .copy_from_host(0, &encode_f32_to_bytes(&conv.values), Some(stream))
             .map_err(|err| format!("failed to copy linear-attn resident conv weight: {err}"))?;
@@ -28425,7 +28438,7 @@ impl PackageLinearAttnResidentStepLayer {
             conv_history_buffer,
             a_log_buffer,
             dt_bias_buffer,
-            attn_norm_weight: attn_norm.values,
+            attn_norm_weight_buffer,
             post_norm_weight_buffer,
             qkv_matrix,
             a_matrix,
@@ -28543,28 +28556,16 @@ impl PackageLinearAttnResidentStepLayer {
         )
         .map_err(|err| format!("failed to run linear-attn resident recurrent step: {err}"))?;
 
-        let recurrent_step = read_runtime_buffer_f32(
+        ullm_runtime_sys::segmented_rmsnorm_f32(
             &self.recurrent_output_buffer,
-            stream,
-            self.hidden,
-            "linear-attn resident recurrent output",
-        )?;
-        let mut attn_normed = Vec::with_capacity(self.hidden);
-        for value_head in 0..self.value_heads {
-            let row_element_start = value_head * self.value_dim;
-            let row_element_end = row_element_start + self.value_dim;
-            let normed = runtime_host_rmsnorm_f32(
-                &recurrent_step[row_element_start..row_element_end],
-                &self.attn_norm_weight,
-                1e-6_f32,
-            );
-            attn_normed.extend_from_slice(&normed);
-        }
-        self.attn_normed_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&attn_normed), Some(stream))
-            .map_err(|err| {
-                format!("failed to copy linear-attn resident normed attention: {err}")
-            })?;
+            &self.attn_norm_weight_buffer,
+            self.value_heads,
+            self.value_dim,
+            1e-6_f32,
+            &mut self.attn_normed_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident attention RMSNorm: {err}"))?;
         ullm_runtime_sys::silu_mul_f32(
             &self.z_buffer,
             &self.attn_normed_buffer,
