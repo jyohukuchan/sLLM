@@ -693,17 +693,23 @@ extern "C" __global__ void ullm_aq4_matvec_f32_kernel(
     unsigned long long row_scale_count,
     unsigned long long rows,
     unsigned long long cols,
+    unsigned int rows_per_block,
     float *output) {
-    const unsigned int row = blockIdx.x;
     const unsigned int tid = threadIdx.x;
+    const unsigned int threads_per_row = blockDim.x / rows_per_block;
+    const unsigned int row_in_block = tid / threads_per_row;
+    const unsigned int lane = tid - row_in_block * threads_per_row;
+    const unsigned long long row =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
+    const unsigned int partial_offset = row_in_block * threads_per_row;
     __shared__ float partial[256];
     float sum = 0.0f;
     if (row < rows) {
         const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
         if ((cols % group_size) == 0ull) {
             const unsigned long long groups_per_row = cols / group_size;
-            for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
-                 group_in_row += blockDim.x) {
+            for (unsigned long long group_in_row = lane; group_in_row < groups_per_row;
+                 group_in_row += threads_per_row) {
                 const unsigned long long group = static_cast<unsigned long long>(row) * groups_per_row +
                     group_in_row;
                 const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
@@ -723,7 +729,7 @@ extern "C" __global__ void ullm_aq4_matvec_f32_kernel(
                 sum += raw_sum * scale_values[scale_index] * tensor_scale;
             }
         } else {
-            for (unsigned long long col = tid; col < cols; col += blockDim.x) {
+            for (unsigned long long col = lane; col < cols; col += threads_per_row) {
                 const unsigned long long element = row_offset + col;
                 const unsigned char packed = indices[element >> 1];
                 const unsigned char codebook_index =
@@ -740,14 +746,14 @@ extern "C" __global__ void ullm_aq4_matvec_f32_kernel(
     }
     partial[tid] = sum;
     __syncthreads();
-    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-        if (tid < offset) {
-            partial[tid] += partial[tid + offset];
+    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
+        if (lane < offset) {
+            partial[partial_offset + lane] += partial[partial_offset + lane + offset];
         }
         __syncthreads();
     }
-    if (tid == 0 && row < rows) {
-        float value = partial[0];
+    if (lane == 0 && row < rows) {
+        float value = partial[partial_offset];
         if (row_scales != nullptr && row < row_scale_count) {
             value *= row_scales[row];
         }
@@ -827,9 +833,15 @@ extern "C" __global__ void ullm_aq4_matvec_add_f32_kernel(
     unsigned long long row_scale_count,
     unsigned long long rows,
     unsigned long long cols,
+    unsigned int rows_per_block,
     float *output) {
-    const unsigned int row = blockIdx.x;
     const unsigned int tid = threadIdx.x;
+    const unsigned int threads_per_row = blockDim.x / rows_per_block;
+    const unsigned int row_in_block = tid / threads_per_row;
+    const unsigned int lane = tid - row_in_block * threads_per_row;
+    const unsigned long long row =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
+    const unsigned int partial_offset = row_in_block * threads_per_row;
     __shared__ float partial[256];
     float sum = 0.0f;
     if (row < rows) {
@@ -844,19 +856,19 @@ extern "C" __global__ void ullm_aq4_matvec_add_f32_kernel(
             tensor_scale,
             row,
             cols,
-            tid,
-            blockDim.x);
+            lane,
+            threads_per_row);
     }
     partial[tid] = sum;
     __syncthreads();
-    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-        if (tid < offset) {
-            partial[tid] += partial[tid + offset];
+    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
+        if (lane < offset) {
+            partial[partial_offset + lane] += partial[partial_offset + lane + offset];
         }
         __syncthreads();
     }
-    if (tid == 0 && row < rows) {
-        float value = partial[0];
+    if (lane == 0 && row < rows) {
+        float value = partial[partial_offset];
         if (row_scales != nullptr && row < row_scale_count) {
             value *= row_scales[row];
         }
@@ -944,9 +956,15 @@ extern "C" __global__ void ullm_aq4_matvec_silu_mul_f32_kernel(
     const float *input,
     unsigned long long rows,
     unsigned long long cols,
+    unsigned int rows_per_block,
     float *output) {
-    const unsigned int row = blockIdx.x;
     const unsigned int tid = threadIdx.x;
+    const unsigned int threads_per_row = blockDim.x / rows_per_block;
+    const unsigned int row_in_block = tid / threads_per_row;
+    const unsigned int lane = tid - row_in_block * threads_per_row;
+    const unsigned long long row =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
+    const unsigned int partial_offset = row_in_block * threads_per_row;
     __shared__ float gate_partial[256];
     __shared__ float up_partial[256];
     float gate_sum = 0.0f;
@@ -963,8 +981,8 @@ extern "C" __global__ void ullm_aq4_matvec_silu_mul_f32_kernel(
             gate_tensor_scale,
             row,
             cols,
-            tid,
-            blockDim.x);
+            lane,
+            threads_per_row);
         up_sum = ullm_aq4_matvec_thread_sum(
             up_indices,
             up_scale_indices,
@@ -976,22 +994,22 @@ extern "C" __global__ void ullm_aq4_matvec_silu_mul_f32_kernel(
             up_tensor_scale,
             row,
             cols,
-            tid,
-            blockDim.x);
+            lane,
+            threads_per_row);
     }
     gate_partial[tid] = gate_sum;
     up_partial[tid] = up_sum;
     __syncthreads();
-    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-        if (tid < offset) {
-            gate_partial[tid] += gate_partial[tid + offset];
-            up_partial[tid] += up_partial[tid + offset];
+    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
+        if (lane < offset) {
+            gate_partial[partial_offset + lane] += gate_partial[partial_offset + lane + offset];
+            up_partial[partial_offset + lane] += up_partial[partial_offset + lane + offset];
         }
         __syncthreads();
     }
-    if (tid == 0 && row < rows) {
-        float gate_value = gate_partial[0];
-        float up_value = up_partial[0];
+    if (lane == 0 && row < rows) {
+        float gate_value = gate_partial[partial_offset];
+        float up_value = up_partial[partial_offset];
         if (gate_row_scales != nullptr && row < gate_row_scale_count) {
             gate_value *= gate_row_scales[row];
         }
@@ -1085,10 +1103,16 @@ extern "C" __global__ void ullm_aq4_matvec_gate_beta_f32_kernel(
     const float *dt_bias,
     unsigned long long heads,
     unsigned long long cols,
+    unsigned int rows_per_block,
     float *gate_output,
     float *beta_output) {
-    const unsigned int head = blockIdx.x;
     const unsigned int tid = threadIdx.x;
+    const unsigned int threads_per_row = blockDim.x / rows_per_block;
+    const unsigned int row_in_block = tid / threads_per_row;
+    const unsigned int lane = tid - row_in_block * threads_per_row;
+    const unsigned long long head =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
+    const unsigned int partial_offset = row_in_block * threads_per_row;
     __shared__ float a_partial[256];
     __shared__ float b_partial[256];
     float a_sum = 0.0f;
@@ -1105,8 +1129,8 @@ extern "C" __global__ void ullm_aq4_matvec_gate_beta_f32_kernel(
             a_tensor_scale,
             head,
             cols,
-            tid,
-            blockDim.x);
+            lane,
+            threads_per_row);
         b_sum = ullm_aq4_gate_beta_thread_sum(
             b_indices,
             b_scale_indices,
@@ -1118,22 +1142,22 @@ extern "C" __global__ void ullm_aq4_matvec_gate_beta_f32_kernel(
             b_tensor_scale,
             head,
             cols,
-            tid,
-            blockDim.x);
+            lane,
+            threads_per_row);
     }
     a_partial[tid] = a_sum;
     b_partial[tid] = b_sum;
     __syncthreads();
-    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-        if (tid < offset) {
-            a_partial[tid] += a_partial[tid + offset];
-            b_partial[tid] += b_partial[tid + offset];
+    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
+        if (lane < offset) {
+            a_partial[partial_offset + lane] += a_partial[partial_offset + lane + offset];
+            b_partial[partial_offset + lane] += b_partial[partial_offset + lane + offset];
         }
         __syncthreads();
     }
-    if (tid == 0 && head < heads) {
-        float a_value = a_partial[0];
-        float b_value = b_partial[0];
+    if (lane == 0 && head < heads) {
+        float a_value = a_partial[partial_offset];
+        float b_value = b_partial[partial_offset];
         if (a_row_scales != nullptr && head < a_row_scale_count) {
             a_value *= a_row_scales[head];
         }
@@ -2632,11 +2656,17 @@ std::vector<std::string> hip_arch_candidates(int device_id) {
     return candidates;
 }
 
-unsigned int aq4_matvec_block_size_for_device(int device_id) {
+struct Aq4MatvecLaunchConfig {
+    unsigned int block_size = 256;
+    unsigned int rows_per_block = 1;
+};
+
+Aq4MatvecLaunchConfig aq4_matvec_launch_config_for_device(int device_id) {
     int major = 0;
     int minor = 0;
     hip_runtime().device_compute_capability(device_id, &major, &minor);
-    return major >= 12 ? 64u : 256u;
+    return major >= 12 ? Aq4MatvecLaunchConfig{256u, 4u}
+                       : Aq4MatvecLaunchConfig{256u, 1u};
 }
 
 class HipAq4KernelCache {
@@ -3317,8 +3347,10 @@ bool aq4_matvec_f32_hip_kernel(
         return false;
     }
 
-    const unsigned int block_size = aq4_matvec_block_size_for_device(device_id);
-    if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const size_t grid_size =
+        (rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec row count exceeds HIP grid limit";
         }
@@ -3336,6 +3368,7 @@ bool aq4_matvec_f32_hip_kernel(
     void *row_scale_ptr = row_scale_buffer == nullptr ? nullptr : row_scale_buffer->ptr;
     void *output_ptr = output_buffer->ptr;
     unsigned long long kernel_row_scale_count = static_cast<unsigned long long>(row_scale_count);
+    unsigned int kernel_rows_per_block = launch_config.rows_per_block;
     void *kernel_params[] = {
         &index_ptr,
         &scale_ptr,
@@ -3349,13 +3382,14 @@ bool aq4_matvec_f32_hip_kernel(
         &kernel_row_scale_count,
         &kernel_rows,
         &kernel_cols,
+        &kernel_rows_per_block,
         &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
     if (!hip_runtime().module_launch_kernel(
             function,
-            static_cast<unsigned int>(rows),
-            block_size,
+            static_cast<unsigned int>(grid_size),
+            launch_config.block_size,
             kernel_params,
             hip_stream,
             device_id)) {
@@ -3390,8 +3424,10 @@ bool aq4_matvec_add_f32_hip_kernel(
         return false;
     }
 
-    const unsigned int block_size = aq4_matvec_block_size_for_device(device_id);
-    if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const size_t grid_size =
+        (rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec add row count exceeds HIP grid limit";
         }
@@ -3410,6 +3446,7 @@ bool aq4_matvec_add_f32_hip_kernel(
     void *row_scale_ptr = row_scale_buffer == nullptr ? nullptr : row_scale_buffer->ptr;
     void *output_ptr = output_buffer->ptr;
     unsigned long long kernel_row_scale_count = static_cast<unsigned long long>(row_scale_count);
+    unsigned int kernel_rows_per_block = launch_config.rows_per_block;
     void *kernel_params[] = {
         &index_ptr,
         &scale_ptr,
@@ -3424,13 +3461,14 @@ bool aq4_matvec_add_f32_hip_kernel(
         &kernel_row_scale_count,
         &kernel_rows,
         &kernel_cols,
+        &kernel_rows_per_block,
         &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
     if (!hip_runtime().module_launch_kernel(
             function,
-            static_cast<unsigned int>(rows),
-            block_size,
+            static_cast<unsigned int>(grid_size),
+            launch_config.block_size,
             kernel_params,
             hip_stream,
             device_id)) {
@@ -3787,8 +3825,10 @@ bool aq4_matvec_silu_mul_f32_hip_kernel(
         return false;
     }
 
-    const unsigned int block_size = aq4_matvec_block_size_for_device(device_id);
-    if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const size_t grid_size =
+        (rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec SiLU-mul row count exceeds HIP grid limit";
         }
@@ -3817,6 +3857,7 @@ bool aq4_matvec_silu_mul_f32_hip_kernel(
     void *input_ptr = input_buffer->ptr;
     unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
     unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    unsigned int kernel_rows_per_block = launch_config.rows_per_block;
     void *output_ptr = output_buffer->ptr;
     void *kernel_params[] = {
         &gate_index_ptr,
@@ -3840,13 +3881,14 @@ bool aq4_matvec_silu_mul_f32_hip_kernel(
         &input_ptr,
         &kernel_rows,
         &kernel_cols,
+        &kernel_rows_per_block,
         &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
     if (!hip_runtime().module_launch_kernel(
             function,
-            static_cast<unsigned int>(rows),
-            block_size,
+            static_cast<unsigned int>(grid_size),
+            launch_config.block_size,
             kernel_params,
             hip_stream,
             device_id)) {
@@ -4146,8 +4188,10 @@ bool aq4_matvec_gate_beta_f32_hip_kernel(
         return false;
     }
 
-    const unsigned int block_size = aq4_matvec_block_size_for_device(device_id);
-    if (heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const size_t grid_size =
+        (heads + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec gate/beta head count exceeds HIP grid limit";
         }
@@ -4176,6 +4220,7 @@ bool aq4_matvec_gate_beta_f32_hip_kernel(
     void *dt_bias_ptr = dt_bias_buffer->ptr;
     unsigned long long kernel_heads = static_cast<unsigned long long>(heads);
     unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    unsigned int kernel_rows_per_block = launch_config.rows_per_block;
     void *gate_output_ptr = gate_output_buffer->ptr;
     void *beta_output_ptr = beta_output_buffer->ptr;
     void *kernel_params[] = {
@@ -4202,14 +4247,15 @@ bool aq4_matvec_gate_beta_f32_hip_kernel(
         &dt_bias_ptr,
         &kernel_heads,
         &kernel_cols,
+        &kernel_rows_per_block,
         &gate_output_ptr,
         &beta_output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
     if (!hip_runtime().module_launch_kernel(
             function,
-            static_cast<unsigned int>(heads),
-            block_size,
+            static_cast<unsigned int>(grid_size),
+            launch_config.block_size,
             kernel_params,
             hip_stream,
             device_id)) {
