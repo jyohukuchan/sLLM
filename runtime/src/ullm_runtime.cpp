@@ -1683,48 +1683,73 @@ extern "C" __global__ void ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel(
     constexpr unsigned int threads_per_row = 256u / rows_per_block;
     const unsigned int row_in_block = tid / threads_per_row;
     const unsigned int lane = tid - row_in_block * threads_per_row;
-    const unsigned long long block_start =
-        static_cast<unsigned long long>(blockIdx.x) * rows_per_block;
-    const unsigned long long logical_row = block_start + row_in_block;
-    const unsigned long long single_rows = qkv_rows + z_rows;
-    const unsigned long long total_rows = single_rows + heads;
-    const bool block_needs_secondary = block_start + rows_per_block > single_rows;
+    const unsigned long long logical_row =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
+    const unsigned long long projection_rows = qkv_rows > z_rows ? qkv_rows : z_rows;
+    const unsigned long long total_rows = projection_rows + heads;
     const unsigned int partial_offset = row_in_block * threads_per_row;
     __shared__ float primary_partial[256];
     __shared__ float secondary_partial[256];
     float primary_sum = 0.0f;
     float secondary_sum = 0.0f;
-    if (logical_row < qkv_rows) {
-        primary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
-            qkv_indices,
-            qkv_scale_indices,
-            qkv_codebook,
-            qkv_scale_values,
-            input,
-            qkv_scale_count,
-            qkv_group_size,
-            qkv_tensor_scale,
-            logical_row,
-            cols,
-            lane,
-            threads_per_row);
-    } else if (logical_row < single_rows) {
-        const unsigned long long z_row = logical_row - qkv_rows;
-        primary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
-            z_indices,
-            z_scale_indices,
-            z_codebook,
-            z_scale_values,
-            input,
-            z_scale_count,
-            z_group_size,
-            z_tensor_scale,
-            z_row,
-            cols,
-            lane,
-            threads_per_row);
+    if (logical_row < projection_rows) {
+        if (logical_row < qkv_rows && logical_row < z_rows &&
+            qkv_group_size == z_group_size && (cols % qkv_group_size) == 0ull) {
+            ullm_aq4_qkv_z_gate_beta_pair_thread_sums(
+                qkv_indices,
+                qkv_scale_indices,
+                qkv_codebook,
+                qkv_scale_values,
+                qkv_scale_count,
+                qkv_tensor_scale,
+                z_indices,
+                z_scale_indices,
+                z_codebook,
+                z_scale_values,
+                z_scale_count,
+                z_tensor_scale,
+                input,
+                qkv_group_size,
+                logical_row,
+                cols,
+                lane,
+                threads_per_row,
+                &primary_sum,
+                &secondary_sum);
+        } else {
+            if (logical_row < qkv_rows) {
+                primary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
+                    qkv_indices,
+                    qkv_scale_indices,
+                    qkv_codebook,
+                    qkv_scale_values,
+                    input,
+                    qkv_scale_count,
+                    qkv_group_size,
+                    qkv_tensor_scale,
+                    logical_row,
+                    cols,
+                    lane,
+                    threads_per_row);
+            }
+            if (logical_row < z_rows) {
+                secondary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
+                    z_indices,
+                    z_scale_indices,
+                    z_codebook,
+                    z_scale_values,
+                    input,
+                    z_scale_count,
+                    z_group_size,
+                    z_tensor_scale,
+                    logical_row,
+                    cols,
+                    lane,
+                    threads_per_row);
+            }
+        }
     } else if (logical_row < total_rows) {
-        const unsigned long long head = logical_row - single_rows;
+        const unsigned long long head = logical_row - projection_rows;
         if (a_group_size == b_group_size && (cols % a_group_size) == 0ull) {
             ullm_aq4_qkv_z_gate_beta_pair_thread_sums(
                 a_indices,
@@ -1782,28 +1807,29 @@ extern "C" __global__ void ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel(
     for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
         if (lane < offset) {
             primary_partial[partial_offset + lane] += primary_partial[partial_offset + lane + offset];
-            if (block_needs_secondary) {
-                secondary_partial[partial_offset + lane] +=
-                    secondary_partial[partial_offset + lane + offset];
-            }
+            secondary_partial[partial_offset + lane] +=
+                secondary_partial[partial_offset + lane + offset];
         }
         __syncthreads();
     }
     if (lane == 0 && logical_row < total_rows) {
         float value = primary_partial[partial_offset];
-        if (logical_row < qkv_rows) {
-            if (qkv_row_scales != nullptr && logical_row < qkv_row_scale_count) {
-                value *= qkv_row_scales[logical_row];
+        if (logical_row < projection_rows) {
+            if (logical_row < qkv_rows) {
+                if (qkv_row_scales != nullptr && logical_row < qkv_row_scale_count) {
+                    value *= qkv_row_scales[logical_row];
+                }
+                qkv_output[logical_row] = value;
             }
-            qkv_output[logical_row] = value;
-        } else if (logical_row < single_rows) {
-            const unsigned long long z_row = logical_row - qkv_rows;
-            if (z_row_scales != nullptr && z_row < z_row_scale_count) {
-                value *= z_row_scales[z_row];
+            if (logical_row < z_rows) {
+                float z_value = secondary_partial[partial_offset];
+                if (z_row_scales != nullptr && logical_row < z_row_scale_count) {
+                    z_value *= z_row_scales[logical_row];
+                }
+                z_output[logical_row] = z_value;
             }
-            z_output[z_row] = value;
         } else {
-            const unsigned long long head = logical_row - single_rows;
+            const unsigned long long head = logical_row - projection_rows;
             float b_value = secondary_partial[partial_offset];
             if (a_row_scales != nullptr && head < a_row_scale_count) {
                 value *= a_row_scales[head];
@@ -5157,13 +5183,14 @@ bool aq4_matvec_qkv_z_gate_beta_f32_hip_kernel(
 
     const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
     const size_t max_size = std::numeric_limits<size_t>::max();
-    if (qkv_rows > max_size - z_rows || qkv_rows + z_rows > max_size - heads) {
+    const size_t projection_rows = std::max(qkv_rows, z_rows);
+    if (projection_rows > max_size - heads) {
         if (error != nullptr) {
             *error = "AQ4 qkv/z gate/beta row count overflows";
         }
         return false;
     }
-    const size_t total_rows = qkv_rows + z_rows + heads;
+    const size_t total_rows = projection_rows + heads;
     const size_t grid_size =
         (total_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
