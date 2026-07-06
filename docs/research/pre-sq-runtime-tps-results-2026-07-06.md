@@ -776,3 +776,43 @@ New artifacts:
 - `benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.3.json`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.3/summary.json`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.3/summary.md`
+
+## Prompt Suite v0.3: V620/RDNA2 Compatibility
+
+The same controlled v0.3 suite was also run on V620/RDNA2 (`device_index=1`). This checks the
+prototype claim on the second target architecture using tokenizer-derived prompts, the same stop
+policy, and the same output-health rules.
+
+Summary comparison:
+
+| target | device | mean decode tok/s | min decode tok/s | max decode tok/s | mean prefill tok/s | verified all | output ok | output warn | output not evaluated |
+| --- | ---: | ---: | ---: | ---: | ---: | :---: | ---: | ---: | ---: |
+| R9700/RDNA4 | `2` | 19.796 | 18.500 | 20.166 | 19.850 | true | 6 | 0 | 1 |
+| V620/RDNA2 | `1` | 15.434 | 14.553 | 15.668 | 16.503 | true | 6 | 0 | 1 |
+
+V620 per-case results:
+
+| case | category | prompt tokens | generated | stop reason | status | prefill tok/s | decode tok/s | last-8 tok/s | verified |
+| --- | --- | ---: | ---: | --- | --- | ---: | ---: | ---: | :---: |
+| warmup_direct_answer | technical | 26 | 67 | stop_token | ok | 15.433 | 15.661 | 15.349 | true |
+| memory_vs_compute_direct | technical | 34 | 62 | stop_sequence | ok | 16.325 | 15.585 | 15.535 | true |
+| throughput_checklist_direct | checklist | 26 | 53 | stop_sequence | ok | 16.004 | 15.549 | 15.529 | true |
+| japanese_direct_answer | japanese | 41 | 49 | stop_token | ok | 17.120 | 15.592 | 15.512 | true |
+| python_stop_helper | code | 30 | 84 | stop_token | ok | 16.314 | 15.432 | 15.320 | true |
+| short_qa_bandwidth | short_qa | 25 | 35 | stop_sequence | ok | 15.572 | 15.668 | 15.618 | true |
+| long_prefill_warmup_timing | timing | 256 | 192 | max_generated_tokens | not_evaluated | 18.750 | 14.553 | 14.255 | true |
+
+Interpretation:
+
+- V620/RDNA2 is slower than R9700/RDNA4 on the same controlled text-prompt suite, but remains in the
+  `~14.6-15.7 tok/s` decode range.
+- The generated previews match the R9700 content for the quality-scored cases, with no output-health
+  warnings and `verified=true` throughout.
+- This supports presenting the current AQ4 prototype as working on both RDNA4 and RDNA2 for the
+  controlled pre-SQ prompt suite. It is still a single-request, no tensor-parallel, no-batching
+  prototype measurement.
+
+New artifacts:
+
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.md`
