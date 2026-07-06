@@ -1056,8 +1056,22 @@ fn resolve_aq_policy(options: &Options) -> Result<AqPolicyPlan, String> {
     })
 }
 
+fn is_float_matrix_input(dtype: &str, shape: &[usize]) -> bool {
+    matches!(dtype, "BF16" | "F16" | "F32") && shape.len() >= 2
+}
+
 fn is_supported_input(dtype: &str, shape: &[usize], family: &str) -> bool {
-    matches!(dtype, "BF16" | "F16" | "F32") && shape.len() >= 2 && is_default_quant_family(family)
+    is_float_matrix_input(dtype, shape) && is_default_quant_family(family)
+}
+
+fn is_forced_quant_tensor_input(
+    dtype: &str,
+    shape: &[usize],
+    tensor_name: &str,
+    policy: &AqPolicyPlan,
+) -> bool {
+    is_float_matrix_input(dtype, shape)
+        && policy.high_tensors.iter().any(|item| item == tensor_name)
 }
 
 fn quant_assignment(
@@ -3765,7 +3779,8 @@ fn build_model_plan(
             let n_bytes =
                 tensor_payload_bytes(&header).map_err(|err| format!("{err} for tensor {name}"))?;
             let family = family_for_tensor(&name).to_string();
-            let supported_input = is_supported_input(&header.dtype, &header.shape, &family);
+            let supported_input = is_supported_input(&header.dtype, &header.shape, &family)
+                || is_forced_quant_tensor_input(&header.dtype, &header.shape, &name, aq_policy);
             let (quant_format, quant_role) =
                 quant_assignment(supported_input, &name, &family, aq_policy);
             let estimated_output_bytes =
@@ -4320,9 +4335,10 @@ mod tests {
         TensorScaleEstimator, TensorScaleSampleCollector, ULLM_AQ_DTYPE_BF16, ULLM_AQ_DTYPE_F16,
         aq_scale_format, assign_codebook_scopes, bytes_to_lower_hex,
         choose_best_scale_index_for_group, decode_numeric_value, default_threads, effective_bpp,
-        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor, lower_median,
-        max_codebook_abs, merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats,
-        new_numeric_stats, new_quant_dry_run_stats, numeric_element_size, parse_scale_window,
+        empty_aq_quant_metrics, estimate_output_bytes, family_for_tensor,
+        is_forced_quant_tensor_input, is_supported_input, lower_median, max_codebook_abs,
+        merge_prototype_dirs, nearest_codebook_index, new_aq_group_stats, new_numeric_stats,
+        new_quant_dry_run_stats, numeric_element_size, parse_scale_window,
         parse_tensor_scale_estimator, quant_assignment, read_safetensors_metadata,
         read_tensor_payload_chunk, resolve_aq_policy, run_direct_prototype_package,
         scale_format_dominates, scale_table_contains_all, scale_values, select_codebook,
@@ -4621,6 +4637,39 @@ mod tests {
         let (format, role) = quant_assignment(false, target, "mlp_up", &policy);
         assert_eq!(format, None);
         assert_eq!(role, None);
+    }
+
+    #[test]
+    fn high_tensor_override_can_opt_in_non_default_float_matrix() {
+        let target = "lm_head.weight";
+        let mut options = test_options("all-g16");
+        options.aq_high_format = "aq4_e4m3_g16_ts_flloyd16".to_string();
+        options.aq_high_tensors.push(target.to_string());
+        let policy = resolve_aq_policy(&options).expect("policy with lm head tensor override");
+
+        assert!(!is_supported_input("BF16", &[248320, 4096], "lm_head"));
+        assert!(is_forced_quant_tensor_input(
+            "BF16",
+            &[248320, 4096],
+            target,
+            &policy
+        ));
+        assert!(!is_forced_quant_tensor_input(
+            "BF16",
+            &[248320],
+            target,
+            &policy
+        ));
+        assert!(!is_forced_quant_tensor_input(
+            "I32",
+            &[248320, 4096],
+            target,
+            &policy
+        ));
+
+        let (format, role) = quant_assignment(true, target, "lm_head", &policy);
+        assert_eq!(format.as_deref(), Some("aq4_e4m3_g16_ts_flloyd16"));
+        assert_eq!(role.as_deref(), Some("high"));
     }
 
     #[test]

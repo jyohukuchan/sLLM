@@ -16151,6 +16151,20 @@ enum PackageLmHeadRuntime {
     CpuChunked {
         chunk_rows: usize,
     },
+    GpuResidentAq4 {
+        shape: Vec<u64>,
+        vocab: usize,
+        hidden: usize,
+        matrix: PackageAq4ResidentMatvec,
+        input_buffer: ullm_runtime_sys::RuntimeBuffer,
+        logits_buffer: ullm_runtime_sys::RuntimeBuffer,
+        top1_partial_count: usize,
+        top1_partial_values_buffer: ullm_runtime_sys::RuntimeBuffer,
+        top1_partial_indices_buffer: ullm_runtime_sys::RuntimeBuffer,
+        top1_partial_values_host: Vec<u8>,
+        top1_partial_indices_host: Vec<u8>,
+        logits_host: Vec<u8>,
+    },
     GpuResidentF32 {
         dtype: String,
         shape: Vec<u64>,
@@ -16184,6 +16198,103 @@ impl PackageLmHeadRuntime {
             PackageLmHeadMode::CpuChunked => Ok(Self::CpuChunked { chunk_rows }),
             PackageLmHeadMode::GpuResidentF32 => {
                 let selector = TensorSelector::Name(QWEN3_LM_HEAD_TENSOR.to_string());
+                if select_tensor_payload_bundle(path, &selector).is_ok() {
+                    let mut registry = WeightRegistry::new();
+                    let matrix = PackageAq4ResidentMatvec::load(
+                        context,
+                        stream,
+                        &mut registry,
+                        path,
+                        QWEN3_LM_HEAD_TENSOR,
+                        chunk_bytes,
+                    )
+                    .map_err(|err| format!("failed to load resident AQ4 lm_head tensor: {err}"))?;
+                    let vocab = matrix.rows;
+                    let cols = matrix.cols;
+                    if cols != hidden {
+                        return Err(format!(
+                            "resident AQ4 lm_head hidden mismatch: lm_head={cols} hidden={hidden}"
+                        ));
+                    }
+                    let shape = vec![
+                        u64::try_from(vocab)
+                            .map_err(|_| "resident AQ4 lm_head vocab exceeds u64".to_string())?,
+                        u64::try_from(hidden)
+                            .map_err(|_| "resident AQ4 lm_head hidden exceeds u64".to_string())?,
+                    ];
+                    let hidden_bytes = checked_f32_byte_len(hidden, "resident AQ4 lm_head input")?;
+                    let logits_bytes = checked_f32_byte_len(vocab, "resident AQ4 lm_head logits")?;
+                    let top1_partial_count =
+                        ullm_runtime_sys::top1_partial_count(vocab).map_err(|err| {
+                            format!("failed to size resident AQ4 lm_head top1: {err}")
+                        })?;
+                    let top1_partial_values_bytes = checked_f32_byte_len(
+                        top1_partial_count,
+                        "resident AQ4 lm_head top1 values",
+                    )?;
+                    let top1_partial_indices_bytes = top1_partial_count
+                        .checked_mul(std::mem::size_of::<u32>())
+                        .ok_or_else(|| {
+                            "resident AQ4 lm_head top1 index byte size overflows".to_string()
+                        })?;
+                    let mut input_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+                        format!("failed to allocate resident AQ4 lm_head input: {err}")
+                    })?;
+                    let mut logits_buffer = context.alloc_buffer(logits_bytes).map_err(|err| {
+                        format!("failed to allocate resident AQ4 lm_head logits: {err}")
+                    })?;
+                    let mut top1_partial_values_buffer = context
+                        .alloc_buffer(top1_partial_values_bytes)
+                        .map_err(|err| {
+                            format!("failed to allocate resident AQ4 lm_head top1 values: {err}")
+                        })?;
+                    let mut top1_partial_indices_buffer = context
+                        .alloc_buffer(top1_partial_indices_bytes)
+                        .map_err(|err| {
+                            format!("failed to allocate resident AQ4 lm_head top1 indices: {err}")
+                        })?;
+                    stream.synchronize().map_err(|err| {
+                        format!("failed to synchronize resident AQ4 lm_head load: {err}")
+                    })?;
+                    let mut top1_partial_values_host = vec![0_u8; top1_partial_values_bytes];
+                    let mut top1_partial_indices_host = vec![0_u8; top1_partial_indices_bytes];
+                    let mut logits_host = vec![0_u8; logits_bytes];
+                    let zero_hidden_values = vec![0.0_f32; hidden];
+                    input_buffer
+                        .copy_from_host(0, &encode_f32_to_bytes(&zero_hidden_values), Some(stream))
+                        .map_err(|err| {
+                            format!("failed to copy resident AQ4 lm_head prewarm input: {err}")
+                        })?;
+                    package_gpu_resident_aq4_lm_head_top_logits(
+                        stream,
+                        &matrix,
+                        &input_buffer,
+                        vocab,
+                        hidden,
+                        &mut logits_buffer,
+                        &mut top1_partial_values_buffer,
+                        &mut top1_partial_indices_buffer,
+                        &mut top1_partial_values_host,
+                        &mut top1_partial_indices_host,
+                        &mut logits_host,
+                        1,
+                    )
+                    .map_err(|err| format!("failed to prewarm resident AQ4 lm_head: {err}"))?;
+                    return Ok(Self::GpuResidentAq4 {
+                        shape,
+                        vocab,
+                        hidden,
+                        matrix,
+                        input_buffer,
+                        logits_buffer,
+                        top1_partial_count,
+                        top1_partial_values_buffer,
+                        top1_partial_indices_buffer,
+                        top1_partial_values_host,
+                        top1_partial_indices_host,
+                        logits_host,
+                    });
+                }
                 let bundle = select_passthrough_payload_bundle(path, &selector)
                     .map_err(|err| format!("failed to select resident lm_head tensor: {err}"))?;
                 validate_passthrough_shape_elements(&bundle)
@@ -16365,6 +16476,44 @@ impl PackageLmHeadRuntime {
                     package_lm_head_top_k_from_rows(path, hidden_values, top_k, *chunk_rows)?;
                 Ok(top_logits)
             }
+            Self::GpuResidentAq4 {
+                vocab,
+                hidden,
+                matrix,
+                input_buffer,
+                logits_buffer,
+                top1_partial_values_buffer,
+                top1_partial_indices_buffer,
+                top1_partial_values_host,
+                top1_partial_indices_host,
+                logits_host,
+                ..
+            } => {
+                if hidden_values.len() != *hidden {
+                    return Err(format!(
+                        "resident AQ4 lm_head input length mismatch: got {} expected {}",
+                        hidden_values.len(),
+                        hidden
+                    ));
+                }
+                input_buffer
+                    .copy_from_host(0, &encode_f32_to_bytes(hidden_values), Some(stream))
+                    .map_err(|err| format!("failed to copy resident AQ4 lm_head input: {err}"))?;
+                package_gpu_resident_aq4_lm_head_top_logits(
+                    stream,
+                    matrix,
+                    input_buffer,
+                    *vocab,
+                    *hidden,
+                    logits_buffer,
+                    top1_partial_values_buffer,
+                    top1_partial_indices_buffer,
+                    top1_partial_values_host,
+                    top1_partial_indices_host,
+                    logits_host,
+                    top_k,
+                )
+            }
             Self::GpuResidentF32 {
                 vocab,
                 hidden,
@@ -16409,7 +16558,10 @@ impl PackageLmHeadRuntime {
     }
 
     fn supports_device_input(&self) -> bool {
-        matches!(self, Self::GpuResidentF32 { .. })
+        matches!(
+            self,
+            Self::GpuResidentAq4 { .. } | Self::GpuResidentF32 { .. }
+        )
     }
 
     fn top_logits_from_device_buffer(
@@ -16422,6 +16574,31 @@ impl PackageLmHeadRuntime {
             Self::CpuChunked { .. } => {
                 Err("device lm_head input requires gpu_resident_f32 lm_head mode".to_string())
             }
+            Self::GpuResidentAq4 {
+                vocab,
+                hidden,
+                matrix,
+                logits_buffer,
+                top1_partial_values_buffer,
+                top1_partial_indices_buffer,
+                top1_partial_values_host,
+                top1_partial_indices_host,
+                logits_host,
+                ..
+            } => package_gpu_resident_aq4_lm_head_top_logits(
+                stream,
+                matrix,
+                hidden_buffer,
+                *vocab,
+                *hidden,
+                logits_buffer,
+                top1_partial_values_buffer,
+                top1_partial_indices_buffer,
+                top1_partial_values_host,
+                top1_partial_indices_host,
+                logits_host,
+                top_k,
+            ),
             Self::GpuResidentF32 {
                 vocab,
                 hidden,
@@ -16457,6 +16634,28 @@ impl PackageLmHeadRuntime {
             Self::CpuChunked { chunk_rows } => serde_json::json!({
                 "mode": PackageLmHeadMode::CpuChunked.as_str(),
                 "chunk_rows": chunk_rows,
+                "load_ms": load_ms,
+            }),
+            Self::GpuResidentAq4 {
+                shape,
+                vocab,
+                hidden,
+                matrix,
+                top1_partial_count,
+                ..
+            } => serde_json::json!({
+                "mode": PackageLmHeadMode::GpuResidentF32.as_str(),
+                "tensor": QWEN3_LM_HEAD_TENSOR,
+                "dtype": "AQ4",
+                "shape": shape,
+                "vocab": vocab,
+                "hidden": hidden,
+                "matrix_storage_dtype": "AQ4",
+                "group_size": matrix.group_size,
+                "scale_count": matrix.scale_count,
+                "tensor_scale": matrix.tensor_scale,
+                "top1_partial_count": top1_partial_count,
+                "prewarmed_top1": true,
                 "load_ms": load_ms,
             }),
             Self::GpuResidentF32 {
@@ -16762,6 +16961,75 @@ fn package_gpu_resident_lm_head_top_logits(
         ),
     }
     .map_err(|err| format!("resident lm_head matvec failed: {err}"))?;
+    package_resident_lm_head_top_logits_from_logits(
+        stream,
+        logits_buffer,
+        vocab,
+        top1_partial_values_buffer,
+        top1_partial_indices_buffer,
+        top1_partial_values_host,
+        top1_partial_indices_host,
+        logits_host,
+        top_k,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_gpu_resident_aq4_lm_head_top_logits(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    matrix: &PackageAq4ResidentMatvec,
+    input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    vocab: usize,
+    hidden: usize,
+    logits_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    top1_partial_values_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    top1_partial_indices_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    top1_partial_values_host: &mut [u8],
+    top1_partial_indices_host: &mut [u8],
+    logits_host: &mut [u8],
+    top_k: usize,
+) -> Result<Vec<PackageTokenLogit>, String> {
+    if matrix.rows != vocab || matrix.cols != hidden {
+        return Err(format!(
+            "resident AQ4 lm_head shape mismatch: matrix=[{},{}] expected=[{vocab},{hidden}]",
+            matrix.rows, matrix.cols
+        ));
+    }
+    let required_input_bytes = checked_f32_byte_len(hidden, "resident AQ4 lm_head input")?;
+    let input_bytes = input_buffer
+        .size()
+        .map_err(|err| format!("failed to query resident AQ4 lm_head input buffer size: {err}"))?;
+    if input_bytes < required_input_bytes {
+        return Err(format!(
+            "resident AQ4 lm_head input buffer is too small: got {input_bytes} bytes expected at least {required_input_bytes}"
+        ));
+    }
+    matrix.matvec(input_buffer, logits_buffer, stream, "resident AQ4 lm_head")?;
+    package_resident_lm_head_top_logits_from_logits(
+        stream,
+        logits_buffer,
+        vocab,
+        top1_partial_values_buffer,
+        top1_partial_indices_buffer,
+        top1_partial_values_host,
+        top1_partial_indices_host,
+        logits_host,
+        top_k,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_resident_lm_head_top_logits_from_logits(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    logits_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    vocab: usize,
+    top1_partial_values_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    top1_partial_indices_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    top1_partial_values_host: &mut [u8],
+    top1_partial_indices_host: &mut [u8],
+    logits_host: &mut [u8],
+    top_k: usize,
+) -> Result<Vec<PackageTokenLogit>, String> {
     if top_k == 1 {
         ullm_runtime_sys::top1_f32(
             logits_buffer,
