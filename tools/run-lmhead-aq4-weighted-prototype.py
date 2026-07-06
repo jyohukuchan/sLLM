@@ -67,6 +67,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lm-head-mode", default="gpu_resident_f32")
     parser.add_argument("--stop-token-ids", default=DEFAULT_STOP_TOKEN_IDS)
     parser.add_argument("--logit-atol", type=float, default=1e-3)
+    parser.add_argument(
+        "--baseline-summary",
+        action="append",
+        default=[],
+        help="Baseline prompt-suite summary as LABEL:PATH. LABEL should match a --suite-device label.",
+    )
+    parser.add_argument("--min-decode-tps-ratio-vs-baseline", type=float, default=1.0)
+    parser.add_argument("--min-prefill-tps-ratio-vs-baseline", type=float, default=0.95)
+    parser.add_argument("--max-hit-generation-limit-regression-vs-baseline", type=int, default=1)
     parser.add_argument("--max-output-warn-count", type=int, default=1)
     parser.add_argument("--max-output-not-evaluated-count", type=int, default=1)
     parser.add_argument("--max-hit-generation-limit-count", type=int, default=1)
@@ -232,6 +241,7 @@ def build_gates(
     inspect_output: Path,
     suite_summaries: list[dict[str, Any]],
     guard_summaries: list[dict[str, Any]],
+    baseline_summaries: list[dict[str, Any]],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     if args.dry_run:
@@ -246,6 +256,11 @@ def build_gates(
                 "max_low_unique_token_ratio_count": args.max_low_unique_token_ratio_count,
                 "max_prompt_echo_count": args.max_prompt_echo_count,
                 "logit_atol": args.logit_atol,
+                "min_decode_tps_ratio_vs_baseline": args.min_decode_tps_ratio_vs_baseline,
+                "min_prefill_tps_ratio_vs_baseline": args.min_prefill_tps_ratio_vs_baseline,
+                "max_hit_generation_limit_regression_vs_baseline": (
+                    args.max_hit_generation_limit_regression_vs_baseline
+                ),
             },
         }
     inspect_metrics = parse_inspect_output(inspect_output)
@@ -269,9 +284,23 @@ def build_gates(
         for item in suite_summaries
     ]
     guard_gates = [guard_gate(Path(str(item["summary"]))) for item in guard_summaries]
+    suite_summary_by_label = {
+        str(item["label"]): Path(str(item["summary"]))
+        for item in suite_summaries
+    }
+    baseline_gates = [
+        baseline_gate(
+            str(item["label"]),
+            suite_summary_by_label.get(str(item["label"])),
+            Path(str(item["summary"])),
+            args,
+        )
+        for item in baseline_summaries
+    ]
     evaluated_gates: list[dict[str, Any]] = [package_integrity]
     evaluated_gates.extend(suite_gates)
     evaluated_gates.extend(guard_gates)
+    evaluated_gates.extend(baseline_gates)
     full_quality_evaluated = bool(suite_gates) and (len(suite_gates) < 2 or bool(guard_gates))
     return {
         "passed": all(gate.get("passed") is True for gate in evaluated_gates),
@@ -279,6 +308,7 @@ def build_gates(
         "package_integrity": package_integrity,
         "prompt_suites": suite_gates,
         "guards": guard_gates,
+        "baseline_comparisons": baseline_gates,
         "thresholds": {
             "max_output_warn_count": args.max_output_warn_count,
             "max_output_not_evaluated_count": args.max_output_not_evaluated_count,
@@ -286,6 +316,11 @@ def build_gates(
             "max_low_unique_token_ratio_count": args.max_low_unique_token_ratio_count,
             "max_prompt_echo_count": args.max_prompt_echo_count,
             "logit_atol": args.logit_atol,
+            "min_decode_tps_ratio_vs_baseline": args.min_decode_tps_ratio_vs_baseline,
+            "min_prefill_tps_ratio_vs_baseline": args.min_prefill_tps_ratio_vs_baseline,
+            "max_hit_generation_limit_regression_vs_baseline": (
+                args.max_hit_generation_limit_regression_vs_baseline
+            ),
         },
     }
 
@@ -304,6 +339,149 @@ def parse_suite_device(value: str) -> tuple[str, int]:
     if index < 0:
         raise SystemExit(f"--suite-device index must be non-negative: {value!r}")
     return label, index
+
+
+def parse_labeled_path(value: str, option: str) -> tuple[str, Path]:
+    if ":" not in value:
+        raise SystemExit(f"{option} must be LABEL:PATH, got {value!r}")
+    label, raw_path = value.split(":", 1)
+    label = label.strip()
+    if not label:
+        raise SystemExit(f"{option} label must not be empty: {value!r}")
+    if not raw_path:
+        raise SystemExit(f"{option} path must not be empty: {value!r}")
+    return label, Path(raw_path)
+
+
+def float_metric(metrics: dict[str, Any], key: str) -> float | None:
+    value = metrics.get(key)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def ratio_or_none(candidate: float | None, baseline: float | None) -> float | None:
+    if candidate is None or baseline is None or baseline <= 0.0:
+        return None
+    return candidate / baseline
+
+
+def baseline_gate(
+    label: str,
+    candidate_summary_path: Path | None,
+    baseline_summary_path: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if candidate_summary_path is None:
+        return {
+            "label": label,
+            "baseline_summary": str(baseline_summary_path),
+            "evaluated": False,
+            "passed": False,
+            "reason": "candidate_summary_missing_for_label",
+        }
+    candidate_summary = load_json_if_exists(candidate_summary_path)
+    baseline_summary = load_json_if_exists(baseline_summary_path)
+    if candidate_summary is None or baseline_summary is None:
+        return {
+            "label": label,
+            "candidate_summary": str(candidate_summary_path),
+            "baseline_summary": str(baseline_summary_path),
+            "evaluated": False,
+            "passed": False,
+            "reason": "summary_missing_or_invalid",
+        }
+    candidate_metrics = candidate_summary.get("metrics", {})
+    baseline_metrics = baseline_summary.get("metrics", {})
+    if not isinstance(candidate_metrics, dict):
+        candidate_metrics = {}
+    if not isinstance(baseline_metrics, dict):
+        baseline_metrics = {}
+
+    candidate_decode = float_metric(candidate_metrics, "decode_tps_mean")
+    baseline_decode = float_metric(baseline_metrics, "decode_tps_mean")
+    candidate_prefill = float_metric(candidate_metrics, "prefill_tps_mean")
+    baseline_prefill = float_metric(baseline_metrics, "prefill_tps_mean")
+    decode_ratio = ratio_or_none(candidate_decode, baseline_decode)
+    prefill_ratio = ratio_or_none(candidate_prefill, baseline_prefill)
+
+    failures = []
+    if decode_ratio is None or decode_ratio < args.min_decode_tps_ratio_vs_baseline:
+        failures.append(
+            {
+                "metric": "decode_tps_mean_ratio",
+                "actual": decode_ratio,
+                "min": args.min_decode_tps_ratio_vs_baseline,
+            }
+        )
+    if prefill_ratio is None or prefill_ratio < args.min_prefill_tps_ratio_vs_baseline:
+        failures.append(
+            {
+                "metric": "prefill_tps_mean_ratio",
+                "actual": prefill_ratio,
+                "min": args.min_prefill_tps_ratio_vs_baseline,
+            }
+        )
+
+    comparisons = [
+        ("output_ok_count", ">="),
+        ("output_warn_count", "<="),
+        ("output_not_evaluated_count", "<="),
+        ("low_unique_token_ratio_count", "<="),
+        ("prompt_echo_count", "<="),
+    ]
+    for key, relation in comparisons:
+        candidate_value = int_metric(candidate_metrics, key)
+        baseline_value = int_metric(baseline_metrics, key)
+        if candidate_value is None or baseline_value is None:
+            failures.append({"metric": key, "actual": candidate_value, "baseline": baseline_value})
+        elif relation == ">=" and candidate_value < baseline_value:
+            failures.append({"metric": key, "actual": candidate_value, "min": baseline_value})
+        elif relation == "<=" and candidate_value > baseline_value:
+            failures.append({"metric": key, "actual": candidate_value, "max": baseline_value})
+
+    candidate_hit_limit = int_metric(candidate_metrics, "hit_generation_limit_count")
+    baseline_hit_limit = int_metric(baseline_metrics, "hit_generation_limit_count")
+    if candidate_hit_limit is None or baseline_hit_limit is None:
+        failures.append(
+            {
+                "metric": "hit_generation_limit_count",
+                "actual": candidate_hit_limit,
+                "baseline": baseline_hit_limit,
+            }
+        )
+    else:
+        max_hit_limit = baseline_hit_limit + args.max_hit_generation_limit_regression_vs_baseline
+        if candidate_hit_limit > max_hit_limit:
+            failures.append(
+                {
+                    "metric": "hit_generation_limit_count",
+                    "actual": candidate_hit_limit,
+                    "max": max_hit_limit,
+                    "baseline": baseline_hit_limit,
+                }
+            )
+
+    return {
+        "label": label,
+        "candidate_summary": str(candidate_summary_path),
+        "baseline_summary": str(baseline_summary_path),
+        "evaluated": True,
+        "passed": not failures,
+        "failures": failures,
+        "metrics": {
+            "candidate_decode_tps_mean": candidate_decode,
+            "baseline_decode_tps_mean": baseline_decode,
+            "decode_tps_ratio": decode_ratio,
+            "candidate_prefill_tps_mean": candidate_prefill,
+            "baseline_prefill_tps_mean": baseline_prefill,
+            "prefill_tps_ratio": prefill_ratio,
+            "candidate_output_ok_count": int_metric(candidate_metrics, "output_ok_count"),
+            "baseline_output_ok_count": int_metric(baseline_metrics, "output_ok_count"),
+            "candidate_output_warn_count": int_metric(candidate_metrics, "output_warn_count"),
+            "baseline_output_warn_count": int_metric(baseline_metrics, "output_warn_count"),
+            "candidate_hit_generation_limit_count": candidate_hit_limit,
+            "baseline_hit_generation_limit_count": baseline_hit_limit,
+        },
+    }
 
 
 def run_command(
@@ -652,6 +830,11 @@ def main() -> int:
                 }
             )
 
+    baseline_summaries = [
+        {"label": label, "summary": str(existing_path(path))}
+        for label, path in [parse_labeled_path(value, "--baseline-summary") for value in args.baseline_summary]
+    ]
+
     payload = {
         "schema_version": SCHEMA_VERSION,
         "run_id": args.run_id,
@@ -672,7 +855,8 @@ def main() -> int:
         },
         "suite_summaries": suite_summaries,
         "guard_summaries": guard_summaries,
-        "gates": build_gates(inspect_output, suite_summaries, guard_summaries, args),
+        "baseline_summaries": baseline_summaries,
+        "gates": build_gates(inspect_output, suite_summaries, guard_summaries, baseline_summaries, args),
         "dry_run": bool(args.dry_run),
         "skip_existing": bool(args.skip_existing),
         "steps": steps,
