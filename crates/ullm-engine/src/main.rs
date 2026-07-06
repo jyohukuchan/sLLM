@@ -7,6 +7,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use ullm_engine::decode_runner::{
     Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerDecodeInputLayout,
@@ -28691,6 +28692,48 @@ struct PackageAq4ResidentMatvec {
     row_scale_buffer: Option<ullm_runtime_sys::RuntimeBuffer>,
 }
 
+static AQ4_MATVEC_ADD_PREWARMED: AtomicBool = AtomicBool::new(false);
+
+fn prewarm_aq4_matvec_add_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    matrix: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    residual_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_ADD_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; matrix.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        residual_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; matrix.rows]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm residual: {err}"))?;
+        matrix.matvec_add(input_buffer, residual_buffer, output_buffer, stream, label)?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_ADD_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
 impl PackageAq4ResidentMatvec {
     fn load(
         context: &mut ullm_runtime_sys::RuntimeContext,
@@ -28801,6 +28844,34 @@ impl PackageAq4ResidentMatvec {
             Some(stream),
         )
         .map_err(|err| format!("failed to run {label} AQ4 matvec: {err}"))
+    }
+
+    fn matvec_add(
+        &self,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<(), String> {
+        ullm_runtime_sys::aq4_matvec_add_f32(
+            self.index_buffer.as_ref(),
+            self.scale_buffer.as_ref(),
+            self.codebook_buffer.as_ref(),
+            &self.scale_values_buffer,
+            input_buffer,
+            residual_buffer,
+            self.row_scale_buffer.as_ref(),
+            self.scale_count,
+            self.group_size,
+            self.tensor_scale,
+            self.row_scale_count,
+            self.rows,
+            self.cols,
+            output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} AQ4 matvec add: {err}"))
     }
 
     fn matvec_silu_mul_with(
@@ -28954,11 +29025,9 @@ struct PackageSelfAttnResidentStepLayer {
     v_cache_buffer: ullm_runtime_sys::RuntimeBuffer,
     attention_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     attention_projection_input_buffer: ullm_runtime_sys::RuntimeBuffer,
-    attention_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
     attention_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
-    mlp_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
 }
 
@@ -29195,7 +29264,7 @@ impl PackageSelfAttnResidentStepLayer {
             .alloc_buffer(block_table.len() * std::mem::size_of::<u32>())
             .map_err(|err| format!("failed to allocate self-attn resident block table: {err}"))?;
 
-        let input_buffer = context
+        let mut input_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident input: {err}"))?;
         let input_normed_buffer = context
@@ -29243,25 +29312,20 @@ impl PackageSelfAttnResidentStepLayer {
         let attention_output_buffer = context.alloc_buffer(attention_bytes).map_err(|err| {
             format!("failed to allocate self-attn resident attention output: {err}")
         })?;
-        let attention_projection_input_buffer =
+        let mut attention_projection_input_buffer =
             context.alloc_buffer(attention_bytes).map_err(|err| {
                 format!("failed to allocate self-attn resident attention projection input: {err}")
             })?;
-        let attention_projected_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate self-attn resident attention projected: {err}")
-        })?;
-        let attention_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate self-attn resident attention block output: {err}")
-        })?;
+        let mut attention_block_output_buffer =
+            context.alloc_buffer(hidden_bytes).map_err(|err| {
+                format!("failed to allocate self-attn resident attention block output: {err}")
+            })?;
         let post_normed_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident post normed: {err}"))?;
         let mlp_activation_buffer = context.alloc_buffer(intermediate_bytes).map_err(|err| {
             format!("failed to allocate self-attn resident MLP activation: {err}")
         })?;
-        let mlp_output_buffer = context
-            .alloc_buffer(hidden_bytes)
-            .map_err(|err| format!("failed to allocate self-attn resident MLP output: {err}"))?;
         let layer_output_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident layer output: {err}"))?;
@@ -29298,6 +29362,14 @@ impl PackageSelfAttnResidentStepLayer {
         stream.synchronize().map_err(|err| {
             format!("failed to synchronize self-attn resident layer setup: {err}")
         })?;
+        prewarm_aq4_matvec_add_once(
+            stream,
+            &o_matrix,
+            &mut attention_projection_input_buffer,
+            &mut input_buffer,
+            &mut attention_block_output_buffer,
+            "self-attn resident AQ4 matvec add",
+        )?;
 
         Ok(Self {
             hidden,
@@ -29337,11 +29409,9 @@ impl PackageSelfAttnResidentStepLayer {
             v_cache_buffer,
             attention_output_buffer,
             attention_projection_input_buffer,
-            attention_projected_buffer,
             attention_block_output_buffer,
             post_normed_buffer,
             mlp_activation_buffer,
-            mlp_output_buffer,
             layer_output_buffer,
         })
     }
@@ -29601,23 +29671,20 @@ impl PackageSelfAttnResidentStepLayer {
                 &self.attention_projection_input_buffer
             }
         };
-        self.o_matrix.matvec(
-            projection_input_buffer,
-            &mut self.attention_projected_buffer,
-            stream,
-            "self-attn resident o projection",
-        )?;
-        ullm_runtime_sys::add_f32(
-            match input {
-                PackageSelfAttnResidentStepInput::InternalInputBuffer => &self.input_buffer,
-                PackageSelfAttnResidentStepInput::ExternalBuffer(buffer) => buffer,
-            },
-            &self.attention_projected_buffer,
-            self.hidden,
-            &mut self.attention_block_output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} self-attn residual add: {err}"))?;
+        self.o_matrix
+            .matvec_add(
+                projection_input_buffer,
+                match input {
+                    PackageSelfAttnResidentStepInput::InternalInputBuffer => &self.input_buffer,
+                    PackageSelfAttnResidentStepInput::ExternalBuffer(buffer) => buffer,
+                },
+                &mut self.attention_block_output_buffer,
+                stream,
+                "self-attn resident o projection residual",
+            )
+            .map_err(|err| {
+                format!("failed to run {label} self-attn o projection residual: {err}")
+            })?;
         ullm_runtime_sys::rmsnorm_f32(
             &self.attention_block_output_buffer,
             &self.post_norm_weight_buffer,
@@ -29634,20 +29701,15 @@ impl PackageSelfAttnResidentStepLayer {
             stream,
             "self-attn resident MLP gate/up activation",
         )?;
-        self.mlp_down_matrix.matvec(
-            &self.mlp_activation_buffer,
-            &mut self.mlp_output_buffer,
-            stream,
-            "self-attn resident MLP down",
-        )?;
-        ullm_runtime_sys::add_f32(
-            &self.attention_block_output_buffer,
-            &self.mlp_output_buffer,
-            self.hidden,
-            &mut self.layer_output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} self-attn layer residual: {err}"))?;
+        self.mlp_down_matrix
+            .matvec_add(
+                &self.mlp_activation_buffer,
+                &self.attention_block_output_buffer,
+                &mut self.layer_output_buffer,
+                stream,
+                "self-attn resident MLP down residual",
+            )
+            .map_err(|err| format!("failed to run {label} self-attn MLP down residual: {err}"))?;
         Ok(())
     }
 }
@@ -29691,11 +29753,9 @@ struct PackageLinearAttnResidentStepLayer {
     recurrent_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_projection_input_buffer: ullm_runtime_sys::RuntimeBuffer,
-    attn_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
-    mlp_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
 }
 
@@ -29985,7 +30045,7 @@ impl PackageLinearAttnResidentStepLayer {
             format!("failed to allocate linear-attn resident conv history: {err}")
         })?;
 
-        let input_buffer = context
+        let mut input_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident input: {err}"))?;
         let input_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
@@ -30030,13 +30090,11 @@ impl PackageLinearAttnResidentStepLayer {
         let attn_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident attention normed: {err}")
         })?;
-        let attn_projection_input_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate linear-attn resident attention projection input: {err}")
-        })?;
-        let attn_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate linear-attn resident attention output: {err}")
-        })?;
-        let attn_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        let mut attn_projection_input_buffer =
+            context.alloc_buffer(hidden_bytes).map_err(|err| {
+                format!("failed to allocate linear-attn resident attention projection input: {err}")
+            })?;
+        let mut attn_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident attention block: {err}")
         })?;
         let post_normed_buffer = context
@@ -30045,9 +30103,6 @@ impl PackageLinearAttnResidentStepLayer {
         let mlp_activation_buffer = context.alloc_buffer(intermediate_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident MLP activation: {err}")
         })?;
-        let mlp_output_buffer = context
-            .alloc_buffer(hidden_bytes)
-            .map_err(|err| format!("failed to allocate linear-attn resident MLP output: {err}"))?;
         let layer_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident layer output: {err}")
         })?;
@@ -30099,6 +30154,14 @@ impl PackageLinearAttnResidentStepLayer {
         stream.synchronize().map_err(|err| {
             format!("failed to synchronize linear-attn resident layer setup: {err}")
         })?;
+        prewarm_aq4_matvec_add_once(
+            stream,
+            &out_matrix,
+            &mut attn_projection_input_buffer,
+            &mut input_buffer,
+            &mut attn_block_output_buffer,
+            "linear-attn resident AQ4 matvec add",
+        )?;
 
         Ok(Self {
             layer_index,
@@ -30139,11 +30202,9 @@ impl PackageLinearAttnResidentStepLayer {
             recurrent_output_buffer,
             attn_normed_buffer,
             attn_projection_input_buffer,
-            attn_output_buffer,
             attn_block_output_buffer,
             post_normed_buffer,
             mlp_activation_buffer,
-            mlp_output_buffer,
             layer_output_buffer,
         })
     }
@@ -30325,23 +30386,20 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident attention SiLU-mul: {err}"))?;
-        self.out_matrix.matvec(
-            &self.attn_projection_input_buffer,
-            &mut self.attn_output_buffer,
-            stream,
-            "linear-attn resident out projection",
-        )?;
-        ullm_runtime_sys::add_f32(
-            match input {
-                PackageLinearAttnResidentStepInput::InternalInputBuffer => &self.input_buffer,
-                PackageLinearAttnResidentStepInput::ExternalBuffer(buffer) => buffer,
-            },
-            &self.attn_output_buffer,
-            self.hidden,
-            &mut self.attn_block_output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident attention residual: {err}"))?;
+        self.out_matrix
+            .matvec_add(
+                &self.attn_projection_input_buffer,
+                match input {
+                    PackageLinearAttnResidentStepInput::InternalInputBuffer => &self.input_buffer,
+                    PackageLinearAttnResidentStepInput::ExternalBuffer(buffer) => buffer,
+                },
+                &mut self.attn_block_output_buffer,
+                stream,
+                "linear-attn resident out projection residual",
+            )
+            .map_err(|err| {
+                format!("failed to run linear-attn resident attention residual: {err}")
+            })?;
 
         ullm_runtime_sys::rmsnorm_f32(
             &self.attn_block_output_buffer,
@@ -30359,20 +30417,15 @@ impl PackageLinearAttnResidentStepLayer {
             stream,
             "linear-attn resident MLP gate/up activation",
         )?;
-        self.mlp_down_matrix.matvec(
-            &self.mlp_activation_buffer,
-            &mut self.mlp_output_buffer,
-            stream,
-            "linear-attn resident MLP down",
-        )?;
-        ullm_runtime_sys::add_f32(
-            &self.attn_block_output_buffer,
-            &self.mlp_output_buffer,
-            self.hidden,
-            &mut self.layer_output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident layer residual: {err}"))?;
+        self.mlp_down_matrix
+            .matvec_add(
+                &self.mlp_activation_buffer,
+                &self.attn_block_output_buffer,
+                &mut self.layer_output_buffer,
+                stream,
+                "linear-attn resident MLP down residual",
+            )
+            .map_err(|err| format!("failed to run linear-attn resident layer residual: {err}"))?;
         Ok(())
     }
 }
