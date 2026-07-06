@@ -735,7 +735,10 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
     }
 
     static std::string aq4_matvec_add_kernel_source_for_arch(const std::string &arch) {
-        return aq4_rows_per_block_preamble(arch) + aq4_matvec_add_kernel_source();
+        const unsigned int rows_per_block =
+            arch.rfind("gfx12", 0) == 0 ? 8u : aq4_rows_per_block_for_arch(arch);
+        return "#define ULLM_AQ4_ROWS_PER_BLOCK " + std::to_string(rows_per_block) +
+               "\n" + aq4_matvec_add_kernel_source();
     }
 
     static std::string aq4_matvec_pair_kernel_source_for_arch(const std::string &arch) {
@@ -5126,8 +5129,15 @@ bool aq4_matvec_add_f32_hip_kernel(
     }
 
     const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    Aq4MatvecLaunchConfig add_launch_config = launch_config;
+    int compute_major = 0;
+    int compute_minor = 0;
+    hip_runtime().device_compute_capability(device_id, &compute_major, &compute_minor);
+    if (compute_major >= 12) {
+        add_launch_config.rows_per_block = 8u;
+    }
     const size_t grid_size =
-        (rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+        (rows + add_launch_config.rows_per_block - 1) / add_launch_config.rows_per_block;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec add row count exceeds HIP grid limit";
@@ -5167,7 +5177,7 @@ bool aq4_matvec_add_f32_hip_kernel(
     if (!hip_runtime().module_launch_kernel(
             function,
             static_cast<unsigned int>(grid_size),
-            launch_config.block_size,
+            add_launch_config.block_size,
             kernel_params,
             hip_stream,
             device_id)) {
