@@ -275,3 +275,46 @@ Interpretation:
 New artifact:
 
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-gpu-lm-head-r9700-prompt16-gen16-warmup-summary-hip-matvec.json`
+
+## Direct AQ4 Matvec Prototype
+
+Implemented a first fused AQ4 matvec path that keeps packed 4-bit indices, u8 scale indices,
+codebook values, scale-table values, and optional row-scale overrides resident as separate runtime
+buffers. The HIP kernel computes group-local raw sums first, then applies the group scale and tensor
+scale before the row reduction. This is closer to the intended low-latency AQ execution path than
+the previous materialize-to-FP32 route.
+
+Representative R9700 package matvec smokes against the materialized FP32 reference:
+
+| tensor | elements | group | row overrides | f32 ms | aq4 ms | speedup | max abs diff | verified |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| layer0 `linear_attn.in_proj_qkv` | 33,554,432 | 16 | 0 | 0.323 | 0.184 | 1.754 | 0.000000477 | true |
+| layer0 `mlp.gate_proj` | 50,331,648 | 16 | 0 | 0.365 | 0.301 | 1.211 | 0.000000179 | true |
+| layer0 `mlp.up_proj` | 50,331,648 | 16 | 0 | 0.440 | 0.261 | 1.687 | 0.000000134 | true |
+| layer0 `mlp.down_proj` | 50,331,648 | 16 | 0 | 0.361 | 0.241 | 1.498 | 0.000000238 | true |
+| layer6 `linear_attn.out_proj` | 16,777,216 | 8 | 1 | 0.101 | 0.116 | 0.873 | 0.000000238 | true |
+
+R9700 `prompt=16/generated=16` decode after replacing the linear-attention resident projection
+matvecs with direct AQ4 matvec:
+
+| target | device | prompt | generated | all-step tok/s | skip-1 tok/s | skip-2 tok/s | last-4 tok/s | p50 step ms | generated-token agreement | verified |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |
+| R9700/RDNA4 | `2` | `16` | `16` | 5.517 | 5.508 | 5.498 | 5.465 | 182.178 | matches prior gen16 | true |
+
+Interpretation:
+
+- Output quality did not collapse in the short decode probe: generated token IDs matched the prior
+  materialized-FP32 gen16 run.
+- The direct AQ4 kernel validates the raw-value plus scale-table execution direction, including
+  row-scale override handling.
+- The speedup is real but not large enough for the current decode architecture. Linear-attention
+  layers dropped from about `154.0 ms/token` to about `143.3 ms/token` on average, with p50 linear
+  layer sum about `143.3 ms/token`.
+- This leaves the path far above the `50 ms/token` budget for `20 tok/s`. The remaining wall is not
+  AQ format correctness; it is the current one-token, many-small-kernel, host-mediated layer
+  execution shape. Further progress needs fused projection groups and fewer host readbacks, not just
+  replacing each GEMV one-for-one.
+
+New artifact:
+
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-direct-matvec-r9700-prompt16-gen16.json`
