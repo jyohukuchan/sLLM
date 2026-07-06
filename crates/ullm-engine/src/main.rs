@@ -16276,18 +16276,18 @@ impl PackageLmHeadRuntime {
                         )?;
                     }
                 }
-                let input_buffer = context
+                let mut input_buffer = context
                     .alloc_buffer(hidden_bytes)
                     .map_err(|err| format!("failed to allocate resident lm_head input: {err}"))?;
-                let logits_buffer = context
+                let mut logits_buffer = context
                     .alloc_buffer(logits_bytes)
                     .map_err(|err| format!("failed to allocate resident lm_head logits: {err}"))?;
-                let top1_partial_values_buffer = context
+                let mut top1_partial_values_buffer = context
                     .alloc_buffer(top1_partial_values_bytes)
                     .map_err(|err| {
                         format!("failed to allocate resident lm_head top1 values: {err}")
                     })?;
-                let top1_partial_indices_buffer = context
+                let mut top1_partial_indices_buffer = context
                     .alloc_buffer(top1_partial_indices_bytes)
                     .map_err(|err| {
                         format!("failed to allocate resident lm_head top1 indices: {err}")
@@ -16295,6 +16295,31 @@ impl PackageLmHeadRuntime {
                 stream
                     .synchronize()
                     .map_err(|err| format!("failed to synchronize resident lm_head load: {err}"))?;
+                let mut top1_partial_values_host = vec![0_u8; top1_partial_values_bytes];
+                let mut top1_partial_indices_host = vec![0_u8; top1_partial_indices_bytes];
+                let mut logits_host = vec![0_u8; logits_bytes];
+                let zero_hidden_values = vec![0.0_f32; hidden];
+                input_buffer
+                    .copy_from_host(0, &encode_f32_to_bytes(&zero_hidden_values), Some(stream))
+                    .map_err(|err| {
+                        format!("failed to copy resident lm_head prewarm input: {err}")
+                    })?;
+                package_gpu_resident_lm_head_top_logits(
+                    stream,
+                    &matrix_buffer,
+                    &input_buffer,
+                    matrix_storage,
+                    vocab,
+                    hidden,
+                    &mut logits_buffer,
+                    &mut top1_partial_values_buffer,
+                    &mut top1_partial_indices_buffer,
+                    &mut top1_partial_values_host,
+                    &mut top1_partial_indices_host,
+                    &mut logits_host,
+                    1,
+                )
+                .map_err(|err| format!("failed to prewarm resident lm_head: {err}"))?;
                 Ok(Self::GpuResidentF32 {
                     dtype,
                     shape: bundle.shape,
@@ -16307,9 +16332,9 @@ impl PackageLmHeadRuntime {
                     logits_buffer,
                     top1_partial_values_buffer,
                     top1_partial_indices_buffer,
-                    top1_partial_values_host: vec![0_u8; top1_partial_values_bytes],
-                    top1_partial_indices_host: vec![0_u8; top1_partial_indices_bytes],
-                    logits_host: vec![0_u8; logits_bytes],
+                    top1_partial_values_host,
+                    top1_partial_indices_host,
+                    logits_host,
                     matrix_bytes,
                 })
             }
@@ -16442,6 +16467,7 @@ impl PackageLmHeadRuntime {
                 "matrix_storage_dtype": matrix_storage.as_str(),
                 "top1_partial_count": top1_partial_count,
                 "matrix_bytes": matrix_bytes,
+                "prewarmed_top1": true,
                 "load_ms": load_ms,
             }),
         }
