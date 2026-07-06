@@ -424,6 +424,7 @@ def write_summary_json(
         "category_metrics": category_metrics(case_summaries),
         "cases": case_summaries,
     }
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -464,7 +465,21 @@ def write_summary_md(path: Path, summary_json: Path, case_summaries: list[dict[s
             )
         )
     lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def resolve_summary_path(output_dir: Path, value: str | Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    if path == output_dir or path.is_relative_to(output_dir):
+        return path
+    output_dir_resolved = output_dir.resolve(strict=False)
+    path_resolved = path.resolve(strict=False)
+    if path_resolved.is_relative_to(output_dir_resolved):
+        return path
+    return output_dir / path
 
 
 def load_existing_case(case: PromptCase, output_dir: Path) -> tuple[Path, dict[str, Any]]:
@@ -496,8 +511,8 @@ def main() -> int:
             report = run_case(args, case, report_path)
         case_summaries.append(summarize_report(case, report_path, report))
 
-    summary_json = args.output_dir / args.summary_json
-    summary_md = args.output_dir / args.summary_md
+    summary_json = resolve_summary_path(args.output_dir, args.summary_json)
+    summary_md = resolve_summary_path(args.output_dir, args.summary_md)
     write_summary_json(summary_json, args, metadata, case_summaries)
     write_summary_md(summary_md, summary_json, case_summaries)
     print(f"wrote {summary_json}", file=sys.stderr)
