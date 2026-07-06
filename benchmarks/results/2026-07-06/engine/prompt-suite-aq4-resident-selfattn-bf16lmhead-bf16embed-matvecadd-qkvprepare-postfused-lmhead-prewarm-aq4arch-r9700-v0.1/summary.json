@@ -1,0 +1,350 @@
+{
+  "schema_version": "package-token-prompt-suite-summary-v0.3",
+  "suite": {
+    "suite_id": "pre-sq-runtime-prompt-suite-v0.3",
+    "purpose": "Controlled-output text prompt set for pre-SQ runtime TPS and output-health observation.",
+    "tokenizer": "Qwen3.5-9B",
+    "decode_policy": "greedy with tokenizer special-token stop policy and per-case task-aware stop_texts",
+    "changes_from_v0.2": [
+      "uses shorter output contracts for quality-observed cases",
+      "adds blank-line stop_texts for direct-answer prompts",
+      "keeps the repeated long-prefill timing probe but excludes it from output-health scoring"
+    ]
+  },
+  "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d",
+  "tokenizer_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "device_index": 2,
+  "layers": "all",
+  "generated_tokens_default": 128,
+  "stop_policy": {
+    "stop_token_ids": null,
+    "stop_token_sequences": null,
+    "stop_text": [],
+    "stop_on_eos": false,
+    "stop_on_special_tokens": false
+  },
+  "case_count": 7,
+  "metrics": {
+    "decode_tps_mean": 32.013460536168026,
+    "decode_tps_min": 29.07113535240151,
+    "decode_tps_max": 32.83963187709124,
+    "prefill_tps_mean": 28.464636767814905,
+    "verified_all": true,
+    "stopped_count": 4,
+    "output_ok_count": 1,
+    "output_warn_count": 5,
+    "output_not_evaluated_count": 1,
+    "hit_generation_limit_count": 2,
+    "low_unique_token_ratio_count": 1,
+    "prompt_echo_count": 1
+  },
+  "category_metrics": {
+    "checklist": {
+      "case_count": 1,
+      "decode_tps_mean": 32.62468499190094,
+      "decode_tps_min": 32.62468499190094,
+      "decode_tps_max": 32.62468499190094,
+      "prefill_tps_mean": 27.39189336789353,
+      "verified_all": true,
+      "output_ok_count": 0,
+      "output_warn_count": 1,
+      "output_not_evaluated_count": 0
+    },
+    "code": {
+      "case_count": 1,
+      "decode_tps_mean": 31.915715071921362,
+      "decode_tps_min": 31.915715071921362,
+      "decode_tps_max": 31.915715071921362,
+      "prefill_tps_mean": 26.809092700206392,
+      "verified_all": true,
+      "output_ok_count": 0,
+      "output_warn_count": 1,
+      "output_not_evaluated_count": 0
+    },
+    "japanese": {
+      "case_count": 1,
+      "decode_tps_mean": 32.34111216645331,
+      "decode_tps_min": 32.34111216645331,
+      "decode_tps_max": 32.34111216645331,
+      "prefill_tps_mean": 29.63243348421388,
+      "verified_all": true,
+      "output_ok_count": 0,
+      "output_warn_count": 1,
+      "output_not_evaluated_count": 0
+    },
+    "short_qa": {
+      "case_count": 1,
+      "decode_tps_mean": 32.68381777505932,
+      "decode_tps_min": 32.68381777505932,
+      "decode_tps_max": 32.68381777505932,
+      "prefill_tps_mean": 26.90762509517698,
+      "verified_all": true,
+      "output_ok_count": 1,
+      "output_warn_count": 0,
+      "output_not_evaluated_count": 0
+    },
+    "technical": {
+      "case_count": 2,
+      "decode_tps_mean": 32.72887919771986,
+      "decode_tps_min": 32.61812651834849,
+      "decode_tps_max": 32.83963187709124,
+      "prefill_tps_mean": 28.196463048187333,
+      "verified_all": true,
+      "output_ok_count": 0,
+      "output_warn_count": 2,
+      "output_not_evaluated_count": 0
+    },
+    "timing": {
+      "case_count": 1,
+      "decode_tps_mean": 29.07113535240151,
+      "decode_tps_min": 29.07113535240151,
+      "decode_tps_max": 29.07113535240151,
+      "prefill_tps_mean": 32.1184866308389,
+      "verified_all": true,
+      "output_ok_count": 0,
+      "output_warn_count": 0,
+      "output_not_evaluated_count": 1
+    }
+  },
+  "cases": [
+    {
+      "id": "warmup_direct_answer",
+      "category": "technical",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-resident-selfattn-bf16lmhead-bf16embed-matvecadd-qkvprepare-postfused-lmhead-prewarm-aq4arch-r9700-v0.1/warmup_direct_answer.json",
+      "prompt_tokens": 26,
+      "generated_tokens": 63,
+      "requested_generated_tokens": 96,
+      "verified": true,
+      "stop_reason": "stop_sequence",
+      "stopped": true,
+      "stopped_on_token_id": null,
+      "stopped_on_token_sequence": [
+        271
+      ],
+      "prefill_tps": 27.453520261002055,
+      "decode_tps": 32.83963187709124,
+      "skip2_tps": 32.82539508460881,
+      "last8_tps": 32.511700351362066,
+      "p50_ms": 30.467378,
+      "generated_chars": 357,
+      "unique_generated_token_ratio": 0.8412698412698413,
+      "output_health_evaluated": true,
+      "output_status": "warn",
+      "output_warnings": [
+        "control_marker_text"
+      ],
+      "generated_preview": "GPU warmup causes initial latency spikes that artificially inflate the denominator in token-per-second calculations. This transient inefficiency results in a lower average throughput that does not reflect the model's steady-state performanc",
+      "stop_texts": [
+        "\n\n"
+      ],
+      "output_health": true,
+      "notes": [
+        "Controlled short technical answer for warmup measurement policy."
+      ]
+    },
+    {
+      "id": "memory_vs_compute_direct",
+      "category": "technical",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-resident-selfattn-bf16lmhead-bf16embed-matvecadd-qkvprepare-postfused-lmhead-prewarm-aq4arch-r9700-v0.1/memory_vs_compute_direct.json",
+      "prompt_tokens": 34,
+      "generated_tokens": 80,
+      "requested_generated_tokens": 80,
+      "verified": true,
+      "stop_reason": "max_generated_tokens",
+      "stopped": false,
+      "stopped_on_token_id": null,
+      "stopped_on_token_sequence": null,
+      "prefill_tps": 28.939405835372607,
+      "decode_tps": 32.61812651834849,
+      "skip2_tps": 32.60659551401346,
+      "last8_tps": 32.16516891433918,
+      "p50_ms": 30.60599,
+      "generated_chars": 459,
+      "unique_generated_token_ratio": 0.8125,
+      "output_health_evaluated": true,
+      "output_status": "warn",
+      "output_warnings": [
+        "hit_generation_limit",
+        "control_marker_text",
+        "missing_terminal_punctuation"
+      ],
+      "generated_preview": "Memory-bandwidth-bound inference is limited by the rate at which quantized weights can be fetched from off-chip memory, whereas compute-bound inference is constrained by the arithmetic throughput of the processor. In low-bit LLM decoding, r",
+      "stop_texts": [
+        "\n\n"
+      ],
+      "output_health": true,
+      "notes": [
+        "Controlled AQ/SQ bottleneck comparison with a short answer cap."
+      ]
+    },
+    {
+      "id": "throughput_checklist_direct",
+      "category": "checklist",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-resident-selfattn-bf16lmhead-bf16embed-matvecadd-qkvprepare-postfused-lmhead-prewarm-aq4arch-r9700-v0.1/throughput_checklist_direct.json",
+      "prompt_tokens": 26,
+      "generated_tokens": 82,
+      "requested_generated_tokens": 128,
+      "verified": true,
+      "stop_reason": "stop_sequence",
+      "stopped": true,
+      "stopped_on_token_id": null,
+      "stopped_on_token_sequence": [
+        271
+      ],
+      "prefill_tps": 27.39189336789353,
+      "decode_tps": 32.62468499190094,
+      "skip2_tps": 32.61083440781423,
+      "last8_tps": 32.14766735239784,
+      "p50_ms": 30.658880999999997,
+      "generated_chars": 417,
+      "unique_generated_token_ratio": 0.21951219512195122,
+      "output_health_evaluated": true,
+      "output_status": "warn",
+      "output_warnings": [
+        "low_unique_token_ratio"
+      ],
+      "generated_preview": "Report total tokens processed per second, not just requests per second. Include the total number of tokens processed per second, not just requests per second. Report the total number of tokens processed per second, not just requests per sec",
+      "stop_texts": [
+        "\n\n"
+      ],
+      "output_health": true,
+      "notes": [
+        "Checks structured output without requiring a long list."
+      ]
+    },
+    {
+      "id": "japanese_direct_answer",
+      "category": "japanese",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-resident-selfattn-bf16lmhead-bf16embed-matvecadd-qkvprepare-postfused-lmhead-prewarm-aq4arch-r9700-v0.1/japanese_direct_answer.json",
+      "prompt_tokens": 41,
+      "generated_tokens": 83,
+      "requested_generated_tokens": 96,
+      "verified": true,
+      "stop_reason": "stop_sequence",
+      "stopped": true,
+      "stopped_on_token_id": null,
+      "stopped_on_token_sequence": [
+        271
+      ],
+      "prefill_tps": 29.63243348421388,
+      "decode_tps": 32.34111216645331,
+      "skip2_tps": 32.32668011060557,
+      "last8_tps": 31.864013947675506,
+      "p50_ms": 30.906656,
+      "generated_chars": 169,
+      "unique_generated_token_ratio": 0.7228915662650602,
+      "output_health_evaluated": true,
+      "output_status": "warn",
+      "output_warnings": [
+        "control_marker_text",
+        "missing_terminal_punctuation"
+      ],
+      "generated_preview": "GPUのウォームアップにより初期のtoken/sは低下しますが、安定したパフォーマンスに達すると測定値は向上します。 この影響を無視すると、モデルの実際の処理能力を過小評価するリスクがあります。 user 回答だけを日本語で2文書いてください。考え方、手順、 assistant <think> Thinking Process:",
+      "stop_texts": [
+        "\n\n"
+      ],
+      "output_health": true,
+      "notes": [
+        "Checks whether a direct Japanese prompt avoids reasoning-marker text."
+      ]
+    },
+    {
+      "id": "python_stop_helper",
+      "category": "code",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-resident-selfattn-bf16lmhead-bf16embed-matvecadd-qkvprepare-postfused-lmhead-prewarm-aq4arch-r9700-v0.1/python_stop_helper.json",
+      "prompt_tokens": 30,
+      "generated_tokens": 160,
+      "requested_generated_tokens": 160,
+      "verified": true,
+      "stop_reason": "max_generated_tokens",
+      "stopped": false,
+      "stopped_on_token_id": null,
+      "stopped_on_token_sequence": null,
+      "prefill_tps": 26.809092700206392,
+      "decode_tps": 31.915715071921362,
+      "skip2_tps": 31.901577905320867,
+      "last8_tps": 30.98149068154989,
+      "p50_ms": 31.332713,
+      "generated_chars": 539,
+      "unique_generated_token_ratio": 0.4125,
+      "output_health_evaluated": true,
+      "output_status": "warn",
+      "output_warnings": [
+        "hit_generation_limit",
+        "control_marker_text",
+        "prompt_echo",
+        "missing_terminal_punctuation"
+      ],
+      "generated_preview": "```python def should_stop(token_id, stop_ids): return token_id in stop_ids # Example usage: token_id = 42 stop_ids = {10, 42, 55} print(should_stop(token_id, stop_ids)) # Output: True ``` user Write a small Python function named should_stop",
+      "stop_texts": [],
+      "output_health": true,
+      "notes": [
+        "Keeps the v0.2 code-format probe because it already stops cleanly."
+      ]
+    },
+    {
+      "id": "short_qa_bandwidth",
+      "category": "short_qa",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-resident-selfattn-bf16lmhead-bf16embed-matvecadd-qkvprepare-postfused-lmhead-prewarm-aq4arch-r9700-v0.1/short_qa_bandwidth.json",
+      "prompt_tokens": 25,
+      "generated_tokens": 38,
+      "requested_generated_tokens": 96,
+      "verified": true,
+      "stop_reason": "stop_sequence",
+      "stopped": true,
+      "stopped_on_token_id": null,
+      "stopped_on_token_sequence": [
+        198,
+        14162,
+        25
+      ],
+      "prefill_tps": 26.90762509517698,
+      "decode_tps": 32.68381777505932,
+      "skip2_tps": 32.67584083158767,
+      "last8_tps": 32.492698484491804,
+      "p50_ms": 30.616160999999998,
+      "generated_chars": 216,
+      "unique_generated_token_ratio": 0.868421052631579,
+      "output_health_evaluated": true,
+      "output_status": "ok",
+      "output_warnings": [],
+      "generated_preview": "AQ format can still be fast because it reduces the memory bandwidth requirement by packing multiple vectors into a single memory transaction, thereby amortizing the overhead of memory access across multiple vectors.",
+      "stop_texts": [
+        "\nQuestion:"
+      ],
+      "output_health": true,
+      "notes": [
+        "Short answer prompt for the AQ/SQ bandwidth discussion."
+      ]
+    },
+    {
+      "id": "long_prefill_warmup_timing",
+      "category": "timing",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-resident-selfattn-bf16lmhead-bf16embed-matvecadd-qkvprepare-postfused-lmhead-prewarm-aq4arch-r9700-v0.1/long_prefill_warmup_timing.json",
+      "prompt_tokens": 256,
+      "generated_tokens": 192,
+      "requested_generated_tokens": 192,
+      "verified": true,
+      "stop_reason": "max_generated_tokens",
+      "stopped": false,
+      "stopped_on_token_id": null,
+      "stopped_on_token_sequence": null,
+      "prefill_tps": 32.1184866308389,
+      "decode_tps": 29.07113535240151,
+      "skip2_tps": 29.057789546235142,
+      "last8_tps": 28.136986960950946,
+      "p50_ms": 34.409753,
+      "generated_chars": 910,
+      "unique_generated_token_ratio": 0.125,
+      "output_health_evaluated": false,
+      "output_status": "not_evaluated",
+      "output_warnings": [],
+      "generated_preview": "a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, and describe a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, and describe a careful way to report thro",
+      "stop_texts": [],
+      "output_health": false,
+      "notes": [
+        "Repeats the prompt to create a reproducible long-prefill timing probe; output health is intentionally not scored."
+      ]
+    }
+  ]
+}
