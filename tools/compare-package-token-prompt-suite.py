@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-summary", required=True, type=Path)
     parser.add_argument("--reference-label", default="reference")
     parser.add_argument("--candidate-label", default="candidate")
+    parser.add_argument("--logit-atol", type=float, default=1e-6)
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--output-md", type=Path)
     return parser.parse_args()
@@ -56,6 +57,19 @@ def token_list(value: Any, label: str) -> list[int]:
         return [int(item) for item in raw]
     except (TypeError, ValueError) as exc:
         raise SystemExit(f"{label} must contain integer token IDs") from exc
+
+
+def top_logits(value: Any, label: str) -> list[dict[str, Any]]:
+    rows = as_list(value, label)
+    parsed = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise SystemExit(f"{label}[{index}] must be an object")
+        try:
+            parsed.append({"token_id": int(row["token_id"]), "logit": float(row["logit"])})
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SystemExit(f"{label}[{index}] must contain token_id and logit") from exc
+    return parsed
 
 
 def case_map(summary: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
@@ -109,6 +123,49 @@ def stop_signature(report: dict[str, Any], label: str) -> dict[str, Any]:
     }
 
 
+def nested_top_logits(report: dict[str, Any], path: tuple[str, str], label: str) -> list[dict[str, Any]]:
+    parent = as_mapping(report.get(path[0]), f"{label}.{path[0]}")
+    return top_logits(parent.get(path[1]), f"{label}.{path[0]}.{path[1]}")
+
+
+def compare_top_logits(
+    reference_top: list[dict[str, Any]],
+    candidate_top: list[dict[str, Any]],
+    logit_atol: float,
+) -> dict[str, Any]:
+    count = min(len(reference_top), len(candidate_top))
+    rows = []
+    for index in range(count):
+        left = reference_top[index]
+        right = candidate_top[index]
+        diff = abs(left["logit"] - right["logit"])
+        rows.append(
+            {
+                "rank": index,
+                "reference_token_id": left["token_id"],
+                "candidate_token_id": right["token_id"],
+                "token_id_match": left["token_id"] == right["token_id"],
+                "reference_logit": left["logit"],
+                "candidate_logit": right["logit"],
+                "abs_logit_diff": diff,
+                "logit_within_atol": diff <= logit_atol,
+            }
+        )
+    count_match = len(reference_top) == len(candidate_top)
+    token_ids_match = count_match and all(item["token_id_match"] for item in rows)
+    max_abs_diff = max((item["abs_logit_diff"] for item in rows), default=None)
+    logits_within_atol = count_match and all(item["logit_within_atol"] for item in rows)
+    return {
+        "count": len(reference_top),
+        "count_match": count_match,
+        "token_ids_match": token_ids_match,
+        "max_abs_logit_diff": max_abs_diff,
+        "logit_atol": logit_atol,
+        "logits_within_atol": logits_within_atol,
+        "rows": rows,
+    }
+
+
 def compare_case(
     reference_summary_path: Path,
     candidate_summary_path: Path,
@@ -116,6 +173,7 @@ def compare_case(
     candidate_case: dict[str, Any],
     reference_label: str,
     candidate_label: str,
+    logit_atol: float,
 ) -> dict[str, Any]:
     case_id = str(reference_case["id"])
     reference_report = load_json_object(
@@ -141,6 +199,16 @@ def compare_case(
     reference_stop = stop_signature(reference_report, f"{reference_label}.{case_id}")
     candidate_stop = stop_signature(candidate_report, f"{candidate_label}.{case_id}")
     stop_match = reference_stop == candidate_stop
+    prefill_top_logits = compare_top_logits(
+        nested_top_logits(reference_report, ("prefill", "top_logits"), f"{reference_label}.{case_id}"),
+        nested_top_logits(candidate_report, ("prefill", "top_logits"), f"{candidate_label}.{case_id}"),
+        logit_atol,
+    )
+    decode_last_top_logits = compare_top_logits(
+        nested_top_logits(reference_report, ("decode", "last_top_logits"), f"{reference_label}.{case_id}"),
+        nested_top_logits(candidate_report, ("decode", "last_top_logits"), f"{candidate_label}.{case_id}"),
+        logit_atol,
+    )
 
     return {
         "id": case_id,
@@ -161,6 +229,12 @@ def compare_case(
         "reference_output_status": reference_case.get("output_status"),
         "candidate_output_status": candidate_case.get("output_status"),
         "output_status_match": reference_case.get("output_status") == candidate_case.get("output_status"),
+        "prefill_top_logits": prefill_top_logits,
+        "decode_last_top_logits": decode_last_top_logits,
+        "top_logits_match": prefill_top_logits["token_ids_match"]
+        and prefill_top_logits["logits_within_atol"]
+        and decode_last_top_logits["token_ids_match"]
+        and decode_last_top_logits["logits_within_atol"],
     }
 
 
@@ -183,6 +257,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             candidate_cases[case_id],
             args.reference_label,
             args.candidate_label,
+            args.logit_atol,
         )
         for case_id in common_ids
     ]
@@ -197,6 +272,24 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "stop_match_count": sum(1 for item in case_reports if item["stop_match"]),
         "both_verified_count": sum(1 for item in case_reports if item["both_verified"]),
         "output_status_match_count": sum(1 for item in case_reports if item["output_status_match"]),
+        "top_logits_match_count": sum(1 for item in case_reports if item["top_logits_match"]),
+        "max_prefill_top_logit_abs_diff": max(
+            (
+                item["prefill_top_logits"]["max_abs_logit_diff"]
+                for item in case_reports
+                if item["prefill_top_logits"]["max_abs_logit_diff"] is not None
+            ),
+            default=None,
+        ),
+        "max_decode_last_top_logit_abs_diff": max(
+            (
+                item["decode_last_top_logits"]["max_abs_logit_diff"]
+                for item in case_reports
+                if item["decode_last_top_logits"]["max_abs_logit_diff"] is not None
+            ),
+            default=None,
+        ),
+        "logit_atol": args.logit_atol,
     }
     passed = (
         not missing_in_candidate
@@ -205,6 +298,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         and all(item["generated_tokens_match"] for item in case_reports)
         and all(item["stop_match"] for item in case_reports)
         and all(item["both_verified"] for item in case_reports)
+        and all(item["top_logits_match"] for item in case_reports)
     )
     metrics["passed"] = passed
     return {
@@ -256,17 +350,18 @@ def write_md(path: Path, json_path: Path | None, report: dict[str, Any]) -> None
             f"- Passed: `{fmt_bool(metrics.get('passed'))}`",
             f"- Compared cases: `{metrics.get('compared_case_count')}`",
             "",
-            "| case | category | prompt match | generated match | stop match | both verified | output status match | generated tokens | sha256 |",
-            "| --- | --- | :---: | :---: | :---: | :---: | :---: | ---: | --- |",
+            "| case | category | prompt match | generated match | logits match | stop match | both verified | output status match | generated tokens | sha256 |",
+            "| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | ---: | --- |",
         ]
     )
     for item in report["cases"]:
         lines.append(
-            "| {case} | {category} | {prompt} | {generated} | {stop} | {verified} | {status} | {tokens} | {sha} |".format(
+            "| {case} | {category} | {prompt} | {generated} | {logits} | {stop} | {verified} | {status} | {tokens} | {sha} |".format(
                 case=item["id"],
                 category=item.get("category", ""),
                 prompt=fmt_bool(item.get("prompt_tokens_match")),
                 generated=fmt_bool(item.get("generated_tokens_match")),
+                logits=fmt_bool(item.get("top_logits_match")),
                 stop=fmt_bool(item.get("stop_match")),
                 verified=fmt_bool(item.get("both_verified")),
                 status=fmt_bool(item.get("output_status_match")),

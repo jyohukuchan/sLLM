@@ -817,13 +817,15 @@ New artifacts:
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.json`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.md`
 
-## Prompt Suite v0.3: Cross-Device Generated-Token Guard
+## Prompt Suite v0.3: Cross-Device Token and Logits Guard
 
 `tools/compare-package-token-prompt-suite.py` now compares two prompt-suite summaries and verifies
-exact generated-token agreement case by case. The guard compares:
+exact generated-token and top-logits agreement case by case. The guard compares:
 
 - prompt token IDs;
 - generated token IDs;
+- prefill top logits;
+- final decode-step top logits;
 - stop reason and stop token/sequence;
 - per-case `verified`;
 - output status.
@@ -837,9 +839,12 @@ Guard result:
 | compared cases | 7 |
 | prompt token matches | 7 |
 | generated token matches | 7 |
+| top logits matches | 7 |
 | stop matches | 7 |
 | both verified | 7 |
 | output status matches | 7 |
+| max prefill top-logit abs diff | 0.0 |
+| max final decode top-logit abs diff | 0.0 |
 | passed | true |
 
 Per-case generated-token hashes:
@@ -858,6 +863,8 @@ Interpretation:
 
 - The controlled prompt suite now has a generated-token guard across RDNA4 and RDNA2, not only
   matching output text previews.
+- The same guard now also compares prefill and final decode-step top logits across all v0.3 cases,
+  and they match exactly in the saved R9700/V620 reports.
 - This does not replace an independent final-logits reference check against a CPU or external
   reference, but it is a stronger prototype guard than per-device `verified=true` alone.
 

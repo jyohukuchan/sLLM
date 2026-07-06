@@ -5,7 +5,7 @@
 - R9700/RDNA4では、AQ4 prototype pathがsynthetic `prompt=16/generated=512` で `18.957 tok/s` まで到達した。
 - 実text promptでも、controlled v0.3 suiteでR9700/RDNA4はmean decode `19.796 tok/s`、V620/RDNA2はmean decode `15.434 tok/s` を記録した。
 - v0.3 suiteでは、品質評価対象6件がR9700/V620の両方でwarningなし、timing probe 1件は品質評価から分離した。
-- R9700/V620間のgenerated-token guardはv0.3 suite全7件でpassedになった。
+- R9700/V620間のgenerated-token/top-logits guardはv0.3 suite全7件でpassedになった。
 - short QA 1件では、R9700/V620間のfinal top-8 logits guardもpassedになった。
 
 ## 今回の変更点
@@ -13,7 +13,7 @@
 - 現時点で外に出せるAQ4 prototype claimと、まだ出せないclaimを分けた。
 - SQ format設計へ進む前に残すべき測定・正しさ・制約を整理した。
 - 発表時に必要なartifactと、次のgateを1ページにまとめた。
-- cross-device generated-token guardをprototype evidenceへ追加した。
+- cross-device generated-token/top-logits guardをprototype evidenceへ追加した。
 - short QAのcross-device final top-logits guardをprototype evidenceへ追加した。
 
 ## 次の行動
@@ -71,11 +71,11 @@ Quality-scored cases only:
 The seventh v0.3 case is a repeated 256-token prefill timing probe. It is retained for throughput
 pressure but marked `not_evaluated` for output health because prompt echo is expected there.
 
-Generated-token guard:
+Generated-token and suite top-logits guard:
 
-| comparison | compared cases | prompt token matches | generated token matches | stop matches | both verified | passed |
-| --- | ---: | ---: | ---: | ---: | ---: | :---: |
-| R9700/RDNA4 -> V620/RDNA2 | 7 | 7 | 7 | 7 | 7 | true |
+| comparison | compared cases | prompt token matches | generated token matches | top logits matches | max top-logit abs diff | stop matches | both verified | passed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| R9700/RDNA4 -> V620/RDNA2 | 7 | 7 | 7 | 7 | 0.0 | 7 | 7 | true |
 
 Short-QA final top-logits guard:
 
@@ -105,7 +105,7 @@ Short-QA final top-logits guard:
 | server API | not implemented |
 | sampling | greedy only in the measured suite |
 | tokenizer integration | handled by Python wrapper, not native runtime API |
-| correctness guard | hidden-state golden prefix guard exists; cross-device generated-token guard exists for v0.3; short-QA cross-device top-logits guard exists; independent CPU/external final-logits reference is still missing |
+| correctness guard | hidden-state golden prefix guard exists; cross-device generated-token/top-logits guard exists for v0.3; short-QA logits smoke guard exists; independent CPU/external final-logits reference is still missing |
 | BF16 baseline | deferred because current package/runtime cannot express a full decoder BF16 baseline cleanly |
 | memory residency | current path still uses large resident/runtime buffers; SQ must address compact residency |
 | model scope | Qwen3.5-9B package path, not a broad model zoo claim |
