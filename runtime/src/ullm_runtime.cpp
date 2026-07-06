@@ -761,7 +761,8 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
 
     static std::string aq4_matvec_qkv_z_gate_beta_kernel_source_for_arch(
         const std::string &arch) {
-        return aq4_rows_per_block_preamble(arch) + aq4_matvec_qkv_z_gate_beta_kernel_source();
+        return aq4_rows_per_block_preamble_with_rdna4_override(arch, 8u) +
+               aq4_matvec_qkv_z_gate_beta_kernel_source();
     }
 
     static std::string aq4_matvec_silu_mul_kernel_source_for_arch(const std::string &arch) {
@@ -5530,7 +5531,8 @@ bool aq4_matvec_qkv_z_gate_beta_f32_hip_kernel(
         return false;
     }
 
-    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const Aq4MatvecLaunchConfig launch_config =
+        aq4_matvec_launch_config_with_rdna4_rows_per_block(device_id, 8u);
     const size_t max_size = std::numeric_limits<size_t>::max();
     const size_t projection_rows = std::max(qkv_rows, z_rows);
     if (projection_rows > max_size - heads) {
