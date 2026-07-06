@@ -15504,6 +15504,53 @@ fn tps(tokens: usize, wall_ms: f64) -> Option<f64> {
     }
 }
 
+fn timed_step_tps(step_wall_ms: &[f64]) -> Option<f64> {
+    tps(step_wall_ms.len(), step_wall_ms.iter().sum::<f64>())
+}
+
+fn timed_step_summary_json(step_wall_ms: &[f64]) -> serde_json::Value {
+    let count = step_wall_ms.len();
+    let wall_ms = step_wall_ms.iter().sum::<f64>();
+    let mean_ms = if count > 0 {
+        Some(wall_ms / count as f64)
+    } else {
+        None
+    };
+    let min_ms = step_wall_ms.iter().copied().reduce(f64::min);
+    let max_ms = step_wall_ms.iter().copied().reduce(f64::max);
+    let p50_ms = if count > 0 {
+        let mut sorted = step_wall_ms.to_vec();
+        sorted.sort_by(|left, right| left.total_cmp(right));
+        Some(sorted[count / 2])
+    } else {
+        None
+    };
+    let skip1 = if count > 1 { &step_wall_ms[1..] } else { &[] };
+    let skip2 = if count > 2 { &step_wall_ms[2..] } else { &[] };
+    let last4_start = count.saturating_sub(4);
+    let last8_start = count.saturating_sub(8);
+    let last4 = &step_wall_ms[last4_start..];
+    let last8 = &step_wall_ms[last8_start..];
+
+    serde_json::json!({
+        "count": count,
+        "wall_ms": wall_ms,
+        "mean_ms": mean_ms,
+        "min_ms": min_ms,
+        "p50_ms": p50_ms,
+        "max_ms": max_ms,
+        "all_step_tps": timed_step_tps(step_wall_ms),
+        "warmup_skip_1_step_count": skip1.len(),
+        "warmup_skip_1_step_tps": timed_step_tps(skip1),
+        "warmup_skip_2_step_count": skip2.len(),
+        "warmup_skip_2_step_tps": timed_step_tps(skip2),
+        "last_4_step_count": last4.len(),
+        "last_4_step_tps": timed_step_tps(last4),
+        "last_8_step_count": last8.len(),
+        "last_8_step_tps": timed_step_tps(last8),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn package_token_ids_generate_smoke_impl(
     path: &str,
@@ -15663,6 +15710,7 @@ fn package_token_ids_generate_recompute_smoke_impl(
     };
     let total_ms = run_started.elapsed().as_secs_f64() * 1000.0;
     let timed_decode_tokens = decode_step_ms.len();
+    let decode_step_summary = timed_step_summary_json(&decode_step_ms);
     let prompt_token_count = prompt_token_ids.len();
     let full_forward_tokens = prompt_token_ids
         .len()
@@ -15701,6 +15749,7 @@ fn package_token_ids_generate_recompute_smoke_impl(
             "timed_recompute_steps": timed_decode_tokens,
             "sequence_lengths": decode_sequence_lengths,
             "step_wall_ms": decode_step_ms,
+            "step_wall_summary": decode_step_summary,
             "wall_ms": decode_ms,
             "timed_step_tps": tps(timed_decode_tokens, decode_ms),
             "end_to_end_generated_tps": tps(generated_tokens, total_ms),
@@ -16484,6 +16533,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let decode_ms = decode_step_ms.iter().sum::<f64>();
     let total_ms = run_started.elapsed().as_secs_f64() * 1000.0;
     let timed_decode_tokens = decode_step_ms.len();
+    let decode_step_summary = timed_step_summary_json(&decode_step_ms);
     let report = serde_json::json!({
         "schema_version": "package-token-ids-generate-smoke-v0.1",
         "package": path,
@@ -16520,6 +16570,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "timed_incremental_steps": timed_decode_tokens,
             "positions": decode_positions,
             "step_wall_ms": decode_step_ms,
+            "step_wall_summary": decode_step_summary,
             "embedding_step_ms": decode_embedding_ms,
             "layers_step_ms": decode_layers_ms,
             "layer_step_ms": decode_layer_step_ms,

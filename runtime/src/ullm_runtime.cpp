@@ -5417,7 +5417,16 @@ ullm_status ullm_runtime_matvec_f32(
         return ULLM_STATUS_OK;
     }
 
-    if (std::getenv("ULLM_DISABLE_ROCBLAS_MATVEC") == nullptr) {
+    const bool disable_rocblas = std::getenv("ULLM_DISABLE_ROCBLAS_MATVEC") != nullptr;
+    const bool require_rocblas = std::getenv("ULLM_REQUIRE_ROCBLAS_MATVEC") != nullptr;
+    const bool enable_rocblas =
+        require_rocblas || std::getenv("ULLM_ENABLE_ROCBLAS_MATVEC") != nullptr;
+    if (disable_rocblas && require_rocblas) {
+        set_error("ULLM_DISABLE_ROCBLAS_MATVEC and ULLM_REQUIRE_ROCBLAS_MATVEC are both set");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+
+    if (enable_rocblas && !disable_rocblas) {
         std::string rocblas_error;
         if (rocblas_runtime().sgemv_row_major(
                 matrix_buffer->hip_device_id,
@@ -5431,7 +5440,7 @@ ullm_status ullm_runtime_matvec_f32(
             set_error("");
             return ULLM_STATUS_OK;
         }
-        if (std::getenv("ULLM_REQUIRE_ROCBLAS_MATVEC") != nullptr) {
+        if (require_rocblas) {
             set_error(rocblas_error.empty() ? "rocBLAS SGEMV is unavailable" : rocblas_error.c_str());
             return ULLM_STATUS_RUNTIME_ERROR;
         }
