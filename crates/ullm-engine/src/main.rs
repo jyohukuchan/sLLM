@@ -17484,6 +17484,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let use_aq4_matvec_qkv_z_gate_beta_requested =
         !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA");
     let use_aq4_matvec_pair_qkv_z = !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_QKV_Z");
+    let use_aq4_matvec_pair_self_attn_qk =
+        !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_SELF_ATTN_QK");
 
     let run_started = Instant::now();
     let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
@@ -17966,6 +17968,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "sync_linear_attn_components_for_timing": sync_linear_attn_components_for_timing,
             "use_aq4_matvec_qkv_z_gate_beta": use_aq4_matvec_qkv_z_gate_beta,
             "use_aq4_matvec_pair_qkv_z": use_aq4_matvec_pair_qkv_z,
+            "use_aq4_matvec_pair_self_attn_qk": use_aq4_matvec_pair_self_attn_qk,
             "positions": decode_positions,
             "step_wall_ms": decode_step_ms,
             "step_wall_summary": decode_step_summary,
@@ -29962,7 +29965,7 @@ impl PackageSelfAttnResidentStepLayer {
         let input_normed_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident input normed: {err}"))?;
-        let q_projected_buffer = context
+        let mut q_projected_buffer = context
             .alloc_buffer(q_projected_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident q projected: {err}"))?;
         let q_query_buffer = context
@@ -29971,7 +29974,7 @@ impl PackageSelfAttnResidentStepLayer {
         let q_gate_buffer = context
             .alloc_buffer(q_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident q gate: {err}"))?;
-        let k_projected_buffer = context
+        let mut k_projected_buffer = context
             .alloc_buffer(k_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident k projected: {err}"))?;
         let v_projected_buffer = context
@@ -30062,6 +30065,17 @@ impl PackageSelfAttnResidentStepLayer {
             &mut attention_block_output_buffer,
             "self-attn resident AQ4 matvec add",
         )?;
+        if !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_SELF_ATTN_QK") {
+            prewarm_aq4_matvec_pair_once(
+                stream,
+                &q_matrix,
+                &k_matrix,
+                &mut input_buffer,
+                &mut q_projected_buffer,
+                &mut k_projected_buffer,
+                "self-attn resident AQ4 q/k pair projection",
+            )?;
+        }
 
         Ok(Self {
             hidden,
@@ -30224,18 +30238,29 @@ impl PackageSelfAttnResidentStepLayer {
         }
         .map_err(|err| format!("failed to run {label} self-attn input RMSNorm: {err}"))?;
 
-        self.q_matrix.matvec(
-            &self.input_normed_buffer,
-            &mut self.q_projected_buffer,
-            stream,
-            "self-attn resident q projection",
-        )?;
-        self.k_matrix.matvec(
-            &self.input_normed_buffer,
-            &mut self.k_projected_buffer,
-            stream,
-            "self-attn resident k projection",
-        )?;
+        if env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_SELF_ATTN_QK") {
+            self.q_matrix.matvec(
+                &self.input_normed_buffer,
+                &mut self.q_projected_buffer,
+                stream,
+                "self-attn resident q projection",
+            )?;
+            self.k_matrix.matvec(
+                &self.input_normed_buffer,
+                &mut self.k_projected_buffer,
+                stream,
+                "self-attn resident k projection",
+            )?;
+        } else {
+            self.q_matrix.matvec_pair_with(
+                &self.k_matrix,
+                &self.input_normed_buffer,
+                &mut self.q_projected_buffer,
+                &mut self.k_projected_buffer,
+                stream,
+                "self-attn resident q/k projection",
+            )?;
+        }
         self.v_matrix.matvec(
             &self.input_normed_buffer,
             &mut self.v_projected_buffer,
