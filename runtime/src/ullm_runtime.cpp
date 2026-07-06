@@ -780,11 +780,11 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
     }
 
     static std::string aq4_matvec_pair_kernel_source_for_arch(const std::string &arch) {
-        return aq4_rows_per_block_preamble(arch) + aq4_matvec_pair_kernel_source();
+        return aq4_fused_rows_per_block_preamble(arch, 16u) + aq4_matvec_pair_kernel_source();
     }
 
     static std::string aq4_matvec_triple_kernel_source_for_arch(const std::string &arch) {
-        return aq4_rows_per_block_preamble(arch) + aq4_matvec_triple_kernel_source();
+        return aq4_fused_rows_per_block_preamble(arch, 16u) + aq4_matvec_triple_kernel_source();
     }
 
     static std::string aq4_matvec_qkv_z_gate_beta_kernel_source_for_arch(
@@ -5510,7 +5510,8 @@ bool aq4_matvec_pair_f32_hip_kernel(
         return false;
     }
 
-    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const Aq4MatvecLaunchConfig launch_config =
+        aq4_matvec_launch_config_for_fused_kernel(device_id, 16u);
     const size_t work_rows = std::max(left_rows, right_rows);
     const size_t grid_size =
         (work_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
@@ -5636,7 +5637,8 @@ bool aq4_matvec_triple_f32_hip_kernel(
         return false;
     }
 
-    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const Aq4MatvecLaunchConfig launch_config =
+        aq4_matvec_launch_config_for_fused_kernel(device_id, 16u);
     const size_t work_rows = std::max(first_rows, std::max(second_rows, third_rows));
     const size_t grid_size =
         (work_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
