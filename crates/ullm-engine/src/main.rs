@@ -15907,6 +15907,9 @@ fn package_token_ids_generate_smoke_impl(
             stop_token_sequences,
         );
     }
+    let sync_decode_layers_for_timing = env::var("ULLM_SYNC_DECODE_LAYERS_FOR_TIMING")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
     package_token_ids_generate_incremental_smoke_impl(
         path,
         device_index,
@@ -15922,6 +15925,7 @@ fn package_token_ids_generate_smoke_impl(
         lm_head_mode,
         stop_token_ids,
         stop_token_sequences,
+        sync_decode_layers_for_timing,
     )
 }
 
@@ -17371,6 +17375,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     lm_head_mode: PackageLmHeadMode,
     stop_token_ids: Vec<usize>,
     stop_token_sequences: Vec<Vec<usize>>,
+    sync_decode_layers_for_timing: bool,
 ) -> Result<String, String> {
     if prompt_token_ids.is_empty() {
         return Err(
@@ -17699,6 +17704,11 @@ fn package_token_ids_generate_incremental_smoke_impl(
                             "incremental decode",
                         )?
                     };
+                if sync_decode_layers_for_timing {
+                    stream.synchronize().map_err(|err| {
+                        format!("failed to synchronize incremental decode layers: {err}")
+                    })?;
+                }
                 let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
                 let final_hidden_buffer = layers
                     .get(final_layer_position)
@@ -17830,6 +17840,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
         "decode": {
             "requested_generated_tokens": generated_tokens,
             "timed_incremental_steps": timed_decode_tokens,
+            "sync_layers_for_timing": sync_decode_layers_for_timing,
             "positions": decode_positions,
             "step_wall_ms": decode_step_ms,
             "step_wall_summary": decode_step_summary,
