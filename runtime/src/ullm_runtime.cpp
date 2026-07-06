@@ -4769,7 +4769,7 @@ bool matvec_bf16_f32_hip_kernel(
         return false;
     }
 
-    constexpr unsigned int block_size = 256;
+    constexpr unsigned int block_size = 64;
     if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "BF16 matvec row count exceeds HIP grid limit";
