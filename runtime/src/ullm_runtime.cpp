@@ -369,6 +369,18 @@ public:
             error);
     }
 
+    bool compile_aq4_matvec_gate_beta_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            aq4_matvec_gate_beta_kernel_source(),
+            "ullm_aq4_matvec_gate_beta_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_matvec_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, matvec_kernel_source(), "ullm_matvec_f32.hip", code, error);
     }
@@ -791,6 +803,150 @@ extern "C" __global__ void ullm_aq4_matvec_silu_mul_f32_kernel(
         }
         const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
         output[row] = gate_value * sigmoid * up_value;
+    }
+}
+)";
+    }
+
+    static const char *aq4_matvec_gate_beta_kernel_source() {
+        return R"(
+__device__ float ullm_aq4_gate_beta_thread_sum(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row,
+    unsigned long long cols,
+    unsigned int tid,
+    unsigned int block_size) {
+    const unsigned long long row_offset = row * cols;
+    float sum = 0.0f;
+    if ((cols % group_size) == 0ull) {
+        const unsigned long long groups_per_row = cols / group_size;
+        for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
+             group_in_row += block_size) {
+            const unsigned long long group = row * groups_per_row + group_in_row;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index >= scale_count) {
+                continue;
+            }
+            float raw_sum = 0.0f;
+            const unsigned long long col_start = group_in_row * group_size;
+            for (unsigned long long offset = 0; offset < group_size; ++offset) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long element = row_offset + col;
+                const unsigned char packed = indices[element >> 1];
+                const unsigned char codebook_index =
+                    (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                raw_sum += codebook[codebook_index] * input[col];
+            }
+            sum += raw_sum * scale_values[scale_index] * tensor_scale;
+        }
+    } else {
+        for (unsigned long long col = tid; col < cols; col += block_size) {
+            const unsigned long long element = row_offset + col;
+            const unsigned char packed = indices[element >> 1];
+            const unsigned char codebook_index =
+                (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+            const unsigned long long group = element / group_size;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index < scale_count) {
+                const float value =
+                    codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+                sum += value * input[col];
+            }
+        }
+    }
+    return sum;
+}
+
+extern "C" __global__ void ullm_aq4_matvec_gate_beta_f32_kernel(
+    const unsigned char *a_indices,
+    const unsigned char *a_scale_indices,
+    const float *a_codebook,
+    const float *a_scale_values,
+    const float *a_row_scales,
+    unsigned long long a_scale_count,
+    unsigned long long a_group_size,
+    float a_tensor_scale,
+    unsigned long long a_row_scale_count,
+    const unsigned char *b_indices,
+    const unsigned char *b_scale_indices,
+    const float *b_codebook,
+    const float *b_scale_values,
+    const float *b_row_scales,
+    unsigned long long b_scale_count,
+    unsigned long long b_group_size,
+    float b_tensor_scale,
+    unsigned long long b_row_scale_count,
+    const float *input,
+    const float *a_log,
+    const float *dt_bias,
+    unsigned long long heads,
+    unsigned long long cols,
+    float *gate_output,
+    float *beta_output) {
+    const unsigned int head = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+    __shared__ float a_partial[256];
+    __shared__ float b_partial[256];
+    float a_sum = 0.0f;
+    float b_sum = 0.0f;
+    if (head < heads) {
+        a_sum = ullm_aq4_gate_beta_thread_sum(
+            a_indices,
+            a_scale_indices,
+            a_codebook,
+            a_scale_values,
+            input,
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            head,
+            cols,
+            tid,
+            blockDim.x);
+        b_sum = ullm_aq4_gate_beta_thread_sum(
+            b_indices,
+            b_scale_indices,
+            b_codebook,
+            b_scale_values,
+            input,
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            head,
+            cols,
+            tid,
+            blockDim.x);
+    }
+    a_partial[tid] = a_sum;
+    b_partial[tid] = b_sum;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            a_partial[tid] += a_partial[tid + offset];
+            b_partial[tid] += b_partial[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (tid == 0 && head < heads) {
+        float a_value = a_partial[0];
+        float b_value = b_partial[0];
+        if (a_row_scales != nullptr && head < a_row_scale_count) {
+            a_value *= a_row_scales[head];
+        }
+        if (b_row_scales != nullptr && head < b_row_scale_count) {
+            b_value *= b_row_scales[head];
+        }
+        const float x = a_value + dt_bias[head];
+        const float softplus = x <= 20.0f ? logf(1.0f + expf(x)) : x;
+        gate_output[head] = -expf(a_log[head]) * softplus;
+        beta_output[head] = 1.0f / (1.0f + expf(-b_value));
     }
 }
 )";
@@ -2088,6 +2244,75 @@ bool aq4_matvec_silu_mul_f32_host(
     return true;
 }
 
+bool aq4_matvec_gate_beta_f32_host(
+    const std::uint8_t *a_indices,
+    const std::uint8_t *a_scale_indices,
+    const float *a_codebook,
+    const float *a_scale_values,
+    size_t a_scale_count,
+    size_t a_group_size,
+    float a_tensor_scale,
+    const float *a_row_scales,
+    size_t a_row_scale_count,
+    const std::uint8_t *b_indices,
+    const std::uint8_t *b_scale_indices,
+    const float *b_codebook,
+    const float *b_scale_values,
+    size_t b_scale_count,
+    size_t b_group_size,
+    float b_tensor_scale,
+    const float *b_row_scales,
+    size_t b_row_scale_count,
+    const float *input,
+    const float *a_log,
+    const float *dt_bias,
+    size_t heads,
+    size_t cols,
+    float *gate_output,
+    float *beta_output) {
+    std::vector<float> a(heads);
+    std::vector<float> b(heads);
+    if (!aq4_matvec_f32_host(
+            a_indices,
+            a_scale_indices,
+            a_codebook,
+            a_scale_values,
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            input,
+            a_row_scales,
+            a_row_scale_count,
+            heads,
+            cols,
+            a.data())) {
+        return false;
+    }
+    if (!aq4_matvec_f32_host(
+            b_indices,
+            b_scale_indices,
+            b_codebook,
+            b_scale_values,
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            input,
+            b_row_scales,
+            b_row_scale_count,
+            heads,
+            cols,
+            b.data())) {
+        return false;
+    }
+    for (size_t head = 0; head < heads; ++head) {
+        const float x = a[head] + dt_bias[head];
+        const float softplus = x <= 20.0f ? std::log1p(std::exp(x)) : x;
+        gate_output[head] = -std::exp(a_log[head]) * softplus;
+        beta_output[head] = 1.0f / (1.0f + std::exp(-b[head]));
+    }
+    return true;
+}
+
 class HipAq4MatvecKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -2700,6 +2925,399 @@ ullm_status aq4_matvec_silu_mul_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize AQ4 matvec SiLU-mul HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipAq4MatvecGateBetaKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_aq4_matvec_gate_beta_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_aq4_matvec_gate_beta_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build AQ4 matvec gate/beta HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipAq4MatvecGateBetaKernelCache &hip_aq4_matvec_gate_beta_kernel_cache() {
+    static HipAq4MatvecGateBetaKernelCache cache;
+    return cache;
+}
+
+bool aq4_matvec_gate_beta_f32_hip_kernel(
+    const ullm_runtime_buffer *a_index_buffer,
+    const ullm_runtime_buffer *a_scale_buffer,
+    const ullm_runtime_buffer *a_codebook_buffer,
+    const ullm_runtime_buffer *a_scale_values_buffer,
+    const ullm_runtime_buffer *a_row_scale_buffer,
+    size_t a_scale_count,
+    size_t a_group_size,
+    float a_tensor_scale,
+    size_t a_row_scale_count,
+    const ullm_runtime_buffer *b_index_buffer,
+    const ullm_runtime_buffer *b_scale_buffer,
+    const ullm_runtime_buffer *b_codebook_buffer,
+    const ullm_runtime_buffer *b_scale_values_buffer,
+    const ullm_runtime_buffer *b_row_scale_buffer,
+    size_t b_scale_count,
+    size_t b_group_size,
+    float b_tensor_scale,
+    size_t b_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t heads,
+    size_t cols,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = a_index_buffer->hip_device_id;
+    void *function = hip_aq4_matvec_gate_beta_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    if (heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "AQ4 matvec gate/beta head count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    void *a_index_ptr = a_index_buffer->ptr;
+    void *a_scale_ptr = a_scale_buffer->ptr;
+    void *a_codebook_ptr = a_codebook_buffer->ptr;
+    void *a_scale_values_ptr = a_scale_values_buffer->ptr;
+    void *a_row_scale_ptr = a_row_scale_buffer == nullptr ? nullptr : a_row_scale_buffer->ptr;
+    unsigned long long kernel_a_scale_count = static_cast<unsigned long long>(a_scale_count);
+    unsigned long long kernel_a_group_size = static_cast<unsigned long long>(a_group_size);
+    unsigned long long kernel_a_row_scale_count =
+        static_cast<unsigned long long>(a_row_scale_count);
+    void *b_index_ptr = b_index_buffer->ptr;
+    void *b_scale_ptr = b_scale_buffer->ptr;
+    void *b_codebook_ptr = b_codebook_buffer->ptr;
+    void *b_scale_values_ptr = b_scale_values_buffer->ptr;
+    void *b_row_scale_ptr = b_row_scale_buffer == nullptr ? nullptr : b_row_scale_buffer->ptr;
+    unsigned long long kernel_b_scale_count = static_cast<unsigned long long>(b_scale_count);
+    unsigned long long kernel_b_group_size = static_cast<unsigned long long>(b_group_size);
+    unsigned long long kernel_b_row_scale_count =
+        static_cast<unsigned long long>(b_row_scale_count);
+    void *input_ptr = input_buffer->ptr;
+    void *a_log_ptr = a_log_buffer->ptr;
+    void *dt_bias_ptr = dt_bias_buffer->ptr;
+    unsigned long long kernel_heads = static_cast<unsigned long long>(heads);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    void *gate_output_ptr = gate_output_buffer->ptr;
+    void *beta_output_ptr = beta_output_buffer->ptr;
+    void *kernel_params[] = {
+        &a_index_ptr,
+        &a_scale_ptr,
+        &a_codebook_ptr,
+        &a_scale_values_ptr,
+        &a_row_scale_ptr,
+        &kernel_a_scale_count,
+        &kernel_a_group_size,
+        &a_tensor_scale,
+        &kernel_a_row_scale_count,
+        &b_index_ptr,
+        &b_scale_ptr,
+        &b_codebook_ptr,
+        &b_scale_values_ptr,
+        &b_row_scale_ptr,
+        &kernel_b_scale_count,
+        &kernel_b_group_size,
+        &b_tensor_scale,
+        &kernel_b_row_scale_count,
+        &input_ptr,
+        &a_log_ptr,
+        &dt_bias_ptr,
+        &kernel_heads,
+        &kernel_cols,
+        &gate_output_ptr,
+        &beta_output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(heads),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for AQ4 matvec gate/beta";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status aq4_matvec_gate_beta_f32_hip_staging(
+    const ullm_runtime_buffer *a_index_buffer,
+    const ullm_runtime_buffer *a_scale_buffer,
+    const ullm_runtime_buffer *a_codebook_buffer,
+    const ullm_runtime_buffer *a_scale_values_buffer,
+    const ullm_runtime_buffer *a_row_scale_buffer,
+    size_t a_scale_count,
+    size_t a_group_size,
+    float a_tensor_scale,
+    size_t a_row_scale_count,
+    size_t a_required_index_bytes,
+    size_t a_groups,
+    size_t a_codebook_entries,
+    const ullm_runtime_buffer *b_index_buffer,
+    const ullm_runtime_buffer *b_scale_buffer,
+    const ullm_runtime_buffer *b_codebook_buffer,
+    const ullm_runtime_buffer *b_scale_values_buffer,
+    const ullm_runtime_buffer *b_row_scale_buffer,
+    size_t b_scale_count,
+    size_t b_group_size,
+    float b_tensor_scale,
+    size_t b_row_scale_count,
+    size_t b_required_index_bytes,
+    size_t b_groups,
+    size_t b_codebook_entries,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t heads,
+    size_t cols,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<std::uint8_t> host_a_indices(a_required_index_bytes);
+    std::vector<std::uint8_t> host_a_scale_indices(a_groups);
+    std::vector<float> host_a_codebook(a_codebook_entries);
+    std::vector<float> host_a_scale_values(a_scale_count);
+    std::vector<float> host_a_row_scales(a_row_scale_count);
+    std::vector<std::uint8_t> host_b_indices(b_required_index_bytes);
+    std::vector<std::uint8_t> host_b_scale_indices(b_groups);
+    std::vector<float> host_b_codebook(b_codebook_entries);
+    std::vector<float> host_b_scale_values(b_scale_count);
+    std::vector<float> host_b_row_scales(b_row_scale_count);
+    std::vector<float> host_input(cols);
+    std::vector<float> host_a_log(heads);
+    std::vector<float> host_dt_bias(heads);
+    std::vector<float> host_gate(heads);
+    std::vector<float> host_beta(heads);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = a_index_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_a_indices.data(),
+            a_index_buffer->ptr,
+            a_required_index_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_a_scale_indices.data(),
+            a_scale_buffer->ptr,
+            a_groups,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_a_codebook.data(),
+            a_codebook_buffer->ptr,
+            a_codebook_buffer->bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_a_scale_values.data(),
+            a_scale_values_buffer->ptr,
+            a_scale_count * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        (a_row_scale_buffer != nullptr && a_row_scale_count > 0 &&
+         !hip_runtime().copy_async(
+             host_a_row_scales.data(),
+             a_row_scale_buffer->ptr,
+             a_row_scale_count * sizeof(float),
+             HIP_MEMCPY_DEVICE_TO_HOST,
+             hip_stream,
+             device_id)) ||
+        !hip_runtime().copy_async(
+            host_b_indices.data(),
+            b_index_buffer->ptr,
+            b_required_index_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_b_scale_indices.data(),
+            b_scale_buffer->ptr,
+            b_groups,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_b_codebook.data(),
+            b_codebook_buffer->ptr,
+            b_codebook_buffer->bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_b_scale_values.data(),
+            b_scale_values_buffer->ptr,
+            b_scale_count * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        (b_row_scale_buffer != nullptr && b_row_scale_count > 0 &&
+         !hip_runtime().copy_async(
+             host_b_row_scales.data(),
+             b_row_scale_buffer->ptr,
+             b_row_scale_count * sizeof(float),
+             HIP_MEMCPY_DEVICE_TO_HOST,
+             hip_stream,
+             device_id)) ||
+        !hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            cols * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_a_log.data(),
+            a_log_buffer->ptr,
+            heads * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_dt_bias.data(),
+            dt_bias_buffer->ptr,
+            heads * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy AQ4 matvec gate/beta HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize AQ4 matvec gate/beta HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!aq4_matvec_gate_beta_f32_host(
+            host_a_indices.data(),
+            host_a_scale_indices.data(),
+            host_a_codebook.data(),
+            host_a_scale_values.data(),
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            a_row_scale_buffer == nullptr ? nullptr : host_a_row_scales.data(),
+            a_row_scale_count,
+            host_b_indices.data(),
+            host_b_scale_indices.data(),
+            host_b_codebook.data(),
+            host_b_scale_values.data(),
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            b_row_scale_buffer == nullptr ? nullptr : host_b_row_scales.data(),
+            b_row_scale_count,
+            host_input.data(),
+            host_a_log.data(),
+            host_dt_bias.data(),
+            heads,
+            cols,
+            host_gate.data(),
+            host_beta.data())) {
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!hip_runtime().copy_async(
+            gate_output_buffer->ptr,
+            host_gate.data(),
+            heads * sizeof(float),
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            beta_output_buffer->ptr,
+            host_beta.data(),
+            heads * sizeof(float),
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy AQ4 matvec gate/beta output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize AQ4 matvec gate/beta HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -6721,6 +7339,264 @@ ullm_status ullm_runtime_aq4_matvec_silu_mul_f32(
         rows,
         cols,
         output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_aq4_matvec_gate_beta_f32(
+    const ullm_runtime_buffer *a_index_buffer,
+    const ullm_runtime_buffer *a_scale_buffer,
+    const ullm_runtime_buffer *a_codebook_buffer,
+    const ullm_runtime_buffer *a_scale_values_buffer,
+    const ullm_runtime_buffer *a_row_scale_buffer,
+    size_t a_scale_count,
+    size_t a_group_size,
+    float a_tensor_scale,
+    size_t a_row_scale_count,
+    const ullm_runtime_buffer *b_index_buffer,
+    const ullm_runtime_buffer *b_scale_buffer,
+    const ullm_runtime_buffer *b_codebook_buffer,
+    const ullm_runtime_buffer *b_scale_values_buffer,
+    const ullm_runtime_buffer *b_row_scale_buffer,
+    size_t b_scale_count,
+    size_t b_group_size,
+    float b_tensor_scale,
+    size_t b_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t heads,
+    size_t cols,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (a_index_buffer == nullptr || a_scale_buffer == nullptr ||
+        a_codebook_buffer == nullptr || a_scale_values_buffer == nullptr ||
+        b_index_buffer == nullptr || b_scale_buffer == nullptr ||
+        b_codebook_buffer == nullptr || b_scale_values_buffer == nullptr ||
+        input_buffer == nullptr || a_log_buffer == nullptr || dt_bias_buffer == nullptr ||
+        gate_output_buffer == nullptr || beta_output_buffer == nullptr) {
+        set_error("AQ4 matvec gate/beta received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (a_scale_count == 0 || b_scale_count == 0) {
+        set_error("AQ4 matvec gate/beta scale table is empty");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (a_group_size == 0 || b_group_size == 0) {
+        set_error("AQ4 matvec gate/beta group size must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (heads == 0 || cols == 0) {
+        set_error("AQ4 matvec gate/beta heads and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(a_tensor_scale) || a_tensor_scale <= 0.0f ||
+        !std::isfinite(b_tensor_scale) || b_tensor_scale <= 0.0f) {
+        set_error("AQ4 matvec gate/beta tensor scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(a_index_buffer, a_scale_buffer) ||
+        !buffers_share_backend(a_index_buffer, a_codebook_buffer) ||
+        !buffers_share_backend(a_index_buffer, a_scale_values_buffer) ||
+        !buffers_share_backend(a_index_buffer, b_index_buffer) ||
+        !buffers_share_backend(a_index_buffer, b_scale_buffer) ||
+        !buffers_share_backend(a_index_buffer, b_codebook_buffer) ||
+        !buffers_share_backend(a_index_buffer, b_scale_values_buffer) ||
+        !buffers_share_backend(a_index_buffer, input_buffer) ||
+        !buffers_share_backend(a_index_buffer, a_log_buffer) ||
+        !buffers_share_backend(a_index_buffer, dt_bias_buffer) ||
+        !buffers_share_backend(a_index_buffer, gate_output_buffer) ||
+        !buffers_share_backend(a_index_buffer, beta_output_buffer) ||
+        (a_row_scale_buffer != nullptr &&
+         !buffers_share_backend(a_index_buffer, a_row_scale_buffer)) ||
+        (b_row_scale_buffer != nullptr &&
+         !buffers_share_backend(a_index_buffer, b_row_scale_buffer))) {
+        set_error("AQ4 matvec gate/beta buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(gate_output_buffer, stream) ||
+        !stream_matches_buffer(beta_output_buffer, stream)) {
+        set_error("AQ4 matvec gate/beta stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / heads) {
+        set_error("AQ4 matvec gate/beta matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t elements = heads * cols;
+    const size_t a_required_index_bytes = elements / 2 + (elements % 2);
+    const size_t b_required_index_bytes = a_required_index_bytes;
+    const size_t a_groups = elements / a_group_size + (elements % a_group_size == 0 ? 0 : 1);
+    const size_t b_groups = elements / b_group_size + (elements % b_group_size == 0 ? 0 : 1);
+    if (cols > max_size / sizeof(float) ||
+        heads > max_size / sizeof(float) ||
+        a_scale_count > max_size / sizeof(float) ||
+        b_scale_count > max_size / sizeof(float) ||
+        a_row_scale_count > max_size / sizeof(float) ||
+        b_row_scale_count > max_size / sizeof(float)) {
+        set_error("AQ4 matvec gate/beta byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_input_bytes = cols * sizeof(float);
+    const size_t required_output_bytes = heads * sizeof(float);
+    const size_t a_required_scale_value_bytes = a_scale_count * sizeof(float);
+    const size_t b_required_scale_value_bytes = b_scale_count * sizeof(float);
+    const size_t a_required_row_scale_bytes = a_row_scale_count * sizeof(float);
+    const size_t b_required_row_scale_bytes = b_row_scale_count * sizeof(float);
+    if (a_index_buffer->bytes < a_required_index_bytes ||
+        b_index_buffer->bytes < b_required_index_bytes) {
+        set_error("AQ4 matvec gate/beta index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (a_scale_buffer->bytes < a_groups || b_scale_buffer->bytes < b_groups) {
+        set_error("AQ4 matvec gate/beta scale index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (a_scale_values_buffer->bytes < a_required_scale_value_bytes ||
+        b_scale_values_buffer->bytes < b_required_scale_value_bytes) {
+        set_error("AQ4 matvec gate/beta scale value buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("AQ4 matvec gate/beta input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (a_log_buffer->bytes < required_output_bytes ||
+        dt_bias_buffer->bytes < required_output_bytes) {
+        set_error("AQ4 matvec gate/beta parameter buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((a_row_scale_buffer != nullptr &&
+         a_row_scale_buffer->bytes < a_required_row_scale_bytes) ||
+        (b_row_scale_buffer != nullptr &&
+         b_row_scale_buffer->bytes < b_required_row_scale_bytes)) {
+        set_error("AQ4 matvec gate/beta row scale buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_output_buffer->bytes < required_output_bytes ||
+        beta_output_buffer->bytes < required_output_bytes) {
+        set_error("AQ4 matvec gate/beta output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (a_codebook_buffer->bytes % sizeof(float) != 0 ||
+        b_codebook_buffer->bytes % sizeof(float) != 0) {
+        set_error("AQ4 matvec gate/beta codebook buffer size is not a multiple of f32");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t a_codebook_entries = a_codebook_buffer->bytes / sizeof(float);
+    const size_t b_codebook_entries = b_codebook_buffer->bytes / sizeof(float);
+    if (a_codebook_entries < 16 || b_codebook_entries < 16) {
+        set_error("AQ4 matvec gate/beta requires at least 16 codebook entries");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (a_index_buffer->backend == BackendKind::Cpu) {
+        if (!aq4_matvec_gate_beta_f32_host(
+                static_cast<const std::uint8_t *>(a_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(a_scale_buffer->ptr),
+                static_cast<const float *>(a_codebook_buffer->ptr),
+                static_cast<const float *>(a_scale_values_buffer->ptr),
+                a_scale_count,
+                a_group_size,
+                a_tensor_scale,
+                a_row_scale_buffer == nullptr ? nullptr : static_cast<const float *>(a_row_scale_buffer->ptr),
+                a_row_scale_count,
+                static_cast<const std::uint8_t *>(b_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(b_scale_buffer->ptr),
+                static_cast<const float *>(b_codebook_buffer->ptr),
+                static_cast<const float *>(b_scale_values_buffer->ptr),
+                b_scale_count,
+                b_group_size,
+                b_tensor_scale,
+                b_row_scale_buffer == nullptr ? nullptr : static_cast<const float *>(b_row_scale_buffer->ptr),
+                b_row_scale_count,
+                static_cast<const float *>(input_buffer->ptr),
+                static_cast<const float *>(a_log_buffer->ptr),
+                static_cast<const float *>(dt_bias_buffer->ptr),
+                heads,
+                cols,
+                static_cast<float *>(gate_output_buffer->ptr),
+                static_cast<float *>(beta_output_buffer->ptr))) {
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (aq4_matvec_gate_beta_f32_hip_kernel(
+            a_index_buffer,
+            a_scale_buffer,
+            a_codebook_buffer,
+            a_scale_values_buffer,
+            a_row_scale_buffer,
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            a_row_scale_count,
+            b_index_buffer,
+            b_scale_buffer,
+            b_codebook_buffer,
+            b_scale_values_buffer,
+            b_row_scale_buffer,
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            b_row_scale_count,
+            input_buffer,
+            a_log_buffer,
+            dt_bias_buffer,
+            heads,
+            cols,
+            gate_output_buffer,
+            beta_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "AQ4 matvec gate/beta HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return aq4_matvec_gate_beta_f32_hip_staging(
+        a_index_buffer,
+        a_scale_buffer,
+        a_codebook_buffer,
+        a_scale_values_buffer,
+        a_row_scale_buffer,
+        a_scale_count,
+        a_group_size,
+        a_tensor_scale,
+        a_row_scale_count,
+        a_required_index_bytes,
+        a_groups,
+        a_codebook_entries,
+        b_index_buffer,
+        b_scale_buffer,
+        b_codebook_buffer,
+        b_scale_values_buffer,
+        b_row_scale_buffer,
+        b_scale_count,
+        b_group_size,
+        b_tensor_scale,
+        b_row_scale_count,
+        b_required_index_bytes,
+        b_groups,
+        b_codebook_entries,
+        input_buffer,
+        a_log_buffer,
+        dt_bias_buffer,
+        heads,
+        cols,
+        gate_output_buffer,
+        beta_output_buffer,
         stream);
 }
 

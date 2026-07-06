@@ -27945,6 +27945,55 @@ impl PackageAq4ResidentMatvec {
         )
         .map_err(|err| format!("failed to run {label} AQ4 fused matvec SiLU-mul: {err}"))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matvec_gate_beta_with(
+        &self,
+        b: &Self,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        a_log_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        dt_bias_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        beta_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<(), String> {
+        if self.rows != b.rows || self.cols != b.cols {
+            return Err(format!(
+                "{label} AQ4 fused gate/beta shape mismatch: a=[{},{}] b=[{},{}]",
+                self.rows, self.cols, b.rows, b.cols
+            ));
+        }
+        ullm_runtime_sys::aq4_matvec_gate_beta_f32(
+            self.index_buffer.as_ref(),
+            self.scale_buffer.as_ref(),
+            self.codebook_buffer.as_ref(),
+            &self.scale_values_buffer,
+            self.row_scale_buffer.as_ref(),
+            self.scale_count,
+            self.group_size,
+            self.tensor_scale,
+            self.row_scale_count,
+            b.index_buffer.as_ref(),
+            b.scale_buffer.as_ref(),
+            b.codebook_buffer.as_ref(),
+            &b.scale_values_buffer,
+            b.row_scale_buffer.as_ref(),
+            b.scale_count,
+            b.group_size,
+            b.tensor_scale,
+            b.row_scale_count,
+            input_buffer,
+            a_log_buffer,
+            dt_bias_buffer,
+            self.rows,
+            self.cols,
+            gate_output_buffer,
+            beta_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} AQ4 fused gate/beta: {err}"))
+    }
 }
 
 struct PackageLinearAttnResidentStepLayer {
@@ -27976,8 +28025,6 @@ struct PackageLinearAttnResidentStepLayer {
     input_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     qkv_buffer: ullm_runtime_sys::RuntimeBuffer,
-    a_buffer: ullm_runtime_sys::RuntimeBuffer,
-    b_buffer: ullm_runtime_sys::RuntimeBuffer,
     z_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_q_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_k_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -28261,12 +28308,6 @@ impl PackageLinearAttnResidentStepLayer {
         let qkv_buffer = context
             .alloc_buffer(qkv_step_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident qkv: {err}"))?;
-        let a_buffer = context
-            .alloc_buffer(gate_beta_step_bytes)
-            .map_err(|err| format!("failed to allocate linear-attn resident a: {err}"))?;
-        let b_buffer = context
-            .alloc_buffer(gate_beta_step_bytes)
-            .map_err(|err| format!("failed to allocate linear-attn resident b: {err}"))?;
         let z_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident z: {err}"))?;
@@ -28375,8 +28416,6 @@ impl PackageLinearAttnResidentStepLayer {
             input_buffer,
             input_normed_buffer,
             qkv_buffer,
-            a_buffer,
-            b_buffer,
             z_buffer,
             recurrent_q_buffer,
             recurrent_k_buffer,
@@ -28429,18 +28468,6 @@ impl PackageLinearAttnResidentStepLayer {
             stream,
             "linear-attn resident qkv projection",
         )?;
-        self.a_matrix.matvec(
-            &self.input_normed_buffer,
-            &mut self.a_buffer,
-            stream,
-            "linear-attn resident a projection",
-        )?;
-        self.b_matrix.matvec(
-            &self.input_normed_buffer,
-            &mut self.b_buffer,
-            stream,
-            "linear-attn resident b projection",
-        )?;
         self.z_matrix.matvec(
             &self.input_normed_buffer,
             &mut self.z_buffer,
@@ -28480,18 +28507,16 @@ impl PackageLinearAttnResidentStepLayer {
             self.qk_l2_norm,
             self.q_scale,
         )?;
-        ullm_runtime_sys::linear_attn_gate_beta_f32(
-            &self.a_buffer,
-            &self.b_buffer,
+        self.a_matrix.matvec_gate_beta_with(
+            &self.b_matrix,
+            &self.input_normed_buffer,
             &self.a_log_buffer,
             &self.dt_bias_buffer,
-            self.value_heads,
-            1,
             &mut self.recurrent_gate_buffer,
             &mut self.recurrent_beta_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident gate/beta: {err}"))?;
+            stream,
+            "linear-attn resident a/b gate-beta",
+        )?;
         self.recurrent_q_buffer
             .copy_from_host(0, &encode_f32_to_bytes(&qkv_split.q), Some(stream))
             .map_err(|err| format!("failed to copy linear-attn resident recurrent q: {err}"))?;

@@ -119,6 +119,34 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_aq4_matvec_gate_beta_f32(
+        a_index_buffer: *const RawRuntimeBuffer,
+        a_scale_buffer: *const RawRuntimeBuffer,
+        a_codebook_buffer: *const RawRuntimeBuffer,
+        a_scale_values_buffer: *const RawRuntimeBuffer,
+        a_row_scale_buffer: *const RawRuntimeBuffer,
+        a_scale_count: usize,
+        a_group_size: usize,
+        a_tensor_scale: f32,
+        a_row_scale_count: usize,
+        b_index_buffer: *const RawRuntimeBuffer,
+        b_scale_buffer: *const RawRuntimeBuffer,
+        b_codebook_buffer: *const RawRuntimeBuffer,
+        b_scale_values_buffer: *const RawRuntimeBuffer,
+        b_row_scale_buffer: *const RawRuntimeBuffer,
+        b_scale_count: usize,
+        b_group_size: usize,
+        b_tensor_scale: f32,
+        b_row_scale_count: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        a_log_buffer: *const RawRuntimeBuffer,
+        dt_bias_buffer: *const RawRuntimeBuffer,
+        heads: usize,
+        cols: usize,
+        gate_output_buffer: *mut RawRuntimeBuffer,
+        beta_output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_matvec_f32(
         matrix_buffer: *const RawRuntimeBuffer,
         input_buffer: *const RawRuntimeBuffer,
@@ -693,6 +721,143 @@ pub fn aq4_matvec_silu_mul_f32(
             rows,
             cols,
             output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn aq4_matvec_gate_beta_f32(
+    a_index_buffer: &RuntimeBuffer,
+    a_scale_buffer: &RuntimeBuffer,
+    a_codebook_buffer: &RuntimeBuffer,
+    a_scale_values_buffer: &RuntimeBuffer,
+    a_row_scale_buffer: Option<&RuntimeBuffer>,
+    a_scale_count: usize,
+    a_group_size: usize,
+    a_tensor_scale: f32,
+    a_row_scale_count: usize,
+    b_index_buffer: &RuntimeBuffer,
+    b_scale_buffer: &RuntimeBuffer,
+    b_codebook_buffer: &RuntimeBuffer,
+    b_scale_values_buffer: &RuntimeBuffer,
+    b_row_scale_buffer: Option<&RuntimeBuffer>,
+    b_scale_count: usize,
+    b_group_size: usize,
+    b_tensor_scale: f32,
+    b_row_scale_count: usize,
+    input_buffer: &RuntimeBuffer,
+    a_log_buffer: &RuntimeBuffer,
+    dt_bias_buffer: &RuntimeBuffer,
+    heads: usize,
+    cols: usize,
+    gate_output_buffer: &mut RuntimeBuffer,
+    beta_output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if a_scale_count == 0 || b_scale_count == 0 {
+        return Err("AQ4 matvec gate/beta scale table is empty".to_string());
+    }
+    if a_group_size == 0 || b_group_size == 0 {
+        return Err("AQ4 matvec gate/beta group size must be greater than zero".to_string());
+    }
+    if heads == 0 || cols == 0 {
+        return Err("AQ4 matvec gate/beta heads and cols must be greater than zero".to_string());
+    }
+    if !a_tensor_scale.is_finite()
+        || a_tensor_scale <= 0.0
+        || !b_tensor_scale.is_finite()
+        || b_tensor_scale <= 0.0
+    {
+        return Err(
+            "AQ4 matvec gate/beta tensor scale must be finite and greater than zero".to_string(),
+        );
+    }
+    let elements = heads
+        .checked_mul(cols)
+        .ok_or_else(|| "AQ4 matvec gate/beta matrix element count overflows".to_string())?;
+    let index_bytes = elements / 2 + usize::from(!elements.is_multiple_of(2));
+    let a_groups = elements / a_group_size + usize::from(!elements.is_multiple_of(a_group_size));
+    let b_groups = elements / b_group_size + usize::from(!elements.is_multiple_of(b_group_size));
+    let a_scale_value_bytes = a_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec gate/beta a scale value byte size overflows".to_string())?;
+    let b_scale_value_bytes = b_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec gate/beta b scale value byte size overflows".to_string())?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec gate/beta input byte size overflows".to_string())?;
+    let output_bytes = heads
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec gate/beta output byte size overflows".to_string())?;
+    let a_row_scale_bytes = a_row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec gate/beta a row scale byte size overflows".to_string())?;
+    let b_row_scale_bytes = b_row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec gate/beta b row scale byte size overflows".to_string())?;
+    check_copy_range(0, index_bytes, a_index_buffer.size()?)?;
+    check_copy_range(0, index_bytes, b_index_buffer.size()?)?;
+    check_copy_range(0, a_groups, a_scale_buffer.size()?)?;
+    check_copy_range(0, b_groups, b_scale_buffer.size()?)?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        a_codebook_buffer.size()?,
+    )?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        b_codebook_buffer.size()?,
+    )?;
+    check_copy_range(0, a_scale_value_bytes, a_scale_values_buffer.size()?)?;
+    check_copy_range(0, b_scale_value_bytes, b_scale_values_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    check_copy_range(0, output_bytes, a_log_buffer.size()?)?;
+    check_copy_range(0, output_bytes, dt_bias_buffer.size()?)?;
+    if let Some(a_row_scale_buffer) = a_row_scale_buffer {
+        check_copy_range(0, a_row_scale_bytes, a_row_scale_buffer.size()?)?;
+    }
+    if let Some(b_row_scale_buffer) = b_row_scale_buffer {
+        check_copy_range(0, b_row_scale_bytes, b_row_scale_buffer.size()?)?;
+    }
+    check_copy_range(0, output_bytes, gate_output_buffer.size()?)?;
+    check_copy_range(0, output_bytes, beta_output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    let a_row_scale_raw = a_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let b_row_scale_raw = b_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    status_to_result(unsafe {
+        ullm_runtime_aq4_matvec_gate_beta_f32(
+            a_index_buffer.raw.as_ptr(),
+            a_scale_buffer.raw.as_ptr(),
+            a_codebook_buffer.raw.as_ptr(),
+            a_scale_values_buffer.raw.as_ptr(),
+            a_row_scale_raw,
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            a_row_scale_count,
+            b_index_buffer.raw.as_ptr(),
+            b_scale_buffer.raw.as_ptr(),
+            b_codebook_buffer.raw.as_ptr(),
+            b_scale_values_buffer.raw.as_ptr(),
+            b_row_scale_raw,
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            b_row_scale_count,
+            input_buffer.raw.as_ptr(),
+            a_log_buffer.raw.as_ptr(),
+            dt_bias_buffer.raw.as_ptr(),
+            heads,
+            cols,
+            gate_output_buffer.raw.as_ptr(),
+            beta_output_buffer.raw.as_ptr(),
             stream,
         )
     })
@@ -3242,6 +3407,130 @@ mod tests {
     }
 
     #[test]
+    fn cpu_aq4_matvec_gate_beta_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut a_index = context.alloc_buffer(3).unwrap();
+        let mut a_scale = context.alloc_buffer(3).unwrap();
+        let mut a_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut a_scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut b_index = context.alloc_buffer(3).unwrap();
+        let mut b_scale = context.alloc_buffer(3).unwrap();
+        let mut b_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut b_scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut a_log = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut dt_bias = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut beta_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        a_index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        b_index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        a_scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        b_scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        a_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        b_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        a_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        b_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        a_log
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.0, 0.5]), Some(&mut stream))
+            .unwrap();
+        dt_bias
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.1, -0.2]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_matvec_gate_beta_f32(
+            &a_index,
+            &a_scale,
+            &a_codebook,
+            &a_scale_values,
+            None,
+            2,
+            2,
+            0.1,
+            0,
+            &b_index,
+            &b_scale,
+            &b_codebook,
+            &b_scale_values,
+            None,
+            2,
+            2,
+            0.2,
+            0,
+            &input,
+            &a_log,
+            &dt_bias,
+            2,
+            3,
+            &mut gate_output,
+            &mut beta_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut gate_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut beta_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        gate_output
+            .copy_to_host(0, &mut gate_bytes, Some(&mut stream))
+            .unwrap();
+        beta_output
+            .copy_to_host(0, &mut beta_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let (expected_gate, expected_beta) = expected_linear_attn_gate_beta(
+            &[1.125, 0.3],
+            &[2.25, 0.6],
+            &[0.0, 0.5],
+            &[0.1, -0.2],
+            2,
+            1,
+        );
+        assert_f32s_close(&le_bytes_to_f32s(&gate_bytes), &expected_gate, 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&beta_bytes), &expected_beta, 1e-6);
+    }
+
+    #[test]
     fn first_hip_aq4_dequant_f32_materializes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -3453,6 +3742,133 @@ mod tests {
         stream.synchronize().unwrap();
         let expected = expected_silu_mul(&[1.125, 0.3], &[2.25, 0.6]);
         assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-6);
+    }
+
+    #[test]
+    fn first_hip_aq4_matvec_gate_beta_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut a_index = context.alloc_buffer(3).unwrap();
+        let mut a_scale = context.alloc_buffer(3).unwrap();
+        let mut a_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut a_scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut b_index = context.alloc_buffer(3).unwrap();
+        let mut b_scale = context.alloc_buffer(3).unwrap();
+        let mut b_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut b_scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut a_log = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut dt_bias = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut beta_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        a_index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        b_index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        a_scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        b_scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        a_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        b_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        a_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        b_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        a_log
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.0, 0.5]), Some(&mut stream))
+            .unwrap();
+        dt_bias
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.1, -0.2]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_matvec_gate_beta_f32(
+            &a_index,
+            &a_scale,
+            &a_codebook,
+            &a_scale_values,
+            None,
+            2,
+            2,
+            0.1,
+            0,
+            &b_index,
+            &b_scale,
+            &b_codebook,
+            &b_scale_values,
+            None,
+            2,
+            2,
+            0.2,
+            0,
+            &input,
+            &a_log,
+            &dt_bias,
+            2,
+            3,
+            &mut gate_output,
+            &mut beta_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut gate_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut beta_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        gate_output
+            .copy_to_host(0, &mut gate_bytes, Some(&mut stream))
+            .unwrap();
+        beta_output
+            .copy_to_host(0, &mut beta_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let (expected_gate, expected_beta) = expected_linear_attn_gate_beta(
+            &[1.125, 0.3],
+            &[2.25, 0.6],
+            &[0.0, 0.5],
+            &[0.1, -0.2],
+            2,
+            1,
+        );
+        assert_f32s_close(&le_bytes_to_f32s(&gate_bytes), &expected_gate, 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&beta_bytes), &expected_beta, 1e-6);
     }
 
     #[test]

@@ -139,6 +139,34 @@ ullm_status ullm_runtime_aq4_matvec_silu_mul_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_aq4_matvec_gate_beta_f32(
+    const ullm_runtime_buffer *a_index_buffer,
+    const ullm_runtime_buffer *a_scale_buffer,
+    const ullm_runtime_buffer *a_codebook_buffer,
+    const ullm_runtime_buffer *a_scale_values_buffer,
+    const ullm_runtime_buffer *a_row_scale_buffer,
+    size_t a_scale_count,
+    size_t a_group_size,
+    float a_tensor_scale,
+    size_t a_row_scale_count,
+    const ullm_runtime_buffer *b_index_buffer,
+    const ullm_runtime_buffer *b_scale_buffer,
+    const ullm_runtime_buffer *b_codebook_buffer,
+    const ullm_runtime_buffer *b_scale_values_buffer,
+    const ullm_runtime_buffer *b_row_scale_buffer,
+    size_t b_scale_count,
+    size_t b_group_size,
+    float b_tensor_scale,
+    size_t b_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t heads,
+    size_t cols,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_matvec_f32(
     const ullm_runtime_buffer *matrix_buffer,
     const ullm_runtime_buffer *input_buffer,
