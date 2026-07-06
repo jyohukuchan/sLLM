@@ -200,3 +200,50 @@ SQ design implications:
 - T5 is closed for the current pre-sq scope: materialized-AQ has an R9700 long-run anchor, and true BF16 baseline is explicitly deferred because current artifacts/runtime do not support it.
 - T6 is satisfied by the decision pack above and `docs/plans/sq-format-design-input-v0.1.md`.
 - Stretch context runs should be deferred unless a faster path is introduced.
+
+## Runtime Decode Bottleneck Fix Update
+
+Follow-up debugging showed that the earlier `~0.14 tok/s` decode result did not represent the
+raw FP32/AQ GPU path. It was dominated by the CPU/chunked lm_head top-k path and by smoke-only
+self-attention verification work inside the incremental decode loop.
+
+Implemented fixes:
+
+- Added `gpu_resident_f32` lm_head mode for `package-token-ids-generate-smoke` and
+  `package-token-ids-bench`, so lm_head weights are loaded to GPU once instead of scanned from
+  package chunks on CPU every token.
+- Added prefill/decode timing breakdowns, including per-layer step timings and lm_head timings.
+- Moved linear-attention gate/beta parameters to resident GPU buffers.
+- Removed the expensive per-value-head GPU RMSNorm loop from the linear-attention decode step by
+  computing that small headwise norm on the host after recurrent output readback.
+- Made pure HIP runtime kernels enqueue asynchronously; host synchronization is now left to
+  explicit readback/synchronization points.
+- Added optional rocBLAS SGEMV for `matvec_f32`, with fallback to the existing HIP kernel.
+- Added a lighter self-attention incremental prepare path that skips smoke-only q/k/RoPE/attention
+  reference recomputation.
+
+Short R9700 validation:
+
+| target | device | prompt | generated | lm_head mode | decode tok/s | prefill tok/s | decode p50 ms | layers p50 ms | lm_head p50 ms | verified |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | :---: |
+| R9700/RDNA4 | `2` | `16` | `8` | `gpu_resident_f32` | 5.254 | 4.712 | 191.185 | 182.609 | 7.175 | true |
+
+Short V620 compatibility check:
+
+| target | device | prompt | generated | lm_head mode | decode tok/s | prefill tok/s | decode wall ms | layers wall ms | lm_head wall ms | verified |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | :---: |
+| V620/RDNA2 | `1` | `1` | `2` | `gpu_resident_f32` | 3.725 | 1.204 | 268.451 | 257.248 | 10.088 | true |
+
+Updated interpretation:
+
+- The current R9700 FP32 path now exceeds the minimum debug target of `5 tok/s` on the short
+  `prompt=16/generated=8` probe.
+- This is still not near the expected R9700 product-speed range. The remaining main cost is the
+  per-layer decode body, especially repeated GEMV and host/runtime orchestration.
+- AQ vs SQ should not be judged from the old `0.14 tok/s` number. That number was a runtime path
+  artifact, not a useful memory-bandwidth-bound AQ result.
+
+New artifacts:
+
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-gpu-lm-head-r9700-prompt16-gen8-self-prepare-fast.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-gpu-lm-head-v620-prompt1-gen2-self-prepare-fast.json`

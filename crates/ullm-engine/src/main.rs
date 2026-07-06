@@ -22,7 +22,8 @@ use ullm_engine::decoder::{
     qwen3_causal_attn_to_host_f32, qwen3_decoder_layer_sequence_to_host_f32,
     qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
     qwen3_self_attn_block_sequence_to_host_f32,
-    qwen3_self_attn_prepare_sequence_for_paged_decode_f32, qwen3_self_attn_runtime_shape,
+    qwen3_self_attn_prepare_sequence_for_paged_decode_f32,
+    qwen3_self_attn_project_sequence_to_host_f32, qwen3_self_attn_runtime_shape,
     split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::golden::{GoldenTensorFixture, compare_f32_slices};
@@ -273,6 +274,7 @@ fn main() -> ExitCode {
                 env::args().nth(10),
                 env::args().nth(11),
                 env::args().nth(12),
+                env::args().nth(13),
             )
         }
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
@@ -9199,6 +9201,158 @@ fn qwen3_self_attn_prepare_model_loop_sequence_smoke(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn qwen3_self_attn_prepare_model_loop_sequence_decode(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    self_attn_weights: &Qwen3SelfAttnRuntimeWeights,
+    residual_sequence: Vec<f32>,
+    sequence_len: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    position_offset: usize,
+    input_norm: &PassthroughF32Data,
+    q_norm: &PassthroughF32Data,
+    k_norm: &PassthroughF32Data,
+    label: &str,
+) -> Result<Qwen3SelfAttnModelLoopPreparedSequence, String> {
+    let Qwen3SelfAttnRuntimeShape {
+        hidden,
+        q_heads: shape_q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        attention_width: _,
+        q_projection_layout,
+    } = qwen3_self_attn_runtime_shape(self_attn_weights)?;
+    let expected_residual_len = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| format!("{label} residual length overflows"))?;
+    if residual_sequence.len() != expected_residual_len {
+        return Err(format!(
+            "{label} residual length {} does not match expected {}",
+            residual_sequence.len(),
+            expected_residual_len
+        ));
+    }
+    if input_norm.values.len() != hidden {
+        return Err(format!(
+            "{label} input RMSNorm length {} does not match hidden={hidden}",
+            input_norm.values.len()
+        ));
+    }
+    if q_norm.values.len() != head_dim || k_norm.values.len() != head_dim {
+        return Err(format!(
+            "{label} q/k RMSNorm length mismatch: q={} k={} head_dim={head_dim}",
+            q_norm.values.len(),
+            k_norm.values.len()
+        ));
+    }
+
+    let original_residual_sequence = residual_sequence;
+    let mut attention_input_normed = Vec::with_capacity(original_residual_sequence.len());
+    for residual in original_residual_sequence.chunks_exact(hidden) {
+        attention_input_normed.extend(runtime_host_rmsnorm_f32(
+            residual,
+            &input_norm.values,
+            1e-6_f32,
+        ));
+    }
+
+    let projected = qwen3_self_attn_project_sequence_to_host_f32(
+        context,
+        stream,
+        self_attn_weights,
+        &attention_input_normed,
+        sequence_len,
+    )?;
+    let q_projection_split = split_qwen3_self_attn_q_projection(
+        &projected.q_projected,
+        sequence_len,
+        self_attn_weights.q_rows,
+        hidden,
+        head_dim,
+    )?;
+    if q_projection_layout != q_projection_split.layout {
+        return Err(format!(
+            "{label} q projection layout changed between shape and split: {q_projection_layout} vs {}",
+            q_projection_split.layout
+        ));
+    }
+    if shape_q_heads != q_projection_split.q_heads {
+        return Err(format!(
+            "{label} q head count changed between shape and split: {} vs {shape_q_heads}",
+            q_projection_split.q_heads
+        ));
+    }
+
+    let mut q_normed = Vec::with_capacity(q_projection_split.query.len());
+    for head_input in q_projection_split.query.chunks_exact(head_dim) {
+        q_normed.extend(runtime_host_rmsnorm_f32(
+            head_input,
+            &q_norm.values,
+            1e-5_f32,
+        ));
+    }
+    let mut k_normed = Vec::with_capacity(projected.k_projected.len());
+    for head_input in projected.k_projected.chunks_exact(head_dim) {
+        k_normed.extend(runtime_host_rmsnorm_f32(
+            head_input,
+            &k_norm.values,
+            1e-5_f32,
+        ));
+    }
+    let q_rope = runtime_host_rope_f32(
+        &q_normed,
+        sequence_len,
+        q_projection_split.q_heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    );
+    let k_rope = runtime_host_rope_f32(
+        &k_normed,
+        sequence_len,
+        kv_heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    );
+    if q_rope.len() != q_normed.len() || k_rope.len() != k_normed.len() {
+        return Err(format!("{label} RoPE produced an unexpected output length"));
+    }
+    let output_gate_layout = if q_projection_split.gate.is_some() {
+        "runtime-sigmoid"
+    } else {
+        "none"
+    };
+    let q_gate_elements = q_projection_split.gate.as_ref().map_or(0, Vec::len);
+
+    Ok(Qwen3SelfAttnModelLoopPreparedSequence {
+        residual_sequence: original_residual_sequence,
+        q_rope,
+        k_rope,
+        v_projected: projected.v_projected,
+        q_gate: q_projection_split.gate,
+        hidden,
+        q_heads: q_projection_split.q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale: 1.0_f32 / (head_dim as f32).sqrt(),
+        q_projection_layout,
+        q_gate_elements,
+        output_gate_layout,
+        q_norm_max_abs_diff: 0.0,
+        k_norm_max_abs_diff: 0.0,
+        q_rope_max_abs_diff: 0.0,
+        k_rope_max_abs_diff: 0.0,
+        attention_max_abs_diff: 0.0,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn qwen3_self_attn_prepare_sequence_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -15012,6 +15166,32 @@ struct PackageTokenLogit {
     logit: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageLmHeadMode {
+    CpuChunked,
+    GpuResidentF32,
+}
+
+impl PackageLmHeadMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CpuChunked => "cpu_chunked",
+            Self::GpuResidentF32 => "gpu_resident_f32",
+        }
+    }
+}
+
+fn parse_package_lm_head_mode(value: Option<String>) -> Result<PackageLmHeadMode, ExitCode> {
+    match value.as_deref() {
+        None | Some("") | Some("cpu") | Some("cpu_chunked") => Ok(PackageLmHeadMode::CpuChunked),
+        Some("gpu") | Some("gpu_resident_f32") => Ok(PackageLmHeadMode::GpuResidentF32),
+        Some(raw) => {
+            eprintln!("invalid lm head mode: {raw}; expected cpu_chunked or gpu_resident_f32");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
 fn parse_package_token_ids_layer_indices(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
     match value.as_deref() {
         None | Some("") | Some("all") | Some("default") => {
@@ -15184,6 +15364,7 @@ fn package_token_ids_generate_smoke(
     rotary_dim: Option<String>,
     rope_base: Option<String>,
     position_offset: Option<String>,
+    lm_head_mode: Option<String>,
 ) -> ExitCode {
     let Some(path) = path else {
         eprintln!("package-token-ids-generate-smoke requires a .ullm.d path");
@@ -15230,6 +15411,10 @@ fn package_token_ids_generate_smoke(
             }
             Err(code) => return code,
         };
+    let lm_head_mode = match parse_package_lm_head_mode(lm_head_mode) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
     let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
         Ok(value) => value,
         Err(code) => return code,
@@ -15251,6 +15436,7 @@ fn package_token_ids_generate_smoke(
         rotary_dim,
         rope_base,
         position_offset,
+        lm_head_mode,
     ) {
         Ok(report) => {
             println!("{report}");
@@ -15331,11 +15517,17 @@ fn package_token_ids_generate_smoke_impl(
     rotary_dim: Option<String>,
     rope_base: f32,
     position_offset: usize,
+    lm_head_mode: PackageLmHeadMode,
 ) -> Result<String, String> {
     if env::var("ULLM_GENERATE_DECODE_MODE")
         .map(|value| value == "full_sequence_recompute_greedy")
         .unwrap_or(false)
     {
+        if lm_head_mode != PackageLmHeadMode::CpuChunked {
+            return Err(
+                "gpu_resident_f32 lm head mode is only supported by incremental decode".to_string(),
+            );
+        }
         return package_token_ids_generate_recompute_smoke_impl(
             path,
             device_index,
@@ -15362,6 +15554,7 @@ fn package_token_ids_generate_smoke_impl(
         rotary_dim,
         rope_base,
         position_offset,
+        lm_head_mode,
     )
 }
 
@@ -15537,6 +15730,271 @@ fn package_token_ids_generate_recompute_smoke_impl(
         .map_err(|err| format!("failed to encode token-id generate smoke report: {err}"))
 }
 
+enum PackageLmHeadRuntime {
+    CpuChunked {
+        chunk_rows: usize,
+    },
+    GpuResidentF32 {
+        dtype: String,
+        shape: Vec<u64>,
+        vocab: usize,
+        hidden: usize,
+        matrix_buffer: ullm_runtime_sys::RuntimeBuffer,
+        input_buffer: ullm_runtime_sys::RuntimeBuffer,
+        logits_buffer: ullm_runtime_sys::RuntimeBuffer,
+        logits_host: Vec<u8>,
+        matrix_bytes: usize,
+    },
+}
+
+impl PackageLmHeadRuntime {
+    fn load(
+        mode: PackageLmHeadMode,
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        hidden: usize,
+        chunk_rows: usize,
+    ) -> Result<Self, String> {
+        match mode {
+            PackageLmHeadMode::CpuChunked => Ok(Self::CpuChunked { chunk_rows }),
+            PackageLmHeadMode::GpuResidentF32 => {
+                let data = read_named_passthrough_f32(path, QWEN3_LM_HEAD_TENSOR, chunk_bytes)
+                    .map_err(|err| format!("failed to read resident lm_head tensor: {err}"))?;
+                if data.shape.len() != 2 {
+                    return Err(format!(
+                        "resident lm_head must be 2D, got shape {:?}",
+                        data.shape
+                    ));
+                }
+                let vocab = usize::try_from(data.shape[0])
+                    .map_err(|_| "resident lm_head vocab size is too large".to_string())?;
+                let cols = usize::try_from(data.shape[1])
+                    .map_err(|_| "resident lm_head hidden size is too large".to_string())?;
+                if cols != hidden {
+                    return Err(format!(
+                        "resident lm_head hidden mismatch: lm_head={cols} hidden={hidden}"
+                    ));
+                }
+                let expected_values = vocab
+                    .checked_mul(hidden)
+                    .ok_or_else(|| "resident lm_head element count overflows".to_string())?;
+                if data.values.len() != expected_values {
+                    return Err(format!(
+                        "resident lm_head value count mismatch: got {} expected {expected_values}",
+                        data.values.len()
+                    ));
+                }
+                let matrix_bytes =
+                    checked_f32_byte_len(data.values.len(), "resident lm_head matrix")?;
+                let hidden_bytes = checked_f32_byte_len(hidden, "resident lm_head input")?;
+                let logits_bytes = checked_f32_byte_len(vocab, "resident lm_head logits")?;
+                let mut matrix_buffer = context
+                    .alloc_buffer(matrix_bytes)
+                    .map_err(|err| format!("failed to allocate resident lm_head matrix: {err}"))?;
+                copy_f32_values_to_runtime_buffer_chunked(
+                    &mut matrix_buffer,
+                    &data.values,
+                    stream,
+                    "resident lm_head matrix",
+                )?;
+                let input_buffer = context
+                    .alloc_buffer(hidden_bytes)
+                    .map_err(|err| format!("failed to allocate resident lm_head input: {err}"))?;
+                let logits_buffer = context
+                    .alloc_buffer(logits_bytes)
+                    .map_err(|err| format!("failed to allocate resident lm_head logits: {err}"))?;
+                stream
+                    .synchronize()
+                    .map_err(|err| format!("failed to synchronize resident lm_head load: {err}"))?;
+                Ok(Self::GpuResidentF32 {
+                    dtype: data.dtype,
+                    shape: data.shape,
+                    vocab,
+                    hidden,
+                    matrix_buffer,
+                    input_buffer,
+                    logits_buffer,
+                    logits_host: vec![0_u8; logits_bytes],
+                    matrix_bytes,
+                })
+            }
+        }
+    }
+
+    fn top_logits(
+        &mut self,
+        path: &str,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        hidden_values: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<PackageTokenLogit>, String> {
+        match self {
+            Self::CpuChunked { chunk_rows } => {
+                let (_vocab, _dtype, _shape, top_logits) =
+                    package_lm_head_top_k_from_rows(path, hidden_values, top_k, *chunk_rows)?;
+                Ok(top_logits)
+            }
+            Self::GpuResidentF32 {
+                vocab,
+                hidden,
+                matrix_buffer,
+                input_buffer,
+                logits_buffer,
+                logits_host,
+                ..
+            } => {
+                if hidden_values.len() != *hidden {
+                    return Err(format!(
+                        "resident lm_head input length mismatch: got {} expected {}",
+                        hidden_values.len(),
+                        hidden
+                    ));
+                }
+                input_buffer
+                    .copy_from_host(0, &encode_f32_to_bytes(hidden_values), Some(stream))
+                    .map_err(|err| format!("failed to copy resident lm_head input: {err}"))?;
+                ullm_runtime_sys::matvec_f32(
+                    matrix_buffer,
+                    input_buffer,
+                    *vocab,
+                    *hidden,
+                    logits_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("resident lm_head matvec failed: {err}"))?;
+                logits_buffer
+                    .copy_to_host(0, logits_host, Some(stream))
+                    .map_err(|err| format!("failed to copy resident lm_head logits: {err}"))?;
+                stream.synchronize().map_err(|err| {
+                    format!("failed to synchronize resident lm_head logits: {err}")
+                })?;
+                package_top_logits_from_f32_bytes(logits_host, top_k)
+            }
+        }
+    }
+
+    fn report_json(&self, load_ms: f64) -> serde_json::Value {
+        match self {
+            Self::CpuChunked { chunk_rows } => serde_json::json!({
+                "mode": PackageLmHeadMode::CpuChunked.as_str(),
+                "chunk_rows": chunk_rows,
+                "load_ms": load_ms,
+            }),
+            Self::GpuResidentF32 {
+                dtype,
+                shape,
+                vocab,
+                hidden,
+                matrix_bytes,
+                ..
+            } => serde_json::json!({
+                "mode": PackageLmHeadMode::GpuResidentF32.as_str(),
+                "tensor": QWEN3_LM_HEAD_TENSOR,
+                "dtype": dtype,
+                "shape": shape,
+                "vocab": vocab,
+                "hidden": hidden,
+                "matrix_bytes": matrix_bytes,
+                "load_ms": load_ms,
+            }),
+        }
+    }
+}
+
+fn copy_f32_values_to_runtime_buffer_chunked(
+    buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    values: &[f32],
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    label: &str,
+) -> Result<(), String> {
+    const COPY_CHUNK_F32: usize = 1 << 20;
+    for (chunk_index, chunk) in values.chunks(COPY_CHUNK_F32).enumerate() {
+        let offset_elements = chunk_index
+            .checked_mul(COPY_CHUNK_F32)
+            .ok_or_else(|| format!("{label} copy offset overflows"))?;
+        let offset_bytes = offset_elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| format!("{label} copy byte offset overflows"))?;
+        let bytes = encode_f32_to_bytes(chunk);
+        buffer
+            .copy_from_host(offset_bytes, &bytes, Some(stream))
+            .map_err(|err| format!("failed to copy {label} chunk {chunk_index}: {err}"))?;
+    }
+    Ok(())
+}
+
+fn package_logit_precedes(left: &PackageTokenLogit, right: &PackageTokenLogit) -> bool {
+    left.logit
+        .total_cmp(&right.logit)
+        .reverse()
+        .then_with(|| left.token_id.cmp(&right.token_id))
+        .is_lt()
+}
+
+fn push_package_top_logit(
+    top_logits: &mut Vec<PackageTokenLogit>,
+    top_k: usize,
+    candidate: PackageTokenLogit,
+) {
+    if top_logits.len() < top_k {
+        top_logits.push(candidate);
+        top_logits.sort_by(|left, right| {
+            right
+                .logit
+                .total_cmp(&left.logit)
+                .then_with(|| left.token_id.cmp(&right.token_id))
+        });
+        return;
+    }
+    if let Some(last) = top_logits.last() {
+        if !package_logit_precedes(&candidate, last) {
+            return;
+        }
+    }
+    if let Some(last) = top_logits.last_mut() {
+        *last = candidate;
+    }
+    top_logits.sort_by(|left, right| {
+        right
+            .logit
+            .total_cmp(&left.logit)
+            .then_with(|| left.token_id.cmp(&right.token_id))
+    });
+}
+
+fn package_top_logits_from_f32_bytes(
+    logits_bytes: &[u8],
+    top_k: usize,
+) -> Result<Vec<PackageTokenLogit>, String> {
+    if top_k == 0 {
+        return Err("top k must be greater than zero".to_string());
+    }
+    if !logits_bytes
+        .len()
+        .is_multiple_of(std::mem::size_of::<f32>())
+    {
+        return Err("resident lm_head logits byte length is not f32-aligned".to_string());
+    }
+    let mut top_logits = Vec::with_capacity(top_k);
+    for (token_id, chunk) in logits_bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .enumerate()
+    {
+        let logit = f32::from_le_bytes(chunk.try_into().expect("f32 chunk"));
+        if !logit.is_finite() {
+            return Err(format!("lm_head logit for token {token_id} is not finite"));
+        }
+        push_package_top_logit(
+            &mut top_logits,
+            top_k,
+            PackageTokenLogit { token_id, logit },
+        );
+    }
+    Ok(top_logits)
+}
+
 enum PackageTokenIdsIncrementalLayer {
     LinearAttention(PackageLinearAttnResidentStepLayer),
     SelfAttention { self_index: usize },
@@ -15549,9 +16007,9 @@ fn package_token_ids_incremental_layer_step<'weights>(
     layer: &mut PackageTokenIdsIncrementalLayer,
     self_layers: &'weights [Qwen3PackageDecoderLayerRuntime],
     self_states: &mut [Qwen3DecoderLayerRuntime<'weights>],
-    block_table: &[u32],
-    block_size: usize,
-    cache_blocks: usize,
+    _block_table: &[u32],
+    _block_size: usize,
+    _cache_blocks: usize,
     rotary_dim: usize,
     rope_base: f32,
     rope_position: usize,
@@ -15568,7 +16026,7 @@ fn package_token_ids_incremental_layer_step<'weights>(
             let state = self_states
                 .get_mut(*self_index)
                 .ok_or_else(|| format!("{label} self-attn state index {self_index} is missing"))?;
-            let prepared = qwen3_self_attn_prepare_model_loop_sequence_smoke(
+            let prepared = qwen3_self_attn_prepare_model_loop_sequence_decode(
                 context,
                 stream,
                 &loaded.weights.self_attn,
@@ -15580,9 +16038,6 @@ fn package_token_ids_incremental_layer_step<'weights>(
                 &loaded.input_norm,
                 &loaded.q_norm,
                 &loaded.k_norm,
-                block_table,
-                block_size,
-                cache_blocks,
                 label,
             )?;
             let step = state.step(
@@ -15613,10 +16068,11 @@ fn package_token_ids_incremental_layer_step<'weights>(
 
 fn package_token_ids_incremental_final_logits(
     path: &str,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    lm_head_runtime: &mut PackageLmHeadRuntime,
     final_hidden: &[f32],
     final_norm: &PassthroughF32Data,
     top_k: usize,
-    lm_head_chunk_rows: usize,
 ) -> Result<(serde_json::Value, usize), String> {
     let final_normed = runtime_host_rmsnorm_f32(final_hidden, &final_norm.values, 1e-6_f32);
     if final_normed.len() != final_hidden.len()
@@ -15626,8 +16082,7 @@ fn package_token_ids_incremental_final_logits(
             "incremental final normalized hidden state contains invalid values".to_string(),
         );
     }
-    let (_lm_head_vocab, _lm_head_dtype, _lm_head_shape, top_logits) =
-        package_lm_head_top_k_from_rows(path, &final_normed, top_k, lm_head_chunk_rows)?;
+    let top_logits = lm_head_runtime.top_logits(path, stream, &final_normed, top_k)?;
     let next = top_logits
         .first()
         .map(|entry| entry.token_id)
@@ -15703,6 +16158,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     rotary_dim: Option<String>,
     rope_base: f32,
     position_offset: usize,
+    lm_head_mode: PackageLmHeadMode,
 ) -> Result<String, String> {
     if prompt_token_ids.is_empty() {
         return Err(
@@ -15872,7 +16328,20 @@ fn package_token_ids_generate_incremental_smoke_impl(
         ));
     }
 
+    let lm_head_load_started = Instant::now();
+    let mut lm_head_runtime = PackageLmHeadRuntime::load(
+        lm_head_mode,
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        hidden,
+        lm_head_chunk_rows,
+    )?;
+    let lm_head_load_ms = lm_head_load_started.elapsed().as_secs_f64() * 1000.0;
+
     let prefill_started = Instant::now();
+    let prefill_layers_started = Instant::now();
     let mut residual_sequence = embedding_rows.values;
     for (layer_position, layer) in layers.iter_mut().enumerate() {
         let mut next_sequence = Vec::with_capacity(residual_sequence.len());
@@ -15908,19 +16377,27 @@ fn package_token_ids_generate_incremental_smoke_impl(
         }
         residual_sequence = next_sequence;
     }
+    let prefill_layers_ms = prefill_layers_started.elapsed().as_secs_f64() * 1000.0;
+    let prefill_lm_head_started = Instant::now();
     let final_hidden_start = (prompt_token_ids.len() - 1) * hidden;
     let (prefill_top_logits, first_generated) = package_token_ids_incremental_final_logits(
         path,
+        &mut stream,
+        &mut lm_head_runtime,
         &residual_sequence[final_hidden_start..final_hidden_start + hidden],
         &final_norm,
         top_k,
-        lm_head_chunk_rows,
     )?;
+    let prefill_lm_head_ms = prefill_lm_head_started.elapsed().as_secs_f64() * 1000.0;
     let prefill_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
 
     let mut sequence_ids = prompt_token_ids.clone();
     let mut generated_token_ids = Vec::with_capacity(generated_tokens);
     let mut decode_step_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
+    let mut decode_embedding_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
+    let mut decode_layers_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
+    let mut decode_layer_step_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
+    let mut decode_lm_head_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut decode_positions = Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut last_top_logits = prefill_top_logits.clone();
     if generated_tokens > 0 {
@@ -15933,9 +16410,11 @@ fn package_token_ids_generate_incremental_smoke_impl(
         let token_id = *sequence_ids
             .last()
             .ok_or_else(|| "incremental sequence unexpectedly empty".to_string())?;
+        let decode_embedding_started = Instant::now();
         let embedding =
             read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &[token_id])
                 .map_err(|err| format!("failed to read incremental decode embedding: {err}"))?;
+        let embedding_step_ms = decode_embedding_started.elapsed().as_secs_f64() * 1000.0;
         if embedding.values.len() != hidden {
             return Err(format!(
                 "incremental decode embedding length {} does not match hidden {hidden}",
@@ -15952,7 +16431,10 @@ fn package_token_ids_generate_incremental_smoke_impl(
             .checked_add(decode_index)
             .ok_or_else(|| "incremental decode cache position overflows".to_string())?;
         let mut residual = embedding.values;
+        let decode_layers_started = Instant::now();
+        let mut layer_step_ms = Vec::with_capacity(layers.len());
         for (layer_position, layer) in layers.iter_mut().enumerate() {
+            let layer_step_started = Instant::now();
             residual = package_token_ids_incremental_layer_step(
                 &mut context,
                 &mut stream,
@@ -15969,6 +16451,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
                 &residual,
                 &format!("incremental decode layer {layer_position} position {position}"),
             )?;
+            layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
             if residual.len() != hidden {
                 return Err(format!(
                     "incremental decode layer {layer_position} output length {} does not match hidden {hidden}",
@@ -15976,15 +16459,23 @@ fn package_token_ids_generate_incremental_smoke_impl(
                 ));
             }
         }
+        let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
+        let decode_lm_head_started = Instant::now();
         let (top_logits, next) = package_token_ids_incremental_final_logits(
             path,
+            &mut stream,
+            &mut lm_head_runtime,
             &residual,
             &final_norm,
             top_k,
-            lm_head_chunk_rows,
         )?;
+        let lm_head_step_ms = decode_lm_head_started.elapsed().as_secs_f64() * 1000.0;
         last_top_logits = top_logits;
         decode_step_ms.push(decode_started.elapsed().as_secs_f64() * 1000.0);
+        decode_embedding_ms.push(embedding_step_ms);
+        decode_layers_ms.push(layers_step_ms);
+        decode_layer_step_ms.push(layer_step_ms);
+        decode_lm_head_ms.push(lm_head_step_ms);
         decode_positions.push(position);
         generated_token_ids.push(next);
         sequence_ids.push(next);
@@ -16010,6 +16501,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
         "self_attn": self_attn_shape,
         "top_k": top_k,
         "lm_head_chunk_rows": lm_head_chunk_rows,
+        "lm_head_runtime": lm_head_runtime.report_json(lm_head_load_ms),
         "rotary_dim": resolved_rotary_dim,
         "rope_base": rope_base,
         "position_offset": position_offset,
@@ -16018,6 +16510,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
         "prefill": {
             "prompt_tokens": sequence_ids.len().saturating_sub(generated_tokens),
             "wall_ms": prefill_ms,
+            "layers_wall_ms": prefill_layers_ms,
+            "lm_head_wall_ms": prefill_lm_head_ms,
             "tps": tps(sequence_ids.len().saturating_sub(generated_tokens), prefill_ms),
             "top_logits": prefill_top_logits,
         },
@@ -16026,6 +16520,10 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "timed_incremental_steps": timed_decode_tokens,
             "positions": decode_positions,
             "step_wall_ms": decode_step_ms,
+            "embedding_step_ms": decode_embedding_ms,
+            "layers_step_ms": decode_layers_ms,
+            "layer_step_ms": decode_layer_step_ms,
+            "lm_head_step_ms": decode_lm_head_ms,
             "wall_ms": decode_ms,
             "timed_step_tps": tps(timed_decode_tokens, decode_ms),
             "end_to_end_generated_tps": tps(generated_tokens, total_ms),
@@ -16039,6 +16537,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
         "timing_ms": {
             "embedding_read": embed_ms,
             "layer_load": layer_load_ms,
+            "lm_head_load": lm_head_load_ms,
             "prefill": prefill_ms,
             "decode": decode_ms,
             "total": total_ms,
@@ -26032,7 +26531,7 @@ fn print_help() {
         "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!(
-        "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+        "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32]"
     );
     eprintln!(
         "package-token-ids-bench: same arguments as package-token-ids-generate-smoke; writes the same measured JSON report"
@@ -26855,12 +27354,12 @@ struct PackageLinearAttnResidentStepLayer {
     qk_l2_norm: bool,
     kernel_size: usize,
     intermediate: usize,
-    a_log: Vec<f32>,
-    dt_bias: Vec<f32>,
     conv_history: Vec<f32>,
-    input_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
-    conv_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
-    attn_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    conv_weight: Vec<f32>,
+    input_norm_weight: Vec<f32>,
+    a_log_buffer: ullm_runtime_sys::RuntimeBuffer,
+    dt_bias_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attn_norm_weight: Vec<f32>,
     post_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
     qkv_matrix: ullm_runtime_sys::RuntimeBuffer,
     a_matrix: ullm_runtime_sys::RuntimeBuffer,
@@ -26876,8 +27375,6 @@ struct PackageLinearAttnResidentStepLayer {
     a_buffer: ullm_runtime_sys::RuntimeBuffer,
     b_buffer: ullm_runtime_sys::RuntimeBuffer,
     z_buffer: ullm_runtime_sys::RuntimeBuffer,
-    conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
-    conv_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_q_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_k_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_v_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -26885,8 +27382,6 @@ struct PackageLinearAttnResidentStepLayer {
     recurrent_beta_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_state_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_output_buffer: ullm_runtime_sys::RuntimeBuffer,
-    attn_norm_input_buffer: ullm_runtime_sys::RuntimeBuffer,
-    attn_norm_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_projection_input_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_output_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -27104,15 +27599,12 @@ impl PackageLinearAttnResidentStepLayer {
             checked_f32_byte_len(qkv_step_elements, "linear-attn resident qkv step")?;
         let gate_beta_step_bytes =
             checked_f32_byte_len(value_heads, "linear-attn resident gate/beta step")?;
-        let value_dim_bytes = checked_f32_byte_len(value_dim, "linear-attn resident value dim")?;
         let intermediate_bytes =
             checked_f32_byte_len(intermediate, "linear-attn resident intermediate")?;
         let conv_history_elements =
             qkv_step_elements.checked_mul(kernel_size).ok_or_else(|| {
                 "linear-attn resident conv history element count overflows".to_string()
             })?;
-        let conv_history_bytes =
-            checked_f32_byte_len(conv_history_elements, "linear-attn resident conv history")?;
         let state_elements = value_heads
             .checked_mul(key_dim)
             .and_then(|value| value.checked_mul(value_dim))
@@ -27121,28 +27613,18 @@ impl PackageLinearAttnResidentStepLayer {
             })?;
         let state_bytes = checked_f32_byte_len(state_elements, "linear-attn resident state")?;
 
-        let mut input_norm_weight_buffer = context
+        let mut a_log_buffer = context
             .alloc_buffer(checked_f32_byte_len(
-                input_norm_weight_values.len(),
-                "linear-attn resident input norm weight",
+                a_log.values.len(),
+                "linear-attn resident A_log",
             )?)
-            .map_err(|err| {
-                format!("failed to allocate linear-attn resident input norm weight: {err}")
-            })?;
-        let mut conv_weight_buffer = context
+            .map_err(|err| format!("failed to allocate linear-attn resident A_log: {err}"))?;
+        let mut dt_bias_buffer = context
             .alloc_buffer(checked_f32_byte_len(
-                conv.values.len(),
-                "linear-attn resident conv weight",
+                dt_bias.values.len(),
+                "linear-attn resident dt_bias",
             )?)
-            .map_err(|err| format!("failed to allocate linear-attn resident conv weight: {err}"))?;
-        let mut attn_norm_weight_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                attn_norm.values.len(),
-                "linear-attn resident attention norm weight",
-            )?)
-            .map_err(|err| {
-                format!("failed to allocate linear-attn resident attention norm weight: {err}")
-            })?;
+            .map_err(|err| format!("failed to allocate linear-attn resident dt_bias: {err}"))?;
         let mut post_norm_weight_buffer = context
             .alloc_buffer(checked_f32_byte_len(
                 post_norm_weight_values.len(),
@@ -27170,12 +27652,6 @@ impl PackageLinearAttnResidentStepLayer {
         let z_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident z: {err}"))?;
-        let conv_history_buffer = context.alloc_buffer(conv_history_bytes).map_err(|err| {
-            format!("failed to allocate linear-attn resident conv history: {err}")
-        })?;
-        let conv_output_buffer = context
-            .alloc_buffer(conv_history_bytes)
-            .map_err(|err| format!("failed to allocate linear-attn resident conv output: {err}"))?;
         let recurrent_q_buffer = context
             .alloc_buffer(checked_f32_byte_len(
                 q_elements_per_step,
@@ -27202,12 +27678,6 @@ impl PackageLinearAttnResidentStepLayer {
             .map_err(|err| format!("failed to allocate linear-attn resident state: {err}"))?;
         let recurrent_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident recurrent output: {err}")
-        })?;
-        let attn_norm_input_buffer = context.alloc_buffer(value_dim_bytes).map_err(|err| {
-            format!("failed to allocate linear-attn resident attention norm input: {err}")
-        })?;
-        let attn_norm_output_buffer = context.alloc_buffer(value_dim_bytes).map_err(|err| {
-            format!("failed to allocate linear-attn resident attention norm output: {err}")
         })?;
         let attn_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident attention normed: {err}")
@@ -27240,21 +27710,12 @@ impl PackageLinearAttnResidentStepLayer {
             format!("failed to allocate linear-attn resident layer output: {err}")
         })?;
 
-        input_norm_weight_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&input_norm_weight_values),
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to copy linear-attn resident input norm: {err}"))?;
-        conv_weight_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&conv.values), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident conv weight: {err}"))?;
-        attn_norm_weight_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&attn_norm.values), Some(stream))
-            .map_err(|err| {
-                format!("failed to copy linear-attn resident attention norm weight: {err}")
-            })?;
+        a_log_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&a_log.values), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident A_log: {err}"))?;
+        dt_bias_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&dt_bias.values), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident dt_bias: {err}"))?;
         post_norm_weight_buffer
             .copy_from_host(
                 0,
@@ -27285,12 +27746,12 @@ impl PackageLinearAttnResidentStepLayer {
             qk_l2_norm,
             kernel_size,
             intermediate,
-            a_log: a_log.values,
-            dt_bias: dt_bias.values,
             conv_history: vec![0.0_f32; conv_history_elements],
-            input_norm_weight_buffer,
-            conv_weight_buffer,
-            attn_norm_weight_buffer,
+            conv_weight: conv.values,
+            input_norm_weight: input_norm_weight_values,
+            a_log_buffer,
+            dt_bias_buffer,
+            attn_norm_weight: attn_norm.values,
             post_norm_weight_buffer,
             qkv_matrix,
             a_matrix,
@@ -27306,8 +27767,6 @@ impl PackageLinearAttnResidentStepLayer {
             a_buffer,
             b_buffer,
             z_buffer,
-            conv_history_buffer,
-            conv_output_buffer,
             recurrent_q_buffer,
             recurrent_k_buffer,
             recurrent_v_buffer,
@@ -27315,8 +27774,6 @@ impl PackageLinearAttnResidentStepLayer {
             recurrent_beta_buffer,
             recurrent_state_buffer,
             recurrent_output_buffer,
-            attn_norm_input_buffer,
-            attn_norm_output_buffer,
             attn_normed_buffer,
             attn_projection_input_buffer,
             attn_output_buffer,
@@ -27343,27 +27800,19 @@ impl PackageLinearAttnResidentStepLayer {
                 self.hidden
             ));
         }
-        let hidden_bytes = checked_f32_byte_len(self.hidden, "linear-attn resident step hidden")?;
-        let qkv_step_bytes =
-            checked_f32_byte_len(self.qkv_step_elements, "linear-attn resident step qkv")?;
-        let value_dim_bytes =
-            checked_f32_byte_len(self.value_dim, "linear-attn resident step value dim")?;
-
         self.input_buffer
             .copy_from_host(0, &encode_f32_to_bytes(residual), Some(stream))
             .map_err(|err| format!("failed to copy linear-attn resident residual: {err}"))?;
-        ullm_runtime_sys::rmsnorm_f32(
-            &self.input_buffer,
-            &self.input_norm_weight_buffer,
-            self.hidden,
-            1e-6_f32,
-            &mut self.input_normed_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident input RMSNorm: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize linear-attn resident input norm: {err}")
-        })?;
+        let input_normed = runtime_host_rmsnorm_f32(residual, &self.input_norm_weight, 1e-6_f32);
+        if input_normed.len() != self.hidden {
+            return Err(format!(
+                "linear-attn resident input RMSNorm failed for layer {}",
+                self.layer_index
+            ));
+        }
+        self.input_normed_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&input_normed), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident input normed: {err}"))?;
 
         ullm_runtime_sys::matvec_f32(
             &self.qkv_matrix,
@@ -27401,27 +27850,11 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident z projection: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize linear-attn resident projections: {err}")
-        })?;
-
         let qkv_step = read_runtime_buffer_f32(
             &self.qkv_buffer,
             stream,
             self.qkv_step_elements,
             "linear-attn resident qkv",
-        )?;
-        let a_step = read_runtime_buffer_f32(
-            &self.a_buffer,
-            stream,
-            self.value_heads,
-            "linear-attn resident a",
-        )?;
-        let b_step = read_runtime_buffer_f32(
-            &self.b_buffer,
-            stream,
-            self.value_heads,
-            "linear-attn resident b",
         )?;
 
         if self.kernel_size > 1 {
@@ -27430,32 +27863,16 @@ impl PackageLinearAttnResidentStepLayer {
         let latest_start = (self.kernel_size - 1) * self.qkv_step_elements;
         self.conv_history[latest_start..latest_start + self.qkv_step_elements]
             .copy_from_slice(&qkv_step);
-        self.conv_history_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&self.conv_history), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident conv history: {err}"))?;
-        ullm_runtime_sys::depthwise_conv1d_f32(
-            &self.conv_history_buffer,
-            &self.conv_weight_buffer,
-            self.qkv_step_elements,
-            self.kernel_size,
-            self.kernel_size,
-            &mut self.conv_output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident conv: {err}"))?;
-        stream
-            .synchronize()
-            .map_err(|err| format!("failed to synchronize linear-attn resident conv: {err}"))?;
-        let latest_byte_start =
-            checked_f32_byte_len(latest_start, "linear-attn resident latest conv offset")?;
-        let mut conv_step_bytes = vec![0_u8; qkv_step_bytes];
-        self.conv_output_buffer
-            .copy_to_host(latest_byte_start, &mut conv_step_bytes, Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident conv output: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize linear-attn resident conv copy: {err}")
-        })?;
-        let conv_step = runtime_host_silu_f32(&decode_f32_le_values(&conv_step_bytes));
+        let mut conv_step = vec![0.0_f32; self.qkv_step_elements];
+        for channel in 0..self.qkv_step_elements {
+            let mut value = 0.0_f32;
+            for kernel in 0..self.kernel_size {
+                value += self.conv_history[kernel * self.qkv_step_elements + channel]
+                    * self.conv_weight[channel * self.kernel_size + kernel];
+            }
+            conv_step[channel] = value;
+        }
+        let conv_step = runtime_host_silu_f32(&conv_step);
         let qkv_split = split_linear_attn_qkv_for_recurrent(
             &conv_step,
             1,
@@ -27466,14 +27883,18 @@ impl PackageLinearAttnResidentStepLayer {
             self.qk_l2_norm,
             self.q_scale,
         )?;
-        let (gate, beta) = runtime_host_linear_attn_gate_beta_f32(
-            &a_step,
-            &b_step,
-            &self.a_log,
-            &self.dt_bias,
+        ullm_runtime_sys::linear_attn_gate_beta_f32(
+            &self.a_buffer,
+            &self.b_buffer,
+            &self.a_log_buffer,
+            &self.dt_bias_buffer,
             self.value_heads,
             1,
-        );
+            &mut self.recurrent_gate_buffer,
+            &mut self.recurrent_beta_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident gate/beta: {err}"))?;
         self.recurrent_q_buffer
             .copy_from_host(0, &encode_f32_to_bytes(&qkv_split.q), Some(stream))
             .map_err(|err| format!("failed to copy linear-attn resident recurrent q: {err}"))?;
@@ -27483,12 +27904,6 @@ impl PackageLinearAttnResidentStepLayer {
         self.recurrent_v_buffer
             .copy_from_host(0, &encode_f32_to_bytes(&qkv_split.v), Some(stream))
             .map_err(|err| format!("failed to copy linear-attn resident recurrent v: {err}"))?;
-        self.recurrent_gate_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&gate), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident recurrent gate: {err}"))?;
-        self.recurrent_beta_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&beta), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident recurrent beta: {err}"))?;
         ullm_runtime_sys::linear_attn_recurrent_f32(
             &self.recurrent_q_buffer,
             &self.recurrent_k_buffer,
@@ -27505,9 +27920,6 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident recurrent step: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize linear-attn resident recurrent step: {err}")
-        })?;
 
         let recurrent_step = read_runtime_buffer_f32(
             &self.recurrent_output_buffer,
@@ -27515,58 +27927,19 @@ impl PackageLinearAttnResidentStepLayer {
             self.hidden,
             "linear-attn resident recurrent output",
         )?;
-        let mut attn_normed_bytes = vec![0_u8; hidden_bytes];
-        let recurrent_bytes = encode_f32_to_bytes(&recurrent_step);
+        let mut attn_normed = Vec::with_capacity(self.hidden);
         for value_head in 0..self.value_heads {
             let row_element_start = value_head * self.value_dim;
-            let row_byte_start = row_element_start * std::mem::size_of::<f32>();
-            let row_byte_end = row_byte_start + value_dim_bytes;
-            self.attn_norm_input_buffer
-                .copy_from_host(
-                    0,
-                    &recurrent_bytes[row_byte_start..row_byte_end],
-                    Some(stream),
-                )
-                .map_err(|err| {
-                    format!(
-                        "failed to copy linear-attn resident attention norm row {value_head}: {err}"
-                    )
-                })?;
-            ullm_runtime_sys::rmsnorm_f32(
-                &self.attn_norm_input_buffer,
-                &self.attn_norm_weight_buffer,
-                self.value_dim,
+            let row_element_end = row_element_start + self.value_dim;
+            let normed = runtime_host_rmsnorm_f32(
+                &recurrent_step[row_element_start..row_element_end],
+                &self.attn_norm_weight,
                 1e-6_f32,
-                &mut self.attn_norm_output_buffer,
-                Some(stream),
-            )
-            .map_err(|err| {
-                format!("failed to run linear-attn resident attention norm row {value_head}: {err}")
-            })?;
-            stream.synchronize().map_err(|err| {
-                format!(
-                    "failed to synchronize linear-attn resident attention norm row {value_head}: {err}"
-                )
-            })?;
-            self.attn_norm_output_buffer
-                .copy_to_host(
-                    0,
-                    &mut attn_normed_bytes[row_byte_start..row_byte_end],
-                    Some(stream),
-                )
-                .map_err(|err| {
-                    format!(
-                        "failed to copy linear-attn resident attention norm row {value_head}: {err}"
-                    )
-                })?;
-            stream.synchronize().map_err(|err| {
-                format!(
-                    "failed to synchronize linear-attn resident attention norm copy row {value_head}: {err}"
-                )
-            })?;
+            );
+            attn_normed.extend_from_slice(&normed);
         }
         self.attn_normed_buffer
-            .copy_from_host(0, &attn_normed_bytes, Some(stream))
+            .copy_from_host(0, &encode_f32_to_bytes(&attn_normed), Some(stream))
             .map_err(|err| {
                 format!("failed to copy linear-attn resident normed attention: {err}")
             })?;
@@ -27595,9 +27968,6 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident attention residual: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize linear-attn resident attention block: {err}")
-        })?;
 
         ullm_runtime_sys::rmsnorm_f32(
             &self.attn_block_output_buffer,
@@ -27651,9 +28021,6 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident layer residual: {err}"))?;
-        stream
-            .synchronize()
-            .map_err(|err| format!("failed to synchronize linear-attn resident layer: {err}"))?;
         read_runtime_buffer_f32(
             &self.layer_output_buffer,
             stream,

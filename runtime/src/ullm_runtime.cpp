@@ -1175,6 +1175,162 @@ HipRuntime &hip_runtime() {
     return runtime;
 }
 
+class RocBlasRuntime {
+public:
+    bool sgemv_row_major(
+        int device_id,
+        void *stream,
+        const void *matrix_ptr,
+        const void *input_ptr,
+        size_t rows,
+        size_t cols,
+        void *output_ptr,
+        std::string *error) {
+        load_once();
+        if (!available()) {
+            append_error(error, "rocBLAS is not available");
+            return false;
+        }
+        if (rows > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+            cols > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            append_error(error, "rocBLAS SGEMV dimensions exceed rocblas_int range");
+            return false;
+        }
+        if (!hip_runtime().set_device(device_id)) {
+            append_error(error, "failed to select HIP device for rocBLAS SGEMV");
+            return false;
+        }
+
+        void *handle = handle_for_device(device_id, error);
+        if (handle == nullptr) {
+            return false;
+        }
+        if (rocblas_set_stream_(handle, stream) != 0) {
+            append_error(error, "rocblas_set_stream failed for SGEMV");
+            return false;
+        }
+
+        constexpr int rocblas_operation_transpose = 112;
+        const int m = static_cast<int>(cols);
+        const int n = static_cast<int>(rows);
+        const int lda = static_cast<int>(cols);
+        const float alpha = 1.0f;
+        const float beta = 0.0f;
+        const int status = rocblas_sgemv_(
+            handle,
+            rocblas_operation_transpose,
+            m,
+            n,
+            &alpha,
+            static_cast<const float *>(matrix_ptr),
+            lda,
+            static_cast<const float *>(input_ptr),
+            1,
+            &beta,
+            static_cast<float *>(output_ptr),
+            1);
+        if (status != 0) {
+            append_error(error, "rocblas_sgemv failed with status " + std::to_string(status));
+            return false;
+        }
+        return true;
+    }
+
+private:
+    using rocblas_create_handle_fn = int (*)(void **);
+    using rocblas_destroy_handle_fn = int (*)(void *);
+    using rocblas_set_stream_fn = int (*)(void *, void *);
+    using rocblas_sgemv_fn = int (*)(
+        void *,
+        int,
+        int,
+        int,
+        const float *,
+        const float *,
+        int,
+        const float *,
+        int,
+        const float *,
+        float *,
+        int);
+
+    struct HandleEntry {
+        void *handle = nullptr;
+    };
+
+    bool available() const {
+        return rocblas_create_handle_ != nullptr && rocblas_destroy_handle_ != nullptr &&
+               rocblas_set_stream_ != nullptr && rocblas_sgemv_ != nullptr;
+    }
+
+    void *handle_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = handles_.find(device_id);
+        if (found != handles_.end()) {
+            return found->second.handle;
+        }
+        void *handle = nullptr;
+        if (rocblas_create_handle_(&handle) != 0 || handle == nullptr) {
+            append_error(error, "rocblas_create_handle failed");
+            return nullptr;
+        }
+        handles_.emplace(device_id, HandleEntry{handle});
+        return handle;
+    }
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    void load_once() {
+        std::call_once(load_flag_, [this]() {
+#if defined(__linux__)
+            constexpr std::array<const char *, 3> candidates = {
+                "librocblas.so",
+                "librocblas.so.5",
+                "librocblas.so.4",
+            };
+            for (const char *candidate : candidates) {
+                handle_ = dlopen(candidate, RTLD_LAZY | RTLD_LOCAL);
+                if (handle_ != nullptr) {
+                    break;
+                }
+            }
+            if (handle_ == nullptr) {
+                return;
+            }
+            rocblas_create_handle_ = reinterpret_cast<rocblas_create_handle_fn>(
+                dlsym(handle_, "rocblas_create_handle"));
+            rocblas_destroy_handle_ = reinterpret_cast<rocblas_destroy_handle_fn>(
+                dlsym(handle_, "rocblas_destroy_handle"));
+            rocblas_set_stream_ =
+                reinterpret_cast<rocblas_set_stream_fn>(dlsym(handle_, "rocblas_set_stream"));
+            rocblas_sgemv_ = reinterpret_cast<rocblas_sgemv_fn>(dlsym(handle_, "rocblas_sgemv"));
+#endif
+        });
+    }
+
+    std::once_flag load_flag_;
+    void *handle_ = nullptr;
+    rocblas_create_handle_fn rocblas_create_handle_ = nullptr;
+    rocblas_destroy_handle_fn rocblas_destroy_handle_ = nullptr;
+    rocblas_set_stream_fn rocblas_set_stream_ = nullptr;
+    rocblas_sgemv_fn rocblas_sgemv_ = nullptr;
+    std::mutex mutex_;
+    std::unordered_map<int, HandleEntry> handles_;
+};
+
+RocBlasRuntime &rocblas_runtime() {
+    static RocBlasRuntime runtime;
+    return runtime;
+}
+
 HipRtcRuntime &hiprtc_runtime() {
     static HipRtcRuntime runtime;
     return runtime;
@@ -1737,12 +1893,6 @@ bool matvec_f32_hip_kernel(
         }
         return false;
     }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 matvec HIP kernel";
-        }
-        return false;
-    }
     return true;
 }
 
@@ -1932,12 +2082,6 @@ bool rmsnorm_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 RMSNorm";
-        }
-        return false;
-    }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 RMSNorm HIP kernel";
         }
         return false;
     }
@@ -2393,12 +2537,6 @@ bool silu_mul_f32_hip_kernel(
         }
         return false;
     }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 SiLU-mul HIP kernel";
-        }
-        return false;
-    }
     return true;
 }
 
@@ -2577,12 +2715,6 @@ bool sigmoid_mul_f32_hip_kernel(
         }
         return false;
     }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 sigmoid-mul HIP kernel";
-        }
-        return false;
-    }
     return true;
 }
 
@@ -2758,12 +2890,6 @@ bool add_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 add";
-        }
-        return false;
-    }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 add HIP kernel";
         }
         return false;
     }
@@ -2955,12 +3081,6 @@ bool rope_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 RoPE";
-        }
-        return false;
-    }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 RoPE HIP kernel";
         }
         return false;
     }
@@ -3164,12 +3284,6 @@ bool causal_attn_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 causal attention";
-        }
-        return false;
-    }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 causal attention HIP kernel";
         }
         return false;
     }
@@ -3396,12 +3510,6 @@ bool decode_attn_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 decode attention";
-        }
-        return false;
-    }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 decode attention HIP kernel";
         }
         return false;
     }
@@ -3637,12 +3745,6 @@ bool paged_decode_attn_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 paged decode attention";
-        }
-        return false;
-    }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 paged decode attention HIP kernel";
         }
         return false;
     }
@@ -3894,12 +3996,6 @@ bool paged_kv_write_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 paged KV write";
-        }
-        return false;
-    }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 paged KV write HIP kernel";
         }
         return false;
     }
@@ -4173,12 +4269,6 @@ bool depthwise_conv1d_f32_hip_kernel(
         }
         return false;
     }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 depthwise conv1d HIP kernel";
-        }
-        return false;
-    }
     return true;
 }
 
@@ -4401,12 +4491,6 @@ bool linear_attn_gate_beta_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 linear attention gate beta";
-        }
-        return false;
-    }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 linear attention gate beta HIP kernel";
         }
         return false;
     }
@@ -4704,12 +4788,6 @@ bool linear_attn_recurrent_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 linear attention recurrent";
-        }
-        return false;
-    }
-    if (!synchronize_hip_staging(stream, device_id)) {
-        if (error != nullptr) {
-            *error = "failed to synchronize f32 linear attention recurrent HIP kernel";
         }
         return false;
     }
@@ -5337,6 +5415,26 @@ ullm_status ullm_runtime_matvec_f32(
         matvec_f32_host(matrix, input, rows, cols, output);
         set_error("");
         return ULLM_STATUS_OK;
+    }
+
+    if (std::getenv("ULLM_DISABLE_ROCBLAS_MATVEC") == nullptr) {
+        std::string rocblas_error;
+        if (rocblas_runtime().sgemv_row_major(
+                matrix_buffer->hip_device_id,
+                stream == nullptr ? nullptr : stream->stream,
+                matrix_buffer->ptr,
+                input_buffer->ptr,
+                rows,
+                cols,
+                output_buffer->ptr,
+                &rocblas_error)) {
+            set_error("");
+            return ULLM_STATUS_OK;
+        }
+        if (std::getenv("ULLM_REQUIRE_ROCBLAS_MATVEC") != nullptr) {
+            set_error(rocblas_error.empty() ? "rocBLAS SGEMV is unavailable" : rocblas_error.c_str());
+            return ULLM_STATUS_RUNTIME_ERROR;
+        }
     }
 
     std::string hip_kernel_error;
