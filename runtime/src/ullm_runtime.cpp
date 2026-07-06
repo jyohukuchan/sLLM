@@ -2632,6 +2632,13 @@ std::vector<std::string> hip_arch_candidates(int device_id) {
     return candidates;
 }
 
+unsigned int aq4_matvec_block_size_for_device(int device_id) {
+    int major = 0;
+    int minor = 0;
+    hip_runtime().device_compute_capability(device_id, &major, &minor);
+    return major >= 12 ? 64u : 256u;
+}
+
 class HipAq4KernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -3310,7 +3317,7 @@ bool aq4_matvec_f32_hip_kernel(
         return false;
     }
 
-    constexpr unsigned int block_size = 256;
+    const unsigned int block_size = aq4_matvec_block_size_for_device(device_id);
     if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec row count exceeds HIP grid limit";
@@ -3383,7 +3390,7 @@ bool aq4_matvec_add_f32_hip_kernel(
         return false;
     }
 
-    constexpr unsigned int block_size = 256;
+    const unsigned int block_size = aq4_matvec_block_size_for_device(device_id);
     if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec add row count exceeds HIP grid limit";
@@ -3780,7 +3787,7 @@ bool aq4_matvec_silu_mul_f32_hip_kernel(
         return false;
     }
 
-    constexpr unsigned int block_size = 256;
+    const unsigned int block_size = aq4_matvec_block_size_for_device(device_id);
     if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec SiLU-mul row count exceeds HIP grid limit";
@@ -4139,7 +4146,7 @@ bool aq4_matvec_gate_beta_f32_hip_kernel(
         return false;
     }
 
-    constexpr unsigned int block_size = 256;
+    const unsigned int block_size = aq4_matvec_block_size_for_device(device_id);
     if (heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec gate/beta head count exceeds HIP grid limit";
