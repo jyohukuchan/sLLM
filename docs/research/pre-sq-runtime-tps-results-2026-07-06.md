@@ -258,16 +258,16 @@ R9700 `prompt=16/generated=16` validation with the default HIP matvec path:
 
 | target | device | prompt | generated | lm_head mode | all-step tok/s | skip-1 tok/s | skip-2 tok/s | last-4 tok/s | p50 step ms | verified |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | :---: |
-| R9700/RDNA4 | `2` | `16` | `16` | `gpu_resident_f32` | 5.234 | 5.225 | 5.214 | 5.166 | 191.830 | true |
+| R9700/RDNA4 | `2` | `16` | `16` | `gpu_resident_f32` | 5.220 | 5.210 | 5.199 | 5.136 | 191.523 | true |
 
 Interpretation:
 
-- The first timed decode steps were the fastest measured steps (`186.199 ms`, then `186.115 ms`),
+- The first timed decode steps were the fastest measured steps (`186.422 ms`, then `186.343 ms`),
   so this result is not being suppressed by first-token warmup.
 - Decode step time slowly increases from about `186 ms` to `195 ms`; this is consistent with
   cache/position-dependent work, especially self-attention, rather than GPU warmup.
-- The average layer body cost is about `182.9 ms/token`. Linear-attention layers alone account for
-  about `153.7 ms/token`, which already exceeds the `50 ms/token` budget required for `20 tok/s`.
+- The average layer body cost is about `183.3 ms/token`. Linear-attention layers alone account for
+  about `154.0 ms/token`, which already exceeds the `50 ms/token` budget required for `20 tok/s`.
 - rocBLAS SGEMV was measured slightly slower for this 1-token decode path, so `matvec_f32` now uses
   the existing HIP kernel by default. rocBLAS remains available through
   `ULLM_ENABLE_ROCBLAS_MATVEC=1` or `ULLM_REQUIRE_ROCBLAS_MATVEC=1`.
