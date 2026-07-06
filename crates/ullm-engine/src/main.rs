@@ -27903,6 +27903,48 @@ impl PackageAq4ResidentMatvec {
         )
         .map_err(|err| format!("failed to run {label} AQ4 matvec: {err}"))
     }
+
+    fn matvec_silu_mul_with(
+        &self,
+        up: &Self,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<(), String> {
+        if self.rows != up.rows || self.cols != up.cols {
+            return Err(format!(
+                "{label} AQ4 fused MLP shape mismatch: gate=[{},{}] up=[{},{}]",
+                self.rows, self.cols, up.rows, up.cols
+            ));
+        }
+        ullm_runtime_sys::aq4_matvec_silu_mul_f32(
+            self.index_buffer.as_ref(),
+            self.scale_buffer.as_ref(),
+            self.codebook_buffer.as_ref(),
+            &self.scale_values_buffer,
+            self.row_scale_buffer.as_ref(),
+            self.scale_count,
+            self.group_size,
+            self.tensor_scale,
+            self.row_scale_count,
+            up.index_buffer.as_ref(),
+            up.scale_buffer.as_ref(),
+            up.codebook_buffer.as_ref(),
+            &up.scale_values_buffer,
+            up.row_scale_buffer.as_ref(),
+            up.scale_count,
+            up.group_size,
+            up.tensor_scale,
+            up.row_scale_count,
+            input_buffer,
+            self.rows,
+            self.cols,
+            output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} AQ4 fused matvec SiLU-mul: {err}"))
+    }
 }
 
 struct PackageLinearAttnResidentStepLayer {
@@ -27916,7 +27958,6 @@ struct PackageLinearAttnResidentStepLayer {
     q_scale: f32,
     qk_l2_norm: bool,
     kernel_size: usize,
-    intermediate: usize,
     conv_history: Vec<f32>,
     conv_weight: Vec<f32>,
     input_norm_weight: Vec<f32>,
@@ -27950,8 +27991,6 @@ struct PackageLinearAttnResidentStepLayer {
     attn_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
-    mlp_gate_buffer: ullm_runtime_sys::RuntimeBuffer,
-    mlp_up_buffer: ullm_runtime_sys::RuntimeBuffer,
     mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
     mlp_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -28273,12 +28312,6 @@ impl PackageLinearAttnResidentStepLayer {
         let post_normed_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident post normed: {err}"))?;
-        let mlp_gate_buffer = context
-            .alloc_buffer(intermediate_bytes)
-            .map_err(|err| format!("failed to allocate linear-attn resident MLP gate: {err}"))?;
-        let mlp_up_buffer = context
-            .alloc_buffer(intermediate_bytes)
-            .map_err(|err| format!("failed to allocate linear-attn resident MLP up: {err}"))?;
         let mlp_activation_buffer = context.alloc_buffer(intermediate_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident MLP activation: {err}")
         })?;
@@ -28324,7 +28357,6 @@ impl PackageLinearAttnResidentStepLayer {
             q_scale,
             qk_l2_norm,
             kernel_size,
-            intermediate,
             conv_history: vec![0.0_f32; conv_history_elements],
             conv_weight: conv.values,
             input_norm_weight: input_norm_weight_values,
@@ -28358,8 +28390,6 @@ impl PackageLinearAttnResidentStepLayer {
             attn_output_buffer,
             attn_block_output_buffer,
             post_normed_buffer,
-            mlp_gate_buffer,
-            mlp_up_buffer,
             mlp_activation_buffer,
             mlp_output_buffer,
             layer_output_buffer,
@@ -28542,26 +28572,13 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident post RMSNorm: {err}"))?;
-        self.mlp_gate_matrix.matvec(
+        self.mlp_gate_matrix.matvec_silu_mul_with(
+            &self.mlp_up_matrix,
             &self.post_normed_buffer,
-            &mut self.mlp_gate_buffer,
-            stream,
-            "linear-attn resident MLP gate",
-        )?;
-        self.mlp_up_matrix.matvec(
-            &self.post_normed_buffer,
-            &mut self.mlp_up_buffer,
-            stream,
-            "linear-attn resident MLP up",
-        )?;
-        ullm_runtime_sys::silu_mul_f32(
-            &self.mlp_gate_buffer,
-            &self.mlp_up_buffer,
-            self.intermediate,
             &mut self.mlp_activation_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident MLP activation: {err}"))?;
+            stream,
+            "linear-attn resident MLP gate/up activation",
+        )?;
         self.mlp_down_matrix.matvec(
             &self.mlp_activation_buffer,
             &mut self.mlp_output_buffer,

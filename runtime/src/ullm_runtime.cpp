@@ -357,6 +357,18 @@ public:
         return compile_kernel(arch, aq4_matvec_kernel_source(), "ullm_aq4_matvec_f32.hip", code, error);
     }
 
+    bool compile_aq4_matvec_silu_mul_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            aq4_matvec_silu_mul_kernel_source(),
+            "ullm_aq4_matvec_silu_mul_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_matvec_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, matvec_kernel_source(), "ullm_matvec_f32.hip", code, error);
     }
@@ -640,6 +652,145 @@ extern "C" __global__ void ullm_aq4_matvec_f32_kernel(
             value *= row_scales[row];
         }
         output[row] = value;
+    }
+}
+)";
+    }
+
+    static const char *aq4_matvec_silu_mul_kernel_source() {
+        return R"(
+__device__ float ullm_aq4_matvec_thread_sum(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row,
+    unsigned long long cols,
+    unsigned int tid,
+    unsigned int block_size) {
+    const unsigned long long row_offset = row * cols;
+    float sum = 0.0f;
+    if ((cols % group_size) == 0ull) {
+        const unsigned long long groups_per_row = cols / group_size;
+        for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
+             group_in_row += block_size) {
+            const unsigned long long group = row * groups_per_row + group_in_row;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index >= scale_count) {
+                continue;
+            }
+            float raw_sum = 0.0f;
+            const unsigned long long col_start = group_in_row * group_size;
+            for (unsigned long long offset = 0; offset < group_size; ++offset) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long element = row_offset + col;
+                const unsigned char packed = indices[element >> 1];
+                const unsigned char codebook_index =
+                    (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                raw_sum += codebook[codebook_index] * input[col];
+            }
+            sum += raw_sum * scale_values[scale_index] * tensor_scale;
+        }
+    } else {
+        for (unsigned long long col = tid; col < cols; col += block_size) {
+            const unsigned long long element = row_offset + col;
+            const unsigned char packed = indices[element >> 1];
+            const unsigned char codebook_index =
+                (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+            const unsigned long long group = element / group_size;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index < scale_count) {
+                const float value =
+                    codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+                sum += value * input[col];
+            }
+        }
+    }
+    return sum;
+}
+
+extern "C" __global__ void ullm_aq4_matvec_silu_mul_f32_kernel(
+    const unsigned char *gate_indices,
+    const unsigned char *gate_scale_indices,
+    const float *gate_codebook,
+    const float *gate_scale_values,
+    const float *gate_row_scales,
+    unsigned long long gate_scale_count,
+    unsigned long long gate_group_size,
+    float gate_tensor_scale,
+    unsigned long long gate_row_scale_count,
+    const unsigned char *up_indices,
+    const unsigned char *up_scale_indices,
+    const float *up_codebook,
+    const float *up_scale_values,
+    const float *up_row_scales,
+    unsigned long long up_scale_count,
+    unsigned long long up_group_size,
+    float up_tensor_scale,
+    unsigned long long up_row_scale_count,
+    const float *input,
+    unsigned long long rows,
+    unsigned long long cols,
+    float *output) {
+    const unsigned int row = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+    __shared__ float gate_partial[256];
+    __shared__ float up_partial[256];
+    float gate_sum = 0.0f;
+    float up_sum = 0.0f;
+    if (row < rows) {
+        gate_sum = ullm_aq4_matvec_thread_sum(
+            gate_indices,
+            gate_scale_indices,
+            gate_codebook,
+            gate_scale_values,
+            input,
+            gate_scale_count,
+            gate_group_size,
+            gate_tensor_scale,
+            row,
+            cols,
+            tid,
+            blockDim.x);
+        up_sum = ullm_aq4_matvec_thread_sum(
+            up_indices,
+            up_scale_indices,
+            up_codebook,
+            up_scale_values,
+            input,
+            up_scale_count,
+            up_group_size,
+            up_tensor_scale,
+            row,
+            cols,
+            tid,
+            blockDim.x);
+    }
+    gate_partial[tid] = gate_sum;
+    up_partial[tid] = up_sum;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            gate_partial[tid] += gate_partial[tid + offset];
+            up_partial[tid] += up_partial[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (tid == 0 && row < rows) {
+        float gate_value = gate_partial[0];
+        float up_value = up_partial[0];
+        if (gate_row_scales != nullptr && row < gate_row_scale_count) {
+            gate_value *= gate_row_scales[row];
+        }
+        if (up_row_scales != nullptr && row < up_row_scale_count) {
+            up_value *= up_row_scales[row];
+        }
+        const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
+        output[row] = gate_value * sigmoid * up_value;
     }
 }
 )";
@@ -1872,6 +2023,71 @@ bool aq4_matvec_f32_host(
     return true;
 }
 
+bool aq4_matvec_silu_mul_f32_host(
+    const std::uint8_t *gate_indices,
+    const std::uint8_t *gate_scale_indices,
+    const float *gate_codebook,
+    const float *gate_scale_values,
+    size_t gate_scale_count,
+    size_t gate_group_size,
+    float gate_tensor_scale,
+    const float *gate_row_scales,
+    size_t gate_row_scale_count,
+    const std::uint8_t *up_indices,
+    const std::uint8_t *up_scale_indices,
+    const float *up_codebook,
+    const float *up_scale_values,
+    size_t up_scale_count,
+    size_t up_group_size,
+    float up_tensor_scale,
+    const float *up_row_scales,
+    size_t up_row_scale_count,
+    const float *input,
+    size_t rows,
+    size_t cols,
+    float *output) {
+    std::vector<float> gate(rows);
+    std::vector<float> up(rows);
+    if (!aq4_matvec_f32_host(
+            gate_indices,
+            gate_scale_indices,
+            gate_codebook,
+            gate_scale_values,
+            gate_scale_count,
+            gate_group_size,
+            gate_tensor_scale,
+            input,
+            gate_row_scales,
+            gate_row_scale_count,
+            rows,
+            cols,
+            gate.data())) {
+        return false;
+    }
+    if (!aq4_matvec_f32_host(
+            up_indices,
+            up_scale_indices,
+            up_codebook,
+            up_scale_values,
+            up_scale_count,
+            up_group_size,
+            up_tensor_scale,
+            input,
+            up_row_scales,
+            up_row_scale_count,
+            rows,
+            cols,
+            up.data())) {
+        return false;
+    }
+    for (size_t row = 0; row < rows; ++row) {
+        const float gate_value = gate[row];
+        const float sigmoid = 1.0f / (1.0f + std::exp(-gate_value));
+        output[row] = gate_value * sigmoid * up[row];
+    }
+    return true;
+}
+
 class HipAq4MatvecKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -2128,6 +2344,362 @@ ullm_status aq4_matvec_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize AQ4 matvec HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipAq4MatvecSiluMulKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_aq4_matvec_silu_mul_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_aq4_matvec_silu_mul_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build AQ4 matvec SiLU-mul HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipAq4MatvecSiluMulKernelCache &hip_aq4_matvec_silu_mul_kernel_cache() {
+    static HipAq4MatvecSiluMulKernelCache cache;
+    return cache;
+}
+
+bool aq4_matvec_silu_mul_f32_hip_kernel(
+    const ullm_runtime_buffer *gate_index_buffer,
+    const ullm_runtime_buffer *gate_scale_buffer,
+    const ullm_runtime_buffer *gate_codebook_buffer,
+    const ullm_runtime_buffer *gate_scale_values_buffer,
+    const ullm_runtime_buffer *gate_row_scale_buffer,
+    size_t gate_scale_count,
+    size_t gate_group_size,
+    float gate_tensor_scale,
+    size_t gate_row_scale_count,
+    const ullm_runtime_buffer *up_index_buffer,
+    const ullm_runtime_buffer *up_scale_buffer,
+    const ullm_runtime_buffer *up_codebook_buffer,
+    const ullm_runtime_buffer *up_scale_values_buffer,
+    const ullm_runtime_buffer *up_row_scale_buffer,
+    size_t up_scale_count,
+    size_t up_group_size,
+    float up_tensor_scale,
+    size_t up_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = gate_index_buffer->hip_device_id;
+    void *function = hip_aq4_matvec_silu_mul_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "AQ4 matvec SiLU-mul row count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    void *gate_index_ptr = gate_index_buffer->ptr;
+    void *gate_scale_ptr = gate_scale_buffer->ptr;
+    void *gate_codebook_ptr = gate_codebook_buffer->ptr;
+    void *gate_scale_values_ptr = gate_scale_values_buffer->ptr;
+    void *gate_row_scale_ptr =
+        gate_row_scale_buffer == nullptr ? nullptr : gate_row_scale_buffer->ptr;
+    unsigned long long kernel_gate_scale_count =
+        static_cast<unsigned long long>(gate_scale_count);
+    unsigned long long kernel_gate_group_size = static_cast<unsigned long long>(gate_group_size);
+    unsigned long long kernel_gate_row_scale_count =
+        static_cast<unsigned long long>(gate_row_scale_count);
+    void *up_index_ptr = up_index_buffer->ptr;
+    void *up_scale_ptr = up_scale_buffer->ptr;
+    void *up_codebook_ptr = up_codebook_buffer->ptr;
+    void *up_scale_values_ptr = up_scale_values_buffer->ptr;
+    void *up_row_scale_ptr = up_row_scale_buffer == nullptr ? nullptr : up_row_scale_buffer->ptr;
+    unsigned long long kernel_up_scale_count = static_cast<unsigned long long>(up_scale_count);
+    unsigned long long kernel_up_group_size = static_cast<unsigned long long>(up_group_size);
+    unsigned long long kernel_up_row_scale_count =
+        static_cast<unsigned long long>(up_row_scale_count);
+    void *input_ptr = input_buffer->ptr;
+    unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &gate_index_ptr,
+        &gate_scale_ptr,
+        &gate_codebook_ptr,
+        &gate_scale_values_ptr,
+        &gate_row_scale_ptr,
+        &kernel_gate_scale_count,
+        &kernel_gate_group_size,
+        &gate_tensor_scale,
+        &kernel_gate_row_scale_count,
+        &up_index_ptr,
+        &up_scale_ptr,
+        &up_codebook_ptr,
+        &up_scale_values_ptr,
+        &up_row_scale_ptr,
+        &kernel_up_scale_count,
+        &kernel_up_group_size,
+        &up_tensor_scale,
+        &kernel_up_row_scale_count,
+        &input_ptr,
+        &kernel_rows,
+        &kernel_cols,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(rows),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for AQ4 matvec SiLU-mul";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status aq4_matvec_silu_mul_f32_hip_staging(
+    const ullm_runtime_buffer *gate_index_buffer,
+    const ullm_runtime_buffer *gate_scale_buffer,
+    const ullm_runtime_buffer *gate_codebook_buffer,
+    const ullm_runtime_buffer *gate_scale_values_buffer,
+    const ullm_runtime_buffer *gate_row_scale_buffer,
+    size_t gate_scale_count,
+    size_t gate_group_size,
+    float gate_tensor_scale,
+    size_t gate_row_scale_count,
+    size_t gate_required_index_bytes,
+    size_t gate_groups,
+    size_t gate_codebook_entries,
+    const ullm_runtime_buffer *up_index_buffer,
+    const ullm_runtime_buffer *up_scale_buffer,
+    const ullm_runtime_buffer *up_codebook_buffer,
+    const ullm_runtime_buffer *up_scale_values_buffer,
+    const ullm_runtime_buffer *up_row_scale_buffer,
+    size_t up_scale_count,
+    size_t up_group_size,
+    float up_tensor_scale,
+    size_t up_row_scale_count,
+    size_t up_required_index_bytes,
+    size_t up_groups,
+    size_t up_codebook_entries,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<std::uint8_t> host_gate_indices(gate_required_index_bytes);
+    std::vector<std::uint8_t> host_gate_scale_indices(gate_groups);
+    std::vector<float> host_gate_codebook(gate_codebook_entries);
+    std::vector<float> host_gate_scale_values(gate_scale_count);
+    std::vector<float> host_gate_row_scales(gate_row_scale_count);
+    std::vector<std::uint8_t> host_up_indices(up_required_index_bytes);
+    std::vector<std::uint8_t> host_up_scale_indices(up_groups);
+    std::vector<float> host_up_codebook(up_codebook_entries);
+    std::vector<float> host_up_scale_values(up_scale_count);
+    std::vector<float> host_up_row_scales(up_row_scale_count);
+    std::vector<float> host_input(cols);
+    std::vector<float> host_output(rows);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = gate_index_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_gate_indices.data(),
+            gate_index_buffer->ptr,
+            gate_required_index_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_gate_scale_indices.data(),
+            gate_scale_buffer->ptr,
+            gate_groups,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_gate_codebook.data(),
+            gate_codebook_buffer->ptr,
+            gate_codebook_buffer->bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_gate_scale_values.data(),
+            gate_scale_values_buffer->ptr,
+            gate_scale_count * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        (gate_row_scale_buffer != nullptr && gate_row_scale_count > 0 &&
+         !hip_runtime().copy_async(
+             host_gate_row_scales.data(),
+             gate_row_scale_buffer->ptr,
+             gate_row_scale_count * sizeof(float),
+             HIP_MEMCPY_DEVICE_TO_HOST,
+             hip_stream,
+             device_id)) ||
+        !hip_runtime().copy_async(
+            host_up_indices.data(),
+            up_index_buffer->ptr,
+            up_required_index_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_up_scale_indices.data(),
+            up_scale_buffer->ptr,
+            up_groups,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_up_codebook.data(),
+            up_codebook_buffer->ptr,
+            up_codebook_buffer->bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_up_scale_values.data(),
+            up_scale_values_buffer->ptr,
+            up_scale_count * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        (up_row_scale_buffer != nullptr && up_row_scale_count > 0 &&
+         !hip_runtime().copy_async(
+             host_up_row_scales.data(),
+             up_row_scale_buffer->ptr,
+             up_row_scale_count * sizeof(float),
+             HIP_MEMCPY_DEVICE_TO_HOST,
+             hip_stream,
+             device_id)) ||
+        !hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            cols * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy AQ4 matvec SiLU-mul HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize AQ4 matvec SiLU-mul HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!aq4_matvec_silu_mul_f32_host(
+            host_gate_indices.data(),
+            host_gate_scale_indices.data(),
+            host_gate_codebook.data(),
+            host_gate_scale_values.data(),
+            gate_scale_count,
+            gate_group_size,
+            gate_tensor_scale,
+            gate_row_scale_buffer == nullptr ? nullptr : host_gate_row_scales.data(),
+            gate_row_scale_count,
+            host_up_indices.data(),
+            host_up_scale_indices.data(),
+            host_up_codebook.data(),
+            host_up_scale_values.data(),
+            up_scale_count,
+            up_group_size,
+            up_tensor_scale,
+            up_row_scale_buffer == nullptr ? nullptr : host_up_row_scales.data(),
+            up_row_scale_count,
+            host_input.data(),
+            rows,
+            cols,
+            host_output.data())) {
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            rows * sizeof(float),
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy AQ4 matvec SiLU-mul output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize AQ4 matvec SiLU-mul HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -5910,6 +6482,244 @@ ullm_status ullm_runtime_aq4_matvec_f32(
         required_index_bytes,
         groups,
         codebook_entries,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_aq4_matvec_silu_mul_f32(
+    const ullm_runtime_buffer *gate_index_buffer,
+    const ullm_runtime_buffer *gate_scale_buffer,
+    const ullm_runtime_buffer *gate_codebook_buffer,
+    const ullm_runtime_buffer *gate_scale_values_buffer,
+    const ullm_runtime_buffer *gate_row_scale_buffer,
+    size_t gate_scale_count,
+    size_t gate_group_size,
+    float gate_tensor_scale,
+    size_t gate_row_scale_count,
+    const ullm_runtime_buffer *up_index_buffer,
+    const ullm_runtime_buffer *up_scale_buffer,
+    const ullm_runtime_buffer *up_codebook_buffer,
+    const ullm_runtime_buffer *up_scale_values_buffer,
+    const ullm_runtime_buffer *up_row_scale_buffer,
+    size_t up_scale_count,
+    size_t up_group_size,
+    float up_tensor_scale,
+    size_t up_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (gate_index_buffer == nullptr || gate_scale_buffer == nullptr ||
+        gate_codebook_buffer == nullptr || gate_scale_values_buffer == nullptr ||
+        up_index_buffer == nullptr || up_scale_buffer == nullptr ||
+        up_codebook_buffer == nullptr || up_scale_values_buffer == nullptr ||
+        input_buffer == nullptr || output_buffer == nullptr) {
+        set_error("AQ4 matvec SiLU-mul received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_scale_count == 0 || up_scale_count == 0) {
+        set_error("AQ4 matvec SiLU-mul scale table is empty");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_group_size == 0 || up_group_size == 0) {
+        set_error("AQ4 matvec SiLU-mul group size must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rows == 0 || cols == 0) {
+        set_error("AQ4 matvec SiLU-mul rows and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(gate_tensor_scale) || gate_tensor_scale <= 0.0f ||
+        !std::isfinite(up_tensor_scale) || up_tensor_scale <= 0.0f) {
+        set_error("AQ4 matvec SiLU-mul tensor scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(gate_index_buffer, gate_scale_buffer) ||
+        !buffers_share_backend(gate_index_buffer, gate_codebook_buffer) ||
+        !buffers_share_backend(gate_index_buffer, gate_scale_values_buffer) ||
+        !buffers_share_backend(gate_index_buffer, up_index_buffer) ||
+        !buffers_share_backend(gate_index_buffer, up_scale_buffer) ||
+        !buffers_share_backend(gate_index_buffer, up_codebook_buffer) ||
+        !buffers_share_backend(gate_index_buffer, up_scale_values_buffer) ||
+        !buffers_share_backend(gate_index_buffer, input_buffer) ||
+        !buffers_share_backend(gate_index_buffer, output_buffer) ||
+        (gate_row_scale_buffer != nullptr &&
+         !buffers_share_backend(gate_index_buffer, gate_row_scale_buffer)) ||
+        (up_row_scale_buffer != nullptr &&
+         !buffers_share_backend(gate_index_buffer, up_row_scale_buffer))) {
+        set_error("AQ4 matvec SiLU-mul buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("AQ4 matvec SiLU-mul stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / rows) {
+        set_error("AQ4 matvec SiLU-mul matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t elements = rows * cols;
+    const size_t gate_required_index_bytes = elements / 2 + (elements % 2);
+    const size_t up_required_index_bytes = gate_required_index_bytes;
+    const size_t gate_groups =
+        elements / gate_group_size + (elements % gate_group_size == 0 ? 0 : 1);
+    const size_t up_groups = elements / up_group_size + (elements % up_group_size == 0 ? 0 : 1);
+    if (cols > max_size / sizeof(float) ||
+        rows > max_size / sizeof(float) ||
+        gate_scale_count > max_size / sizeof(float) ||
+        up_scale_count > max_size / sizeof(float) ||
+        gate_row_scale_count > max_size / sizeof(float) ||
+        up_row_scale_count > max_size / sizeof(float)) {
+        set_error("AQ4 matvec SiLU-mul byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_input_bytes = cols * sizeof(float);
+    const size_t required_output_bytes = rows * sizeof(float);
+    const size_t gate_required_scale_value_bytes = gate_scale_count * sizeof(float);
+    const size_t up_required_scale_value_bytes = up_scale_count * sizeof(float);
+    const size_t gate_required_row_scale_bytes = gate_row_scale_count * sizeof(float);
+    const size_t up_required_row_scale_bytes = up_row_scale_count * sizeof(float);
+    if (gate_index_buffer->bytes < gate_required_index_bytes ||
+        up_index_buffer->bytes < up_required_index_bytes) {
+        set_error("AQ4 matvec SiLU-mul index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_scale_buffer->bytes < gate_groups || up_scale_buffer->bytes < up_groups) {
+        set_error("AQ4 matvec SiLU-mul scale index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_scale_values_buffer->bytes < gate_required_scale_value_bytes ||
+        up_scale_values_buffer->bytes < up_required_scale_value_bytes) {
+        set_error("AQ4 matvec SiLU-mul scale value buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("AQ4 matvec SiLU-mul input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((gate_row_scale_buffer != nullptr &&
+         gate_row_scale_buffer->bytes < gate_required_row_scale_bytes) ||
+        (up_row_scale_buffer != nullptr &&
+         up_row_scale_buffer->bytes < up_required_row_scale_bytes)) {
+        set_error("AQ4 matvec SiLU-mul row scale buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_output_bytes) {
+        set_error("AQ4 matvec SiLU-mul output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_codebook_buffer->bytes % sizeof(float) != 0 ||
+        up_codebook_buffer->bytes % sizeof(float) != 0) {
+        set_error("AQ4 matvec SiLU-mul codebook buffer size is not a multiple of f32");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t gate_codebook_entries = gate_codebook_buffer->bytes / sizeof(float);
+    const size_t up_codebook_entries = up_codebook_buffer->bytes / sizeof(float);
+    if (gate_codebook_entries < 16 || up_codebook_entries < 16) {
+        set_error("AQ4 matvec SiLU-mul requires at least 16 codebook entries");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (gate_index_buffer->backend == BackendKind::Cpu) {
+        if (!aq4_matvec_silu_mul_f32_host(
+                static_cast<const std::uint8_t *>(gate_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(gate_scale_buffer->ptr),
+                static_cast<const float *>(gate_codebook_buffer->ptr),
+                static_cast<const float *>(gate_scale_values_buffer->ptr),
+                gate_scale_count,
+                gate_group_size,
+                gate_tensor_scale,
+                gate_row_scale_buffer == nullptr
+                    ? nullptr
+                    : static_cast<const float *>(gate_row_scale_buffer->ptr),
+                gate_row_scale_count,
+                static_cast<const std::uint8_t *>(up_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(up_scale_buffer->ptr),
+                static_cast<const float *>(up_codebook_buffer->ptr),
+                static_cast<const float *>(up_scale_values_buffer->ptr),
+                up_scale_count,
+                up_group_size,
+                up_tensor_scale,
+                up_row_scale_buffer == nullptr ? nullptr : static_cast<const float *>(up_row_scale_buffer->ptr),
+                up_row_scale_count,
+                static_cast<const float *>(input_buffer->ptr),
+                rows,
+                cols,
+                static_cast<float *>(output_buffer->ptr))) {
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (aq4_matvec_silu_mul_f32_hip_kernel(
+            gate_index_buffer,
+            gate_scale_buffer,
+            gate_codebook_buffer,
+            gate_scale_values_buffer,
+            gate_row_scale_buffer,
+            gate_scale_count,
+            gate_group_size,
+            gate_tensor_scale,
+            gate_row_scale_count,
+            up_index_buffer,
+            up_scale_buffer,
+            up_codebook_buffer,
+            up_scale_values_buffer,
+            up_row_scale_buffer,
+            up_scale_count,
+            up_group_size,
+            up_tensor_scale,
+            up_row_scale_count,
+            input_buffer,
+            rows,
+            cols,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_AQ4_MATVEC_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "AQ4 matvec SiLU-mul HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return aq4_matvec_silu_mul_f32_hip_staging(
+        gate_index_buffer,
+        gate_scale_buffer,
+        gate_codebook_buffer,
+        gate_scale_values_buffer,
+        gate_row_scale_buffer,
+        gate_scale_count,
+        gate_group_size,
+        gate_tensor_scale,
+        gate_row_scale_count,
+        gate_required_index_bytes,
+        gate_groups,
+        gate_codebook_entries,
+        up_index_buffer,
+        up_scale_buffer,
+        up_codebook_buffer,
+        up_scale_values_buffer,
+        up_row_scale_buffer,
+        up_scale_count,
+        up_group_size,
+        up_tensor_scale,
+        up_row_scale_count,
+        up_required_index_bytes,
+        up_groups,
+        up_codebook_entries,
+        input_buffer,
+        rows,
+        cols,
         output_buffer,
         stream);
 }

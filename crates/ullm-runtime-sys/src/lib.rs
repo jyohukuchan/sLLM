@@ -94,6 +94,31 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_aq4_matvec_silu_mul_f32(
+        gate_index_buffer: *const RawRuntimeBuffer,
+        gate_scale_buffer: *const RawRuntimeBuffer,
+        gate_codebook_buffer: *const RawRuntimeBuffer,
+        gate_scale_values_buffer: *const RawRuntimeBuffer,
+        gate_row_scale_buffer: *const RawRuntimeBuffer,
+        gate_scale_count: usize,
+        gate_group_size: usize,
+        gate_tensor_scale: f32,
+        gate_row_scale_count: usize,
+        up_index_buffer: *const RawRuntimeBuffer,
+        up_scale_buffer: *const RawRuntimeBuffer,
+        up_codebook_buffer: *const RawRuntimeBuffer,
+        up_scale_values_buffer: *const RawRuntimeBuffer,
+        up_row_scale_buffer: *const RawRuntimeBuffer,
+        up_scale_count: usize,
+        up_group_size: usize,
+        up_tensor_scale: f32,
+        up_row_scale_count: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_matvec_f32(
         matrix_buffer: *const RawRuntimeBuffer,
         input_buffer: *const RawRuntimeBuffer,
@@ -536,6 +561,135 @@ pub fn aq4_matvec_f32(
             group_size,
             tensor_scale,
             row_scale_count,
+            rows,
+            cols,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn aq4_matvec_silu_mul_f32(
+    gate_index_buffer: &RuntimeBuffer,
+    gate_scale_buffer: &RuntimeBuffer,
+    gate_codebook_buffer: &RuntimeBuffer,
+    gate_scale_values_buffer: &RuntimeBuffer,
+    gate_row_scale_buffer: Option<&RuntimeBuffer>,
+    gate_scale_count: usize,
+    gate_group_size: usize,
+    gate_tensor_scale: f32,
+    gate_row_scale_count: usize,
+    up_index_buffer: &RuntimeBuffer,
+    up_scale_buffer: &RuntimeBuffer,
+    up_codebook_buffer: &RuntimeBuffer,
+    up_scale_values_buffer: &RuntimeBuffer,
+    up_row_scale_buffer: Option<&RuntimeBuffer>,
+    up_scale_count: usize,
+    up_group_size: usize,
+    up_tensor_scale: f32,
+    up_row_scale_count: usize,
+    input_buffer: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if gate_scale_count == 0 || up_scale_count == 0 {
+        return Err("AQ4 matvec SiLU-mul scale table is empty".to_string());
+    }
+    if gate_group_size == 0 || up_group_size == 0 {
+        return Err("AQ4 matvec SiLU-mul group size must be greater than zero".to_string());
+    }
+    if rows == 0 || cols == 0 {
+        return Err("AQ4 matvec SiLU-mul rows and cols must be greater than zero".to_string());
+    }
+    if !gate_tensor_scale.is_finite()
+        || gate_tensor_scale <= 0.0
+        || !up_tensor_scale.is_finite()
+        || up_tensor_scale <= 0.0
+    {
+        return Err(
+            "AQ4 matvec SiLU-mul tensor scale must be finite and greater than zero".to_string(),
+        );
+    }
+    let elements = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "AQ4 matvec SiLU-mul matrix element count overflows".to_string())?;
+    let index_bytes = elements / 2 + usize::from(!elements.is_multiple_of(2));
+    let gate_groups =
+        elements / gate_group_size + usize::from(!elements.is_multiple_of(gate_group_size));
+    let up_groups = elements / up_group_size + usize::from(!elements.is_multiple_of(up_group_size));
+    let gate_scale_value_bytes = gate_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec SiLU-mul gate scale value byte size overflows".to_string())?;
+    let up_scale_value_bytes = up_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec SiLU-mul up scale value byte size overflows".to_string())?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec SiLU-mul input byte size overflows".to_string())?;
+    let output_bytes = rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec SiLU-mul output byte size overflows".to_string())?;
+    let gate_row_scale_bytes = gate_row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec SiLU-mul gate row scale byte size overflows".to_string())?;
+    let up_row_scale_bytes = up_row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec SiLU-mul up row scale byte size overflows".to_string())?;
+    check_copy_range(0, index_bytes, gate_index_buffer.size()?)?;
+    check_copy_range(0, index_bytes, up_index_buffer.size()?)?;
+    check_copy_range(0, gate_groups, gate_scale_buffer.size()?)?;
+    check_copy_range(0, up_groups, up_scale_buffer.size()?)?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        gate_codebook_buffer.size()?,
+    )?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        up_codebook_buffer.size()?,
+    )?;
+    check_copy_range(0, gate_scale_value_bytes, gate_scale_values_buffer.size()?)?;
+    check_copy_range(0, up_scale_value_bytes, up_scale_values_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    if let Some(gate_row_scale_buffer) = gate_row_scale_buffer {
+        check_copy_range(0, gate_row_scale_bytes, gate_row_scale_buffer.size()?)?;
+    }
+    if let Some(up_row_scale_buffer) = up_row_scale_buffer {
+        check_copy_range(0, up_row_scale_bytes, up_row_scale_buffer.size()?)?;
+    }
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    let gate_row_scale_raw = gate_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let up_row_scale_raw = up_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    status_to_result(unsafe {
+        ullm_runtime_aq4_matvec_silu_mul_f32(
+            gate_index_buffer.raw.as_ptr(),
+            gate_scale_buffer.raw.as_ptr(),
+            gate_codebook_buffer.raw.as_ptr(),
+            gate_scale_values_buffer.raw.as_ptr(),
+            gate_row_scale_raw,
+            gate_scale_count,
+            gate_group_size,
+            gate_tensor_scale,
+            gate_row_scale_count,
+            up_index_buffer.raw.as_ptr(),
+            up_scale_buffer.raw.as_ptr(),
+            up_codebook_buffer.raw.as_ptr(),
+            up_scale_values_buffer.raw.as_ptr(),
+            up_row_scale_raw,
+            up_scale_count,
+            up_group_size,
+            up_tensor_scale,
+            up_row_scale_count,
+            input_buffer.raw.as_ptr(),
             rows,
             cols,
             output_buffer.raw.as_ptr(),
@@ -2994,6 +3148,100 @@ mod tests {
     }
 
     #[test]
+    fn cpu_aq4_matvec_silu_mul_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut gate_index = context.alloc_buffer(3).unwrap();
+        let mut gate_scale = context.alloc_buffer(3).unwrap();
+        let mut gate_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate_scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut up_index = context.alloc_buffer(3).unwrap();
+        let mut up_scale = context.alloc_buffer(3).unwrap();
+        let mut up_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut up_scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        gate_index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        up_index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        gate_scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        up_scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        gate_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        up_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        gate_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        up_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_matvec_silu_mul_f32(
+            &gate_index,
+            &gate_scale,
+            &gate_codebook,
+            &gate_scale_values,
+            None,
+            2,
+            2,
+            0.1,
+            0,
+            &up_index,
+            &up_scale,
+            &up_codebook,
+            &up_scale_values,
+            None,
+            2,
+            2,
+            0.2,
+            0,
+            &input,
+            2,
+            3,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_silu_mul(&[1.125, 0.3], &[2.25, 0.6]);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-6);
+    }
+
+    #[test]
     fn first_hip_aq4_dequant_f32_materializes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -3108,6 +3356,103 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_eq!(le_bytes_to_f32s(&output_bytes), vec![112.5, 30.0]);
+    }
+
+    #[test]
+    fn first_hip_aq4_matvec_silu_mul_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut gate_index = context.alloc_buffer(3).unwrap();
+        let mut gate_scale = context.alloc_buffer(3).unwrap();
+        let mut gate_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate_scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut up_index = context.alloc_buffer(3).unwrap();
+        let mut up_scale = context.alloc_buffer(3).unwrap();
+        let mut up_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut up_scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        gate_index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        up_index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        gate_scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        up_scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        gate_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        up_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        gate_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        up_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_matvec_silu_mul_f32(
+            &gate_index,
+            &gate_scale,
+            &gate_codebook,
+            &gate_scale_values,
+            None,
+            2,
+            2,
+            0.1,
+            0,
+            &up_index,
+            &up_scale,
+            &up_codebook,
+            &up_scale_values,
+            None,
+            2,
+            2,
+            0.2,
+            0,
+            &input,
+            2,
+            3,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_silu_mul(&[1.125, 0.3], &[2.25, 0.6]);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-6);
     }
 
     #[test]
