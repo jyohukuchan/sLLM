@@ -133,6 +133,13 @@ fn main() -> ExitCode {
             env::args().nth(4),
             env::args().nth(5),
         ),
+        Some("package-aq4-matvec-smoke") => package_aq4_matvec_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+        ),
         Some("package-rmsnorm-smoke") => package_rmsnorm_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -5691,6 +5698,381 @@ fn package_materialize_matvec_smoke(
         device_index,
         info.name,
         format_f32_preview(&preview)
+    );
+    ExitCode::SUCCESS
+}
+
+fn package_aq4_matvec_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    tensor_selector: Option<String>,
+    repeats: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-aq4-matvec-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let repeats = match parse_optional_usize(repeats, 10, "repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let selector = TensorSelector::parse(tensor_selector.as_deref());
+    let bundle = match ullm_engine::package::select_tensor_payload_bundle(&path, &selector) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            eprintln!("failed to select package tensor payloads: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut registry = WeightRegistry::new();
+    let registry_index = match registry.load_and_insert(
+        &mut context,
+        &mut stream,
+        &bundle,
+        LoadOptions {
+            chunk_bytes,
+            verify: true,
+        },
+    ) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("failed to register package tensor payloads: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let Some(loaded) = registry.get(registry_index) else {
+        eprintln!("registered tensor disappeared from weight registry");
+        return ExitCode::from(1);
+    };
+    let materialize = match materialize_config(loaded) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let (rows, cols) = match matrix_shape_rows_cols(&loaded.shape, materialize.elements) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let output_byte_count = match rows.checked_mul(std::mem::size_of::<f32>()) {
+        Some(value) => value,
+        None => {
+            eprintln!("matvec output byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut row_scale_values = None;
+    let mut row_scale_buffer = None;
+    if !bundle.row_scale_overrides.is_empty() {
+        let mut row_scales = vec![1.0_f32; rows];
+        for entry in &bundle.row_scale_overrides {
+            if entry.row_index >= rows || !entry.scale.is_finite() {
+                eprintln!(
+                    "invalid row scale override for {} row {} scale {}",
+                    loaded.tensor_name, entry.row_index, entry.scale
+                );
+                return ExitCode::from(1);
+            }
+            row_scales[entry.row_index] *= entry.scale;
+        }
+        let mut buffer = match context.alloc_buffer(rows * std::mem::size_of::<f32>()) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate row scale buffer: {err}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(err) =
+            buffer.copy_from_host(0, &encode_f32_to_bytes(&row_scales), Some(&mut stream))
+        {
+            eprintln!("failed to copy row scales into runtime buffer: {err}");
+            return ExitCode::from(1);
+        }
+        row_scale_values = Some(row_scales);
+        row_scale_buffer = Some(buffer);
+    }
+    let row_scale_count = if row_scale_buffer.is_some() { rows } else { 0 };
+
+    let mut scale_values_buffer =
+        match context.alloc_buffer(materialize.scale_values.len() * std::mem::size_of::<f32>()) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                eprintln!("failed to allocate scale values buffer: {err}");
+                return ExitCode::from(1);
+            }
+        };
+    if let Err(err) = scale_values_buffer.copy_from_host(
+        0,
+        &encode_f32_to_bytes(&materialize.scale_values),
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to copy scale values into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut input = Vec::with_capacity(cols);
+    for i in 0..cols {
+        input.push(((i % 17) as f32 - 8.0) / 16.0);
+    }
+    let input_bytes = encode_f32_to_bytes(&input);
+    let mut input_buffer = match context.alloc_buffer(input_bytes.len()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate input buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = input_buffer.copy_from_host(0, &input_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy input vector into runtime buffer: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after AQ4 matvec setup: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut matrix = match context.alloc_buffer(materialize.output_bytes) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate materialized matrix buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = ullm_runtime_sys::aq4_dequant_f32(
+        loaded.index.buffer.as_ref(),
+        loaded.scale.buffer.as_ref(),
+        loaded.codebook.buffer.as_ref(),
+        &materialize.scale_values,
+        materialize.group_size,
+        materialize.tensor_scale,
+        materialize.elements,
+        &mut matrix,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to materialize AQ4 tensor: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after materialize: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut f32_output = match context.alloc_buffer(output_byte_count) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate f32 output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut aq4_output = match context.alloc_buffer(output_byte_count) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("failed to allocate AQ4 output buffer: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = ullm_runtime_sys::matvec_f32(
+        &matrix,
+        &input_buffer,
+        rows,
+        cols,
+        &mut f32_output,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to warm up f32 matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = ullm_runtime_sys::aq4_matvec_f32(
+        loaded.index.buffer.as_ref(),
+        loaded.scale.buffer.as_ref(),
+        loaded.codebook.buffer.as_ref(),
+        &scale_values_buffer,
+        &input_buffer,
+        row_scale_buffer.as_ref(),
+        materialize.scale_values.len(),
+        materialize.group_size,
+        materialize.tensor_scale,
+        row_scale_count,
+        rows,
+        cols,
+        &mut aq4_output,
+        Some(&mut stream),
+    ) {
+        eprintln!("failed to warm up AQ4 matvec: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after matvec warmup: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut f32_step_ms = Vec::with_capacity(repeats);
+    for _ in 0..repeats {
+        let started = Instant::now();
+        if let Err(err) = ullm_runtime_sys::matvec_f32(
+            &matrix,
+            &input_buffer,
+            rows,
+            cols,
+            &mut f32_output,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run f32 matvec: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after f32 matvec: {err}");
+            return ExitCode::from(1);
+        }
+        f32_step_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    let mut aq4_step_ms = Vec::with_capacity(repeats);
+    for _ in 0..repeats {
+        let started = Instant::now();
+        if let Err(err) = ullm_runtime_sys::aq4_matvec_f32(
+            loaded.index.buffer.as_ref(),
+            loaded.scale.buffer.as_ref(),
+            loaded.codebook.buffer.as_ref(),
+            &scale_values_buffer,
+            &input_buffer,
+            row_scale_buffer.as_ref(),
+            materialize.scale_values.len(),
+            materialize.group_size,
+            materialize.tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            &mut aq4_output,
+            Some(&mut stream),
+        ) {
+            eprintln!("failed to run AQ4 matvec: {err}");
+            return ExitCode::from(1);
+        }
+        if let Err(err) = stream.synchronize() {
+            eprintln!("failed to synchronize runtime stream after AQ4 matvec: {err}");
+            return ExitCode::from(1);
+        }
+        aq4_step_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    let mut f32_bytes = vec![0_u8; output_byte_count];
+    if let Err(err) = f32_output.copy_to_host(0, &mut f32_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy f32 matvec output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    let mut aq4_bytes = vec![0_u8; output_byte_count];
+    if let Err(err) = aq4_output.copy_to_host(0, &mut aq4_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy AQ4 matvec output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after output copies: {err}");
+        return ExitCode::from(1);
+    }
+    let mut f32_values = decode_f32_le_values(&f32_bytes);
+    if let Some(row_scales) = row_scale_values.as_ref() {
+        for (value, row_scale) in f32_values.iter_mut().zip(row_scales.iter()) {
+            *value *= *row_scale;
+        }
+    }
+    let aq4_values = decode_f32_le_values(&aq4_bytes);
+    let mut max_abs_diff = 0.0_f32;
+    let mut sum_sq_diff = 0.0_f64;
+    let mut max_ref_abs = 0.0_f32;
+    let mut nan_or_inf = false;
+    for (aq4_value, f32_value) in aq4_values.iter().zip(f32_values.iter()) {
+        if !aq4_value.is_finite() || !f32_value.is_finite() {
+            nan_or_inf = true;
+        }
+        let diff = (aq4_value - f32_value).abs();
+        max_abs_diff = max_abs_diff.max(diff);
+        max_ref_abs = max_ref_abs.max(f32_value.abs());
+        sum_sq_diff += f64::from(diff) * f64::from(diff);
+    }
+    let rms_diff = if rows > 0 {
+        (sum_sq_diff / rows as f64).sqrt()
+    } else {
+        0.0
+    };
+    let tolerance = 1e-3_f32.max(max_ref_abs * 1e-5_f32);
+    if nan_or_inf || max_abs_diff > tolerance {
+        eprintln!(
+            "AQ4 matvec mismatch: max_abs_diff={max_abs_diff:.9} tolerance={tolerance:.9} rms_diff={rms_diff:.9}"
+        );
+        return ExitCode::from(1);
+    }
+
+    let f32_mean_ms = f32_step_ms.iter().sum::<f64>() / f32_step_ms.len() as f64;
+    let aq4_mean_ms = aq4_step_ms.iter().sum::<f64>() / aq4_step_ms.len() as f64;
+    println!(
+        "package-aq4-matvec-smoke package={} registry_index={} tensor_index={} tensor=\"{}\" elements={} rows={} cols={} output_bytes={} scale_format={} scale_count={} group_size={} tensor_scale={:.9} row_scale_overrides={} repeats={} backend={} device_index={} name=\"{}\" f32_mean_ms={:.6} aq4_mean_ms={:.6} speedup_vs_f32={:.6} max_abs_diff={max_abs_diff:.9} rms_diff={rms_diff:.9} tolerance={tolerance:.9} f32_preview={} aq4_preview={} verified=true",
+        path,
+        registry_index,
+        loaded.tensor_index,
+        loaded.tensor_name,
+        materialize.elements,
+        rows,
+        cols,
+        output_byte_count,
+        materialize.scale_format,
+        materialize.scale_values.len(),
+        materialize.group_size,
+        materialize.tensor_scale,
+        bundle.row_scale_overrides.len(),
+        repeats,
+        info.backend,
+        device_index,
+        info.name,
+        f32_mean_ms,
+        aq4_mean_ms,
+        f32_mean_ms / aq4_mean_ms,
+        format_f32_preview(&f32_values[..rows.min(8)]),
+        format_f32_preview(&aq4_values[..rows.min(8)])
     );
     ExitCode::SUCCESS
 }
@@ -26582,6 +26964,9 @@ fn print_help() {
         "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
     );
     eprintln!(
+        "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
+    );
+    eprintln!(
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32]"
     );
     eprintln!(
@@ -27393,6 +27778,133 @@ fn read_runtime_buffer_f32(
     Ok(decode_f32_le_values(&bytes))
 }
 
+struct PackageAq4ResidentMatvec {
+    rows: usize,
+    cols: usize,
+    group_size: usize,
+    tensor_scale: f32,
+    scale_count: usize,
+    row_scale_count: usize,
+    index_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    scale_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    codebook_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    scale_values_buffer: ullm_runtime_sys::RuntimeBuffer,
+    row_scale_buffer: Option<ullm_runtime_sys::RuntimeBuffer>,
+}
+
+impl PackageAq4ResidentMatvec {
+    fn load(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        path: &str,
+        tensor_name: &str,
+        chunk_bytes: usize,
+    ) -> Result<Self, String> {
+        let selector = TensorSelector::Name(tensor_name.to_string());
+        let bundle = select_tensor_payload_bundle(path, &selector)
+            .map_err(|err| format!("failed to select tensor payloads for {tensor_name}: {err}"))?;
+        let registry_index = registry
+            .load_and_insert(
+                context,
+                stream,
+                &bundle,
+                LoadOptions {
+                    chunk_bytes,
+                    verify: true,
+                },
+            )
+            .map_err(|err| {
+                format!("failed to register tensor payloads for {tensor_name}: {err}")
+            })?;
+        let loaded = registry
+            .get(registry_index)
+            .ok_or_else(|| "registered tensor disappeared from weight registry".to_string())?;
+        let materialize = materialize_config(loaded).map_err(|err| {
+            format!(
+                "failed to prepare AQ4 matvec config for {tensor_name} (registry index {registry_index}): {err}"
+            )
+        })?;
+        let (rows, cols) = matrix_shape_rows_cols(&loaded.shape, materialize.elements)
+            .map_err(|err| format!("invalid shape for {tensor_name}: {err}"))?;
+        let mut scale_values_buffer = context
+            .alloc_buffer(materialize.scale_values.len() * std::mem::size_of::<f32>())
+            .map_err(|err| {
+                format!("failed to allocate AQ4 scale values for {tensor_name}: {err}")
+            })?;
+        scale_values_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&materialize.scale_values),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to copy AQ4 scale values for {tensor_name}: {err}"))?;
+
+        let mut row_scale_buffer = None;
+        if !bundle.row_scale_overrides.is_empty() {
+            let mut row_scales = vec![1.0_f32; rows];
+            for entry in &bundle.row_scale_overrides {
+                if entry.row_index >= rows || !entry.scale.is_finite() {
+                    return Err(format!(
+                        "invalid row scale override for {tensor_name} row {} scale {}",
+                        entry.row_index, entry.scale
+                    ));
+                }
+                row_scales[entry.row_index] *= entry.scale;
+            }
+            let mut buffer = context
+                .alloc_buffer(rows * std::mem::size_of::<f32>())
+                .map_err(|err| {
+                    format!("failed to allocate row scale buffer for {tensor_name}: {err}")
+                })?;
+            buffer
+                .copy_from_host(0, &encode_f32_to_bytes(&row_scales), Some(stream))
+                .map_err(|err| format!("failed to copy row scales for {tensor_name}: {err}"))?;
+            row_scale_buffer = Some(buffer);
+        }
+
+        Ok(Self {
+            rows,
+            cols,
+            group_size: materialize.group_size,
+            tensor_scale: materialize.tensor_scale,
+            scale_count: materialize.scale_values.len(),
+            row_scale_count: if row_scale_buffer.is_some() { rows } else { 0 },
+            index_buffer: loaded.index.buffer.clone(),
+            scale_buffer: loaded.scale.buffer.clone(),
+            codebook_buffer: loaded.codebook.buffer.clone(),
+            scale_values_buffer,
+            row_scale_buffer,
+        })
+    }
+
+    fn matvec(
+        &self,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<(), String> {
+        ullm_runtime_sys::aq4_matvec_f32(
+            self.index_buffer.as_ref(),
+            self.scale_buffer.as_ref(),
+            self.codebook_buffer.as_ref(),
+            &self.scale_values_buffer,
+            input_buffer,
+            self.row_scale_buffer.as_ref(),
+            self.scale_count,
+            self.group_size,
+            self.tensor_scale,
+            self.row_scale_count,
+            self.rows,
+            self.cols,
+            output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} AQ4 matvec: {err}"))
+    }
+}
+
 struct PackageLinearAttnResidentStepLayer {
     layer_index: usize,
     key_heads: usize,
@@ -27412,14 +27924,14 @@ struct PackageLinearAttnResidentStepLayer {
     dt_bias_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_norm_weight: Vec<f32>,
     post_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
-    qkv_matrix: ullm_runtime_sys::RuntimeBuffer,
-    a_matrix: ullm_runtime_sys::RuntimeBuffer,
-    b_matrix: ullm_runtime_sys::RuntimeBuffer,
-    z_matrix: ullm_runtime_sys::RuntimeBuffer,
-    out_matrix: ullm_runtime_sys::RuntimeBuffer,
-    mlp_gate_matrix: ullm_runtime_sys::RuntimeBuffer,
-    mlp_up_matrix: ullm_runtime_sys::RuntimeBuffer,
-    mlp_down_matrix: ullm_runtime_sys::RuntimeBuffer,
+    qkv_matrix: PackageAq4ResidentMatvec,
+    a_matrix: PackageAq4ResidentMatvec,
+    b_matrix: PackageAq4ResidentMatvec,
+    z_matrix: PackageAq4ResidentMatvec,
+    out_matrix: PackageAq4ResidentMatvec,
+    mlp_gate_matrix: PackageAq4ResidentMatvec,
+    mlp_up_matrix: PackageAq4ResidentMatvec,
+    mlp_down_matrix: PackageAq4ResidentMatvec,
     input_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     qkv_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -27554,7 +28066,7 @@ impl PackageLinearAttnResidentStepLayer {
             effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
 
         let mut registry = WeightRegistry::new();
-        let (qkv_rows, qkv_cols, qkv_matrix) = materialize_selected_aq4_matrix(
+        let qkv_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
             &mut registry,
@@ -27562,7 +28074,7 @@ impl PackageLinearAttnResidentStepLayer {
             &qkv_tensor,
             chunk_bytes,
         )?;
-        let (a_rows, a_cols, a_matrix) = materialize_selected_aq4_matrix(
+        let a_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
             &mut registry,
@@ -27570,7 +28082,7 @@ impl PackageLinearAttnResidentStepLayer {
             &a_tensor,
             chunk_bytes,
         )?;
-        let (b_rows, b_cols, b_matrix) = materialize_selected_aq4_matrix(
+        let b_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
             &mut registry,
@@ -27578,7 +28090,7 @@ impl PackageLinearAttnResidentStepLayer {
             &b_tensor,
             chunk_bytes,
         )?;
-        let (z_rows, z_cols, z_matrix) = materialize_selected_aq4_matrix(
+        let z_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
             &mut registry,
@@ -27586,7 +28098,7 @@ impl PackageLinearAttnResidentStepLayer {
             &z_tensor,
             chunk_bytes,
         )?;
-        let (out_rows, out_cols, out_matrix) = materialize_selected_aq4_matrix(
+        let out_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
             &mut registry,
@@ -27594,7 +28106,7 @@ impl PackageLinearAttnResidentStepLayer {
             &out_tensor,
             chunk_bytes,
         )?;
-        let (gate_rows, gate_cols, mlp_gate_matrix) = materialize_selected_aq4_matrix(
+        let mlp_gate_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
             &mut registry,
@@ -27602,7 +28114,7 @@ impl PackageLinearAttnResidentStepLayer {
             &gate_tensor,
             chunk_bytes,
         )?;
-        let (up_rows, up_cols, mlp_up_matrix) = materialize_selected_aq4_matrix(
+        let mlp_up_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
             &mut registry,
@@ -27610,7 +28122,7 @@ impl PackageLinearAttnResidentStepLayer {
             &up_tensor,
             chunk_bytes,
         )?;
-        let (down_rows, down_cols, mlp_down_matrix) = materialize_selected_aq4_matrix(
+        let mlp_down_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
             &mut registry,
@@ -27618,32 +28130,48 @@ impl PackageLinearAttnResidentStepLayer {
             &down_tensor,
             chunk_bytes,
         )?;
-        if qkv_rows != qkv_step_elements || qkv_cols != hidden {
+        if qkv_matrix.rows != qkv_step_elements || qkv_matrix.cols != hidden {
             return Err(format!(
-                "linear-attn resident qkv shape mismatch: got [{qkv_rows},{qkv_cols}] expected [{qkv_step_elements},{hidden}]"
+                "linear-attn resident qkv shape mismatch: got [{},{}] expected [{qkv_step_elements},{hidden}]",
+                qkv_matrix.rows, qkv_matrix.cols
             ));
         }
-        if a_rows != value_heads || b_rows != value_heads || a_cols != hidden || b_cols != hidden {
+        if a_matrix.rows != value_heads
+            || b_matrix.rows != value_heads
+            || a_matrix.cols != hidden
+            || b_matrix.cols != hidden
+        {
             return Err(format!(
-                "linear-attn resident a/b shape mismatch: a=[{a_rows},{a_cols}] b=[{b_rows},{b_cols}] expected [{value_heads},{hidden}]"
+                "linear-attn resident a/b shape mismatch: a=[{},{}] b=[{},{}] expected [{value_heads},{hidden}]",
+                a_matrix.rows, a_matrix.cols, b_matrix.rows, b_matrix.cols
             ));
         }
-        if z_rows != hidden || z_cols != hidden || out_rows != hidden || out_cols != hidden {
+        if z_matrix.rows != hidden
+            || z_matrix.cols != hidden
+            || out_matrix.rows != hidden
+            || out_matrix.cols != hidden
+        {
             return Err(format!(
-                "linear-attn resident z/out shape mismatch: z=[{z_rows},{z_cols}] out=[{out_rows},{out_cols}] expected [{hidden},{hidden}]"
+                "linear-attn resident z/out shape mismatch: z=[{},{}] out=[{},{}] expected [{hidden},{hidden}]",
+                z_matrix.rows, z_matrix.cols, out_matrix.rows, out_matrix.cols
             ));
         }
-        if gate_rows != up_rows || gate_cols != up_cols || gate_cols != hidden {
+        if mlp_gate_matrix.rows != mlp_up_matrix.rows
+            || mlp_gate_matrix.cols != mlp_up_matrix.cols
+            || mlp_gate_matrix.cols != hidden
+        {
             return Err(format!(
-                "linear-attn resident MLP gate/up shape mismatch: gate=[{gate_rows},{gate_cols}] up=[{up_rows},{up_cols}] hidden={hidden}"
+                "linear-attn resident MLP gate/up shape mismatch: gate=[{},{}] up=[{},{}] hidden={hidden}",
+                mlp_gate_matrix.rows, mlp_gate_matrix.cols, mlp_up_matrix.rows, mlp_up_matrix.cols
             ));
         }
-        if down_rows != hidden || down_cols != gate_rows {
+        if mlp_down_matrix.rows != hidden || mlp_down_matrix.cols != mlp_gate_matrix.rows {
             return Err(format!(
-                "linear-attn resident MLP down shape mismatch: got [{down_rows},{down_cols}] expected [{hidden},{gate_rows}]"
+                "linear-attn resident MLP down shape mismatch: got [{},{}] expected [{hidden},{}]",
+                mlp_down_matrix.rows, mlp_down_matrix.cols, mlp_gate_matrix.rows
             ));
         }
-        let intermediate = gate_rows;
+        let intermediate = mlp_gate_matrix.rows;
 
         let hidden_bytes = checked_f32_byte_len(hidden, "linear-attn resident hidden")?;
         let qkv_step_bytes =
@@ -27865,42 +28393,30 @@ impl PackageLinearAttnResidentStepLayer {
             .copy_from_host(0, &encode_f32_to_bytes(&input_normed), Some(stream))
             .map_err(|err| format!("failed to copy linear-attn resident input normed: {err}"))?;
 
-        ullm_runtime_sys::matvec_f32(
-            &self.qkv_matrix,
+        self.qkv_matrix.matvec(
             &self.input_normed_buffer,
-            self.qkv_step_elements,
-            self.hidden,
             &mut self.qkv_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident qkv projection: {err}"))?;
-        ullm_runtime_sys::matvec_f32(
-            &self.a_matrix,
+            stream,
+            "linear-attn resident qkv projection",
+        )?;
+        self.a_matrix.matvec(
             &self.input_normed_buffer,
-            self.value_heads,
-            self.hidden,
             &mut self.a_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident a projection: {err}"))?;
-        ullm_runtime_sys::matvec_f32(
-            &self.b_matrix,
+            stream,
+            "linear-attn resident a projection",
+        )?;
+        self.b_matrix.matvec(
             &self.input_normed_buffer,
-            self.value_heads,
-            self.hidden,
             &mut self.b_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident b projection: {err}"))?;
-        ullm_runtime_sys::matvec_f32(
-            &self.z_matrix,
+            stream,
+            "linear-attn resident b projection",
+        )?;
+        self.z_matrix.matvec(
             &self.input_normed_buffer,
-            self.hidden,
-            self.hidden,
             &mut self.z_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident z projection: {err}"))?;
+            stream,
+            "linear-attn resident z projection",
+        )?;
         let qkv_step = read_runtime_buffer_f32(
             &self.qkv_buffer,
             stream,
@@ -28002,15 +28518,12 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident attention SiLU-mul: {err}"))?;
-        ullm_runtime_sys::matvec_f32(
-            &self.out_matrix,
+        self.out_matrix.matvec(
             &self.attn_projection_input_buffer,
-            self.hidden,
-            self.hidden,
             &mut self.attn_output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident out projection: {err}"))?;
+            stream,
+            "linear-attn resident out projection",
+        )?;
         ullm_runtime_sys::add_f32(
             &self.input_buffer,
             &self.attn_output_buffer,
@@ -28029,24 +28542,18 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident post RMSNorm: {err}"))?;
-        ullm_runtime_sys::matvec_f32(
-            &self.mlp_gate_matrix,
+        self.mlp_gate_matrix.matvec(
             &self.post_normed_buffer,
-            self.intermediate,
-            self.hidden,
             &mut self.mlp_gate_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident MLP gate: {err}"))?;
-        ullm_runtime_sys::matvec_f32(
-            &self.mlp_up_matrix,
+            stream,
+            "linear-attn resident MLP gate",
+        )?;
+        self.mlp_up_matrix.matvec(
             &self.post_normed_buffer,
-            self.intermediate,
-            self.hidden,
             &mut self.mlp_up_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident MLP up: {err}"))?;
+            stream,
+            "linear-attn resident MLP up",
+        )?;
         ullm_runtime_sys::silu_mul_f32(
             &self.mlp_gate_buffer,
             &self.mlp_up_buffer,
@@ -28055,15 +28562,12 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident MLP activation: {err}"))?;
-        ullm_runtime_sys::matvec_f32(
-            &self.mlp_down_matrix,
+        self.mlp_down_matrix.matvec(
             &self.mlp_activation_buffer,
-            self.hidden,
-            self.intermediate,
             &mut self.mlp_output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident MLP down: {err}"))?;
+            stream,
+            "linear-attn resident MLP down",
+        )?;
         ullm_runtime_sys::add_f32(
             &self.attn_block_output_buffer,
             &self.mlp_output_buffer,
