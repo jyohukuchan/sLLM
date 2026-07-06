@@ -605,3 +605,67 @@ New artifacts:
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/memory_vs_compute.json`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/throughput_checklist.json`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/long_prefill_warmup.json`
+
+## Prompt Suite v0.2: Category Expansion
+
+`benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.2.json` expands the suite beyond English
+technical prompts:
+
+- `technical`: warmup and memory/compute explanations;
+- `checklist`: structured throughput-reporting output;
+- `japanese`: Japanese runtime explanation;
+- `code`: small Python helper generation;
+- `short_qa`: one-sentence AQ/SQ bandwidth answer;
+- `timing`: repeated prompt for 256-token prefill.
+
+The suite runner now carries `category` into reports and adds `category_metrics` to summary JSON.
+
+R9700 v0.2 suite run:
+
+| case | category | prompt tokens | generated | stop reason | status | warnings | prefill tok/s | decode tok/s | last-8 tok/s | verified |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | :---: |
+| warmup_measurement | technical | 16 | 81 | stop_token | ok | - | 16.842 | 20.325 | 20.190 | true |
+| memory_vs_compute | technical | 26 | 128 | max_generated_tokens | warn | hit_generation_limit, missing_terminal_punctuation | 19.096 | 19.990 | 19.836 | true |
+| throughput_checklist | checklist | 16 | 128 | max_generated_tokens | warn | hit_generation_limit, missing_terminal_punctuation | 17.200 | 20.051 | 19.429 | true |
+| japanese_runtime_summary | japanese | 23 | 128 | max_generated_tokens | warn | hit_generation_limit, control_marker_text, missing_terminal_punctuation | 18.770 | 19.931 | 19.737 | true |
+| python_stop_helper | code | 30 | 84 | stop_token | ok | - | 18.784 | 20.008 | 19.857 | true |
+| short_qa_bandwidth | short_qa | 25 | 96 | max_generated_tokens | warn | hit_generation_limit, missing_terminal_punctuation | 18.254 | 20.060 | 19.864 | true |
+| long_prefill_warmup | timing | 256 | 192 | max_generated_tokens | warn | hit_generation_limit, low_unique_token_ratio, prompt_echo, missing_terminal_punctuation | 21.860 | 18.637 | 18.182 | true |
+
+Suite summary:
+
+- case count: `7`
+- mean decode TPS: `19.858`
+- min decode TPS: `18.637`
+- max decode TPS: `20.325`
+- mean prefill TPS: `18.687`
+- verified all: `true`
+- stopped by stop token: `2 / 7`
+- output ok: `2 / 7`
+- output warnings: `5 / 7`
+
+Interpretation:
+
+- The wider prompt set still preserves the `~18-20 tok/s` decode range on R9700. The slower case is
+  the intentional 256-token prefill timing probe.
+- The Python helper case is the first non-English-prose-style output that reaches `ok` status with
+  a stop token and no summary warnings.
+- The Japanese prompt does not numerically collapse, but it emits `<think>`/reasoning-style marker
+  text and hits the generation cap. It should be kept as a visible quality warning, not treated as
+  a successful Japanese answer.
+- The short QA prompt answers the first question, then continues into another question because the
+  stop policy is still token-based rather than task-aware. This is a prompt/stop-policy issue to
+  resolve before using the suite as semantic-quality evidence.
+
+New artifacts:
+
+- `benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.2.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/summary.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/summary.md`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/warmup_measurement.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/memory_vs_compute.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/throughput_checklist.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/japanese_runtime_summary.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/python_stop_helper.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/short_qa_bandwidth.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/long_prefill_warmup.json`

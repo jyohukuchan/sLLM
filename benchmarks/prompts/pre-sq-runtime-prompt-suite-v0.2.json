@@ -1,0 +1,78 @@
+{
+  "metadata": {
+    "suite_id": "pre-sq-runtime-prompt-suite-v0.2",
+    "purpose": "Expanded text prompt set for pre-SQ runtime TPS and output-collapse observation.",
+    "tokenizer": "Qwen3.5-9B",
+    "decode_policy": "greedy with tokenizer special-token stop policy",
+    "changes_from_v0.1": [
+      "adds prompt categories",
+      "adds Japanese, code, and short QA prompts"
+    ]
+  },
+  "prompts": [
+    {
+      "id": "warmup_measurement",
+      "category": "technical",
+      "prompt": "Explain in one concise paragraph why GPU warmup can distort token/s measurements.",
+      "generated_tokens": 128,
+      "notes": [
+        "Checks whether a short technical explanation completes cleanly with stop tokens."
+      ]
+    },
+    {
+      "id": "memory_vs_compute",
+      "category": "technical",
+      "prompt": "Compare memory-bandwidth-bound and compute-bound inference bottlenecks in low-bit LLM decoding. Keep the answer under five sentences.",
+      "generated_tokens": 128,
+      "notes": [
+        "Targets the AQ/SQ design question about where quantization format differences matter."
+      ]
+    },
+    {
+      "id": "throughput_checklist",
+      "category": "checklist",
+      "prompt": "Write a short checklist for reporting LLM inference throughput fairly on a single GPU.",
+      "generated_tokens": 128,
+      "notes": [
+        "Looks for list formatting and repeated-token failure modes under greedy decode."
+      ]
+    },
+    {
+      "id": "japanese_runtime_summary",
+      "category": "japanese",
+      "prompt": "GPUのウォームアップがtoken/s測定に与える影響を、日本語で3文以内に説明してください。",
+      "generated_tokens": 128,
+      "notes": [
+        "Checks Japanese output under the same token-ID runtime path."
+      ]
+    },
+    {
+      "id": "python_stop_helper",
+      "category": "code",
+      "prompt": "Write a small Python function named should_stop(token_id, stop_ids) that returns True when token_id is in stop_ids. Include one short example.",
+      "generated_tokens": 160,
+      "notes": [
+        "Checks code-format output and whether greedy decode repeats code blocks."
+      ]
+    },
+    {
+      "id": "short_qa_bandwidth",
+      "category": "short_qa",
+      "prompt": "Question: In one sentence, why can an AQ format still be fast when inference is memory-bandwidth-bound?\nAnswer:",
+      "generated_tokens": 96,
+      "notes": [
+        "Short answer prompt for the AQ/SQ bandwidth discussion."
+      ]
+    },
+    {
+      "id": "long_prefill_warmup",
+      "category": "timing",
+      "prompt": "Explain why GPU warmup can distort token/s measurements, and describe a careful way to report throughput.",
+      "generated_tokens": 192,
+      "target_prompt_tokens": 256,
+      "notes": [
+        "Repeats the prompt to create a reproducible long-prefill timing probe."
+      ]
+    }
+  ]
+}

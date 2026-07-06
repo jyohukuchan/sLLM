@@ -20,6 +20,7 @@ TERMINAL_TEXT_ENDINGS = (".", "!", "?", "。", "！", "？", "```")
 @dataclass(frozen=True)
 class PromptCase:
     case_id: str
+    category: str
     prompt: str
     generated_tokens: int | None
     target_prompt_tokens: int | None
@@ -110,6 +111,7 @@ def load_suite(path: Path) -> tuple[dict[str, Any], list[PromptCase]]:
         prompt = case.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             raise SystemExit(f"prompt case {case_id} has no prompt text")
+        category = str(case.get("category", "general")).strip() or "general"
         generated_tokens = optional_positive_int(case.get("generated_tokens"), f"{case_id}.generated_tokens")
         target_prompt_tokens = optional_positive_int(
             case.get("target_prompt_tokens"),
@@ -121,6 +123,7 @@ def load_suite(path: Path) -> tuple[dict[str, Any], list[PromptCase]]:
         cases.append(
             PromptCase(
                 case_id=case_id,
+                category=category,
                 prompt=prompt,
                 generated_tokens=generated_tokens,
                 target_prompt_tokens=target_prompt_tokens,
@@ -211,7 +214,7 @@ def run_case(args: argparse.Namespace, case: PromptCase, output_json: Path) -> d
     if not isinstance(report, dict):
         raise SystemExit(f"{output_json}: expected JSON object")
     report.setdefault("suite_case", {})
-    report["suite_case"].update({"id": case.case_id, "notes": case.notes})
+    report["suite_case"].update({"id": case.case_id, "category": case.category, "notes": case.notes})
     output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
 
@@ -251,6 +254,7 @@ def summarize_report(case: PromptCase, report_path: Path, report: dict[str, Any]
 
     return {
         "id": case.case_id,
+        "category": case.category,
         "report": str(report_path),
         "prompt_tokens": text_prompt.get("token_count"),
         "generated_tokens": len(tokens),
@@ -308,6 +312,27 @@ def mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def category_metrics(case_summaries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    categories: dict[str, list[dict[str, Any]]] = {}
+    for item in case_summaries:
+        categories.setdefault(str(item.get("category", "general")), []).append(item)
+    metrics: dict[str, dict[str, Any]] = {}
+    for category, items in sorted(categories.items()):
+        decode_values = [value for item in items if (value := item.get("decode_tps")) is not None]
+        prefill_values = [value for item in items if (value := item.get("prefill_tps")) is not None]
+        metrics[category] = {
+            "case_count": len(items),
+            "decode_tps_mean": mean(decode_values),
+            "decode_tps_min": min(decode_values) if decode_values else None,
+            "decode_tps_max": max(decode_values) if decode_values else None,
+            "prefill_tps_mean": mean(prefill_values),
+            "verified_all": all(item.get("verified") is True for item in items),
+            "output_ok_count": sum(1 for item in items if item.get("output_status") == "ok"),
+            "output_warn_count": sum(1 for item in items if item.get("output_status") == "warn"),
+        }
+    return metrics
+
+
 def write_summary_json(
     path: Path,
     args: argparse.Namespace,
@@ -347,6 +372,7 @@ def write_summary_json(
             ),
             "prompt_echo_count": sum(1 for item in case_summaries if "prompt_echo" in item.get("output_warnings", [])),
         },
+        "category_metrics": category_metrics(case_summaries),
         "cases": case_summaries,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -366,13 +392,14 @@ def write_summary_md(path: Path, summary_json: Path, case_summaries: list[dict[s
         "",
         f"- Summary JSON: `{summary_json}`",
         "",
-        "| case | prompt | generated | stop | status | warnings | prefill tok/s | decode tok/s | skip-2 tok/s | last-8 tok/s | p50 ms | verified | preview |",
-        "| --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | :---: | --- |",
+        "| case | category | prompt | generated | stop | status | warnings | prefill tok/s | decode tok/s | skip-2 tok/s | last-8 tok/s | p50 ms | verified | preview |",
+        "| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | :---: | --- |",
     ]
     for item in case_summaries:
         lines.append(
-            "| {case} | {prompt} | {generated} | {stop} | {status} | {warnings} | {prefill} | {decode} | {skip2} | {last8} | {p50} | {verified} | {preview} |".format(
+            "| {case} | {category} | {prompt} | {generated} | {stop} | {status} | {warnings} | {prefill} | {decode} | {skip2} | {last8} | {p50} | {verified} | {preview} |".format(
                 case=item["id"],
+                category=fmt(item.get("category")),
                 prompt=fmt(item.get("prompt_tokens")),
                 generated=fmt(item.get("generated_tokens")),
                 stop=fmt(item.get("stop_reason")),
