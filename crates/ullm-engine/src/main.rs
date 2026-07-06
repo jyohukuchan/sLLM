@@ -28754,9 +28754,44 @@ struct PackageAq4ResidentMatvec {
     row_scale_buffer: Option<ullm_runtime_sys::RuntimeBuffer>,
 }
 
+static AQ4_MATVEC_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_ADD_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_SILU_MUL_PREWARMED: AtomicBool = AtomicBool::new(false);
 static LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
 static LINEAR_ATTN_POST_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
+
+fn prewarm_aq4_matvec_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    matrix: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; matrix.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        matrix.matvec(input_buffer, output_buffer, stream, label)?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
 
 fn prewarm_aq4_matvec_add_once(
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -28794,6 +28829,85 @@ fn prewarm_aq4_matvec_add_once(
     })();
     if result.is_err() {
         AQ4_MATVEC_ADD_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prewarm_aq4_matvec_gate_beta_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    a: &PackageAq4ResidentMatvec,
+    b: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    a_log_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    dt_bias_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    beta_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_GATE_BETA_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; a.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        a.matvec_gate_beta_with(
+            b,
+            input_buffer,
+            a_log_buffer,
+            dt_bias_buffer,
+            gate_output_buffer,
+            beta_output_buffer,
+            stream,
+            label,
+        )?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_GATE_BETA_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+fn prewarm_aq4_matvec_silu_mul_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    gate: &PackageAq4ResidentMatvec,
+    up: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_SILU_MUL_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; gate.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        gate.matvec_silu_mul_with(up, input_buffer, output_buffer, stream, label)?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_SILU_MUL_PREWARMED.store(false, Ordering::Release);
     }
     result
 }
@@ -30267,7 +30381,7 @@ impl PackageLinearAttnResidentStepLayer {
         let mut input_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident input: {err}"))?;
-        let input_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        let mut input_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident input normed: {err}")
         })?;
         let mut qkv_buffer = context
@@ -30294,10 +30408,10 @@ impl PackageLinearAttnResidentStepLayer {
         let mut recurrent_v_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident v: {err}"))?;
-        let recurrent_gate_buffer = context
+        let mut recurrent_gate_buffer = context
             .alloc_buffer(gate_beta_step_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident gate: {err}"))?;
-        let recurrent_beta_buffer = context
+        let mut recurrent_beta_buffer = context
             .alloc_buffer(gate_beta_step_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident beta: {err}"))?;
         let mut recurrent_state_buffer = context
@@ -30313,12 +30427,13 @@ impl PackageLinearAttnResidentStepLayer {
         let mut attn_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident attention block: {err}")
         })?;
-        let post_normed_buffer = context
+        let mut post_normed_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident post normed: {err}"))?;
-        let mlp_activation_buffer = context.alloc_buffer(intermediate_bytes).map_err(|err| {
-            format!("failed to allocate linear-attn resident MLP activation: {err}")
-        })?;
+        let mut mlp_activation_buffer =
+            context.alloc_buffer(intermediate_bytes).map_err(|err| {
+                format!("failed to allocate linear-attn resident MLP activation: {err}")
+            })?;
         let layer_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident layer output: {err}")
         })?;
@@ -30374,6 +30489,32 @@ impl PackageLinearAttnResidentStepLayer {
             .device_info()
             .map_err(|err| format!("failed to get linear-attn resident device info: {err}"))?;
         if device_info.backend == "hip" {
+            prewarm_aq4_matvec_once(
+                stream,
+                &qkv_matrix,
+                &mut input_normed_buffer,
+                &mut qkv_buffer,
+                "linear-attn resident AQ4 matvec",
+            )?;
+            prewarm_aq4_matvec_gate_beta_once(
+                stream,
+                &a_matrix,
+                &b_matrix,
+                &mut input_normed_buffer,
+                &a_log_buffer,
+                &dt_bias_buffer,
+                &mut recurrent_gate_buffer,
+                &mut recurrent_beta_buffer,
+                "linear-attn resident AQ4 gate-beta",
+            )?;
+            prewarm_aq4_matvec_silu_mul_once(
+                stream,
+                &mlp_gate_matrix,
+                &mlp_up_matrix,
+                &mut post_normed_buffer,
+                &mut mlp_activation_buffer,
+                "linear-attn resident AQ4 SiLU-mul",
+            )?;
             prewarm_linear_attn_qkv_prepare_once(
                 device_info.device_id,
                 stream,

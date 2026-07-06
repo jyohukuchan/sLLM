@@ -683,7 +683,7 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
     }
 
     static unsigned int aq4_rows_per_block_for_arch(const std::string &arch) {
-        return arch.rfind("gfx12", 0) == 0 ? 4u : 1u;
+        return arch.rfind("gfx12", 0) == 0 ? 16u : 1u;
     }
 
     static std::string aq4_rows_per_block_preamble(const std::string &arch) {
