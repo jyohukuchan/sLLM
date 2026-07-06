@@ -136,6 +136,21 @@ An `sq` candidate is comparable to the AQ4 prototype only when:
 If a row does not satisfy these, set `decision.comparable_to_baseline` to `false` and explain why in
 `decision.reason`.
 
+## Baseline Anchor Rows
+
+The current AQ4 prototype baseline may be recorded in this schema as a baseline anchor row so that
+future `sq` rows have a machine-readable comparison target.
+
+For these rows:
+
+- `candidate.format_version` may be `aq4-prototype-current-runtime`;
+- `decision.reason` should state that the row is a baseline anchor;
+- `storage.compact_resident_bytes`, `storage.materialized_working_set_bytes`, and
+  `timing.materialization_wall_ms` may be `null` if they were not measured for the current runtime.
+
+This exception applies only to AQ4 baseline anchor rows. An actual `sq` candidate must still satisfy
+the required gate semantics above to be comparable.
+
 ## Memory Semantics
 
 - `compact_resident_bytes`: bytes that must remain resident in compact `sq` form during the run.
