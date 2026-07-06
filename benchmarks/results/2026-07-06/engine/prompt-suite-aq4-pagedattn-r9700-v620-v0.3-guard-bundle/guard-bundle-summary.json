@@ -1,0 +1,39 @@
+{
+  "schema_version": "package-prompt-guard-bundle-v0.1",
+  "reference": {
+    "label": "R9700-RDNA4",
+    "summary": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.3/summary.json"
+  },
+  "candidate": {
+    "label": "V620-RDNA2",
+    "summary": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.json"
+  },
+  "passed": true,
+  "checks": [
+    {
+      "name": "prompt_suite_token_logits",
+      "json": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-guard-bundle/prompt-suite-token-logits-guard.json",
+      "md": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-guard-bundle/prompt-suite-token-logits-guard.md",
+      "passed": true,
+      "metrics": {
+        "compared_case_count": 7,
+        "generated_token_match_count": 7,
+        "top_logits_match_count": 7,
+        "max_prefill_top_logit_abs_diff": 0.0,
+        "max_decode_last_top_logit_abs_diff": 0.0
+      }
+    },
+    {
+      "name": "standalone_logits",
+      "json": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-guard-bundle/standalone-logits-guard.json",
+      "md": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-guard-bundle/standalone-logits-guard.md",
+      "passed": true,
+      "metrics": {
+        "prompt_tokens": 25,
+        "top_count": 8,
+        "top_token_ids_match": true,
+        "max_abs_logit_diff": 0.0
+      }
+    }
+  ]
+}

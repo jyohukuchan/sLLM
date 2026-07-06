@@ -54,6 +54,7 @@ benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.3/summa
 benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.json
 benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-token-guard.json
 benchmarks/results/2026-07-06/engine/package-token-ids-logits-short-qa-r9700-v620-v0.3-guard.json
+benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-guard-bundle/guard-bundle-summary.json
 ```
 
 | target | device | mean decode tok/s | min decode tok/s | max decode tok/s | mean prefill tok/s | verified all | output ok | output warn | output not evaluated |
@@ -130,6 +131,12 @@ The SQ run record should include at least:
 - stop policy;
 - output-health summary;
 - correctness guard result.
+
+For current artifacts, run the guard set through:
+
+```text
+tools/run-package-prompt-guard-bundle.py
+```
 
 ## Publication Wording
 

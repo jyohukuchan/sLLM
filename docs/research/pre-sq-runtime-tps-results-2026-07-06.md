@@ -930,3 +930,22 @@ New artifacts:
 - `benchmarks/results/2026-07-06/engine/package-token-ids-logits-short-qa-v620-v0.3.json`
 - `benchmarks/results/2026-07-06/engine/package-token-ids-logits-short-qa-r9700-v620-v0.3-guard.json`
 - `benchmarks/results/2026-07-06/engine/package-token-ids-logits-short-qa-r9700-v620-v0.3-guard.md`
+
+## Guard Bundle Driver
+
+`tools/run-package-prompt-guard-bundle.py` now runs the prompt-suite token/logits guard and optional
+standalone logits guard together. This is the intended comparison entrypoint for SQ candidates so
+the same guard set can be rerun without forgetting one check.
+
+R9700/RDNA4 vs V620/RDNA2 v0.3 guard bundle:
+
+| check | passed | key result |
+| --- | :---: | --- |
+| prompt suite token/logits | true | 7 cases, 7 generated-token matches, 7 top-logits matches, max logit diff 0.0 |
+| standalone short-QA logits | true | top-8 token IDs match, max logit diff 0.0 |
+
+New artifacts:
+
+- `tools/run-package-prompt-guard-bundle.py`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-guard-bundle/guard-bundle-summary.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-guard-bundle/guard-bundle-summary.md`
