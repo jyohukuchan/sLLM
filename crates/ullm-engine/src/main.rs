@@ -16431,6 +16431,22 @@ enum PackageTokenIdsIncrementalLayer {
     SelfAttention { self_index: usize },
 }
 
+impl PackageTokenIdsIncrementalLayer {
+    fn as_linear_attention(&self) -> Option<&PackageLinearAttnResidentStepLayer> {
+        match self {
+            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => Some(layer),
+            PackageTokenIdsIncrementalLayer::SelfAttention { .. } => None,
+        }
+    }
+
+    fn as_linear_attention_mut(&mut self) -> Option<&mut PackageLinearAttnResidentStepLayer> {
+        match self {
+            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => Some(layer),
+            PackageTokenIdsIncrementalLayer::SelfAttention { .. } => None,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn package_token_ids_incremental_layer_step<'weights>(
     context: &mut ullm_runtime_sys::RuntimeContext,
@@ -16495,6 +16511,137 @@ fn package_token_ids_incremental_layer_step<'weights>(
             Ok(step.layer_output)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_incremental_layers_step<'weights>(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layers: &mut [PackageTokenIdsIncrementalLayer],
+    self_layers: &'weights [Qwen3PackageDecoderLayerRuntime],
+    self_states: &mut [Qwen3DecoderLayerRuntime<'weights>],
+    block_table: &[u32],
+    block_size: usize,
+    cache_blocks: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    rope_position: usize,
+    cache_position: usize,
+    residual: Vec<f32>,
+    hidden: usize,
+    label: &str,
+) -> Result<(Vec<f32>, Vec<f64>), String> {
+    if residual.len() != hidden {
+        return Err(format!(
+            "{label} residual length {} does not match hidden {hidden}",
+            residual.len()
+        ));
+    }
+    let mut residual_host = Some(residual);
+    let mut residual_device_linear_layer = None;
+    let mut layer_step_ms = Vec::with_capacity(layers.len());
+
+    for layer_position in 0..layers.len() {
+        let layer_step_started = Instant::now();
+        let layer_label = format!("{label} layer {layer_position} position {rope_position}");
+        match layers[layer_position] {
+            PackageTokenIdsIncrementalLayer::LinearAttention(_) => {
+                if let Some(previous_position) = residual_device_linear_layer {
+                    let (previous_layers, current_layers) = layers.split_at_mut(layer_position);
+                    let previous = previous_layers
+                        .get(previous_position)
+                        .and_then(PackageTokenIdsIncrementalLayer::as_linear_attention)
+                        .ok_or_else(|| {
+                            format!(
+                                "{layer_label} previous device residual layer {previous_position} is not linear-attn"
+                            )
+                        })?;
+                    let current = current_layers[0]
+                        .as_linear_attention_mut()
+                        .ok_or_else(|| format!("{layer_label} current layer is not linear-attn"))?;
+                    current.step_from_device_to_device(
+                        stream,
+                        previous.output_buffer(),
+                        &layer_label,
+                    )?;
+                } else {
+                    let residual = residual_host.take().ok_or_else(|| {
+                        format!("{layer_label} missing host residual for linear-attn layer")
+                    })?;
+                    let current = layers[layer_position]
+                        .as_linear_attention_mut()
+                        .ok_or_else(|| format!("{layer_label} current layer is not linear-attn"))?;
+                    current.step_from_host_to_device(stream, &residual, &layer_label)?;
+                }
+                residual_device_linear_layer = Some(layer_position);
+                layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
+            }
+            PackageTokenIdsIncrementalLayer::SelfAttention { .. } => {
+                let host_input = if let Some(previous_position) =
+                    residual_device_linear_layer.take()
+                {
+                    layers
+                        .get(previous_position)
+                        .and_then(PackageTokenIdsIncrementalLayer::as_linear_attention)
+                        .ok_or_else(|| {
+                            format!(
+                                "{layer_label} previous device residual layer {previous_position} is not linear-attn"
+                            )
+                        })?
+                        .read_output(stream)?
+                } else {
+                    residual_host.take().ok_or_else(|| {
+                        format!("{layer_label} missing host residual for self-attn layer")
+                    })?
+                };
+                if host_input.len() != hidden {
+                    return Err(format!(
+                        "{layer_label} self-attn input length {} does not match hidden {hidden}",
+                        host_input.len()
+                    ));
+                }
+                let output = package_token_ids_incremental_layer_step(
+                    context,
+                    stream,
+                    &mut layers[layer_position],
+                    self_layers,
+                    self_states,
+                    block_table,
+                    block_size,
+                    cache_blocks,
+                    rotary_dim,
+                    rope_base,
+                    rope_position,
+                    cache_position,
+                    &host_input,
+                    &layer_label,
+                )?;
+                residual_host = Some(output);
+                layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+    }
+
+    let output = if let Some(previous_position) = residual_device_linear_layer {
+        layers
+            .get(previous_position)
+            .and_then(PackageTokenIdsIncrementalLayer::as_linear_attention)
+            .ok_or_else(|| {
+                format!(
+                    "{label} final device residual layer {previous_position} is not linear-attn"
+                )
+            })?
+            .read_output(stream)?
+    } else {
+        residual_host.ok_or_else(|| format!("{label} missing final host residual"))?
+    };
+    if output.len() != hidden {
+        return Err(format!(
+            "{label} output length {} does not match hidden {hidden}",
+            output.len()
+        ));
+    }
+    Ok((output, layer_step_ms))
 }
 
 fn package_token_ids_incremental_final_logits(
@@ -16861,35 +17008,24 @@ fn package_token_ids_generate_incremental_smoke_impl(
             .len()
             .checked_add(decode_index)
             .ok_or_else(|| "incremental decode cache position overflows".to_string())?;
-        let mut residual = embedding.values;
         let decode_layers_started = Instant::now();
-        let mut layer_step_ms = Vec::with_capacity(layers.len());
-        for (layer_position, layer) in layers.iter_mut().enumerate() {
-            let layer_step_started = Instant::now();
-            residual = package_token_ids_incremental_layer_step(
-                &mut context,
-                &mut stream,
-                layer,
-                &self_layers,
-                &mut self_states,
-                &block_table,
-                block_size,
-                cache_blocks,
-                rotary_dim_value,
-                rope_base,
-                position,
-                cache_position,
-                &residual,
-                &format!("incremental decode layer {layer_position} position {position}"),
-            )?;
-            layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
-            if residual.len() != hidden {
-                return Err(format!(
-                    "incremental decode layer {layer_position} output length {} does not match hidden {hidden}",
-                    residual.len()
-                ));
-            }
-        }
+        let (residual, layer_step_ms) = package_token_ids_incremental_layers_step(
+            &mut context,
+            &mut stream,
+            &mut layers,
+            &self_layers,
+            &mut self_states,
+            &block_table,
+            block_size,
+            cache_blocks,
+            rotary_dim_value,
+            rope_base,
+            position,
+            cache_position,
+            embedding.values,
+            hidden,
+            "incremental decode",
+        )?;
         let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
         let decode_lm_head_started = Instant::now();
         let (top_logits, next) = package_token_ids_incremental_final_logits(
@@ -16993,7 +17129,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "nan_or_inf_detected": false,
         },
         "notes": [
-            "This path keeps selected layer weights resident as dequantized f32 runtime buffers; full-model residency may exceed current GPU memory before sq-format work."
+            "This path keeps selected layer weights resident as dequantized f32 runtime buffers; full-model residency may exceed current GPU memory before sq-format work.",
+            "Decode linear-attention layer_step_ms can shift deferred GPU work to later host-boundary layers when consecutive linear-attention layers stay device-resident; use layers_step_ms and step_wall_summary for throughput comparisons."
         ],
         "verified": true,
     });
@@ -28006,7 +28143,7 @@ struct PackageLinearAttnResidentStepLayer {
     q_scale: f32,
     qk_l2_norm: bool,
     kernel_size: usize,
-    input_norm_weight: Vec<f32>,
+    input_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
     conv_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
     conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
     a_log_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -28041,6 +28178,12 @@ struct PackageLinearAttnResidentStepLayer {
     mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
     mlp_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+}
+
+#[derive(Clone, Copy)]
+enum PackageLinearAttnResidentStepInput<'a> {
+    InternalInputBuffer,
+    ExternalBuffer(&'a ullm_runtime_sys::RuntimeBuffer),
 }
 
 impl PackageLinearAttnResidentStepLayer {
@@ -28292,6 +28435,14 @@ impl PackageLinearAttnResidentStepLayer {
                 "linear-attn resident dt_bias",
             )?)
             .map_err(|err| format!("failed to allocate linear-attn resident dt_bias: {err}"))?;
+        let mut input_norm_weight_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                input_norm_weight_values.len(),
+                "linear-attn resident input norm weight",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate linear-attn resident input norm weight: {err}")
+            })?;
         let mut post_norm_weight_buffer = context
             .alloc_buffer(checked_f32_byte_len(
                 post_norm_weight_values.len(),
@@ -28388,6 +28539,13 @@ impl PackageLinearAttnResidentStepLayer {
         dt_bias_buffer
             .copy_from_host(0, &encode_f32_to_bytes(&dt_bias.values), Some(stream))
             .map_err(|err| format!("failed to copy linear-attn resident dt_bias: {err}"))?;
+        input_norm_weight_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&input_norm_weight_values),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to copy linear-attn resident input norm: {err}"))?;
         post_norm_weight_buffer
             .copy_from_host(
                 0,
@@ -28433,7 +28591,7 @@ impl PackageLinearAttnResidentStepLayer {
             q_scale,
             qk_l2_norm,
             kernel_size,
-            input_norm_weight: input_norm_weight_values,
+            input_norm_weight_buffer,
             conv_weight_buffer,
             conv_history_buffer,
             a_log_buffer,
@@ -28476,6 +28634,16 @@ impl PackageLinearAttnResidentStepLayer {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         residual: &[f32],
     ) -> Result<Vec<f32>, String> {
+        self.step_from_host_to_device(stream, residual, "linear-attn resident layer")?;
+        self.read_output(stream)
+    }
+
+    fn step_from_host_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &[f32],
+        label: &str,
+    ) -> Result<(), String> {
         if residual.len() != self.hidden {
             return Err(format!(
                 "linear-attn resident layer {} residual length mismatch: got {} expected {}",
@@ -28487,16 +28655,80 @@ impl PackageLinearAttnResidentStepLayer {
         self.input_buffer
             .copy_from_host(0, &encode_f32_to_bytes(residual), Some(stream))
             .map_err(|err| format!("failed to copy linear-attn resident residual: {err}"))?;
-        let input_normed = runtime_host_rmsnorm_f32(residual, &self.input_norm_weight, 1e-6_f32);
-        if input_normed.len() != self.hidden {
+        self.run_device_step(
+            stream,
+            PackageLinearAttnResidentStepInput::InternalInputBuffer,
+            label,
+        )
+    }
+
+    fn step_from_device_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<(), String> {
+        let expected_bytes = checked_f32_byte_len(self.hidden, "linear-attn resident input")?;
+        let actual_bytes = residual_buffer
+            .size()
+            .map_err(|err| format!("failed to query {label} residual buffer size: {err}"))?;
+        if actual_bytes < expected_bytes {
             return Err(format!(
-                "linear-attn resident input RMSNorm failed for layer {}",
-                self.layer_index
+                "{label} residual buffer is too small: got {actual_bytes} bytes expected at least {expected_bytes}"
             ));
         }
-        self.input_normed_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&input_normed), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident input normed: {err}"))?;
+        self.run_device_step(
+            stream,
+            PackageLinearAttnResidentStepInput::ExternalBuffer(residual_buffer),
+            label,
+        )
+    }
+
+    fn read_output(
+        &self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<Vec<f32>, String> {
+        read_runtime_buffer_f32(
+            &self.layer_output_buffer,
+            stream,
+            self.hidden,
+            "linear-attn resident layer output",
+        )
+    }
+
+    fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.layer_output_buffer
+    }
+
+    fn run_device_step(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        input: PackageLinearAttnResidentStepInput<'_>,
+        label: &str,
+    ) -> Result<(), String> {
+        match input {
+            PackageLinearAttnResidentStepInput::InternalInputBuffer => {
+                ullm_runtime_sys::rmsnorm_f32(
+                    &self.input_buffer,
+                    &self.input_norm_weight_buffer,
+                    self.hidden,
+                    1e-6_f32,
+                    &mut self.input_normed_buffer,
+                    Some(stream),
+                )
+            }
+            PackageLinearAttnResidentStepInput::ExternalBuffer(buffer) => {
+                ullm_runtime_sys::rmsnorm_f32(
+                    buffer,
+                    &self.input_norm_weight_buffer,
+                    self.hidden,
+                    1e-6_f32,
+                    &mut self.input_normed_buffer,
+                    Some(stream),
+                )
+            }
+        }
+        .map_err(|err| format!("failed to run {label} input RMSNorm: {err}"))?;
 
         self.qkv_matrix.matvec(
             &self.input_normed_buffer,
@@ -28581,7 +28813,10 @@ impl PackageLinearAttnResidentStepLayer {
             "linear-attn resident out projection",
         )?;
         ullm_runtime_sys::add_f32(
-            &self.input_buffer,
+            match input {
+                PackageLinearAttnResidentStepInput::InternalInputBuffer => &self.input_buffer,
+                PackageLinearAttnResidentStepInput::ExternalBuffer(buffer) => buffer,
+            },
             &self.attn_output_buffer,
             self.hidden,
             &mut self.attn_block_output_buffer,
@@ -28619,12 +28854,7 @@ impl PackageLinearAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run linear-attn resident layer residual: {err}"))?;
-        read_runtime_buffer_f32(
-            &self.layer_output_buffer,
-            stream,
-            self.hidden,
-            "linear-attn resident layer output",
-        )
+        Ok(())
     }
 }
 
