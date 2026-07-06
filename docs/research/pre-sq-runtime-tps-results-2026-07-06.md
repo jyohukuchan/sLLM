@@ -866,3 +866,60 @@ New artifacts:
 - `tools/compare-package-token-prompt-suite.py`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-token-guard.json`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-token-guard.md`
+
+## Short QA Final-Logits Guard
+
+The CPU full-model logits smoke for the short QA prompt was attempted but did not complete within
+the useful interactive window. For now, the practical guard is cross-device GPU comparison rather
+than an independent CPU reference.
+
+`tools/compare-package-token-logits.py` compares two `package-token-ids-logits-smoke` JSON reports.
+For the v0.3 `short_qa_bandwidth` prompt, R9700/RDNA4 and V620/RDNA2 produced identical top-8 final
+logits.
+
+Condition:
+
+- prompt case: `short_qa_bandwidth`
+- prompt tokens: `25`
+- top-k: `8`
+- R9700 logits total wall: `49479.525 ms`
+- V620 logits total wall: `49945.966 ms`
+
+Guard result:
+
+| metric | value |
+| --- | ---: |
+| prompt token match | true |
+| top count | 8 |
+| top token IDs match | true |
+| max abs logit diff | 0.0 |
+| both verified | true |
+| passed | true |
+
+Top logits:
+
+| rank | token ID | logit |
+| ---: | ---: | ---: |
+| 0 | 79612 | 8.736091614 |
+| 1 | 8938 | 8.176540375 |
+| 2 | 1473 | 7.934105396 |
+| 3 | 271 | 7.861293793 |
+| 4 | 561 | 7.520740509 |
+| 5 | 21134 | 7.201822758 |
+| 6 | 8439 | 7.165162086 |
+| 7 | 59930 | 7.075000286 |
+
+Interpretation:
+
+- This confirms exact cross-device agreement at the final-logits top-k level for one controlled
+  prompt, in addition to generated-token agreement across the full v0.3 suite.
+- It is still not a CPU or external-reference correctness proof. That remains a later product-quality
+  gate because the current CPU full-model logits path is too slow for routine prompt-suite use.
+
+New artifacts:
+
+- `tools/compare-package-token-logits.py`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-logits-short-qa-r9700-v0.3.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-logits-short-qa-v620-v0.3.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-logits-short-qa-r9700-v620-v0.3-guard.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-logits-short-qa-r9700-v620-v0.3-guard.md`

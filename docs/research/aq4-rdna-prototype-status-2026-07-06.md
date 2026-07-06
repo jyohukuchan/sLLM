@@ -6,6 +6,7 @@
 - 実text promptでも、controlled v0.3 suiteでR9700/RDNA4はmean decode `19.796 tok/s`、V620/RDNA2はmean decode `15.434 tok/s` を記録した。
 - v0.3 suiteでは、品質評価対象6件がR9700/V620の両方でwarningなし、timing probe 1件は品質評価から分離した。
 - R9700/V620間のgenerated-token guardはv0.3 suite全7件でpassedになった。
+- short QA 1件では、R9700/V620間のfinal top-8 logits guardもpassedになった。
 
 ## 今回の変更点
 
@@ -13,6 +14,7 @@
 - SQ format設計へ進む前に残すべき測定・正しさ・制約を整理した。
 - 発表時に必要なartifactと、次のgateを1ページにまとめた。
 - cross-device generated-token guardをprototype evidenceへ追加した。
+- short QAのcross-device final top-logits guardをprototype evidenceへ追加した。
 
 ## 次の行動
 
@@ -51,6 +53,7 @@ Summary artifacts:
 benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.3/summary.json
 benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.json
 benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-token-guard.json
+benchmarks/results/2026-07-06/engine/package-token-ids-logits-short-qa-r9700-v620-v0.3-guard.json
 ```
 
 | target | device | mean decode tok/s | min decode tok/s | max decode tok/s | mean prefill tok/s | verified all | output ok | output warn | output not evaluated |
@@ -74,6 +77,12 @@ Generated-token guard:
 | --- | ---: | ---: | ---: | ---: | ---: | :---: |
 | R9700/RDNA4 -> V620/RDNA2 | 7 | 7 | 7 | 7 | 7 | true |
 
+Short-QA final top-logits guard:
+
+| comparison | prompt tokens | top-k | top token IDs match | max abs logit diff | both verified | passed |
+| --- | ---: | ---: | :---: | ---: | :---: | :---: |
+| R9700/RDNA4 -> V620/RDNA2 | 25 | 8 | true | 0.0 | true | true |
+
 ## What Improved
 
 - The original long `512/256` path was only about `0.14 tok/s`; that result was a runtime-path
@@ -96,7 +105,7 @@ Generated-token guard:
 | server API | not implemented |
 | sampling | greedy only in the measured suite |
 | tokenizer integration | handled by Python wrapper, not native runtime API |
-| correctness guard | hidden-state golden prefix guard exists; cross-device generated-token guard exists for v0.3; independent final-logits reference is still missing |
+| correctness guard | hidden-state golden prefix guard exists; cross-device generated-token guard exists for v0.3; short-QA cross-device top-logits guard exists; independent CPU/external final-logits reference is still missing |
 | BF16 baseline | deferred because current package/runtime cannot express a full decoder BF16 baseline cleanly |
 | memory residency | current path still uses large resident/runtime buffers; SQ must address compact residency |
 | model scope | Qwen3.5-9B package path, not a broad model zoo claim |
