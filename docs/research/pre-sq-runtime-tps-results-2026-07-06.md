@@ -413,3 +413,41 @@ New artifacts:
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-linear-chain-fast-recurrent-r9700-prompt16-gen16.json`
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-linear-chain-fast-recurrent-r9700-prompt16-gen128.json`
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-linear-chain-fast-recurrent-r9700-prompt16-gen256.json`
+
+## Self-Attention Device Fast-Step Follow-Up
+
+After recurrent decode was fixed, the remaining long-decode slope came from the older f32
+self-attention runtime. `7088579` added an output-only fast step for package generation:
+
+- paged decode attention now keeps its output in a runtime buffer for the output gate and
+  projection instead of reading it to host and copying it back.
+- self-attention block output is fed directly into post-attention RMSNorm and MLP residual on GPU.
+- the package token generation path reads only the final self-attention layer output, not every
+  debug intermediate.
+
+R9700 comparison against the recurrent fast-path baseline:
+
+| prompt | generated | path | all-step tok/s | skip-1 tok/s | skip-2 tok/s | last-4 tok/s | p50 step ms | layers mean ms | verified |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| 16 | 16 | recurrent fast path | 15.800 | 15.752 | 15.704 | 15.335 | 63.518 | 55.149 | true |
+| 16 | 16 | + self-attn output-only fast step | 17.154 | 17.108 | 17.058 | 16.585 | 58.138 | 50.134 | true |
+| 16 | 128 | recurrent fast path | 13.650 | 13.631 | 13.613 | 12.263 | 73.816 | 65.088 | true |
+| 16 | 128 | + self-attn output-only fast step | 14.113 | 14.141 | 14.165 | 13.087 | 69.499 | 62.408 | true |
+| 16 | 256 | recurrent fast path | 11.792 | 11.779 | 11.766 | 9.153 | 83.020 | 76.426 | true |
+| 16 | 256 | + self-attn output-only fast step | 12.586 | 12.572 | 12.557 | 9.787 | 77.418 | 71.237 | true |
+
+Interpretation:
+
+- The useful improvement is broader than short prompts: gen16, gen128, and gen256 all improve on
+  the accepted reruns while preserving the same generated prefixes and `verified=true`.
+- The long-decode tail is still dominated by self-attention cache length. The gen256 last-4 rate is
+  only `9.787 tok/s`, so the next improvement should target paged decode attention itself or make
+  self-attention projection/prepare more GPU-resident.
+- An earlier gen16 trial for this patch was an outlier (`11.14 tok/s`) and is intentionally not used
+  as the accepted artifact; the repeated gen16 run produced stable token agreement and `17.154 tok/s`.
+
+New artifacts:
+
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-r9700-prompt16-gen16-rerun.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-r9700-prompt16-gen128.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-r9700-prompt16-gen256.json`
