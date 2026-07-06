@@ -84,7 +84,21 @@ def write_md(path: Path, summary_json: Path, payload: dict[str, Any]) -> None:
             )
         )
     lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def resolve_summary_path(output_dir: Path, value: str | Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    if path == output_dir or path.is_relative_to(output_dir):
+        return path
+    output_dir_resolved = output_dir.resolve(strict=False)
+    path_resolved = path.resolve(strict=False)
+    if path_resolved.is_relative_to(output_dir_resolved):
+        return path
+    return output_dir / path
 
 
 def main() -> int:
@@ -180,8 +194,9 @@ def main() -> int:
         "passed": all(check["passed"] for check in checks),
         "checks": checks,
     }
-    summary_json = args.output_dir / args.summary_json
-    summary_md = args.output_dir / args.summary_md
+    summary_json = resolve_summary_path(args.output_dir, args.summary_json)
+    summary_md = resolve_summary_path(args.output_dir, args.summary_md)
+    summary_json.parent.mkdir(parents=True, exist_ok=True)
     summary_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_md(summary_md, summary_json, payload)
     print(f"wrote {summary_json}", file=sys.stderr)
