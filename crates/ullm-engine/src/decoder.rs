@@ -62,6 +62,26 @@ pub struct Qwen3DecoderLayerStepOutput {
     pub layer_output: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen3DecoderLayerOutputStep {
+    pub cache_position: usize,
+    pub cache_len: usize,
+    pub layer_output: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PagedDecodeDeviceStepOutput {
+    cache_position: usize,
+    cache_len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Qwen3SelfAttnBlockDeviceStepOutput {
+    cache_position: usize,
+    cache_len: usize,
+    gated_projection_input: bool,
+}
+
 #[derive(Debug)]
 pub struct PagedDecodeState {
     shape: PagedDecodeShape,
@@ -87,7 +107,6 @@ pub struct Qwen3SelfAttnBlockStepState {
     decode: Qwen3SelfAttnDecodeState,
     hidden: usize,
     attention_elements: usize,
-    attention_buffer: RuntimeBuffer,
     gate_buffer: RuntimeBuffer,
     projection_input_buffer: RuntimeBuffer,
     projected_buffer: RuntimeBuffer,
@@ -101,12 +120,10 @@ pub struct Qwen3DecoderLayerStepState {
     intermediate: usize,
     mlp_epsilon: f32,
     post_normed_buffer: RuntimeBuffer,
-    post_norm_input_buffer: RuntimeBuffer,
     gate_buffer: RuntimeBuffer,
     up_buffer: RuntimeBuffer,
     activated_buffer: RuntimeBuffer,
     mlp_output_buffer: RuntimeBuffer,
-    block_output_buffer: RuntimeBuffer,
     layer_output_buffer: RuntimeBuffer,
 }
 
@@ -1624,6 +1641,31 @@ impl<'weights> Qwen3DecoderLayerRuntime<'weights> {
         )
     }
 
+    pub fn step_output_only(
+        &mut self,
+        stream: &mut RuntimeStream,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output_gate: Option<&[f32]>,
+        residual: &[f32],
+    ) -> Result<Qwen3DecoderLayerOutputStep, String> {
+        let post_attention = &self.weights.post_attention;
+        self.step_state.step_output_only(
+            stream,
+            &self.weights.self_attn.o_matrix,
+            &post_attention.post_norm_weight,
+            &post_attention.mlp.gate_matrix,
+            &post_attention.mlp.up_matrix,
+            &post_attention.mlp.down_matrix,
+            q,
+            k,
+            v,
+            output_gate,
+            residual,
+        )
+    }
+
     pub fn read_cache_to_host(
         &self,
         stream: &mut RuntimeStream,
@@ -2044,14 +2086,95 @@ impl PagedDecodeState {
         v: &[f32],
         softmax_scale: f32,
     ) -> Result<PagedDecodeStepOutput, String> {
-        self.validate_decode_input(q, softmax_scale)?;
-        let cache_position = self.write_token(stream, k, v)?;
-        let cache_len = self.written_len;
-        let output = self.decode(stream, q, cache_len, softmax_scale)?;
+        let device_step = self.decode_step_to_device(stream, q, k, v, softmax_scale)?;
+        let output = read_f32_buffer(self.output_buffer(), stream, self.shape.output_elements()?)?;
         Ok(PagedDecodeStepOutput {
+            cache_position: device_step.cache_position,
+            cache_len: device_step.cache_len,
+            output,
+        })
+    }
+
+    fn decode_step_to_device(
+        &mut self,
+        stream: &mut RuntimeStream,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        softmax_scale: f32,
+    ) -> Result<PagedDecodeDeviceStepOutput, String> {
+        self.validate_decode_input(q, softmax_scale)?;
+        let cache_position = self.written_len;
+        self.validate_cache_position(cache_position)?;
+        if k.len() != self.shape.k_token_elements()? {
+            return Err(format!(
+                "paged decoder k token length {} does not match expected {}",
+                k.len(),
+                self.shape.k_token_elements()?
+            ));
+        }
+        if v.len() != self.shape.v_token_elements()? {
+            return Err(format!(
+                "paged decoder v token length {} does not match expected {}",
+                v.len(),
+                self.shape.v_token_elements()?
+            ));
+        }
+
+        let q_bytes = f32s_to_le_bytes(q);
+        let k_bytes = f32s_to_le_bytes(k);
+        let v_bytes = f32s_to_le_bytes(v);
+        self.q_buffer
+            .copy_from_host(0, &q_bytes, Some(stream))
+            .map_err(|err| format!("failed to copy paged decoder q input: {err}"))?;
+        self.k_token_buffer
+            .copy_from_host(0, &k_bytes, Some(stream))
+            .map_err(|err| format!("failed to copy paged decoder k token: {err}"))?;
+        self.v_token_buffer
+            .copy_from_host(0, &v_bytes, Some(stream))
+            .map_err(|err| format!("failed to copy paged decoder v token: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize paged decoder token inputs: {err}"))?;
+
+        ullm_runtime_sys::paged_kv_write_f32(
+            &self.k_token_buffer,
+            &self.v_token_buffer,
+            &self.block_table_buffer,
+            cache_position,
+            self.shape.block_size,
+            self.shape.cache_blocks,
+            self.shape.kv_heads,
+            self.shape.head_dim,
+            self.shape.value_dim,
+            &mut self.k_cache_buffer,
+            &mut self.v_cache_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run paged decoder KV write: {err}"))?;
+        self.written_len = self.written_len.max(cache_position + 1);
+        let cache_len = self.written_len;
+
+        ullm_runtime_sys::paged_decode_attn_f32(
+            &self.q_buffer,
+            &self.k_cache_buffer,
+            &self.v_cache_buffer,
+            &self.block_table_buffer,
+            cache_len,
+            self.shape.block_size,
+            self.shape.cache_blocks,
+            self.shape.q_heads,
+            self.shape.kv_heads,
+            self.shape.head_dim,
+            self.shape.value_dim,
+            softmax_scale,
+            &mut self.output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run paged decoder decode attention: {err}"))?;
+        Ok(PagedDecodeDeviceStepOutput {
             cache_position,
             cache_len,
-            output,
         })
     }
 
@@ -2097,11 +2220,12 @@ impl PagedDecodeState {
             Some(stream),
         )
         .map_err(|err| format!("failed to run paged decoder decode attention: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize paged decoder decode attention: {err}")
-        })?;
 
         read_f32_buffer(&self.output_buffer, stream, self.shape.output_elements()?)
+    }
+
+    fn output_buffer(&self) -> &RuntimeBuffer {
+        &self.output_buffer
     }
 
     pub fn read_cache_to_host(
@@ -2194,14 +2318,32 @@ impl Qwen3SelfAttnDecodeState {
         k: &[f32],
         v: &[f32],
     ) -> Result<Qwen3SelfAttnDecodeStepOutput, String> {
-        let step = self
-            .state
-            .decode_step(stream, q, k, v, self.softmax_scale)?;
+        let step = self.step_to_device(stream, q, k, v)?;
+        let attention_output = read_f32_buffer(
+            self.output_buffer(),
+            stream,
+            self.state.shape.output_elements()?,
+        )?;
         Ok(Qwen3SelfAttnDecodeStepOutput {
             cache_position: step.cache_position,
             cache_len: step.cache_len,
-            attention_output: step.output,
+            attention_output,
         })
+    }
+
+    fn step_to_device(
+        &mut self,
+        stream: &mut RuntimeStream,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+    ) -> Result<PagedDecodeDeviceStepOutput, String> {
+        self.state
+            .decode_step_to_device(stream, q, k, v, self.softmax_scale)
+    }
+
+    fn output_buffer(&self) -> &RuntimeBuffer {
+        self.state.output_buffer()
     }
 
     pub fn shape(&self) -> PagedDecodeShape {
@@ -2269,9 +2411,6 @@ impl Qwen3DecoderLayerStepState {
         let mut post_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate Qwen3 decoder layer post normed buffer: {err}")
         })?;
-        let mut post_norm_input_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate Qwen3 decoder layer post norm input buffer: {err}")
-        })?;
         let mut gate_buffer = context
             .alloc_buffer(intermediate_bytes)
             .map_err(|err| format!("failed to allocate Qwen3 decoder layer gate buffer: {err}"))?;
@@ -2284,19 +2423,14 @@ impl Qwen3DecoderLayerStepState {
         let mut mlp_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate Qwen3 decoder layer MLP output buffer: {err}")
         })?;
-        let mut block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate Qwen3 decoder layer block output buffer: {err}")
-        })?;
         let mut layer_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate Qwen3 decoder layer output buffer: {err}")
         })?;
         zero_buffer(&mut post_normed_buffer, Some(stream))?;
-        zero_buffer(&mut post_norm_input_buffer, Some(stream))?;
         zero_buffer(&mut gate_buffer, Some(stream))?;
         zero_buffer(&mut up_buffer, Some(stream))?;
         zero_buffer(&mut activated_buffer, Some(stream))?;
         zero_buffer(&mut mlp_output_buffer, Some(stream))?;
-        zero_buffer(&mut block_output_buffer, Some(stream))?;
         zero_buffer(&mut layer_output_buffer, Some(stream))?;
         stream
             .synchronize()
@@ -2306,18 +2440,16 @@ impl Qwen3DecoderLayerStepState {
             intermediate,
             mlp_epsilon,
             post_normed_buffer,
-            post_norm_input_buffer,
             gate_buffer,
             up_buffer,
             activated_buffer,
             mlp_output_buffer,
-            block_output_buffer,
             layer_output_buffer,
         })
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn step(
+    fn step_to_device(
         &mut self,
         stream: &mut RuntimeStream,
         o_projection_matrix: &RuntimeBuffer,
@@ -2330,19 +2462,16 @@ impl Qwen3DecoderLayerStepState {
         v: &[f32],
         output_gate: Option<&[f32]>,
         residual: &[f32],
-    ) -> Result<Qwen3DecoderLayerStepOutput, String> {
-        let block_step =
-            self.block_state
-                .step(stream, o_projection_matrix, q, k, v, output_gate, residual)?;
-        let Qwen3SelfAttnBlockStepOutput {
-            cache_position,
-            cache_len,
-            attention_output,
-            attention_projection_input,
-            projected_output,
-            block_output,
-        } = block_step;
-
+    ) -> Result<Qwen3SelfAttnBlockDeviceStepOutput, String> {
+        let block_step = self.block_state.step_to_device(
+            stream,
+            o_projection_matrix,
+            q,
+            k,
+            v,
+            output_gate,
+            residual,
+        )?;
         let hidden = self.block_state.hidden();
         let hidden_bytes = f32_bytes(hidden);
         if post_norm_weight.size()? != hidden_bytes {
@@ -2378,16 +2507,8 @@ impl Qwen3DecoderLayerStepState {
             ));
         }
 
-        self.post_norm_input_buffer
-            .copy_from_host(0, &f32s_to_le_bytes(&block_output), Some(stream))
-            .map_err(|err| {
-                format!("failed to copy Qwen3 decoder layer attention block output: {err}")
-            })?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize Qwen3 decoder layer attention block output copy: {err}")
-        })?;
         ullm_runtime_sys::rmsnorm_f32(
-            &self.post_norm_input_buffer,
+            self.block_state.block_buffer(),
             post_norm_weight,
             hidden,
             self.mlp_epsilon,
@@ -2395,9 +2516,6 @@ impl Qwen3DecoderLayerStepState {
             Some(stream),
         )
         .map_err(|err| format!("failed to run Qwen3 decoder layer post RMSNorm: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize Qwen3 decoder layer post RMSNorm: {err}")
-        })?;
 
         ullm_runtime_sys::matvec_f32(
             mlp_gate_matrix,
@@ -2417,9 +2535,6 @@ impl Qwen3DecoderLayerStepState {
             Some(stream),
         )
         .map_err(|err| format!("failed to run Qwen3 decoder layer MLP up matvec: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize Qwen3 decoder layer MLP gate/up matvec: {err}")
-        })?;
         ullm_runtime_sys::silu_mul_f32(
             &self.gate_buffer,
             &self.up_buffer,
@@ -2428,9 +2543,6 @@ impl Qwen3DecoderLayerStepState {
             Some(stream),
         )
         .map_err(|err| format!("failed to run Qwen3 decoder layer MLP SiLU-mul: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize Qwen3 decoder layer MLP SiLU-mul: {err}")
-        })?;
         ullm_runtime_sys::matvec_f32(
             mlp_down_matrix,
             &self.activated_buffer,
@@ -2440,28 +2552,56 @@ impl Qwen3DecoderLayerStepState {
             Some(stream),
         )
         .map_err(|err| format!("failed to run Qwen3 decoder layer MLP down matvec: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize Qwen3 decoder layer MLP down matvec: {err}")
-        })?;
 
-        self.block_output_buffer
-            .copy_from_host(0, &f32s_to_le_bytes(&block_output), Some(stream))
-            .map_err(|err| format!("failed to copy Qwen3 decoder layer block output: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize Qwen3 decoder layer block output copy: {err}")
-        })?;
         ullm_runtime_sys::add_f32(
-            &self.block_output_buffer,
+            self.block_state.block_buffer(),
             &self.mlp_output_buffer,
             hidden,
             &mut self.layer_output_buffer,
             Some(stream),
         )
         .map_err(|err| format!("failed to run Qwen3 decoder layer MLP residual add: {err}"))?;
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize Qwen3 decoder layer MLP residual add: {err}")
-        })?;
 
+        Ok(block_step)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step(
+        &mut self,
+        stream: &mut RuntimeStream,
+        o_projection_matrix: &RuntimeBuffer,
+        post_norm_weight: &RuntimeBuffer,
+        mlp_gate_matrix: &RuntimeBuffer,
+        mlp_up_matrix: &RuntimeBuffer,
+        mlp_down_matrix: &RuntimeBuffer,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output_gate: Option<&[f32]>,
+        residual: &[f32],
+    ) -> Result<Qwen3DecoderLayerStepOutput, String> {
+        let block_step = self.step_to_device(
+            stream,
+            o_projection_matrix,
+            post_norm_weight,
+            mlp_gate_matrix,
+            mlp_up_matrix,
+            mlp_down_matrix,
+            q,
+            k,
+            v,
+            output_gate,
+            residual,
+        )?;
+        let hidden = self.block_state.hidden();
+        let cache_position = block_step.cache_position;
+        let cache_len = block_step.cache_len;
+        let attention_output = self.block_state.read_attention_output(stream)?;
+        let attention_projection_input = self
+            .block_state
+            .read_attention_projection_input(stream, block_step.gated_projection_input)?;
+        let projected_output = self.block_state.read_projected_output(stream)?;
+        let block_output = self.block_state.read_block_output(stream)?;
         let post_normed = read_f32_buffer(&self.post_normed_buffer, stream, hidden)?;
         let mlp_output = read_f32_buffer(&self.mlp_output_buffer, stream, hidden)?;
         let layer_output = read_f32_buffer(&self.layer_output_buffer, stream, hidden)?;
@@ -2474,6 +2614,43 @@ impl Qwen3DecoderLayerStepState {
             block_output,
             post_normed,
             mlp_output,
+            layer_output,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_output_only(
+        &mut self,
+        stream: &mut RuntimeStream,
+        o_projection_matrix: &RuntimeBuffer,
+        post_norm_weight: &RuntimeBuffer,
+        mlp_gate_matrix: &RuntimeBuffer,
+        mlp_up_matrix: &RuntimeBuffer,
+        mlp_down_matrix: &RuntimeBuffer,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output_gate: Option<&[f32]>,
+        residual: &[f32],
+    ) -> Result<Qwen3DecoderLayerOutputStep, String> {
+        let block_step = self.step_to_device(
+            stream,
+            o_projection_matrix,
+            post_norm_weight,
+            mlp_gate_matrix,
+            mlp_up_matrix,
+            mlp_down_matrix,
+            q,
+            k,
+            v,
+            output_gate,
+            residual,
+        )?;
+        let layer_output =
+            read_f32_buffer(&self.layer_output_buffer, stream, self.block_state.hidden())?;
+        Ok(Qwen3DecoderLayerOutputStep {
+            cache_position: block_step.cache_position,
+            cache_len: block_step.cache_len,
             layer_output,
         })
     }
@@ -2532,9 +2709,6 @@ impl Qwen3SelfAttnBlockStepState {
         let hidden_bytes = f32_bytes(hidden);
         let decode =
             Qwen3SelfAttnDecodeState::new(context, stream, shape, block_table, softmax_scale)?;
-        let mut attention_buffer = context
-            .alloc_buffer(attention_bytes)
-            .map_err(|err| format!("failed to allocate Qwen3 self-attn attention buffer: {err}"))?;
         let mut gate_buffer = context
             .alloc_buffer(attention_bytes)
             .map_err(|err| format!("failed to allocate Qwen3 self-attn gate buffer: {err}"))?;
@@ -2550,7 +2724,6 @@ impl Qwen3SelfAttnBlockStepState {
         let mut block_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate Qwen3 self-attn block buffer: {err}"))?;
-        zero_buffer(&mut attention_buffer, Some(stream))?;
         zero_buffer(&mut gate_buffer, Some(stream))?;
         zero_buffer(&mut projection_input_buffer, Some(stream))?;
         zero_buffer(&mut projected_buffer, Some(stream))?;
@@ -2563,7 +2736,6 @@ impl Qwen3SelfAttnBlockStepState {
             decode,
             hidden,
             attention_elements,
-            attention_buffer,
             gate_buffer,
             projection_input_buffer,
             projected_buffer,
@@ -2583,6 +2755,34 @@ impl Qwen3SelfAttnBlockStepState {
         output_gate: Option<&[f32]>,
         residual: &[f32],
     ) -> Result<Qwen3SelfAttnBlockStepOutput, String> {
+        let step =
+            self.step_to_device(stream, o_projection_matrix, q, k, v, output_gate, residual)?;
+        let attention_output = self.read_attention_output(stream)?;
+        let attention_projection_input =
+            self.read_attention_projection_input(stream, step.gated_projection_input)?;
+        let projected_output = self.read_projected_output(stream)?;
+        let block_output = self.read_block_output(stream)?;
+        Ok(Qwen3SelfAttnBlockStepOutput {
+            cache_position: step.cache_position,
+            cache_len: step.cache_len,
+            attention_output,
+            attention_projection_input,
+            projected_output,
+            block_output,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_to_device(
+        &mut self,
+        stream: &mut RuntimeStream,
+        o_projection_matrix: &RuntimeBuffer,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output_gate: Option<&[f32]>,
+        residual: &[f32],
+    ) -> Result<Qwen3SelfAttnBlockDeviceStepOutput, String> {
         if let Some(gate) = output_gate {
             if gate.len() != self.attention_elements {
                 return Err(format!(
@@ -2600,11 +2800,8 @@ impl Qwen3SelfAttnBlockStepState {
             ));
         }
 
-        let decode_step = self.decode.step(stream, q, k, v)?;
-        let attention_bytes = f32s_to_le_bytes(&decode_step.attention_output);
-        self.attention_buffer
-            .copy_from_host(0, &attention_bytes, Some(stream))
-            .map_err(|err| format!("failed to copy Qwen3 self-attn attention output: {err}"))?;
+        let decode_step = self.decode.step_to_device(stream, q, k, v)?;
+        let gated_projection_input = output_gate.is_some();
         if let Some(gate) = output_gate {
             self.gate_buffer
                 .copy_from_host(0, &f32s_to_le_bytes(gate), Some(stream))
@@ -2614,37 +2811,36 @@ impl Qwen3SelfAttnBlockStepState {
             })?;
             ullm_runtime_sys::sigmoid_mul_f32(
                 &self.gate_buffer,
-                &self.attention_buffer,
+                self.decode.output_buffer(),
                 self.attention_elements,
                 &mut self.projection_input_buffer,
                 Some(stream),
             )
             .map_err(|err| format!("failed to run Qwen3 self-attn output gate: {err}"))?;
-        } else {
-            self.projection_input_buffer
-                .copy_from_host(0, &attention_bytes, Some(stream))
-                .map_err(|err| format!("failed to copy Qwen3 self-attn projection input: {err}"))?;
         }
-        stream.synchronize().map_err(|err| {
-            format!("failed to synchronize Qwen3 self-attn projection input: {err}")
-        })?;
+        let projection_input_buffer = if gated_projection_input {
+            &self.projection_input_buffer
+        } else {
+            self.decode.output_buffer()
+        };
 
         ullm_runtime_sys::matvec_f32(
             o_projection_matrix,
-            &self.projection_input_buffer,
+            projection_input_buffer,
             self.hidden,
             self.attention_elements,
             &mut self.projected_buffer,
             Some(stream),
         )
         .map_err(|err| format!("failed to run Qwen3 self-attn o projection: {err}"))?;
-        stream
-            .synchronize()
-            .map_err(|err| format!("failed to synchronize Qwen3 self-attn o projection: {err}"))?;
 
+        let residual_bytes = f32s_to_le_bytes(residual);
         self.residual_buffer
-            .copy_from_host(0, &f32s_to_le_bytes(residual), Some(stream))
+            .copy_from_host(0, &residual_bytes, Some(stream))
             .map_err(|err| format!("failed to copy Qwen3 self-attn residual: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3 self-attn residual input: {err}")
+        })?;
         ullm_runtime_sys::add_f32(
             &self.residual_buffer,
             &self.projected_buffer,
@@ -2653,24 +2849,11 @@ impl Qwen3SelfAttnBlockStepState {
             Some(stream),
         )
         .map_err(|err| format!("failed to run Qwen3 self-attn residual add: {err}"))?;
-        stream
-            .synchronize()
-            .map_err(|err| format!("failed to synchronize Qwen3 self-attn residual add: {err}"))?;
 
-        let attention_projection_input = read_f32_buffer(
-            &self.projection_input_buffer,
-            stream,
-            self.attention_elements,
-        )?;
-        let projected_output = read_f32_buffer(&self.projected_buffer, stream, self.hidden)?;
-        let block_output = read_f32_buffer(&self.block_buffer, stream, self.hidden)?;
-        Ok(Qwen3SelfAttnBlockStepOutput {
+        Ok(Qwen3SelfAttnBlockDeviceStepOutput {
             cache_position: decode_step.cache_position,
             cache_len: decode_step.cache_len,
-            attention_output: decode_step.attention_output,
-            attention_projection_input,
-            projected_output,
-            block_output,
+            gated_projection_input,
         })
     }
 
@@ -2684,6 +2867,54 @@ impl Qwen3SelfAttnBlockStepState {
 
     pub fn attention_elements(&self) -> usize {
         self.attention_elements
+    }
+
+    fn attention_output_buffer(&self) -> &RuntimeBuffer {
+        self.decode.output_buffer()
+    }
+
+    fn projection_input_buffer(&self, gated_projection_input: bool) -> &RuntimeBuffer {
+        if gated_projection_input {
+            &self.projection_input_buffer
+        } else {
+            self.decode.output_buffer()
+        }
+    }
+
+    fn projected_buffer(&self) -> &RuntimeBuffer {
+        &self.projected_buffer
+    }
+
+    fn block_buffer(&self) -> &RuntimeBuffer {
+        &self.block_buffer
+    }
+
+    fn read_attention_output(&self, stream: &mut RuntimeStream) -> Result<Vec<f32>, String> {
+        read_f32_buffer(
+            self.attention_output_buffer(),
+            stream,
+            self.attention_elements,
+        )
+    }
+
+    fn read_attention_projection_input(
+        &self,
+        stream: &mut RuntimeStream,
+        gated_projection_input: bool,
+    ) -> Result<Vec<f32>, String> {
+        read_f32_buffer(
+            self.projection_input_buffer(gated_projection_input),
+            stream,
+            self.attention_elements,
+        )
+    }
+
+    fn read_projected_output(&self, stream: &mut RuntimeStream) -> Result<Vec<f32>, String> {
+        read_f32_buffer(self.projected_buffer(), stream, self.hidden)
+    }
+
+    fn read_block_output(&self, stream: &mut RuntimeStream) -> Result<Vec<f32>, String> {
+        read_f32_buffer(self.block_buffer(), stream, self.hidden)
     }
 
     pub fn written_len(&self) -> usize {

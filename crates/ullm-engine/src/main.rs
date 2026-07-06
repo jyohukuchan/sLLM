@@ -16487,7 +16487,7 @@ fn package_token_ids_incremental_layer_step<'weights>(
                 &loaded.k_norm,
                 label,
             )?;
-            let step = state.step(
+            let step = state.step_output_only(
                 stream,
                 &prepared.q_rope,
                 &prepared.k_rope,
