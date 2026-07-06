@@ -1,0 +1,118 @@
+{
+  "schema_version": "package-token-prompt-suite-summary-v0.1",
+  "suite": {
+    "suite_id": "pre-sq-runtime-prompt-suite-v0.1",
+    "purpose": "Small text prompt set for pre-SQ runtime TPS and output-collapse observation.",
+    "tokenizer": "Qwen3.5-9B",
+    "decode_policy": "greedy with tokenizer special-token stop policy"
+  },
+  "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d",
+  "tokenizer_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "device_index": 2,
+  "layers": "all",
+  "generated_tokens_default": 128,
+  "stop_policy": {
+    "stop_token_ids": null,
+    "stop_on_eos": false,
+    "stop_on_special_tokens": true
+  },
+  "case_count": 4,
+  "metrics": {
+    "decode_tps_mean": 19.6624920400294,
+    "decode_tps_min": 18.585040723842393,
+    "decode_tps_max": 20.158036740264546,
+    "prefill_tps_mean": 18.859844478934647,
+    "verified_all": true,
+    "stopped_count": 1
+  },
+  "cases": [
+    {
+      "id": "warmup_measurement",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/warmup_measurement.json",
+      "prompt_tokens": 16,
+      "generated_tokens": 81,
+      "requested_generated_tokens": 128,
+      "verified": true,
+      "stop_reason": "stop_token",
+      "stopped": true,
+      "stopped_on_token_id": 248044,
+      "prefill_tps": 17.176471995443023,
+      "decode_tps": 20.158036740264546,
+      "skip2_tps": 20.15828235233302,
+      "last8_tps": 19.838750339658006,
+      "p50_ms": 49.598728,
+      "generated_chars": 486,
+      "unique_generated_token_ratio": 0.8641975308641975,
+      "generated_preview": "GPU warmup distorts token/s measurements because the initial frames of inference are dominated by the overhead of loading model weights into high-bandwidth memory and initializing CUDA kernels, rather than pure computation; consequently, th",
+      "notes": [
+        "Checks whether a short technical explanation completes cleanly with stop tokens."
+      ]
+    },
+    {
+      "id": "memory_vs_compute",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/memory_vs_compute.json",
+      "prompt_tokens": 26,
+      "generated_tokens": 128,
+      "requested_generated_tokens": 128,
+      "verified": true,
+      "stop_reason": "max_generated_tokens",
+      "stopped": false,
+      "stopped_on_token_id": null,
+      "prefill_tps": 19.13797341595638,
+      "decode_tps": 19.985411288662974,
+      "skip2_tps": 19.981724861507153,
+      "last8_tps": 19.69850060996777,
+      "p50_ms": 49.924863,
+      "generated_chars": 772,
+      "unique_generated_token_ratio": 0.75,
+      "generated_preview": "Memory-bandwidth-bound bottlenecks occur when the GPU cannot fetch weights fast enough to keep the compute units saturated, which is common in low-bit quantization due to increased memory access frequency. In contrast, compute-bound bottlen",
+      "notes": [
+        "Targets the AQ/SQ design question about where quantization format differences matter."
+      ]
+    },
+    {
+      "id": "throughput_checklist",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/throughput_checklist.json",
+      "prompt_tokens": 16,
+      "generated_tokens": 128,
+      "requested_generated_tokens": 128,
+      "verified": true,
+      "stop_reason": "max_generated_tokens",
+      "stopped": false,
+      "stopped_on_token_id": null,
+      "prefill_tps": 17.19675953807466,
+      "decode_tps": 19.921479407347675,
+      "skip2_tps": 19.917764290080736,
+      "last8_tps": 19.544073889889276,
+      "p50_ms": 50.148976999999995,
+      "generated_chars": 580,
+      "unique_generated_token_ratio": 0.7109375,
+      "generated_preview": "Here is a short checklist for reporting LLM inference throughput fairly on a single GPU. ### 1. Define the Metric Clearly * **[ ] Use Tokens Per Second (TPS):** Avoid reporting \"requests per second.\" TPS is the industry standard because it ",
+      "notes": [
+        "Looks for list formatting and repeated-token failure modes under greedy decode."
+      ]
+    },
+    {
+      "id": "long_prefill_warmup",
+      "report": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/long_prefill_warmup.json",
+      "prompt_tokens": 256,
+      "generated_tokens": 192,
+      "requested_generated_tokens": 192,
+      "verified": true,
+      "stop_reason": "max_generated_tokens",
+      "stopped": false,
+      "stopped_on_token_id": null,
+      "prefill_tps": 21.928172966264533,
+      "decode_tps": 18.585040723842393,
+      "skip2_tps": 18.582938278746795,
+      "last8_tps": 18.135178130701647,
+      "p50_ms": 53.750529,
+      "generated_chars": 942,
+      "unique_generated_token_ratio": 0.203125,
+      "generated_preview": "a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, and describe a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, after running a few iterations, the GPU m",
+      "notes": [
+        "Repeats the prompt to create a reproducible long-prefill timing probe."
+      ]
+    }
+  ]
+}

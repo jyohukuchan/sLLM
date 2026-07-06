@@ -543,3 +543,50 @@ New artifacts:
 - `benchmarks/results/2026-07-06/engine/package-token-prompt-bench-aq4-pagedattn-r9700-warmup-prompt-gen128-stop-special.json`
 - `benchmarks/results/2026-07-06/engine/package-token-prompt-bench-aq4-pagedattn-r9700-warmup-chat-gen128.json`
 - `benchmarks/results/2026-07-06/engine/package-token-prompt-bench-aq4-pagedattn-r9700-warmup-target256-gen256.json`
+
+## Prompt Suite Follow-Up
+
+Single prompt runs were still too easy to cherry-pick. `tools/run-package-token-prompt-suite.py`
+now runs a JSON prompt suite through the text-prompt wrapper, writes one enriched report per prompt,
+and emits summary JSON/Markdown tables. The first suite is
+`benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.1.json`.
+
+R9700 suite run:
+
+| case | prompt tokens | generated | stop reason | prefill tok/s | decode tok/s | skip-2 tok/s | last-8 tok/s | p50 ms | unique generated token ratio | verified |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| warmup_measurement | 16 | 81 | stop_token | 17.176 | 20.158 | 20.158 | 19.839 | 49.599 | 0.864 | true |
+| memory_vs_compute | 26 | 128 | max_generated_tokens | 19.138 | 19.985 | 19.982 | 19.699 | 49.925 | 0.750 | true |
+| throughput_checklist | 16 | 128 | max_generated_tokens | 17.197 | 19.921 | 19.918 | 19.544 | 50.149 | 0.711 | true |
+| long_prefill_warmup | 256 | 192 | max_generated_tokens | 21.928 | 18.585 | 18.583 | 18.135 | 53.751 | 0.203 | true |
+
+Suite summary:
+
+- mean decode TPS: `19.662`
+- min decode TPS: `18.585`
+- max decode TPS: `20.158`
+- mean prefill TPS: `18.860`
+- verified all: `true`
+- stopped by stop token: `1 / 4`
+
+Interpretation:
+
+- The prompt set preserves the `~18-20 tok/s` decode range with tokenizer-derived text prompts and
+  stop-special-token policy.
+- Short technical prompts produce finite, locally coherent English. Two cases hit the generation
+  limit rather than a stop token, so they should be treated as quality-smoke outputs, not polished
+  instruction-following completions.
+- The long-prefill case is intentionally a repeated prompt to reach 256 prompt tokens. It is useful
+  for prefill/decode timing, but its low unique-token ratio and repeated decoded text mean it should
+  not be used as semantic quality evidence.
+
+New artifacts:
+
+- `tools/run-package-token-prompt-suite.py`
+- `benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.1.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/summary.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/summary.md`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/warmup_measurement.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/memory_vs_compute.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/throughput_checklist.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.1/long_prefill_warmup.json`

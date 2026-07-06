@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "suite_id": "pre-sq-runtime-prompt-suite-v0.1",
+    "purpose": "Small text prompt set for pre-SQ runtime TPS and output-collapse observation.",
+    "tokenizer": "Qwen3.5-9B",
+    "decode_policy": "greedy with tokenizer special-token stop policy"
+  },
+  "prompts": [
+    {
+      "id": "warmup_measurement",
+      "prompt": "Explain in one concise paragraph why GPU warmup can distort token/s measurements.",
+      "generated_tokens": 128,
+      "notes": [
+        "Checks whether a short technical explanation completes cleanly with stop tokens."
+      ]
+    },
+    {
+      "id": "memory_vs_compute",
+      "prompt": "Compare memory-bandwidth-bound and compute-bound inference bottlenecks in low-bit LLM decoding. Keep the answer under five sentences.",
+      "generated_tokens": 128,
+      "notes": [
+        "Targets the AQ/SQ design question about where quantization format differences matter."
+      ]
+    },
+    {
+      "id": "throughput_checklist",
+      "prompt": "Write a short checklist for reporting LLM inference throughput fairly on a single GPU.",
+      "generated_tokens": 128,
+      "notes": [
+        "Looks for list formatting and repeated-token failure modes under greedy decode."
+      ]
+    },
+    {
+      "id": "long_prefill_warmup",
+      "prompt": "Explain why GPU warmup can distort token/s measurements, and describe a careful way to report throughput.",
+      "generated_tokens": 192,
+      "target_prompt_tokens": 256,
+      "notes": [
+        "Repeats the prompt to create a reproducible long-prefill timing probe."
+      ]
+    }
+  ]
+}
