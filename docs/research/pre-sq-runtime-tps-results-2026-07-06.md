@@ -14,10 +14,11 @@
 - `tools/run-external-benchmark.py` に `--parse ullm-token-ids-generate` を追加し、uLLM stdout JSON、rocm-smi VRAM監視、correctness summaryを同じJSONL行にまとめられるようにした。
 - R9700とV620で `prompt_tokens=512`, `generated_tokens=256` のVRAM監視付きrunを完走した。
 - materialized-AQ baseline packageでR9700 `512/256` を完走した。V620側の同一長decodeは、R9700/V620ともdecode約 `0.14 tok/s` に張り付くことが既に確認できたため、途中で意図的に停止した。
+- BF16 baseline feasibilityを確認し、現行package/runtimeだけでは真のBF16 baselineを作れないと判断した。
 
 ## 次の行動
 
-1. BF16 baselineの実装可否を整理する。真のBF16 runtimeが重い場合は、まず比較不能な点を明記してT6へ進む。
+1. T4の短いreference guardを作り、長いTPS runが壊れた値を測っていないことを確認する。
 2. 以後のTPS測定は、長いprefillと短いdecodeを分ける。decodeが約 `0.14 tok/s` の経路で長時間測定を繰り返さない。
 3. sq format案では、F32常駐を避ける保存形式とdecode時のmaterialize範囲を最優先で検討する。
 
@@ -29,6 +30,7 @@
 - VRAM-monitored benchmark summary: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-bench-vram-summary.md`
 - Materialized-AQ baseline JSONL: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-baseline-vram.jsonl`
 - Materialized-AQ baseline summary: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-baseline-vram-summary.md`
+- BF16 baseline feasibility note: `docs/research/pre-sq-bf16-baseline-feasibility-2026-07-06.md`
 
 Local raw logs are under `benchmarks/results/2026-07-06/engine/logs/`, but that directory is intentionally ignored by git. The tracked JSONL above contains the comparable metrics, memory summary, correctness summary, and artifact paths.
 
@@ -104,9 +106,17 @@ Conclusion:
 - The bottleneck to address before sq format measurement is runtime decode cost and f32 materialized residency, not RDNA2 vs RDNA4 selection.
 - Long decode runs should resume only after the execution path changes or when a publication-quality sustained number is specifically needed.
 
+## BF16 Baseline Feasibility
+
+The existing full Qwen3.5 package artifacts are not BF16/passthrough-only runtime baselines. The checked materialized-AQ baseline package contains `255` quantized tensors and `520` passthrough tensors. Its large decoder matrix families are under quantized `tensors/`, while passthrough is mostly `embed`, `lm_head`, and `other` small/support tensors.
+
+The loader can read BF16 passthrough payloads, but `read_named_passthrough_f32*` expands them to f32 host values. The decoder matrix path uses `materialize_selected_aq4_matrix`, which dequantizes AQ4 tensors into f32 runtime buffers. Therefore, running the current package is not a true BF16 compute baseline.
+
+For this pre-sq stage, the true BF16 baseline is deferred rather than implemented. Implementing it would require at least a passthrough-only full decoder package, loader branches that select passthrough decoder matrices, and runtime kernels or buffer paths that preserve the intended BF16 baseline semantics.
+
 ## Remaining Plan Items
 
 - T3 is now substantially satisfied for the minimum `512/256` grid, including VRAM.
 - T4 still needs a stricter short reference check against HF/PyTorch or existing golden fixture.
-- T5 is partially complete: materialized-AQ baseline has an R9700 long-run anchor, but true BF16 baseline is not available yet.
-- T6 decision pack is not final until T4 and the BF16 baseline decision are closed. Stretch context runs should be deferred unless a faster path is introduced.
+- T5 is closed for the current pre-sq scope: materialized-AQ has an R9700 long-run anchor, and true BF16 baseline is explicitly deferred because current artifacts/runtime do not support it.
+- T6 decision pack is not final until T4 is closed. Stretch context runs should be deferred unless a faster path is introduced.

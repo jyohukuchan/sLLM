@@ -286,6 +286,7 @@ Exit criteria:
 
 - sq候補が勝つべき基準線が明確になる。
 - 「保存形式の良し悪し」と「runtime実装の未成熟」が分けて見える。
+- 真のBF16 baselineを現行package/runtimeで作れない場合は、その理由をartifactとして残し、pre-sq範囲では明示的にdeferできる。
 
 ### T6: Pre-SQ Decision Pack, 0.5-1 day
 
