@@ -451,3 +451,51 @@ New artifacts:
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-r9700-prompt16-gen16-rerun.json`
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-r9700-prompt16-gen128.json`
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-r9700-prompt16-gen256.json`
+
+## Paged Decode Attention Score-Reuse Follow-Up
+
+The self-attention output-only fast step still left a strong long-decode slope. Inspection showed
+that `ullm_paged_decode_attn_f32_kernel` computed the same q·k score independently for every
+`(q_head, value_dim)` output element. With Qwen3.5 self-attention shape `q_heads=16`,
+`kv_heads=4`, `head_dim=256`, and `value_dim=256`, that repeated each q·k reduction 256 times per
+query head and source timestep.
+
+`c87fed5` added a HIP fast path for the common `head_dim <= 256 && value_dim <= 256` case:
+
+- launch one block per query head instead of one thread per output element;
+- reduce q·k across `head_dim` once per query head/source timestep with 256 threads;
+- reuse the resulting softmax weight across value-dimension lanes in the same block;
+- keep the old output-element path as fallback for larger dimensions.
+
+R9700 comparison against the accepted self-attention fast-step baseline:
+
+| prompt | generated | path | all-step tok/s | skip-1 tok/s | skip-2 tok/s | last-4 tok/s | p50 step ms | verified |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | :---: |
+| 16 | 16 | self-attn output-only fast step | 17.154 | 17.108 | 17.058 | 16.585 | 58.138 | true |
+| 16 | 16 | + paged attention score reuse | 20.306 | 20.310 | 20.318 | 20.367 | 49.205 | true |
+| 16 | 128 | self-attn output-only fast step | 14.113 | 14.141 | 14.165 | 13.087 | 69.499 | true |
+| 16 | 128 | + paged attention score reuse | 20.103 | 20.102 | 20.100 | 19.880 | 49.819 | true |
+| 16 | 256 | self-attn output-only fast step | 12.586 | 12.572 | 12.557 | 9.787 | 77.418 | true |
+| 16 | 256 | + paged attention score reuse | 19.710 | 19.709 | 19.707 | 19.143 | 50.662 | true |
+| 16 | 512 | + paged attention score reuse | 18.957 | 18.955 | 18.954 | 17.858 | 52.926 | true |
+
+Interpretation:
+
+- The R9700 `15-20 tok/s` expectation is now met for this AQ4 prototype path, including several
+  hundred generated tokens. Gen512 still reports `18.96 tok/s` all-step and `17.74 tok/s` over the
+  last 8 timed decode steps.
+- The generated prefix remains the same as the accepted baseline and all probes are `verified=true`.
+  This is still a synthetic `len:16` smoke prompt, so it checks for immediate numerical/output
+  collapse rather than semantic quality.
+- The previous long-decode collapse was not evidence of an AQ format wall or AQ dequant dominance.
+  It was primarily repeated work in the paged f32 attention kernel.
+- Remaining work before SQ design should shift from emergency TPS debugging to broader quality and
+  representativeness: longer real prompts, model/layer coverage, and later SQ candidate comparison
+  under the same warmed timing rules.
+
+New artifacts:
+
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-pagedattn-r9700-prompt16-gen16.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-pagedattn-r9700-prompt16-gen128.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-pagedattn-r9700-prompt16-gen256.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fast-recurrent-selfattn-faststep-pagedattn-r9700-prompt16-gen512.json`
