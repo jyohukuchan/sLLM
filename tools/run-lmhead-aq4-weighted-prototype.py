@@ -67,6 +67,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lm-head-mode", default="gpu_resident_f32")
     parser.add_argument("--stop-token-ids", default=DEFAULT_STOP_TOKEN_IDS)
     parser.add_argument("--logit-atol", type=float, default=1e-3)
+    parser.add_argument("--max-output-warn-count", type=int, default=1)
+    parser.add_argument("--max-output-not-evaluated-count", type=int, default=1)
+    parser.add_argument("--max-hit-generation-limit-count", type=int, default=1)
+    parser.add_argument("--max-low-unique-token-ratio-count", type=int, default=0)
+    parser.add_argument("--max-prompt-echo-count", type=int, default=0)
     parser.add_argument("--skip-prompt-suite", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
@@ -102,6 +107,187 @@ def resolve_output(root: Path, child: str) -> Path:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def load_json_if_exists(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def parse_int(value: str) -> int | str:
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
+def parse_inspect_output(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    metrics: dict[str, Any] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        metrics[key.strip()] = parse_int(value.strip())
+    return metrics
+
+
+def bool_metric(metrics: dict[str, Any], key: str) -> bool:
+    return metrics.get(key) is True
+
+
+def int_metric(metrics: dict[str, Any], key: str) -> int | None:
+    value = metrics.get(key)
+    return value if isinstance(value, int) else None
+
+
+def suite_gate(label: str, summary_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    summary = load_json_if_exists(summary_path)
+    if summary is None:
+        return {
+            "label": label,
+            "summary": str(summary_path),
+            "evaluated": False,
+            "passed": False,
+            "reason": "summary_missing_or_invalid",
+        }
+    metrics = summary.get("metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+    checks = [
+        ("verified_all", bool_metric(metrics, "verified_all"), True),
+        (
+            "output_warn_count",
+            int_metric(metrics, "output_warn_count"),
+            args.max_output_warn_count,
+        ),
+        (
+            "output_not_evaluated_count",
+            int_metric(metrics, "output_not_evaluated_count"),
+            args.max_output_not_evaluated_count,
+        ),
+        (
+            "hit_generation_limit_count",
+            int_metric(metrics, "hit_generation_limit_count"),
+            args.max_hit_generation_limit_count,
+        ),
+        (
+            "low_unique_token_ratio_count",
+            int_metric(metrics, "low_unique_token_ratio_count"),
+            args.max_low_unique_token_ratio_count,
+        ),
+        ("prompt_echo_count", int_metric(metrics, "prompt_echo_count"), args.max_prompt_echo_count),
+    ]
+    failures = []
+    for key, actual, expected in checks:
+        if key == "verified_all":
+            if actual is not expected:
+                failures.append({"metric": key, "actual": actual, "expected": expected})
+        elif actual is None or int(actual) > int(expected):
+            failures.append({"metric": key, "actual": actual, "max": expected})
+    return {
+        "label": label,
+        "summary": str(summary_path),
+        "evaluated": True,
+        "passed": not failures,
+        "failures": failures,
+        "metrics": metrics,
+    }
+
+
+def guard_gate(summary_path: Path) -> dict[str, Any]:
+    summary = load_json_if_exists(summary_path)
+    if summary is None:
+        return {
+            "summary": str(summary_path),
+            "evaluated": False,
+            "passed": False,
+            "reason": "summary_missing_or_invalid",
+        }
+    checks = summary.get("checks", [])
+    check_metrics = [
+        {
+            "name": check.get("name"),
+            "passed": check.get("passed"),
+            "metrics": check.get("metrics"),
+        }
+        for check in checks
+        if isinstance(check, dict)
+    ]
+    return {
+        "summary": str(summary_path),
+        "evaluated": True,
+        "passed": summary.get("passed") is True,
+        "checks": check_metrics,
+    }
+
+
+def build_gates(
+    inspect_output: Path,
+    suite_summaries: list[dict[str, Any]],
+    guard_summaries: list[dict[str, Any]],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if args.dry_run:
+        return {
+            "passed": None,
+            "full_quality_evaluated": False,
+            "reason": "dry_run",
+            "thresholds": {
+                "max_output_warn_count": args.max_output_warn_count,
+                "max_output_not_evaluated_count": args.max_output_not_evaluated_count,
+                "max_hit_generation_limit_count": args.max_hit_generation_limit_count,
+                "max_low_unique_token_ratio_count": args.max_low_unique_token_ratio_count,
+                "max_prompt_echo_count": args.max_prompt_echo_count,
+                "logit_atol": args.logit_atol,
+            },
+        }
+    inspect_metrics = parse_inspect_output(inspect_output)
+    if inspect_metrics is None:
+        package_integrity = {
+            "evaluated": False,
+            "passed": False,
+            "reason": "inspect_output_missing",
+            "metrics": None,
+        }
+    else:
+        missing = inspect_metrics.get("missing_referenced_files")
+        package_integrity = {
+            "evaluated": True,
+            "passed": missing == 0,
+            "metrics": inspect_metrics,
+        }
+
+    suite_gates = [
+        suite_gate(str(item["label"]), Path(str(item["summary"])), args)
+        for item in suite_summaries
+    ]
+    guard_gates = [guard_gate(Path(str(item["summary"]))) for item in guard_summaries]
+    evaluated_gates: list[dict[str, Any]] = [package_integrity]
+    evaluated_gates.extend(suite_gates)
+    evaluated_gates.extend(guard_gates)
+    full_quality_evaluated = bool(suite_gates) and (len(suite_gates) < 2 or bool(guard_gates))
+    return {
+        "passed": all(gate.get("passed") is True for gate in evaluated_gates),
+        "full_quality_evaluated": full_quality_evaluated,
+        "package_integrity": package_integrity,
+        "prompt_suites": suite_gates,
+        "guards": guard_gates,
+        "thresholds": {
+            "max_output_warn_count": args.max_output_warn_count,
+            "max_output_not_evaluated_count": args.max_output_not_evaluated_count,
+            "max_hit_generation_limit_count": args.max_hit_generation_limit_count,
+            "max_low_unique_token_ratio_count": args.max_low_unique_token_ratio_count,
+            "max_prompt_echo_count": args.max_prompt_echo_count,
+            "logit_atol": args.logit_atol,
+        },
+    }
 
 
 def parse_suite_device(value: str) -> tuple[str, int]:
@@ -486,6 +672,7 @@ def main() -> int:
         },
         "suite_summaries": suite_summaries,
         "guard_summaries": guard_summaries,
+        "gates": build_gates(inspect_output, suite_summaries, guard_summaries, args),
         "dry_run": bool(args.dry_run),
         "skip_existing": bool(args.skip_existing),
         "steps": steps,
