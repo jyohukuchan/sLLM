@@ -757,13 +757,18 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
         return aq4_rows_per_block_preamble_for_rows(aq4_rows_per_block_for_arch(arch));
     }
 
-    static std::string aq4_rows_per_block_preamble_with_rdna4_override(
+    static unsigned int aq4_fused_rows_per_block_for_arch(
         const std::string &arch,
         unsigned int rdna4_rows_per_block) {
-        const unsigned int rows_per_block =
-            arch.rfind("gfx12", 0) == 0 ? rdna4_rows_per_block
-                                        : aq4_rows_per_block_for_arch(arch);
-        return aq4_rows_per_block_preamble_for_rows(rows_per_block);
+        // RDNA2 loses too much per-row parallelism above 2 rows/block on fused AQ4 kernels.
+        return arch.rfind("gfx12", 0) == 0 ? rdna4_rows_per_block : 2u;
+    }
+
+    static std::string aq4_fused_rows_per_block_preamble(
+        const std::string &arch,
+        unsigned int rdna4_rows_per_block) {
+        return aq4_rows_per_block_preamble_for_rows(
+            aq4_fused_rows_per_block_for_arch(arch, rdna4_rows_per_block));
     }
 
     static std::string aq4_matvec_kernel_source_for_arch(const std::string &arch) {
@@ -771,8 +776,7 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
     }
 
     static std::string aq4_matvec_add_kernel_source_for_arch(const std::string &arch) {
-        return aq4_rows_per_block_preamble_with_rdna4_override(arch, 8u) +
-               aq4_matvec_add_kernel_source();
+        return aq4_fused_rows_per_block_preamble(arch, 8u) + aq4_matvec_add_kernel_source();
     }
 
     static std::string aq4_matvec_pair_kernel_source_for_arch(const std::string &arch) {
@@ -785,12 +789,12 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
 
     static std::string aq4_matvec_qkv_z_gate_beta_kernel_source_for_arch(
         const std::string &arch) {
-        return aq4_rows_per_block_preamble_with_rdna4_override(arch, 8u) +
+        return aq4_fused_rows_per_block_preamble(arch, 8u) +
                aq4_matvec_qkv_z_gate_beta_kernel_source();
     }
 
     static std::string aq4_matvec_silu_mul_kernel_source_for_arch(const std::string &arch) {
-        return aq4_rows_per_block_preamble_with_rdna4_override(arch, 8u) +
+        return aq4_fused_rows_per_block_preamble(arch, 8u) +
                aq4_matvec_silu_mul_kernel_source();
     }
 
@@ -4405,16 +4409,14 @@ Aq4MatvecLaunchConfig aq4_matvec_launch_config_for_device(int device_id) {
                        : Aq4MatvecLaunchConfig{256u, 1u};
 }
 
-Aq4MatvecLaunchConfig aq4_matvec_launch_config_with_rdna4_rows_per_block(
+Aq4MatvecLaunchConfig aq4_matvec_launch_config_for_fused_kernel(
     int device_id,
     unsigned int rdna4_rows_per_block) {
     int major = 0;
     int minor = 0;
     hip_runtime().device_compute_capability(device_id, &major, &minor);
     Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
-    if (major >= 12) {
-        launch_config.rows_per_block = rdna4_rows_per_block;
-    }
+    launch_config.rows_per_block = major >= 12 ? rdna4_rows_per_block : 2u;
     return launch_config;
 }
 
@@ -5421,7 +5423,7 @@ bool aq4_matvec_add_f32_hip_kernel(
     }
 
     const Aq4MatvecLaunchConfig launch_config =
-        aq4_matvec_launch_config_with_rdna4_rows_per_block(device_id, 8u);
+        aq4_matvec_launch_config_for_fused_kernel(device_id, 8u);
     const size_t grid_size =
         (rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
@@ -5799,7 +5801,7 @@ bool aq4_matvec_qkv_z_gate_beta_f32_hip_kernel(
     }
 
     const Aq4MatvecLaunchConfig launch_config =
-        aq4_matvec_launch_config_with_rdna4_rows_per_block(device_id, 8u);
+        aq4_matvec_launch_config_for_fused_kernel(device_id, 8u);
     const size_t max_size = std::numeric_limits<size_t>::max();
     const size_t projection_rows = std::max(qkv_rows, z_rows);
     if (projection_rows > max_size - heads) {
@@ -6279,7 +6281,7 @@ bool aq4_matvec_silu_mul_f32_hip_kernel(
     }
 
     const Aq4MatvecLaunchConfig launch_config =
-        aq4_matvec_launch_config_with_rdna4_rows_per_block(device_id, 8u);
+        aq4_matvec_launch_config_for_fused_kernel(device_id, 8u);
     const size_t grid_size =
         (rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
