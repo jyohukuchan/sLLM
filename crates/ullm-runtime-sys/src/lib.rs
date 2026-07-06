@@ -377,6 +377,30 @@ unsafe extern "C" {
         k_rope_output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_f32(
+        q_projected_buffer: *const RawRuntimeBuffer,
+        k_projected_buffer: *const RawRuntimeBuffer,
+        v_projected_buffer: *const RawRuntimeBuffer,
+        q_weight_buffer: *const RawRuntimeBuffer,
+        k_weight_buffer: *const RawRuntimeBuffer,
+        block_table_buffer: *const RawRuntimeBuffer,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        rotary_dim: usize,
+        position_offset: usize,
+        rope_base: f32,
+        epsilon: f32,
+        cache_position: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_gate_output_buffer: *mut RawRuntimeBuffer,
+        q_rope_output_buffer: *mut RawRuntimeBuffer,
+        k_cache_buffer: *mut RawRuntimeBuffer,
+        v_cache_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_add_f32(
         lhs_buffer: *const RawRuntimeBuffer,
         rhs_buffer: *const RawRuntimeBuffer,
@@ -2234,6 +2258,163 @@ pub fn qwen35_qk_norm_rope_f32(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn qwen35_qk_norm_rope_paged_kv_write_f32(
+    q_projected_buffer: &RuntimeBuffer,
+    k_projected_buffer: &RuntimeBuffer,
+    v_projected_buffer: &RuntimeBuffer,
+    q_weight_buffer: &RuntimeBuffer,
+    k_weight_buffer: &RuntimeBuffer,
+    block_table_buffer: &RuntimeBuffer,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    rotary_dim: usize,
+    position_offset: usize,
+    rope_base: f32,
+    epsilon: f32,
+    cache_position: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_gate_output_buffer: &mut RuntimeBuffer,
+    q_rope_output_buffer: &mut RuntimeBuffer,
+    k_cache_buffer: &mut RuntimeBuffer,
+    v_cache_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 {
+        return Err(
+            "Qwen3.5 q/k norm RoPE paged KV write heads and dims must be greater than zero".into(),
+        );
+    }
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        return Err(
+            "Qwen3.5 q/k norm RoPE paged KV write rotary_dim must be even and no greater than head_dim"
+                .into(),
+        );
+    }
+    if block_size == 0 || cache_blocks == 0 {
+        return Err(
+            "Qwen3.5 q/k norm RoPE paged KV write block_size and cache_blocks must be greater than zero"
+                .into(),
+        );
+    }
+    if !rope_base.is_finite() || rope_base <= 1.0 {
+        return Err(
+            "Qwen3.5 q/k norm RoPE paged KV write base must be finite and greater than one".into(),
+        );
+    }
+    if !epsilon.is_finite() || epsilon <= 0.0 {
+        return Err(
+            "Qwen3.5 q/k norm RoPE paged KV write epsilon must be finite and greater than zero"
+                .into(),
+        );
+    }
+    let physical_tokens = cache_blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| "Qwen3.5 q/k norm RoPE paged KV write cache size overflows".to_string())?;
+    if cache_position >= physical_tokens {
+        return Err(
+            "Qwen3.5 q/k norm RoPE paged KV write cache_position exceeds cache capacity".into(),
+        );
+    }
+    let block_table_entries = cache_position / block_size + 1;
+    let q_output_elements = q_heads.checked_mul(head_dim).ok_or_else(|| {
+        "Qwen3.5 q/k norm RoPE paged KV write q element count overflows".to_string()
+    })?;
+    let k_elements = kv_heads.checked_mul(head_dim).ok_or_else(|| {
+        "Qwen3.5 q/k norm RoPE paged KV write k element count overflows".to_string()
+    })?;
+    let v_elements = kv_heads.checked_mul(value_dim).ok_or_else(|| {
+        "Qwen3.5 q/k norm RoPE paged KV write v element count overflows".to_string()
+    })?;
+    let kv_head_cache = physical_tokens.checked_mul(kv_heads).ok_or_else(|| {
+        "Qwen3.5 q/k norm RoPE paged KV write cache head count overflows".to_string()
+    })?;
+    let k_cache_elements = kv_head_cache.checked_mul(head_dim).ok_or_else(|| {
+        "Qwen3.5 q/k norm RoPE paged KV write k cache element count overflows".to_string()
+    })?;
+    let v_cache_elements = kv_head_cache.checked_mul(value_dim).ok_or_else(|| {
+        "Qwen3.5 q/k norm RoPE paged KV write v cache element count overflows".to_string()
+    })?;
+    let q_output_bytes = q_output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "Qwen3.5 q/k norm RoPE paged KV write q output byte size overflows".to_string()
+        })?;
+    let q_projected_bytes = q_output_bytes.checked_mul(2).ok_or_else(|| {
+        "Qwen3.5 q/k norm RoPE paged KV write q projected byte size overflows".to_string()
+    })?;
+    let k_projected_bytes = k_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "Qwen3.5 q/k norm RoPE paged KV write k projected byte size overflows".to_string()
+        })?;
+    let v_projected_bytes = v_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "Qwen3.5 q/k norm RoPE paged KV write v projected byte size overflows".to_string()
+        })?;
+    let weight_bytes = head_dim
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "Qwen3.5 q/k norm RoPE paged KV write weight byte size overflows".to_string()
+        })?;
+    let block_table_bytes = block_table_entries
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| {
+            "Qwen3.5 q/k norm RoPE paged KV write block table byte size overflows".to_string()
+        })?;
+    let k_cache_bytes = k_cache_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "Qwen3.5 q/k norm RoPE paged KV write k cache byte size overflows".to_string()
+        })?;
+    let v_cache_bytes = v_cache_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "Qwen3.5 q/k norm RoPE paged KV write v cache byte size overflows".to_string()
+        })?;
+    check_copy_range(0, q_projected_bytes, q_projected_buffer.size()?)?;
+    check_copy_range(0, k_projected_bytes, k_projected_buffer.size()?)?;
+    check_copy_range(0, v_projected_bytes, v_projected_buffer.size()?)?;
+    check_copy_range(0, weight_bytes, q_weight_buffer.size()?)?;
+    check_copy_range(0, weight_bytes, k_weight_buffer.size()?)?;
+    check_copy_range(0, block_table_bytes, block_table_buffer.size()?)?;
+    check_copy_range(0, q_output_bytes, q_gate_output_buffer.size()?)?;
+    check_copy_range(0, q_output_bytes, q_rope_output_buffer.size()?)?;
+    check_copy_range(0, k_cache_bytes, k_cache_buffer.size()?)?;
+    check_copy_range(0, v_cache_bytes, v_cache_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_f32(
+            q_projected_buffer.raw.as_ptr(),
+            k_projected_buffer.raw.as_ptr(),
+            v_projected_buffer.raw.as_ptr(),
+            q_weight_buffer.raw.as_ptr(),
+            k_weight_buffer.raw.as_ptr(),
+            block_table_buffer.raw.as_ptr(),
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            cache_position,
+            block_size,
+            cache_blocks,
+            q_gate_output_buffer.raw.as_ptr(),
+            q_rope_output_buffer.raw.as_ptr(),
+            k_cache_buffer.raw.as_ptr(),
+            v_cache_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 pub fn add_f32(
     lhs_buffer: &RuntimeBuffer,
     rhs_buffer: &RuntimeBuffer,
@@ -3790,6 +3971,210 @@ mod tests {
         assert_f32s_close(&le_bytes_to_f32s(&q_gate_bytes), &expected_q_gate, 1e-6);
         assert_f32s_close(&le_bytes_to_f32s(&q_rope_bytes), &expected_q_rope, 1e-5);
         assert_f32s_close(&le_bytes_to_f32s(&k_rope_bytes), &expected_k_rope, 1e-5);
+    }
+
+    #[test]
+    fn cpu_qwen35_qk_norm_rope_paged_kv_write_f32_matches_split_norm_rope_and_paged_write() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let q_heads = 2_usize;
+        let kv_heads = 1_usize;
+        let head_dim = 6_usize;
+        let value_dim = 5_usize;
+        let rotary_dim = 4_usize;
+        let position_offset = 5_usize;
+        let rope_base = 10000.0_f32;
+        let epsilon = 1e-5_f32;
+        let cache_position = 5_usize;
+        let block_size = 4_usize;
+        let cache_blocks = 2_usize;
+        let q_projected_values = (0..q_heads * head_dim * 2)
+            .map(|index| (index as f32 - 7.0) / 9.0)
+            .collect::<Vec<_>>();
+        let k_projected_values = (0..kv_heads * head_dim)
+            .map(|index| (index as f32 + 3.0) / -8.0)
+            .collect::<Vec<_>>();
+        let v_projected_values = (0..kv_heads * value_dim)
+            .map(|index| (index as f32 - 2.0) / 7.0)
+            .collect::<Vec<_>>();
+        let q_weight_values = [0.5_f32, -1.0, 1.25, 0.75, -0.5, 1.5];
+        let k_weight_values = [-0.25_f32, 0.5, 1.0, -1.5, 0.75, 1.25];
+        let block_table_values = vec![1_u32, 0_u32];
+        let physical_tokens = cache_blocks * block_size;
+        let q_output_elements = q_heads * head_dim;
+        let k_cache_elements = physical_tokens * kv_heads * head_dim;
+        let v_cache_elements = physical_tokens * kv_heads * value_dim;
+        let initial_k_cache = (0..k_cache_elements)
+            .map(|index| -10.0_f32 - index as f32)
+            .collect::<Vec<_>>();
+        let initial_v_cache = (0..v_cache_elements)
+            .map(|index| 20.0_f32 + index as f32)
+            .collect::<Vec<_>>();
+
+        let mut q_projected = context
+            .alloc_buffer(q_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_projected = context
+            .alloc_buffer(k_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_projected = context
+            .alloc_buffer(v_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_weight = context
+            .alloc_buffer(q_weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_weight = context
+            .alloc_buffer(k_weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut block_table = context
+            .alloc_buffer(block_table_values.len() * std::mem::size_of::<u32>())
+            .unwrap();
+        let mut q_gate = context
+            .alloc_buffer(q_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_rope = context
+            .alloc_buffer(q_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_cache = context
+            .alloc_buffer(k_cache_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_cache = context
+            .alloc_buffer(v_cache_elements * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&q_projected_values), Some(&mut stream))
+            .unwrap();
+        k_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&k_projected_values), Some(&mut stream))
+            .unwrap();
+        v_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&v_projected_values), Some(&mut stream))
+            .unwrap();
+        q_weight
+            .copy_from_host(0, &f32s_to_le_bytes(&q_weight_values), Some(&mut stream))
+            .unwrap();
+        k_weight
+            .copy_from_host(0, &f32s_to_le_bytes(&k_weight_values), Some(&mut stream))
+            .unwrap();
+        let block_table_bytes: Vec<u8> = block_table_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        block_table
+            .copy_from_host(0, &block_table_bytes, Some(&mut stream))
+            .unwrap();
+        k_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&initial_k_cache), Some(&mut stream))
+            .unwrap();
+        v_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&initial_v_cache), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        qwen35_qk_norm_rope_paged_kv_write_f32(
+            &q_projected,
+            &k_projected,
+            &v_projected,
+            &q_weight,
+            &k_weight,
+            &block_table,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            cache_position,
+            block_size,
+            cache_blocks,
+            &mut q_gate,
+            &mut q_rope,
+            &mut k_cache,
+            &mut v_cache,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let expected_q_gate = (0..q_heads)
+            .flat_map(|head| {
+                let source_base = head * 2 * head_dim;
+                q_projected_values[source_base + head_dim..source_base + 2 * head_dim].to_vec()
+            })
+            .collect::<Vec<_>>();
+        let expected_q_query = (0..q_heads)
+            .flat_map(|head| {
+                let source_base = head * 2 * head_dim;
+                q_projected_values[source_base..source_base + head_dim].to_vec()
+            })
+            .collect::<Vec<_>>();
+        let expected_q_normed = expected_q_query
+            .chunks_exact(head_dim)
+            .flat_map(|segment| expected_rmsnorm(segment, &q_weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected_k_normed = k_projected_values
+            .chunks_exact(head_dim)
+            .flat_map(|segment| expected_rmsnorm(segment, &k_weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected_q_rope = expected_rope(
+            &expected_q_normed,
+            1,
+            q_heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let expected_k_rope = expected_rope(
+            &expected_k_normed,
+            1,
+            kv_heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let mut expected_k_cache = initial_k_cache;
+        let mut expected_v_cache = initial_v_cache;
+        let physical_timestep = block_table_values[cache_position / block_size] as usize
+            * block_size
+            + (cache_position % block_size);
+        for kv_head in 0..kv_heads {
+            let k_src = kv_head * head_dim;
+            let k_dst = (physical_timestep * kv_heads + kv_head) * head_dim;
+            expected_k_cache[k_dst..k_dst + head_dim]
+                .copy_from_slice(&expected_k_rope[k_src..k_src + head_dim]);
+            let v_src = kv_head * value_dim;
+            let v_dst = (physical_timestep * kv_heads + kv_head) * value_dim;
+            expected_v_cache[v_dst..v_dst + value_dim]
+                .copy_from_slice(&v_projected_values[v_src..v_src + value_dim]);
+        }
+
+        let mut q_gate_bytes = vec![0_u8; q_output_elements * std::mem::size_of::<f32>()];
+        let mut q_rope_bytes = vec![0_u8; q_output_elements * std::mem::size_of::<f32>()];
+        let mut k_cache_bytes = vec![0_u8; k_cache_elements * std::mem::size_of::<f32>()];
+        let mut v_cache_bytes = vec![0_u8; v_cache_elements * std::mem::size_of::<f32>()];
+        q_gate
+            .copy_to_host(0, &mut q_gate_bytes, Some(&mut stream))
+            .unwrap();
+        q_rope
+            .copy_to_host(0, &mut q_rope_bytes, Some(&mut stream))
+            .unwrap();
+        k_cache
+            .copy_to_host(0, &mut k_cache_bytes, Some(&mut stream))
+            .unwrap();
+        v_cache
+            .copy_to_host(0, &mut v_cache_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        assert_f32s_close(&le_bytes_to_f32s(&q_gate_bytes), &expected_q_gate, 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&q_rope_bytes), &expected_q_rope, 1e-5);
+        assert_f32s_close(&le_bytes_to_f32s(&k_cache_bytes), &expected_k_cache, 1e-5);
+        assert_f32s_close(&le_bytes_to_f32s(&v_cache_bytes), &expected_v_cache, 1e-6);
     }
 
     #[test]
@@ -7014,6 +7399,214 @@ mod tests {
         assert_f32s_close(&le_bytes_to_f32s(&q_gate_bytes), &expected_q_gate, 1e-6);
         assert_f32s_close(&le_bytes_to_f32s(&q_rope_bytes), &expected_q_rope, 1e-4);
         assert_f32s_close(&le_bytes_to_f32s(&k_rope_bytes), &expected_k_rope, 1e-4);
+    }
+
+    #[test]
+    fn first_hip_qwen35_qk_norm_rope_paged_kv_write_f32_matches_split_norm_rope_and_paged_write_when_available()
+     {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let q_heads = 2_usize;
+        let kv_heads = 1_usize;
+        let head_dim = 6_usize;
+        let value_dim = 5_usize;
+        let rotary_dim = 4_usize;
+        let position_offset = 5_usize;
+        let rope_base = 10000.0_f32;
+        let epsilon = 1e-5_f32;
+        let cache_position = 5_usize;
+        let block_size = 4_usize;
+        let cache_blocks = 2_usize;
+        let q_projected_values = (0..q_heads * head_dim * 2)
+            .map(|index| (index as f32 - 7.0) / 9.0)
+            .collect::<Vec<_>>();
+        let k_projected_values = (0..kv_heads * head_dim)
+            .map(|index| (index as f32 + 3.0) / -8.0)
+            .collect::<Vec<_>>();
+        let v_projected_values = (0..kv_heads * value_dim)
+            .map(|index| (index as f32 - 2.0) / 7.0)
+            .collect::<Vec<_>>();
+        let q_weight_values = [0.5_f32, -1.0, 1.25, 0.75, -0.5, 1.5];
+        let k_weight_values = [-0.25_f32, 0.5, 1.0, -1.5, 0.75, 1.25];
+        let block_table_values = vec![1_u32, 0_u32];
+        let physical_tokens = cache_blocks * block_size;
+        let q_output_elements = q_heads * head_dim;
+        let k_cache_elements = physical_tokens * kv_heads * head_dim;
+        let v_cache_elements = physical_tokens * kv_heads * value_dim;
+        let initial_k_cache = (0..k_cache_elements)
+            .map(|index| -10.0_f32 - index as f32)
+            .collect::<Vec<_>>();
+        let initial_v_cache = (0..v_cache_elements)
+            .map(|index| 20.0_f32 + index as f32)
+            .collect::<Vec<_>>();
+
+        let mut q_projected = context
+            .alloc_buffer(q_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_projected = context
+            .alloc_buffer(k_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_projected = context
+            .alloc_buffer(v_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_weight = context
+            .alloc_buffer(q_weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_weight = context
+            .alloc_buffer(k_weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut block_table = context
+            .alloc_buffer(block_table_values.len() * std::mem::size_of::<u32>())
+            .unwrap();
+        let mut q_gate = context
+            .alloc_buffer(q_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_rope = context
+            .alloc_buffer(q_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_cache = context
+            .alloc_buffer(k_cache_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_cache = context
+            .alloc_buffer(v_cache_elements * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&q_projected_values), Some(&mut stream))
+            .unwrap();
+        k_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&k_projected_values), Some(&mut stream))
+            .unwrap();
+        v_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&v_projected_values), Some(&mut stream))
+            .unwrap();
+        q_weight
+            .copy_from_host(0, &f32s_to_le_bytes(&q_weight_values), Some(&mut stream))
+            .unwrap();
+        k_weight
+            .copy_from_host(0, &f32s_to_le_bytes(&k_weight_values), Some(&mut stream))
+            .unwrap();
+        let block_table_bytes: Vec<u8> = block_table_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        block_table
+            .copy_from_host(0, &block_table_bytes, Some(&mut stream))
+            .unwrap();
+        k_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&initial_k_cache), Some(&mut stream))
+            .unwrap();
+        v_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&initial_v_cache), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        qwen35_qk_norm_rope_paged_kv_write_f32(
+            &q_projected,
+            &k_projected,
+            &v_projected,
+            &q_weight,
+            &k_weight,
+            &block_table,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            cache_position,
+            block_size,
+            cache_blocks,
+            &mut q_gate,
+            &mut q_rope,
+            &mut k_cache,
+            &mut v_cache,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let expected_q_gate = (0..q_heads)
+            .flat_map(|head| {
+                let source_base = head * 2 * head_dim;
+                q_projected_values[source_base + head_dim..source_base + 2 * head_dim].to_vec()
+            })
+            .collect::<Vec<_>>();
+        let expected_q_query = (0..q_heads)
+            .flat_map(|head| {
+                let source_base = head * 2 * head_dim;
+                q_projected_values[source_base..source_base + head_dim].to_vec()
+            })
+            .collect::<Vec<_>>();
+        let expected_q_normed = expected_q_query
+            .chunks_exact(head_dim)
+            .flat_map(|segment| expected_rmsnorm(segment, &q_weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected_k_normed = k_projected_values
+            .chunks_exact(head_dim)
+            .flat_map(|segment| expected_rmsnorm(segment, &k_weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected_q_rope = expected_rope(
+            &expected_q_normed,
+            1,
+            q_heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let expected_k_rope = expected_rope(
+            &expected_k_normed,
+            1,
+            kv_heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let mut expected_k_cache = initial_k_cache;
+        let mut expected_v_cache = initial_v_cache;
+        let physical_timestep = block_table_values[cache_position / block_size] as usize
+            * block_size
+            + (cache_position % block_size);
+        for kv_head in 0..kv_heads {
+            let k_src = kv_head * head_dim;
+            let k_dst = (physical_timestep * kv_heads + kv_head) * head_dim;
+            expected_k_cache[k_dst..k_dst + head_dim]
+                .copy_from_slice(&expected_k_rope[k_src..k_src + head_dim]);
+            let v_src = kv_head * value_dim;
+            let v_dst = (physical_timestep * kv_heads + kv_head) * value_dim;
+            expected_v_cache[v_dst..v_dst + value_dim]
+                .copy_from_slice(&v_projected_values[v_src..v_src + value_dim]);
+        }
+
+        let mut q_gate_bytes = vec![0_u8; q_output_elements * std::mem::size_of::<f32>()];
+        let mut q_rope_bytes = vec![0_u8; q_output_elements * std::mem::size_of::<f32>()];
+        let mut k_cache_bytes = vec![0_u8; k_cache_elements * std::mem::size_of::<f32>()];
+        let mut v_cache_bytes = vec![0_u8; v_cache_elements * std::mem::size_of::<f32>()];
+        q_gate
+            .copy_to_host(0, &mut q_gate_bytes, Some(&mut stream))
+            .unwrap();
+        q_rope
+            .copy_to_host(0, &mut q_rope_bytes, Some(&mut stream))
+            .unwrap();
+        k_cache
+            .copy_to_host(0, &mut k_cache_bytes, Some(&mut stream))
+            .unwrap();
+        v_cache
+            .copy_to_host(0, &mut v_cache_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        assert_f32s_close(&le_bytes_to_f32s(&q_gate_bytes), &expected_q_gate, 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&q_rope_bytes), &expected_q_rope, 1e-4);
+        assert_f32s_close(&le_bytes_to_f32s(&k_cache_bytes), &expected_k_cache, 1e-4);
+        assert_f32s_close(&le_bytes_to_f32s(&v_cache_bytes), &expected_v_cache, 1e-5);
     }
 
     #[test]

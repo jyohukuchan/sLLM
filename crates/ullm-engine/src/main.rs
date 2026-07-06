@@ -28868,7 +28868,7 @@ static AQ4_MATVEC_QKV_Z_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false)
 static AQ4_MATVEC_ADD_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_SILU_MUL_PREWARMED: AtomicBool = AtomicBool::new(false);
-static QWEN35_QK_NORM_ROPE_PREWARMED: AtomicBool = AtomicBool::new(false);
+static QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_PREWARMED: AtomicBool = AtomicBool::new(false);
 static LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
 static LINEAR_ATTN_POST_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
 
@@ -29165,21 +29165,27 @@ fn prewarm_aq4_matvec_silu_mul_once(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prewarm_qwen35_qk_norm_rope_once(
+fn prewarm_qwen35_qk_norm_rope_paged_kv_write_once(
     stream: &mut ullm_runtime_sys::RuntimeStream,
     q_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     k_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    v_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     q_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
     k_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    block_table_buffer: &ullm_runtime_sys::RuntimeBuffer,
     q_heads: usize,
     kv_heads: usize,
     head_dim: usize,
+    value_dim: usize,
+    block_size: usize,
+    cache_blocks: usize,
     q_gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     q_rope_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
-    k_rope_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    k_cache_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    v_cache_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
     label: &str,
 ) -> Result<(), String> {
-    if QWEN35_QK_NORM_ROPE_PREWARMED
+    if QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_PREWARMED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
@@ -29193,6 +29199,9 @@ fn prewarm_qwen35_qk_norm_rope_once(
         let k_projected_elements = kv_heads
             .checked_mul(head_dim)
             .ok_or_else(|| format!("{label} prewarm k projected element count overflows"))?;
+        let v_projected_elements = kv_heads
+            .checked_mul(value_dim)
+            .ok_or_else(|| format!("{label} prewarm v projected element count overflows"))?;
         q_projected_buffer
             .copy_from_host(
                 0,
@@ -29207,26 +29216,40 @@ fn prewarm_qwen35_qk_norm_rope_once(
                 Some(stream),
             )
             .map_err(|err| format!("failed to zero {label} prewarm k projected: {err}"))?;
+        v_projected_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; v_projected_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm v projected: {err}"))?;
         let rotary_dim = if head_dim.is_multiple_of(2) {
             head_dim
         } else {
             head_dim.saturating_sub(1)
         };
-        ullm_runtime_sys::qwen35_qk_norm_rope_f32(
+        ullm_runtime_sys::qwen35_qk_norm_rope_paged_kv_write_f32(
             q_projected_buffer,
             k_projected_buffer,
+            v_projected_buffer,
             q_weight_buffer,
             k_weight_buffer,
+            block_table_buffer,
             q_heads,
             kv_heads,
             head_dim,
+            value_dim,
             rotary_dim,
             0,
             10000.0_f32,
             1e-5_f32,
+            0,
+            block_size,
+            cache_blocks,
             q_gate_output_buffer,
             q_rope_output_buffer,
-            k_rope_output_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
             Some(stream),
         )
         .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
@@ -29235,7 +29258,7 @@ fn prewarm_qwen35_qk_norm_rope_once(
             .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
     })();
     if result.is_err() {
-        QWEN35_QK_NORM_ROPE_PREWARMED.store(false, Ordering::Release);
+        QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_PREWARMED.store(false, Ordering::Release);
     }
     result
 }
@@ -30187,7 +30210,7 @@ impl PackageSelfAttnResidentStepLayer {
         let mut q_rope_buffer = context
             .alloc_buffer(q_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident q RoPE: {err}"))?;
-        let mut k_rope_buffer = context
+        let k_rope_buffer = context
             .alloc_buffer(k_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident k RoPE: {err}"))?;
         let mut k_cache_buffer = context
@@ -30290,19 +30313,25 @@ impl PackageSelfAttnResidentStepLayer {
             q_projection_layout,
             PackageSelfAttnQProjectionLayout::Qwen35Gated
         ) {
-            prewarm_qwen35_qk_norm_rope_once(
+            prewarm_qwen35_qk_norm_rope_paged_kv_write_once(
                 stream,
                 &mut q_projected_buffer,
                 &mut k_projected_buffer,
+                &mut v_projected_buffer,
                 &q_norm_weight_buffer,
                 &k_norm_weight_buffer,
+                &block_table_buffer,
                 q_heads,
                 kv_heads,
                 head_dim,
+                value_dim,
+                block_size,
+                cache_blocks,
                 &mut q_gate_buffer,
                 &mut q_rope_buffer,
-                &mut k_rope_buffer,
-                "self-attn resident Qwen3.5 q/k norm RoPE",
+                &mut k_cache_buffer,
+                &mut v_cache_buffer,
+                "self-attn resident Qwen3.5 q/k norm RoPE paged KV write",
             )?;
         }
 
@@ -30559,44 +30588,53 @@ impl PackageSelfAttnResidentStepLayer {
                     Some(stream),
                 )
                 .map_err(|err| format!("failed to run {label} self-attn k RoPE: {err}"))?;
+                ullm_runtime_sys::paged_kv_write_f32(
+                    &self.k_rope_buffer,
+                    &self.v_projected_buffer,
+                    &self.block_table_buffer,
+                    cache_position,
+                    self.block_size,
+                    self.cache_blocks,
+                    self.kv_heads,
+                    self.head_dim,
+                    self.value_dim,
+                    &mut self.k_cache_buffer,
+                    &mut self.v_cache_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} self-attn paged KV write: {err}"))?;
             }
             PackageSelfAttnQProjectionLayout::Qwen35Gated => {
-                ullm_runtime_sys::qwen35_qk_norm_rope_f32(
+                ullm_runtime_sys::qwen35_qk_norm_rope_paged_kv_write_f32(
                     &self.q_projected_buffer,
                     &self.k_projected_buffer,
+                    &self.v_projected_buffer,
                     &self.q_norm_weight_buffer,
                     &self.k_norm_weight_buffer,
+                    &self.block_table_buffer,
                     self.q_heads,
                     self.kv_heads,
                     self.head_dim,
+                    self.value_dim,
                     rotary_dim,
                     rope_position,
                     rope_base,
                     1e-5_f32,
+                    cache_position,
+                    self.block_size,
+                    self.cache_blocks,
                     &mut self.q_gate_buffer,
                     &mut self.q_rope_buffer,
-                    &mut self.k_rope_buffer,
+                    &mut self.k_cache_buffer,
+                    &mut self.v_cache_buffer,
                     Some(stream),
                 )
-                .map_err(|err| format!("failed to run {label} self-attn q/k norm RoPE: {err}"))?;
+                .map_err(|err| {
+                    format!("failed to run {label} self-attn q/k norm RoPE paged KV write: {err}")
+                })?;
             }
         }
 
-        ullm_runtime_sys::paged_kv_write_f32(
-            &self.k_rope_buffer,
-            &self.v_projected_buffer,
-            &self.block_table_buffer,
-            cache_position,
-            self.block_size,
-            self.cache_blocks,
-            self.kv_heads,
-            self.head_dim,
-            self.value_dim,
-            &mut self.k_cache_buffer,
-            &mut self.v_cache_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} self-attn paged KV write: {err}"))?;
         self.written_len = self
             .written_len
             .checked_add(1)

@@ -528,6 +528,18 @@ public:
             error);
     }
 
+    bool compile_qwen35_qk_norm_rope_paged_kv_write_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            qwen35_qk_norm_rope_paged_kv_write_kernel_source(),
+            "ullm_qwen35_qk_norm_rope_paged_kv_write_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_add_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, add_kernel_source(), "ullm_add_f32.hip", code, error);
     }
@@ -3082,6 +3094,131 @@ extern "C" __global__ void ullm_qwen35_qk_norm_rope_f32_kernel(
         }
         for (unsigned long long dim = rotary_dim + tid; dim < head_dim; dim += blockDim.x) {
             k_rope_output[output_base + dim] =
+                k_projected[source_base + dim] * inv_rms * k_weight[dim];
+        }
+    }
+}
+)";
+    }
+
+    static const char *qwen35_qk_norm_rope_paged_kv_write_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_qwen35_qk_norm_rope_paged_kv_write_f32_kernel(
+    const float *q_projected,
+    const float *k_projected,
+    const float *v_projected,
+    const float *q_weight,
+    const float *k_weight,
+    const unsigned int *block_table,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    unsigned long long rotary_dim,
+    unsigned long long position_offset,
+    float rope_base,
+    float epsilon,
+    unsigned long long cache_position,
+    unsigned long long block_size,
+    unsigned long long cache_blocks,
+    float *q_gate_output,
+    float *q_rope_output,
+    float *k_cache,
+    float *v_cache) {
+    const unsigned long long segment = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long k_segment_start = q_heads;
+    const unsigned long long v_segment_start = q_heads + kv_heads;
+    const unsigned long long total_segments = q_heads + kv_heads + kv_heads;
+    if (segment >= total_segments) {
+        return;
+    }
+    const unsigned long long block_index = cache_position / block_size;
+    const unsigned long long block_offset = cache_position - block_index * block_size;
+    const unsigned long long block_id = static_cast<unsigned long long>(block_table[block_index]);
+    if (block_id >= cache_blocks) {
+        return;
+    }
+    const unsigned long long physical_timestep = block_id * block_size + block_offset;
+    if (segment >= v_segment_start) {
+        const unsigned long long kv_head = segment - v_segment_start;
+        const unsigned long long source_base = kv_head * value_dim;
+        const unsigned long long cache_base =
+            (physical_timestep * kv_heads + kv_head) * value_dim;
+        for (unsigned long long dim = tid; dim < value_dim; dim += blockDim.x) {
+            v_cache[cache_base + dim] = v_projected[source_base + dim];
+        }
+        return;
+    }
+
+    __shared__ float partial[256];
+    float sum_squares = 0.0f;
+    if (segment < q_heads) {
+        const unsigned long long source_base = segment * 2ull * head_dim;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            const float value = q_projected[source_base + dim];
+            q_gate_output[segment * head_dim + dim] = q_projected[source_base + head_dim + dim];
+            sum_squares += value * value;
+        }
+    } else {
+        const unsigned long long kv_head = segment - k_segment_start;
+        const unsigned long long source_base = kv_head * head_dim;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            const float value = k_projected[source_base + dim];
+            sum_squares += value * value;
+        }
+    }
+    partial[tid] = sum_squares;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            partial[tid] += partial[tid + offset];
+        }
+        __syncthreads();
+    }
+    const float inv_rms = rsqrtf(partial[0] / static_cast<float>(head_dim) + epsilon);
+    const unsigned long long half = rotary_dim >> 1;
+    const float position = static_cast<float>(position_offset);
+    if (segment < q_heads) {
+        const unsigned long long source_base = segment * 2ull * head_dim;
+        const unsigned long long output_base = segment * head_dim;
+        for (unsigned long long pair_dim = tid; pair_dim < half; pair_dim += blockDim.x) {
+            const float exponent =
+                (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(rotary_dim);
+            const float theta = position / powf(rope_base, exponent);
+            const float c = cosf(theta);
+            const float s = sinf(theta);
+            const float first = q_projected[source_base + pair_dim] * inv_rms * q_weight[pair_dim];
+            const unsigned long long second_dim = half + pair_dim;
+            const float second =
+                q_projected[source_base + second_dim] * inv_rms * q_weight[second_dim];
+            q_rope_output[output_base + pair_dim] = first * c - second * s;
+            q_rope_output[output_base + second_dim] = second * c + first * s;
+        }
+        for (unsigned long long dim = rotary_dim + tid; dim < head_dim; dim += blockDim.x) {
+            q_rope_output[output_base + dim] =
+                q_projected[source_base + dim] * inv_rms * q_weight[dim];
+        }
+    } else {
+        const unsigned long long kv_head = segment - k_segment_start;
+        const unsigned long long source_base = kv_head * head_dim;
+        const unsigned long long cache_base =
+            (physical_timestep * kv_heads + kv_head) * head_dim;
+        for (unsigned long long pair_dim = tid; pair_dim < half; pair_dim += blockDim.x) {
+            const float exponent =
+                (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(rotary_dim);
+            const float theta = position / powf(rope_base, exponent);
+            const float c = cosf(theta);
+            const float s = sinf(theta);
+            const float first = k_projected[source_base + pair_dim] * inv_rms * k_weight[pair_dim];
+            const unsigned long long second_dim = half + pair_dim;
+            const float second =
+                k_projected[source_base + second_dim] * inv_rms * k_weight[second_dim];
+            k_cache[cache_base + pair_dim] = first * c - second * s;
+            k_cache[cache_base + second_dim] = second * c + first * s;
+        }
+        for (unsigned long long dim = rotary_dim + tid; dim < head_dim; dim += blockDim.x) {
+            k_cache[cache_base + dim] =
                 k_projected[source_base + dim] * inv_rms * k_weight[dim];
         }
     }
@@ -8349,6 +8486,101 @@ void qwen35_qk_norm_rope_f32_host(
     }
 }
 
+void qwen35_qk_norm_rope_paged_kv_write_f32_host(
+    const float *q_projected,
+    const float *k_projected,
+    const float *v_projected,
+    const float *q_weight,
+    const float *k_weight,
+    const std::uint32_t *block_table,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    size_t cache_position,
+    size_t block_size,
+    float *q_gate_output,
+    float *q_rope_output,
+    float *k_cache,
+    float *v_cache) {
+    const size_t half = rotary_dim / 2;
+    const float position = static_cast<float>(position_offset);
+    const size_t block_index = cache_position / block_size;
+    const size_t block_offset = cache_position - block_index * block_size;
+    const size_t physical_timestep =
+        static_cast<size_t>(block_table[block_index]) * block_size + block_offset;
+    for (size_t head = 0; head < q_heads; ++head) {
+        const size_t source_base = head * 2 * head_dim;
+        const size_t output_base = head * head_dim;
+        float sum_squares = 0.0f;
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            const float value = q_projected[source_base + dim];
+            q_gate_output[output_base + dim] = q_projected[source_base + head_dim + dim];
+            sum_squares += value * value;
+        }
+        const float inv_rms =
+            1.0f / std::sqrt(sum_squares / static_cast<float>(head_dim) + epsilon);
+        for (size_t pair_dim = 0; pair_dim < half; ++pair_dim) {
+            const float exponent =
+                (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(rotary_dim);
+            const float theta = position / std::pow(rope_base, exponent);
+            const float c = std::cos(theta);
+            const float s = std::sin(theta);
+            const float first =
+                q_projected[source_base + pair_dim] * inv_rms * q_weight[pair_dim];
+            const size_t second_dim = half + pair_dim;
+            const float second =
+                q_projected[source_base + second_dim] * inv_rms * q_weight[second_dim];
+            q_rope_output[output_base + pair_dim] = first * c - second * s;
+            q_rope_output[output_base + second_dim] = second * c + first * s;
+        }
+        for (size_t dim = rotary_dim; dim < head_dim; ++dim) {
+            q_rope_output[output_base + dim] =
+                q_projected[source_base + dim] * inv_rms * q_weight[dim];
+        }
+    }
+    for (size_t head = 0; head < kv_heads; ++head) {
+        const size_t k_source_base = head * head_dim;
+        const size_t k_cache_base = (physical_timestep * kv_heads + head) * head_dim;
+        float sum_squares = 0.0f;
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            const float value = k_projected[k_source_base + dim];
+            sum_squares += value * value;
+        }
+        const float inv_rms =
+            1.0f / std::sqrt(sum_squares / static_cast<float>(head_dim) + epsilon);
+        for (size_t pair_dim = 0; pair_dim < half; ++pair_dim) {
+            const float exponent =
+                (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(rotary_dim);
+            const float theta = position / std::pow(rope_base, exponent);
+            const float c = std::cos(theta);
+            const float s = std::sin(theta);
+            const float first =
+                k_projected[k_source_base + pair_dim] * inv_rms * k_weight[pair_dim];
+            const size_t second_dim = half + pair_dim;
+            const float second =
+                k_projected[k_source_base + second_dim] * inv_rms * k_weight[second_dim];
+            k_cache[k_cache_base + pair_dim] = first * c - second * s;
+            k_cache[k_cache_base + second_dim] = second * c + first * s;
+        }
+        for (size_t dim = rotary_dim; dim < head_dim; ++dim) {
+            k_cache[k_cache_base + dim] =
+                k_projected[k_source_base + dim] * inv_rms * k_weight[dim];
+        }
+
+        const size_t v_source_base = head * value_dim;
+        const size_t v_cache_base = (physical_timestep * kv_heads + head) * value_dim;
+        std::copy(
+            v_projected + v_source_base,
+            v_projected + v_source_base + value_dim,
+            v_cache + v_cache_base);
+    }
+}
+
 void add_f32_host(
     const float *lhs,
     const float *rhs,
@@ -9414,6 +9646,361 @@ ullm_status qwen35_qk_norm_rope_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize Qwen3.5 q/k norm RoPE HIP output staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipQwen35QkNormRopePagedKvWriteKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_qwen35_qk_norm_rope_paged_kv_write_kernel(
+                    arch,
+                    &code,
+                    &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_qwen35_qk_norm_rope_paged_kv_write_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty()
+                                ? "failed to build Qwen3.5 q/k norm RoPE paged KV write HIP kernel"
+                                : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipQwen35QkNormRopePagedKvWriteKernelCache
+    &hip_qwen35_qk_norm_rope_paged_kv_write_kernel_cache() {
+    static HipQwen35QkNormRopePagedKvWriteKernelCache cache;
+    return cache;
+}
+
+bool qwen35_qk_norm_rope_paged_kv_write_f32_hip_kernel(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *v_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_projected_buffer->hip_device_id;
+    void *function =
+        hip_qwen35_qk_norm_rope_paged_kv_write_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    const size_t segments = q_heads + kv_heads + kv_heads;
+    if (segments > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "Qwen3.5 q/k norm RoPE paged KV write segment count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    constexpr unsigned int launch_block_size = 256;
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    unsigned long long kernel_rotary_dim = static_cast<unsigned long long>(rotary_dim);
+    unsigned long long kernel_position_offset = static_cast<unsigned long long>(position_offset);
+    unsigned long long kernel_cache_position = static_cast<unsigned long long>(cache_position);
+    unsigned long long kernel_block_size = static_cast<unsigned long long>(block_size);
+    unsigned long long kernel_cache_blocks = static_cast<unsigned long long>(cache_blocks);
+    void *q_projected_ptr = q_projected_buffer->ptr;
+    void *k_projected_ptr = k_projected_buffer->ptr;
+    void *v_projected_ptr = v_projected_buffer->ptr;
+    void *q_weight_ptr = q_weight_buffer->ptr;
+    void *k_weight_ptr = k_weight_buffer->ptr;
+    void *block_table_ptr = block_table_buffer->ptr;
+    void *q_gate_output_ptr = q_gate_output_buffer->ptr;
+    void *q_rope_output_ptr = q_rope_output_buffer->ptr;
+    void *k_cache_ptr = k_cache_buffer->ptr;
+    void *v_cache_ptr = v_cache_buffer->ptr;
+    void *kernel_params[] = {
+        &q_projected_ptr,
+        &k_projected_ptr,
+        &v_projected_ptr,
+        &q_weight_ptr,
+        &k_weight_ptr,
+        &block_table_ptr,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &kernel_rotary_dim,
+        &kernel_position_offset,
+        &rope_base,
+        &epsilon,
+        &kernel_cache_position,
+        &kernel_block_size,
+        &kernel_cache_blocks,
+        &q_gate_output_ptr,
+        &q_rope_output_ptr,
+        &k_cache_ptr,
+        &v_cache_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(segments),
+            launch_block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for Qwen3.5 q/k norm RoPE paged KV write";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status qwen35_qk_norm_rope_paged_kv_write_f32_hip_staging(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *v_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    size_t cache_position,
+    size_t block_size,
+    size_t q_projected_bytes,
+    size_t k_projected_bytes,
+    size_t v_projected_bytes,
+    size_t weight_bytes,
+    size_t block_table_bytes,
+    size_t q_output_bytes,
+    size_t k_cache_bytes,
+    size_t v_cache_bytes,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream) {
+    const size_t q_projected_elements = q_heads * head_dim * 2;
+    const size_t k_projected_elements = kv_heads * head_dim;
+    const size_t v_projected_elements = kv_heads * value_dim;
+    const size_t q_output_elements = q_heads * head_dim;
+    const size_t weight_elements = head_dim;
+    const size_t block_table_entries = block_table_bytes / sizeof(std::uint32_t);
+    const size_t k_cache_elements = k_cache_bytes / sizeof(float);
+    const size_t v_cache_elements = v_cache_bytes / sizeof(float);
+    std::vector<float> host_q_projected(q_projected_elements);
+    std::vector<float> host_k_projected(k_projected_elements);
+    std::vector<float> host_v_projected(v_projected_elements);
+    std::vector<float> host_q_weight(weight_elements);
+    std::vector<float> host_k_weight(weight_elements);
+    std::vector<std::uint32_t> host_block_table(block_table_entries);
+    std::vector<float> host_q_gate(q_output_elements);
+    std::vector<float> host_q_rope(q_output_elements);
+    std::vector<float> host_k_cache(k_cache_elements);
+    std::vector<float> host_v_cache(v_cache_elements);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = q_projected_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_q_projected.data(),
+            q_projected_buffer->ptr,
+            q_projected_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k_projected.data(),
+            k_projected_buffer->ptr,
+            k_projected_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_v_projected.data(),
+            v_projected_buffer->ptr,
+            v_projected_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_q_weight.data(),
+            q_weight_buffer->ptr,
+            weight_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k_weight.data(),
+            k_weight_buffer->ptr,
+            weight_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_block_table.data(),
+            block_table_buffer->ptr,
+            block_table_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k_cache.data(),
+            k_cache_buffer->ptr,
+            k_cache_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_v_cache.data(),
+            v_cache_buffer->ptr,
+            v_cache_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy Qwen3.5 q/k norm RoPE paged KV write HIP inputs");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize Qwen3.5 q/k norm RoPE paged KV write input copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    qwen35_qk_norm_rope_paged_kv_write_f32_host(
+        host_q_projected.data(),
+        host_k_projected.data(),
+        host_v_projected.data(),
+        host_q_weight.data(),
+        host_k_weight.data(),
+        host_block_table.data(),
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        epsilon,
+        cache_position,
+        block_size,
+        host_q_gate.data(),
+        host_q_rope.data(),
+        host_k_cache.data(),
+        host_v_cache.data());
+    if (!hip_runtime().copy_async(
+            q_gate_output_buffer->ptr,
+            host_q_gate.data(),
+            q_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            q_rope_output_buffer->ptr,
+            host_q_rope.data(),
+            q_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            k_cache_buffer->ptr,
+            host_k_cache.data(),
+            k_cache_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            v_cache_buffer->ptr,
+            host_v_cache.data(),
+            v_cache_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy Qwen3.5 q/k norm RoPE paged KV write HIP outputs");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize Qwen3.5 q/k norm RoPE paged KV write output copies");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -15400,6 +15987,275 @@ ullm_status ullm_runtime_qwen35_qk_norm_rope_f32(
         q_gate_output_buffer,
         q_rope_output_buffer,
         k_rope_output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_f32(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *v_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    size_t cache_position,
+    size_t block_size,
+    size_t cache_blocks,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_cache_buffer,
+    ullm_runtime_buffer *v_cache_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_projected_buffer == nullptr || k_projected_buffer == nullptr ||
+        v_projected_buffer == nullptr || q_weight_buffer == nullptr ||
+        k_weight_buffer == nullptr || block_table_buffer == nullptr ||
+        q_gate_output_buffer == nullptr || q_rope_output_buffer == nullptr ||
+        k_cache_buffer == nullptr || v_cache_buffer == nullptr) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0 ||
+        block_size == 0 || cache_blocks == 0) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rotary_dim == 0 || rotary_dim > head_dim || (rotary_dim % 2) != 0) {
+        set_error(
+            "Qwen3.5 q/k norm RoPE paged KV write rotary_dim must be even and no greater than head_dim");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(rope_base) || rope_base <= 1.0f) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write base must be finite and greater than one");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(epsilon) || epsilon <= 0.0f) {
+        set_error(
+            "Qwen3.5 q/k norm RoPE paged KV write epsilon must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_projected_buffer, k_projected_buffer) ||
+        !buffers_share_backend(q_projected_buffer, v_projected_buffer) ||
+        !buffers_share_backend(q_projected_buffer, q_weight_buffer) ||
+        !buffers_share_backend(q_projected_buffer, k_weight_buffer) ||
+        !buffers_share_backend(q_projected_buffer, block_table_buffer) ||
+        !buffers_share_backend(q_projected_buffer, q_gate_output_buffer) ||
+        !buffers_share_backend(q_projected_buffer, q_rope_output_buffer) ||
+        !buffers_share_backend(q_projected_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_projected_buffer, v_cache_buffer)) {
+        set_error(
+            "Qwen3.5 q/k norm RoPE paged KV write buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(q_gate_output_buffer, stream) ||
+        !stream_matches_buffer(q_rope_output_buffer, stream) ||
+        !stream_matches_buffer(k_cache_buffer, stream) ||
+        !stream_matches_buffer(v_cache_buffer, stream)) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cache_blocks > max_size / block_size) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write physical cache size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t physical_tokens = cache_blocks * block_size;
+    if (cache_position >= physical_tokens) {
+        set_error(
+            "Qwen3.5 q/k norm RoPE paged KV write cache_position exceeds physical cache capacity");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t block_index = cache_position / block_size;
+    const size_t block_table_entries = block_index + 1;
+    if (head_dim > max_size / q_heads || head_dim > max_size / kv_heads ||
+        value_dim > max_size / kv_heads) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write token element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_output_elements = q_heads * head_dim;
+    const size_t k_elements = kv_heads * head_dim;
+    const size_t v_elements = kv_heads * value_dim;
+    if (kv_heads > max_size / physical_tokens) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write kv head-cache count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_cache = physical_tokens * kv_heads;
+    if (head_dim > max_size / kv_head_cache || value_dim > max_size / kv_head_cache) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write cache element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_cache_elements = kv_head_cache * head_dim;
+    const size_t v_cache_elements = kv_head_cache * value_dim;
+    if (q_output_elements > max_size / 2 ||
+        q_output_elements > max_size / sizeof(float) ||
+        k_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float) ||
+        head_dim > max_size / sizeof(float) ||
+        block_table_entries > max_size / sizeof(std::uint32_t) ||
+        k_cache_elements > max_size / sizeof(float) ||
+        v_cache_elements > max_size / sizeof(float)) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_projected_elements = q_output_elements * 2;
+    if (q_projected_elements > max_size / sizeof(float)) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write q projected byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_projected_bytes = q_projected_elements * sizeof(float);
+    const size_t k_projected_bytes = k_elements * sizeof(float);
+    const size_t v_projected_bytes = v_elements * sizeof(float);
+    const size_t weight_bytes = head_dim * sizeof(float);
+    const size_t block_table_bytes = block_table_entries * sizeof(std::uint32_t);
+    const size_t q_output_bytes = q_output_elements * sizeof(float);
+    const size_t k_cache_bytes = k_cache_elements * sizeof(float);
+    const size_t v_cache_bytes = v_cache_elements * sizeof(float);
+    if (q_projected_buffer->bytes < q_projected_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write q projected buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_projected_buffer->bytes < k_projected_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write k projected buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_projected_buffer->bytes < v_projected_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write v projected buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_weight_buffer->bytes < weight_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write q weight buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_weight_buffer->bytes < weight_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write k weight buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (block_table_buffer->bytes < block_table_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write block table buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_gate_output_buffer->bytes < q_output_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write q gate output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_rope_output_buffer->bytes < q_output_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write q RoPE output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_cache_buffer->bytes < k_cache_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write k cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_cache_buffer->bytes < v_cache_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE paged KV write v cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_projected_buffer->backend == BackendKind::Cpu) {
+        const auto *block_table = static_cast<const std::uint32_t *>(block_table_buffer->ptr);
+        if (static_cast<size_t>(block_table[block_index]) >= cache_blocks) {
+            set_error(
+                "Qwen3.5 q/k norm RoPE paged KV write block table contains an out-of-range block id");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        qwen35_qk_norm_rope_paged_kv_write_f32_host(
+            static_cast<const float *>(q_projected_buffer->ptr),
+            static_cast<const float *>(k_projected_buffer->ptr),
+            static_cast<const float *>(v_projected_buffer->ptr),
+            static_cast<const float *>(q_weight_buffer->ptr),
+            static_cast<const float *>(k_weight_buffer->ptr),
+            block_table,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            cache_position,
+            block_size,
+            static_cast<float *>(q_gate_output_buffer->ptr),
+            static_cast<float *>(q_rope_output_buffer->ptr),
+            static_cast<float *>(k_cache_buffer->ptr),
+            static_cast<float *>(v_cache_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (qwen35_qk_norm_rope_paged_kv_write_f32_hip_kernel(
+            q_projected_buffer,
+            k_projected_buffer,
+            v_projected_buffer,
+            q_weight_buffer,
+            k_weight_buffer,
+            block_table_buffer,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            cache_position,
+            block_size,
+            cache_blocks,
+            q_gate_output_buffer,
+            q_rope_output_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_PAGED_KV_WRITE_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty()
+                      ? "Qwen3.5 q/k norm RoPE paged KV write HIP kernel is unavailable"
+                      : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return qwen35_qk_norm_rope_paged_kv_write_f32_hip_staging(
+        q_projected_buffer,
+        k_projected_buffer,
+        v_projected_buffer,
+        q_weight_buffer,
+        k_weight_buffer,
+        block_table_buffer,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        epsilon,
+        cache_position,
+        block_size,
+        q_projected_bytes,
+        k_projected_bytes,
+        v_projected_bytes,
+        weight_bytes,
+        block_table_bytes,
+        q_output_bytes,
+        k_cache_bytes,
+        v_cache_bytes,
+        q_gate_output_buffer,
+        q_rope_output_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
         stream);
 }
 
