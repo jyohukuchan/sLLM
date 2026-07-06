@@ -2681,6 +2681,14 @@ __device__ float ullm_bf16_to_f32(unsigned short value) {
     return __uint_as_float(static_cast<unsigned int>(value) << 16);
 }
 
+__device__ float ullm_bf16_pair_low_to_f32(unsigned int value) {
+    return __uint_as_float((value & 0xffffu) << 16);
+}
+
+__device__ float ullm_bf16_pair_high_to_f32(unsigned int value) {
+    return __uint_as_float((value & 0xffff0000u));
+}
+
 extern "C" __global__ void ullm_matvec_bf16_f32_kernel(
     const unsigned short *matrix,
     const float *input,
@@ -2693,8 +2701,21 @@ extern "C" __global__ void ullm_matvec_bf16_f32_kernel(
     float sum = 0.0f;
     if (row < rows) {
         const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
-        for (unsigned long long col = tid; col < cols; col += blockDim.x) {
-            sum += ullm_bf16_to_f32(matrix[row_offset + col]) * input[col];
+        if ((cols & 1ull) == 0ull) {
+            const unsigned int *matrix_pairs =
+                reinterpret_cast<const unsigned int *>(matrix + row_offset);
+            const unsigned long long pair_cols = cols >> 1;
+            for (unsigned long long pair_col = tid; pair_col < pair_cols;
+                 pair_col += blockDim.x) {
+                const unsigned int packed = matrix_pairs[pair_col];
+                const unsigned long long col = pair_col << 1;
+                sum += ullm_bf16_pair_low_to_f32(packed) * input[col];
+                sum += ullm_bf16_pair_high_to_f32(packed) * input[col + 1ull];
+            }
+        } else {
+            for (unsigned long long col = tid; col < cols; col += blockDim.x) {
+                sum += ullm_bf16_to_f32(matrix[row_offset + col]) * input[col];
+            }
         }
     }
     partial[tid] = sum;
