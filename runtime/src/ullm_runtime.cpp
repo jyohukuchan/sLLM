@@ -384,6 +384,19 @@ public:
             error);
     }
 
+    bool compile_aq4_matvec_triple_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        const std::string source = aq4_matvec_triple_kernel_source_for_arch(arch);
+        return compile_kernel(
+            arch,
+            source.c_str(),
+            "ullm_aq4_matvec_triple_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_aq4_matvec_qkv_z_gate_beta_kernel(
         const std::string &arch,
         std::vector<char> *code,
@@ -727,6 +740,10 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
 
     static std::string aq4_matvec_pair_kernel_source_for_arch(const std::string &arch) {
         return aq4_rows_per_block_preamble(arch) + aq4_matvec_pair_kernel_source();
+    }
+
+    static std::string aq4_matvec_triple_kernel_source_for_arch(const std::string &arch) {
+        return aq4_rows_per_block_preamble(arch) + aq4_matvec_triple_kernel_source();
     }
 
     static std::string aq4_matvec_qkv_z_gate_beta_kernel_source_for_arch(
@@ -1088,6 +1105,194 @@ extern "C" __global__ void ullm_aq4_matvec_pair_f32_kernel(
                 value *= right_row_scales[row];
             }
             right_output[row] = value;
+        }
+    }
+}
+)";
+    }
+
+    static const char *aq4_matvec_triple_kernel_source() {
+        return R"(
+__device__ float ullm_aq4_matvec_triple_thread_sum(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row,
+    unsigned long long cols,
+    unsigned int tid,
+    unsigned int block_size) {
+    const unsigned long long row_offset = row * cols;
+    float sum = 0.0f;
+    if ((cols % group_size) == 0ull) {
+        const unsigned long long groups_per_row = cols / group_size;
+        for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
+             group_in_row += block_size) {
+            const unsigned long long group = row * groups_per_row + group_in_row;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index >= scale_count) {
+                continue;
+            }
+            float raw_sum = 0.0f;
+            const unsigned long long col_start = group_in_row * group_size;
+            for (unsigned long long offset = 0; offset < group_size; ++offset) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long element = row_offset + col;
+                const unsigned char packed = indices[element >> 1];
+                const unsigned char codebook_index =
+                    (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                raw_sum += codebook[codebook_index] * input[col];
+            }
+            sum += raw_sum * scale_values[scale_index] * tensor_scale;
+        }
+    } else {
+        for (unsigned long long col = tid; col < cols; col += block_size) {
+            const unsigned long long element = row_offset + col;
+            const unsigned char packed = indices[element >> 1];
+            const unsigned char codebook_index =
+                (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+            const unsigned long long group = element / group_size;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index < scale_count) {
+                const float value =
+                    codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+                sum += value * input[col];
+            }
+        }
+    }
+    return sum;
+}
+
+extern "C" __global__ void ullm_aq4_matvec_triple_f32_kernel(
+    const unsigned char *first_indices,
+    const unsigned char *first_scale_indices,
+    const float *first_codebook,
+    const float *first_scale_values,
+    const float *first_row_scales,
+    unsigned long long first_scale_count,
+    unsigned long long first_group_size,
+    float first_tensor_scale,
+    unsigned long long first_row_scale_count,
+    const unsigned char *second_indices,
+    const unsigned char *second_scale_indices,
+    const float *second_codebook,
+    const float *second_scale_values,
+    const float *second_row_scales,
+    unsigned long long second_scale_count,
+    unsigned long long second_group_size,
+    float second_tensor_scale,
+    unsigned long long second_row_scale_count,
+    const unsigned char *third_indices,
+    const unsigned char *third_scale_indices,
+    const float *third_codebook,
+    const float *third_scale_values,
+    const float *third_row_scales,
+    unsigned long long third_scale_count,
+    unsigned long long third_group_size,
+    float third_tensor_scale,
+    unsigned long long third_row_scale_count,
+    const float *input,
+    unsigned long long first_rows,
+    unsigned long long second_rows,
+    unsigned long long third_rows,
+    unsigned long long cols,
+    float *first_output,
+    float *second_output,
+    float *third_output) {
+    const unsigned int tid = threadIdx.x;
+    constexpr unsigned int rows_per_block = ULLM_AQ4_ROWS_PER_BLOCK;
+    constexpr unsigned int threads_per_row = 256u / rows_per_block;
+    const unsigned int row_in_block = tid / threads_per_row;
+    const unsigned int lane = tid - row_in_block * threads_per_row;
+    const unsigned long long logical_row =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
+    const unsigned long long second_start = first_rows;
+    const unsigned long long third_start = first_rows + second_rows;
+    const unsigned long long total_rows = third_start + third_rows;
+    const unsigned int partial_offset = row_in_block * threads_per_row;
+    __shared__ float partial[256];
+    float sum = 0.0f;
+    unsigned int which = 0u;
+    unsigned long long row = logical_row;
+    if (logical_row < total_rows) {
+        if (logical_row < second_start) {
+            which = 0u;
+            sum = ullm_aq4_matvec_triple_thread_sum(
+                first_indices,
+                first_scale_indices,
+                first_codebook,
+                first_scale_values,
+                input,
+                first_scale_count,
+                first_group_size,
+                first_tensor_scale,
+                row,
+                cols,
+                lane,
+                threads_per_row);
+        } else if (logical_row < third_start) {
+            which = 1u;
+            row = logical_row - second_start;
+            sum = ullm_aq4_matvec_triple_thread_sum(
+                second_indices,
+                second_scale_indices,
+                second_codebook,
+                second_scale_values,
+                input,
+                second_scale_count,
+                second_group_size,
+                second_tensor_scale,
+                row,
+                cols,
+                lane,
+                threads_per_row);
+        } else {
+            which = 2u;
+            row = logical_row - third_start;
+            sum = ullm_aq4_matvec_triple_thread_sum(
+                third_indices,
+                third_scale_indices,
+                third_codebook,
+                third_scale_values,
+                input,
+                third_scale_count,
+                third_group_size,
+                third_tensor_scale,
+                row,
+                cols,
+                lane,
+                threads_per_row);
+        }
+    }
+    partial[tid] = sum;
+    __syncthreads();
+    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
+        if (lane < offset) {
+            partial[partial_offset + lane] += partial[partial_offset + lane + offset];
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && logical_row < total_rows) {
+        float value = partial[partial_offset];
+        if (which == 0u) {
+            if (first_row_scales != nullptr && row < first_row_scale_count) {
+                value *= first_row_scales[row];
+            }
+            first_output[row] = value;
+        } else if (which == 1u) {
+            if (second_row_scales != nullptr && row < second_row_scale_count) {
+                value *= second_row_scales[row];
+            }
+            second_output[row] = value;
+        } else {
+            if (third_row_scales != nullptr && row < third_row_scale_count) {
+                value *= third_row_scales[row];
+            }
+            third_output[row] = value;
         }
     }
 }
@@ -3845,6 +4050,90 @@ HipAq4MatvecPairKernelCache &hip_aq4_matvec_pair_kernel_cache() {
     return cache;
 }
 
+class HipAq4MatvecTripleKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_aq4_matvec_triple_kernel(
+                    arch,
+                    &code,
+                    &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_aq4_matvec_triple_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build AQ4 matvec triple HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipAq4MatvecTripleKernelCache &hip_aq4_matvec_triple_kernel_cache() {
+    static HipAq4MatvecTripleKernelCache cache;
+    return cache;
+}
+
 class HipAq4MatvecQkvZGateBetaKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -4189,6 +4478,165 @@ bool aq4_matvec_pair_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for AQ4 matvec pair";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool aq4_matvec_triple_f32_hip_kernel(
+    const ullm_runtime_buffer *first_index_buffer,
+    const ullm_runtime_buffer *first_scale_buffer,
+    const ullm_runtime_buffer *first_codebook_buffer,
+    const ullm_runtime_buffer *first_scale_values_buffer,
+    const ullm_runtime_buffer *first_row_scale_buffer,
+    size_t first_scale_count,
+    size_t first_group_size,
+    float first_tensor_scale,
+    size_t first_row_scale_count,
+    const ullm_runtime_buffer *second_index_buffer,
+    const ullm_runtime_buffer *second_scale_buffer,
+    const ullm_runtime_buffer *second_codebook_buffer,
+    const ullm_runtime_buffer *second_scale_values_buffer,
+    const ullm_runtime_buffer *second_row_scale_buffer,
+    size_t second_scale_count,
+    size_t second_group_size,
+    float second_tensor_scale,
+    size_t second_row_scale_count,
+    const ullm_runtime_buffer *third_index_buffer,
+    const ullm_runtime_buffer *third_scale_buffer,
+    const ullm_runtime_buffer *third_codebook_buffer,
+    const ullm_runtime_buffer *third_scale_values_buffer,
+    const ullm_runtime_buffer *third_row_scale_buffer,
+    size_t third_scale_count,
+    size_t third_group_size,
+    float third_tensor_scale,
+    size_t third_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    size_t first_rows,
+    size_t second_rows,
+    size_t third_rows,
+    size_t cols,
+    ullm_runtime_buffer *first_output_buffer,
+    ullm_runtime_buffer *second_output_buffer,
+    ullm_runtime_buffer *third_output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = first_index_buffer->hip_device_id;
+    void *function = hip_aq4_matvec_triple_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (first_rows > max_size - second_rows ||
+        first_rows + second_rows > max_size - third_rows) {
+        if (error != nullptr) {
+            *error = "AQ4 matvec triple row count overflows";
+        }
+        return false;
+    }
+    const size_t total_rows = first_rows + second_rows + third_rows;
+    const size_t grid_size =
+        (total_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "AQ4 matvec triple row count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    void *first_index_ptr = first_index_buffer->ptr;
+    void *first_scale_ptr = first_scale_buffer->ptr;
+    void *first_codebook_ptr = first_codebook_buffer->ptr;
+    void *first_scale_values_ptr = first_scale_values_buffer->ptr;
+    void *first_row_scale_ptr =
+        first_row_scale_buffer == nullptr ? nullptr : first_row_scale_buffer->ptr;
+    unsigned long long kernel_first_scale_count =
+        static_cast<unsigned long long>(first_scale_count);
+    unsigned long long kernel_first_group_size =
+        static_cast<unsigned long long>(first_group_size);
+    unsigned long long kernel_first_row_scale_count =
+        static_cast<unsigned long long>(first_row_scale_count);
+    void *second_index_ptr = second_index_buffer->ptr;
+    void *second_scale_ptr = second_scale_buffer->ptr;
+    void *second_codebook_ptr = second_codebook_buffer->ptr;
+    void *second_scale_values_ptr = second_scale_values_buffer->ptr;
+    void *second_row_scale_ptr =
+        second_row_scale_buffer == nullptr ? nullptr : second_row_scale_buffer->ptr;
+    unsigned long long kernel_second_scale_count =
+        static_cast<unsigned long long>(second_scale_count);
+    unsigned long long kernel_second_group_size =
+        static_cast<unsigned long long>(second_group_size);
+    unsigned long long kernel_second_row_scale_count =
+        static_cast<unsigned long long>(second_row_scale_count);
+    void *third_index_ptr = third_index_buffer->ptr;
+    void *third_scale_ptr = third_scale_buffer->ptr;
+    void *third_codebook_ptr = third_codebook_buffer->ptr;
+    void *third_scale_values_ptr = third_scale_values_buffer->ptr;
+    void *third_row_scale_ptr =
+        third_row_scale_buffer == nullptr ? nullptr : third_row_scale_buffer->ptr;
+    unsigned long long kernel_third_scale_count =
+        static_cast<unsigned long long>(third_scale_count);
+    unsigned long long kernel_third_group_size =
+        static_cast<unsigned long long>(third_group_size);
+    unsigned long long kernel_third_row_scale_count =
+        static_cast<unsigned long long>(third_row_scale_count);
+    void *input_ptr = input_buffer->ptr;
+    unsigned long long kernel_first_rows = static_cast<unsigned long long>(first_rows);
+    unsigned long long kernel_second_rows = static_cast<unsigned long long>(second_rows);
+    unsigned long long kernel_third_rows = static_cast<unsigned long long>(third_rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    void *first_output_ptr = first_output_buffer->ptr;
+    void *second_output_ptr = second_output_buffer->ptr;
+    void *third_output_ptr = third_output_buffer->ptr;
+    void *kernel_params[] = {
+        &first_index_ptr,
+        &first_scale_ptr,
+        &first_codebook_ptr,
+        &first_scale_values_ptr,
+        &first_row_scale_ptr,
+        &kernel_first_scale_count,
+        &kernel_first_group_size,
+        &first_tensor_scale,
+        &kernel_first_row_scale_count,
+        &second_index_ptr,
+        &second_scale_ptr,
+        &second_codebook_ptr,
+        &second_scale_values_ptr,
+        &second_row_scale_ptr,
+        &kernel_second_scale_count,
+        &kernel_second_group_size,
+        &second_tensor_scale,
+        &kernel_second_row_scale_count,
+        &third_index_ptr,
+        &third_scale_ptr,
+        &third_codebook_ptr,
+        &third_scale_values_ptr,
+        &third_row_scale_ptr,
+        &kernel_third_scale_count,
+        &kernel_third_group_size,
+        &third_tensor_scale,
+        &kernel_third_row_scale_count,
+        &input_ptr,
+        &kernel_first_rows,
+        &kernel_second_rows,
+        &kernel_third_rows,
+        &kernel_cols,
+        &first_output_ptr,
+        &second_output_ptr,
+        &third_output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            launch_config.block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for AQ4 matvec triple";
         }
         return false;
     }
@@ -11195,6 +11643,287 @@ ullm_status ullm_runtime_aq4_matvec_pair_f32(
 
     set_error(
         hip_kernel_error.empty() ? "AQ4 matvec pair HIP kernel is unavailable" :
+                                   hip_kernel_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
+ullm_status ullm_runtime_aq4_matvec_triple_f32(
+    const ullm_runtime_buffer *first_index_buffer,
+    const ullm_runtime_buffer *first_scale_buffer,
+    const ullm_runtime_buffer *first_codebook_buffer,
+    const ullm_runtime_buffer *first_scale_values_buffer,
+    const ullm_runtime_buffer *first_row_scale_buffer,
+    size_t first_scale_count,
+    size_t first_group_size,
+    float first_tensor_scale,
+    size_t first_row_scale_count,
+    const ullm_runtime_buffer *second_index_buffer,
+    const ullm_runtime_buffer *second_scale_buffer,
+    const ullm_runtime_buffer *second_codebook_buffer,
+    const ullm_runtime_buffer *second_scale_values_buffer,
+    const ullm_runtime_buffer *second_row_scale_buffer,
+    size_t second_scale_count,
+    size_t second_group_size,
+    float second_tensor_scale,
+    size_t second_row_scale_count,
+    const ullm_runtime_buffer *third_index_buffer,
+    const ullm_runtime_buffer *third_scale_buffer,
+    const ullm_runtime_buffer *third_codebook_buffer,
+    const ullm_runtime_buffer *third_scale_values_buffer,
+    const ullm_runtime_buffer *third_row_scale_buffer,
+    size_t third_scale_count,
+    size_t third_group_size,
+    float third_tensor_scale,
+    size_t third_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    size_t first_rows,
+    size_t second_rows,
+    size_t third_rows,
+    size_t cols,
+    ullm_runtime_buffer *first_output_buffer,
+    ullm_runtime_buffer *second_output_buffer,
+    ullm_runtime_buffer *third_output_buffer,
+    ullm_runtime_stream *stream) {
+    struct Matrix {
+        const ullm_runtime_buffer *index = nullptr;
+        const ullm_runtime_buffer *scale = nullptr;
+        const ullm_runtime_buffer *codebook = nullptr;
+        const ullm_runtime_buffer *scale_values = nullptr;
+        const ullm_runtime_buffer *row_scale = nullptr;
+        size_t scale_count = 0;
+        size_t group_size = 0;
+        float tensor_scale = 0.0f;
+        size_t row_scale_count = 0;
+        size_t rows = 0;
+        ullm_runtime_buffer *output = nullptr;
+        const char *label = "";
+    };
+    std::array<Matrix, 3> matrices{{
+        {first_index_buffer,
+         first_scale_buffer,
+         first_codebook_buffer,
+         first_scale_values_buffer,
+         first_row_scale_buffer,
+         first_scale_count,
+         first_group_size,
+         first_tensor_scale,
+         first_row_scale_count,
+         first_rows,
+         first_output_buffer,
+         "first"},
+        {second_index_buffer,
+         second_scale_buffer,
+         second_codebook_buffer,
+         second_scale_values_buffer,
+         second_row_scale_buffer,
+         second_scale_count,
+         second_group_size,
+         second_tensor_scale,
+         second_row_scale_count,
+         second_rows,
+         second_output_buffer,
+         "second"},
+        {third_index_buffer,
+         third_scale_buffer,
+         third_codebook_buffer,
+         third_scale_values_buffer,
+         third_row_scale_buffer,
+         third_scale_count,
+         third_group_size,
+         third_tensor_scale,
+         third_row_scale_count,
+         third_rows,
+         third_output_buffer,
+         "third"},
+    }};
+    if (input_buffer == nullptr) {
+        set_error("AQ4 matvec triple received a null input pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    for (const Matrix &matrix : matrices) {
+        if (matrix.index == nullptr || matrix.scale == nullptr || matrix.codebook == nullptr ||
+            matrix.scale_values == nullptr || matrix.output == nullptr) {
+            set_error("AQ4 matvec triple received a null pointer");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (matrix.scale_count == 0) {
+            set_error("AQ4 matvec triple scale table is empty");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (matrix.group_size == 0) {
+            set_error("AQ4 matvec triple group size must be greater than zero");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (matrix.rows == 0 || cols == 0) {
+            set_error("AQ4 matvec triple rows and cols must be greater than zero");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (!std::isfinite(matrix.tensor_scale) || matrix.tensor_scale <= 0.0f) {
+            set_error("AQ4 matvec triple tensor scale must be finite and greater than zero");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+    }
+
+    const ullm_runtime_buffer *base = first_index_buffer;
+    for (const Matrix &matrix : matrices) {
+        if (!buffers_share_backend(base, matrix.index) ||
+            !buffers_share_backend(base, matrix.scale) ||
+            !buffers_share_backend(base, matrix.codebook) ||
+            !buffers_share_backend(base, matrix.scale_values) ||
+            !buffers_share_backend(base, matrix.output) ||
+            (matrix.row_scale != nullptr && !buffers_share_backend(base, matrix.row_scale))) {
+            set_error("AQ4 matvec triple buffers belong to different backends or devices");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (!stream_matches_buffer(matrix.output, stream)) {
+            set_error("AQ4 matvec triple stream belongs to a different backend or device");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+    }
+    if (!buffers_share_backend(base, input_buffer)) {
+        set_error("AQ4 matvec triple buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (first_rows > max_size - second_rows ||
+        first_rows + second_rows > max_size - third_rows) {
+        set_error("AQ4 matvec triple matrix row count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    std::array<size_t, 3> elements{};
+    std::array<size_t, 3> required_index_bytes{};
+    std::array<size_t, 3> groups{};
+    std::array<size_t, 3> required_output_bytes{};
+    std::array<size_t, 3> required_scale_value_bytes{};
+    std::array<size_t, 3> required_row_scale_bytes{};
+    for (size_t index = 0; index < matrices.size(); ++index) {
+        const Matrix &matrix = matrices[index];
+        if (cols > max_size / matrix.rows ||
+            matrix.rows > max_size / sizeof(float) ||
+            matrix.scale_count > max_size / sizeof(float) ||
+            matrix.row_scale_count > max_size / sizeof(float)) {
+            set_error("AQ4 matvec triple byte size overflows");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        elements[index] = matrix.rows * cols;
+        required_index_bytes[index] = elements[index] / 2 + (elements[index] % 2);
+        groups[index] =
+            elements[index] / matrix.group_size +
+            (elements[index] % matrix.group_size == 0 ? 0 : 1);
+        required_output_bytes[index] = matrix.rows * sizeof(float);
+        required_scale_value_bytes[index] = matrix.scale_count * sizeof(float);
+        required_row_scale_bytes[index] = matrix.row_scale_count * sizeof(float);
+    }
+    if (cols > max_size / sizeof(float)) {
+        set_error("AQ4 matvec triple input byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_input_bytes = cols * sizeof(float);
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("AQ4 matvec triple input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    for (size_t index = 0; index < matrices.size(); ++index) {
+        const Matrix &matrix = matrices[index];
+        if (matrix.index->bytes < required_index_bytes[index]) {
+            set_error("AQ4 matvec triple index buffer is too small");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (matrix.scale->bytes < groups[index]) {
+            set_error("AQ4 matvec triple scale index buffer is too small");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (matrix.scale_values->bytes < required_scale_value_bytes[index]) {
+            set_error("AQ4 matvec triple scale value buffer is too small");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (matrix.row_scale != nullptr &&
+            matrix.row_scale->bytes < required_row_scale_bytes[index]) {
+            set_error("AQ4 matvec triple row scale buffer is too small");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (matrix.output->bytes < required_output_bytes[index]) {
+            set_error("AQ4 matvec triple output buffer is too small");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        if (matrix.codebook->bytes % sizeof(float) != 0 ||
+            matrix.codebook->bytes / sizeof(float) < 16) {
+            set_error("AQ4 matvec triple requires at least 16 f32 codebook entries");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+    }
+
+    if (base->backend == BackendKind::Cpu) {
+        for (const Matrix &matrix : matrices) {
+            if (!aq4_matvec_f32_host(
+                    static_cast<const std::uint8_t *>(matrix.index->ptr),
+                    static_cast<const std::uint8_t *>(matrix.scale->ptr),
+                    static_cast<const float *>(matrix.codebook->ptr),
+                    static_cast<const float *>(matrix.scale_values->ptr),
+                    matrix.scale_count,
+                    matrix.group_size,
+                    matrix.tensor_scale,
+                    static_cast<const float *>(input_buffer->ptr),
+                    matrix.row_scale == nullptr
+                        ? nullptr
+                        : static_cast<const float *>(matrix.row_scale->ptr),
+                    matrix.row_scale_count,
+                    matrix.rows,
+                    cols,
+                    static_cast<float *>(matrix.output->ptr))) {
+                return ULLM_STATUS_INVALID_ARGUMENT;
+            }
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (aq4_matvec_triple_f32_hip_kernel(
+            first_index_buffer,
+            first_scale_buffer,
+            first_codebook_buffer,
+            first_scale_values_buffer,
+            first_row_scale_buffer,
+            first_scale_count,
+            first_group_size,
+            first_tensor_scale,
+            first_row_scale_count,
+            second_index_buffer,
+            second_scale_buffer,
+            second_codebook_buffer,
+            second_scale_values_buffer,
+            second_row_scale_buffer,
+            second_scale_count,
+            second_group_size,
+            second_tensor_scale,
+            second_row_scale_count,
+            third_index_buffer,
+            third_scale_buffer,
+            third_codebook_buffer,
+            third_scale_values_buffer,
+            third_row_scale_buffer,
+            third_scale_count,
+            third_group_size,
+            third_tensor_scale,
+            third_row_scale_count,
+            input_buffer,
+            first_rows,
+            second_rows,
+            third_rows,
+            cols,
+            first_output_buffer,
+            second_output_buffer,
+            third_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    set_error(
+        hip_kernel_error.empty() ? "AQ4 matvec triple HIP kernel is unavailable" :
                                    hip_kernel_error.c_str());
     return ULLM_STATUS_RUNTIME_ERROR;
 }
