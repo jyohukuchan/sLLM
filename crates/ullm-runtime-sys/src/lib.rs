@@ -186,6 +186,14 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_qwen35_split_q_gate_f32(
+        projected_buffer: *const RawRuntimeBuffer,
+        q_heads: usize,
+        head_dim: usize,
+        query_output_buffer: *mut RawRuntimeBuffer,
+        gate_output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_add_f32(
         lhs_buffer: *const RawRuntimeBuffer,
         rhs_buffer: *const RawRuntimeBuffer,
@@ -1057,6 +1065,42 @@ pub fn sigmoid_mul_f32(
             input_buffer.raw.as_ptr(),
             elements,
             output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn qwen35_split_q_gate_f32(
+    projected_buffer: &RuntimeBuffer,
+    q_heads: usize,
+    head_dim: usize,
+    query_output_buffer: &mut RuntimeBuffer,
+    gate_output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if q_heads == 0 || head_dim == 0 {
+        return Err("Qwen3.5 q/gate split q_heads and head_dim must be greater than zero".into());
+    }
+    let output_elements = q_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "Qwen3.5 q/gate split element count overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Qwen3.5 q/gate split output byte size overflows".to_string())?;
+    let projected_bytes = output_bytes
+        .checked_mul(2)
+        .ok_or_else(|| "Qwen3.5 q/gate split projected byte size overflows".to_string())?;
+    check_copy_range(0, projected_bytes, projected_buffer.size()?)?;
+    check_copy_range(0, output_bytes, query_output_buffer.size()?)?;
+    check_copy_range(0, output_bytes, gate_output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_qwen35_split_q_gate_f32(
+            projected_buffer.raw.as_ptr(),
+            q_heads,
+            head_dim,
+            query_output_buffer.raw.as_ptr(),
+            gate_output_buffer.raw.as_ptr(),
             stream,
         )
     })
@@ -2276,6 +2320,41 @@ mod tests {
 
         let err = sigmoid_mul_f32(&gate, &input, 4, &mut output, None).unwrap_err();
         assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
+    fn cpu_qwen35_split_q_gate_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let projected_values = [1.0_f32, 2.0, 10.0, 20.0, 3.0, 4.0, 30.0, 40.0];
+        let mut projected = context
+            .alloc_buffer(projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut query = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        projected
+            .copy_from_host(0, &f32s_to_le_bytes(&projected_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        qwen35_split_q_gate_f32(&projected, 2, 2, &mut query, &mut gate, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut query_bytes = vec![0_u8; 4 * std::mem::size_of::<f32>()];
+        let mut gate_bytes = vec![0_u8; 4 * std::mem::size_of::<f32>()];
+        query
+            .copy_to_host(0, &mut query_bytes, Some(&mut stream))
+            .unwrap();
+        gate.copy_to_host(0, &mut gate_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&query_bytes), vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(le_bytes_to_f32s(&gate_bytes), vec![10.0, 20.0, 30.0, 40.0]);
     }
 
     #[test]

@@ -14,16 +14,14 @@ use ullm_engine::decode_runner::{
     qwen3_decoder_layer_prefill_input_from_sequence,
 };
 use ullm_engine::decoder::{
-    PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntime,
-    Qwen3DecoderLayerRuntimeWeights, Qwen3DecoderLayerSequenceOutput, Qwen3MlpRuntimeWeights,
-    Qwen3PostAttentionRuntimeWeights, Qwen3SelfAttnRuntimePreparedSequence,
-    Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode, Qwen3SelfAttnRuntimeShape,
-    Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
+    PagedDecodeShape, PagedKvCacheReadback, Qwen3DecoderLayerRuntimeWeights,
+    Qwen3DecoderLayerSequenceOutput, Qwen3MlpRuntimeWeights, Qwen3PostAttentionRuntimeWeights,
+    Qwen3SelfAttnRuntimePreparedSequence, Qwen3SelfAttnRuntimePreparedSequenceForPagedDecode,
+    Qwen3SelfAttnRuntimeShape, Qwen3SelfAttnRuntimeWeights, pack_paged_kv_cache_for_block_table,
     qwen3_causal_attn_to_host_f32, qwen3_decoder_layer_sequence_to_host_f32,
     qwen3_headwise_rmsnorm_to_host_f32, qwen3_rope_to_host_f32,
     qwen3_self_attn_block_sequence_to_host_f32,
-    qwen3_self_attn_prepare_sequence_for_paged_decode_f32,
-    qwen3_self_attn_project_sequence_to_host_f32, qwen3_self_attn_runtime_shape,
+    qwen3_self_attn_prepare_sequence_for_paged_decode_f32, qwen3_self_attn_runtime_shape,
     split_qwen3_self_attn_q_projection,
 };
 use ullm_engine::golden::{GoldenTensorFixture, compare_f32_slices};
@@ -41,8 +39,8 @@ use ullm_engine::package::{
     select_tensor_payload_bundle,
 };
 use ullm_engine::qwen3_loader::{
-    Qwen3PackageDecoderLayerRuntime, Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime,
-    Qwen3PackageModelStackRequest, qwen3_decoder_layer_runtime_weights_from_package,
+    Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
+    qwen3_decoder_layer_runtime_weights_from_package,
     qwen3_package_decoder_layer_runtime_from_package,
     qwen3_package_model_run_prefill_step_from_sequence,
     qwen3_package_model_run_ready_batch_from_sequences, qwen3_package_model_stack_runner,
@@ -9585,158 +9583,6 @@ fn qwen3_self_attn_prepare_model_loop_sequence_smoke(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn qwen3_self_attn_prepare_model_loop_sequence_decode(
-    context: &mut ullm_runtime_sys::RuntimeContext,
-    stream: &mut ullm_runtime_sys::RuntimeStream,
-    self_attn_weights: &Qwen3SelfAttnRuntimeWeights,
-    residual_sequence: Vec<f32>,
-    sequence_len: usize,
-    rotary_dim: usize,
-    rope_base: f32,
-    position_offset: usize,
-    input_norm: &PassthroughF32Data,
-    q_norm: &PassthroughF32Data,
-    k_norm: &PassthroughF32Data,
-    label: &str,
-) -> Result<Qwen3SelfAttnModelLoopPreparedSequence, String> {
-    let Qwen3SelfAttnRuntimeShape {
-        hidden,
-        q_heads: shape_q_heads,
-        kv_heads,
-        head_dim,
-        value_dim,
-        attention_width: _,
-        q_projection_layout,
-    } = qwen3_self_attn_runtime_shape(self_attn_weights)?;
-    let expected_residual_len = sequence_len
-        .checked_mul(hidden)
-        .ok_or_else(|| format!("{label} residual length overflows"))?;
-    if residual_sequence.len() != expected_residual_len {
-        return Err(format!(
-            "{label} residual length {} does not match expected {}",
-            residual_sequence.len(),
-            expected_residual_len
-        ));
-    }
-    if input_norm.values.len() != hidden {
-        return Err(format!(
-            "{label} input RMSNorm length {} does not match hidden={hidden}",
-            input_norm.values.len()
-        ));
-    }
-    if q_norm.values.len() != head_dim || k_norm.values.len() != head_dim {
-        return Err(format!(
-            "{label} q/k RMSNorm length mismatch: q={} k={} head_dim={head_dim}",
-            q_norm.values.len(),
-            k_norm.values.len()
-        ));
-    }
-
-    let original_residual_sequence = residual_sequence;
-    let mut attention_input_normed = Vec::with_capacity(original_residual_sequence.len());
-    for residual in original_residual_sequence.chunks_exact(hidden) {
-        attention_input_normed.extend(runtime_host_rmsnorm_f32(
-            residual,
-            &input_norm.values,
-            1e-6_f32,
-        ));
-    }
-
-    let projected = qwen3_self_attn_project_sequence_to_host_f32(
-        context,
-        stream,
-        self_attn_weights,
-        &attention_input_normed,
-        sequence_len,
-    )?;
-    let q_projection_split = split_qwen3_self_attn_q_projection(
-        &projected.q_projected,
-        sequence_len,
-        self_attn_weights.q_rows,
-        hidden,
-        head_dim,
-    )?;
-    if q_projection_layout != q_projection_split.layout {
-        return Err(format!(
-            "{label} q projection layout changed between shape and split: {q_projection_layout} vs {}",
-            q_projection_split.layout
-        ));
-    }
-    if shape_q_heads != q_projection_split.q_heads {
-        return Err(format!(
-            "{label} q head count changed between shape and split: {} vs {shape_q_heads}",
-            q_projection_split.q_heads
-        ));
-    }
-
-    let mut q_normed = Vec::with_capacity(q_projection_split.query.len());
-    for head_input in q_projection_split.query.chunks_exact(head_dim) {
-        q_normed.extend(runtime_host_rmsnorm_f32(
-            head_input,
-            &q_norm.values,
-            1e-5_f32,
-        ));
-    }
-    let mut k_normed = Vec::with_capacity(projected.k_projected.len());
-    for head_input in projected.k_projected.chunks_exact(head_dim) {
-        k_normed.extend(runtime_host_rmsnorm_f32(
-            head_input,
-            &k_norm.values,
-            1e-5_f32,
-        ));
-    }
-    let q_rope = runtime_host_rope_f32(
-        &q_normed,
-        sequence_len,
-        q_projection_split.q_heads,
-        head_dim,
-        rotary_dim,
-        position_offset,
-        rope_base,
-    );
-    let k_rope = runtime_host_rope_f32(
-        &k_normed,
-        sequence_len,
-        kv_heads,
-        head_dim,
-        rotary_dim,
-        position_offset,
-        rope_base,
-    );
-    if q_rope.len() != q_normed.len() || k_rope.len() != k_normed.len() {
-        return Err(format!("{label} RoPE produced an unexpected output length"));
-    }
-    let output_gate_layout = if q_projection_split.gate.is_some() {
-        "runtime-sigmoid"
-    } else {
-        "none"
-    };
-    let q_gate_elements = q_projection_split.gate.as_ref().map_or(0, Vec::len);
-
-    Ok(Qwen3SelfAttnModelLoopPreparedSequence {
-        residual_sequence: original_residual_sequence,
-        q_rope,
-        k_rope,
-        v_projected: projected.v_projected,
-        q_gate: q_projection_split.gate,
-        hidden,
-        q_heads: q_projection_split.q_heads,
-        kv_heads,
-        head_dim,
-        value_dim,
-        softmax_scale: 1.0_f32 / (head_dim as f32).sqrt(),
-        q_projection_layout,
-        q_gate_elements,
-        output_gate_layout,
-        q_norm_max_abs_diff: 0.0,
-        k_norm_max_abs_diff: 0.0,
-        q_rope_max_abs_diff: 0.0,
-        k_rope_max_abs_diff: 0.0,
-        attention_max_abs_diff: 0.0,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
 fn qwen3_self_attn_prepare_sequence_smoke(
     context: &mut ullm_runtime_sys::RuntimeContext,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -16532,101 +16378,88 @@ fn package_top_logits_from_f32_bytes(
 
 enum PackageTokenIdsIncrementalLayer {
     LinearAttention(PackageLinearAttnResidentStepLayer),
-    SelfAttention { self_index: usize },
+    SelfAttention(PackageSelfAttnResidentStepLayer),
 }
 
 impl PackageTokenIdsIncrementalLayer {
-    fn as_linear_attention(&self) -> Option<&PackageLinearAttnResidentStepLayer> {
+    fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
         match self {
-            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => Some(layer),
-            PackageTokenIdsIncrementalLayer::SelfAttention { .. } => None,
+            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => layer.output_buffer(),
+            PackageTokenIdsIncrementalLayer::SelfAttention(layer) => layer.output_buffer(),
         }
     }
 
-    fn as_linear_attention_mut(&mut self) -> Option<&mut PackageLinearAttnResidentStepLayer> {
+    fn read_output(
+        &self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<Vec<f32>, String> {
         match self {
-            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => Some(layer),
-            PackageTokenIdsIncrementalLayer::SelfAttention { .. } => None,
+            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => layer.read_output(stream),
+            PackageTokenIdsIncrementalLayer::SelfAttention(layer) => layer.read_output(stream),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_from_host_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &[f32],
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        match self {
+            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => {
+                layer.step_from_host_to_device(stream, residual, label)
+            }
+            PackageTokenIdsIncrementalLayer::SelfAttention(layer) => layer
+                .step_from_host_to_device(
+                    stream,
+                    residual,
+                    rotary_dim,
+                    rope_base,
+                    rope_position,
+                    cache_position,
+                    label,
+                ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_from_device_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        match self {
+            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => {
+                layer.step_from_device_to_device(stream, residual_buffer, label)
+            }
+            PackageTokenIdsIncrementalLayer::SelfAttention(layer) => layer
+                .step_from_device_to_device(
+                    stream,
+                    residual_buffer,
+                    rotary_dim,
+                    rope_base,
+                    rope_position,
+                    cache_position,
+                    label,
+                ),
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn package_token_ids_incremental_layer_step<'weights>(
-    context: &mut ullm_runtime_sys::RuntimeContext,
-    stream: &mut ullm_runtime_sys::RuntimeStream,
-    layer: &mut PackageTokenIdsIncrementalLayer,
-    self_layers: &'weights [Qwen3PackageDecoderLayerRuntime],
-    self_states: &mut [Qwen3DecoderLayerRuntime<'weights>],
-    _block_table: &[u32],
-    _block_size: usize,
-    _cache_blocks: usize,
-    rotary_dim: usize,
-    rope_base: f32,
-    rope_position: usize,
-    cache_position: usize,
-    residual: &[f32],
-    label: &str,
-) -> Result<Vec<f32>, String> {
-    match layer {
-        PackageTokenIdsIncrementalLayer::LinearAttention(layer) => layer.step(stream, residual),
-        PackageTokenIdsIncrementalLayer::SelfAttention { self_index } => {
-            let loaded = self_layers
-                .get(*self_index)
-                .ok_or_else(|| format!("{label} self-attn layer index {self_index} is missing"))?;
-            let state = self_states
-                .get_mut(*self_index)
-                .ok_or_else(|| format!("{label} self-attn state index {self_index} is missing"))?;
-            let prepared = qwen3_self_attn_prepare_model_loop_sequence_decode(
-                context,
-                stream,
-                &loaded.weights.self_attn,
-                residual.to_vec(),
-                1,
-                rotary_dim,
-                rope_base,
-                rope_position,
-                &loaded.input_norm,
-                &loaded.q_norm,
-                &loaded.k_norm,
-                label,
-            )?;
-            let step = state.step_output_only(
-                stream,
-                &prepared.q_rope,
-                &prepared.k_rope,
-                &prepared.v_projected,
-                prepared.q_gate.as_deref(),
-                &prepared.residual_sequence,
-            )?;
-            if step.cache_position != cache_position {
-                return Err(format!(
-                    "{label} cache_position {} does not match expected {cache_position}",
-                    step.cache_position
-                ));
-            }
-            if step.cache_len != cache_position + 1 {
-                return Err(format!(
-                    "{label} cache_len {} does not match expected {}",
-                    step.cache_len,
-                    cache_position + 1
-                ));
-            }
-            Ok(step.layer_output)
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn package_token_ids_incremental_layers_step<'weights>(
-    context: &mut ullm_runtime_sys::RuntimeContext,
+fn package_token_ids_incremental_layers_step(
     stream: &mut ullm_runtime_sys::RuntimeStream,
     layers: &mut [PackageTokenIdsIncrementalLayer],
-    self_layers: &'weights [Qwen3PackageDecoderLayerRuntime],
-    self_states: &mut [Qwen3DecoderLayerRuntime<'weights>],
-    block_table: &[u32],
-    block_size: usize,
-    cache_blocks: usize,
     rotary_dim: usize,
     rope_base: f32,
     rope_position: usize,
@@ -16642,98 +16475,57 @@ fn package_token_ids_incremental_layers_step<'weights>(
         ));
     }
     let mut residual_host = Some(residual);
-    let mut residual_device_linear_layer = None;
+    let mut residual_device_layer: Option<usize> = None;
     let mut layer_step_ms = Vec::with_capacity(layers.len());
 
     for layer_position in 0..layers.len() {
         let layer_step_started = Instant::now();
         let layer_label = format!("{label} layer {layer_position} position {rope_position}");
-        match layers[layer_position] {
-            PackageTokenIdsIncrementalLayer::LinearAttention(_) => {
-                if let Some(previous_position) = residual_device_linear_layer {
-                    let (previous_layers, current_layers) = layers.split_at_mut(layer_position);
-                    let previous = previous_layers
-                        .get(previous_position)
-                        .and_then(PackageTokenIdsIncrementalLayer::as_linear_attention)
-                        .ok_or_else(|| {
-                            format!(
-                                "{layer_label} previous device residual layer {previous_position} is not linear-attn"
-                            )
-                        })?;
-                    let current = current_layers[0]
-                        .as_linear_attention_mut()
-                        .ok_or_else(|| format!("{layer_label} current layer is not linear-attn"))?;
-                    current.step_from_device_to_device(
-                        stream,
-                        previous.output_buffer(),
-                        &layer_label,
-                    )?;
-                } else {
-                    let residual = residual_host.take().ok_or_else(|| {
-                        format!("{layer_label} missing host residual for linear-attn layer")
-                    })?;
-                    let current = layers[layer_position]
-                        .as_linear_attention_mut()
-                        .ok_or_else(|| format!("{layer_label} current layer is not linear-attn"))?;
-                    current.step_from_host_to_device(stream, &residual, &layer_label)?;
-                }
-                residual_device_linear_layer = Some(layer_position);
-                layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(previous_position) = residual_device_layer {
+            let (previous_layers, current_layers) = layers.split_at_mut(layer_position);
+            let previous = previous_layers.get(previous_position).ok_or_else(|| {
+                format!(
+                    "{layer_label} previous device residual layer {previous_position} is missing"
+                )
+            })?;
+            current_layers[0].step_from_device_to_device(
+                stream,
+                previous.output_buffer(),
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                &layer_label,
+            )?;
+        } else {
+            let residual = residual_host
+                .take()
+                .ok_or_else(|| format!("{layer_label} missing host residual"))?;
+            if residual.len() != hidden {
+                return Err(format!(
+                    "{layer_label} input length {} does not match hidden {hidden}",
+                    residual.len()
+                ));
             }
-            PackageTokenIdsIncrementalLayer::SelfAttention { .. } => {
-                let host_input = if let Some(previous_position) =
-                    residual_device_linear_layer.take()
-                {
-                    layers
-                        .get(previous_position)
-                        .and_then(PackageTokenIdsIncrementalLayer::as_linear_attention)
-                        .ok_or_else(|| {
-                            format!(
-                                "{layer_label} previous device residual layer {previous_position} is not linear-attn"
-                            )
-                        })?
-                        .read_output(stream)?
-                } else {
-                    residual_host.take().ok_or_else(|| {
-                        format!("{layer_label} missing host residual for self-attn layer")
-                    })?
-                };
-                if host_input.len() != hidden {
-                    return Err(format!(
-                        "{layer_label} self-attn input length {} does not match hidden {hidden}",
-                        host_input.len()
-                    ));
-                }
-                let output = package_token_ids_incremental_layer_step(
-                    context,
-                    stream,
-                    &mut layers[layer_position],
-                    self_layers,
-                    self_states,
-                    block_table,
-                    block_size,
-                    cache_blocks,
-                    rotary_dim,
-                    rope_base,
-                    rope_position,
-                    cache_position,
-                    &host_input,
-                    &layer_label,
-                )?;
-                residual_host = Some(output);
-                layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
-            }
+            layers[layer_position].step_from_host_to_device(
+                stream,
+                &residual,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                &layer_label,
+            )?;
         }
+        residual_device_layer = Some(layer_position);
+        layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
     }
 
-    let output = if let Some(previous_position) = residual_device_linear_layer {
+    let output = if let Some(previous_position) = residual_device_layer {
         layers
             .get(previous_position)
-            .and_then(PackageTokenIdsIncrementalLayer::as_linear_attention)
             .ok_or_else(|| {
-                format!(
-                    "{label} final device residual layer {previous_position} is not linear-attn"
-                )
+                format!("{label} final device residual layer {previous_position} is missing")
             })?
             .read_output(stream)?
     } else {
@@ -16793,38 +16585,26 @@ fn checked_product_u64(values: &[usize], label: &str) -> Result<u64, String> {
     Ok(product)
 }
 
-fn package_token_ids_incremental_kv_cache_bytes(
-    self_layers: &[Qwen3PackageDecoderLayerRuntime],
+fn package_token_ids_incremental_kv_cache_layer_bytes(
     cache_blocks: usize,
     block_size: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
 ) -> Result<u64, String> {
-    let mut total = 0_u64;
-    for layer in self_layers {
-        let kv_width = layer
-            .runtime_shape
-            .head_dim
-            .checked_add(layer.runtime_shape.value_dim)
-            .ok_or_else(|| {
-                format!(
-                    "incremental KV width overflows for layer {}",
-                    layer.layer_index
-                )
-            })?;
-        let bytes = checked_product_u64(
-            &[
-                cache_blocks,
-                block_size,
-                layer.runtime_shape.kv_heads,
-                kv_width,
-                std::mem::size_of::<f32>(),
-            ],
-            "incremental KV cache",
-        )?;
-        total = total
-            .checked_add(bytes)
-            .ok_or_else(|| "incremental KV cache total bytes overflow u64".to_string())?;
-    }
-    Ok(total)
+    let kv_width = head_dim
+        .checked_add(value_dim)
+        .ok_or_else(|| "incremental KV width overflows".to_string())?;
+    checked_product_u64(
+        &[
+            cache_blocks,
+            block_size,
+            kv_heads,
+            kv_width,
+            std::mem::size_of::<f32>(),
+        ],
+        "incremental KV cache",
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -16900,7 +16680,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let layer_load_started = Instant::now();
     let mut layer_kinds = Vec::with_capacity(layer_indices.len());
     let mut layers = Vec::with_capacity(layer_indices.len());
-    let mut self_layers = Vec::new();
+    let mut self_attn_layer_count = 0_usize;
+    let mut kv_cache_bytes = 0_u64;
     let mut self_attn_shape = None;
     let mut resolved_rotary_dim = None;
     for &layer_index in &layer_indices {
@@ -16922,26 +16703,27 @@ fn package_token_ids_generate_incremental_smoke_impl(
                 layers.push(PackageTokenIdsIncrementalLayer::LinearAttention(layer));
             }
             PackageDecoderLayerKind::SelfAttention => {
-                let layer = qwen3_package_decoder_layer_runtime_from_package(
+                let layer = PackageSelfAttnResidentStepLayer::load(
                     &mut context,
                     &mut stream,
                     path,
                     chunk_bytes,
                     layer_index,
+                    &block_table,
+                    block_size,
+                    cache_blocks,
                 )
                 .map_err(|err| {
                     format!("failed to load incremental self-attn layer {layer_index}: {err}")
                 })?;
-                if layer.runtime_shape.hidden != hidden {
+                if layer.hidden != hidden {
                     return Err(format!(
                         "incremental self-attn layer {layer_index} hidden mismatch: layer_hidden={} embedding_hidden={hidden}",
-                        layer.runtime_shape.hidden
+                        layer.hidden
                     ));
                 }
-                let layer_rotary_dim = parse_package_token_ids_rotary_dim(
-                    layer.runtime_shape.head_dim,
-                    rotary_dim.as_deref(),
-                )?;
+                let layer_rotary_dim =
+                    parse_package_token_ids_rotary_dim(layer.head_dim, rotary_dim.as_deref())?;
                 if let Some(previous) = resolved_rotary_dim {
                     if previous != layer_rotary_dim {
                         return Err(format!(
@@ -16953,52 +16735,35 @@ fn package_token_ids_generate_incremental_smoke_impl(
                 }
                 if self_attn_shape.is_none() {
                     self_attn_shape = Some(serde_json::json!({
-                        "q_heads": layer.runtime_shape.q_heads,
-                        "kv_heads": layer.runtime_shape.kv_heads,
-                        "head_dim": layer.runtime_shape.head_dim,
-                        "value_dim": layer.runtime_shape.value_dim,
+                        "q_heads": layer.q_heads,
+                        "kv_heads": layer.kv_heads,
+                        "head_dim": layer.head_dim,
+                        "value_dim": layer.value_dim,
                         "rotary_dim": layer_rotary_dim,
+                        "q_projection_layout": layer.q_projection_layout.as_str(),
                     }));
                 }
-                let self_index = self_layers.len();
-                self_layers.push(layer);
-                layers.push(PackageTokenIdsIncrementalLayer::SelfAttention { self_index });
+                let layer_kv_bytes = package_token_ids_incremental_kv_cache_layer_bytes(
+                    cache_blocks,
+                    block_size,
+                    layer.kv_heads,
+                    layer.head_dim,
+                    layer.value_dim,
+                )?;
+                kv_cache_bytes = kv_cache_bytes
+                    .checked_add(layer_kv_bytes)
+                    .ok_or_else(|| "incremental KV cache total bytes overflow u64".to_string())?;
+                self_attn_layer_count = self_attn_layer_count
+                    .checked_add(1)
+                    .ok_or_else(|| "incremental self-attn layer count overflows".to_string())?;
+                layers.push(PackageTokenIdsIncrementalLayer::SelfAttention(layer));
             }
         }
     }
     let rotary_dim_value = resolved_rotary_dim.unwrap_or(0);
-    let kv_cache_bytes =
-        package_token_ids_incremental_kv_cache_bytes(&self_layers, cache_blocks, block_size)?;
     let kv_cache_allocated_blocks = cache_blocks
-        .checked_mul(self_layers.len())
+        .checked_mul(self_attn_layer_count)
         .ok_or_else(|| "incremental KV cache allocated block count overflows".to_string())?;
-    let mut self_states = Vec::with_capacity(self_layers.len());
-    for layer in &self_layers {
-        let decode_shape = PagedDecodeShape {
-            block_size,
-            cache_blocks,
-            q_heads: layer.runtime_shape.q_heads,
-            kv_heads: layer.runtime_shape.kv_heads,
-            head_dim: layer.runtime_shape.head_dim,
-            value_dim: layer.runtime_shape.value_dim,
-        };
-        let state = Qwen3DecoderLayerRuntime::new(
-            &mut context,
-            &mut stream,
-            &layer.weights,
-            decode_shape,
-            block_table.clone(),
-            1.0_f32 / (layer.runtime_shape.head_dim as f32).sqrt(),
-            1e-5_f32,
-        )
-        .map_err(|err| {
-            format!(
-                "failed to create incremental self-attn state for layer {}: {err}",
-                layer.layer_index
-            )
-        })?;
-        self_states.push(state);
-    }
     let layer_load_ms = layer_load_started.elapsed().as_secs_f64() * 1000.0;
 
     let mut final_norm = read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, chunk_bytes)
@@ -17035,22 +16800,18 @@ fn package_token_ids_generate_incremental_smoke_impl(
             let position = position_offset
                 .checked_add(timestep)
                 .ok_or_else(|| "incremental prefill position overflows".to_string())?;
-            let output = package_token_ids_incremental_layer_step(
-                &mut context,
+            let layer_label =
+                format!("incremental prefill layer {layer_position} timestep {timestep}");
+            layer.step_from_host_to_device(
                 &mut stream,
-                layer,
-                &self_layers,
-                &mut self_states,
-                &block_table,
-                block_size,
-                cache_blocks,
+                &residual_sequence[start..end],
                 rotary_dim_value,
                 rope_base,
                 position,
                 timestep,
-                &residual_sequence[start..end],
-                &format!("incremental prefill layer {layer_position} timestep {timestep}"),
+                &layer_label,
             )?;
+            let output = layer.read_output(&mut stream)?;
             if output.len() != hidden {
                 return Err(format!(
                     "incremental prefill layer {layer_position} output length {} does not match hidden {hidden}",
@@ -17128,14 +16889,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
             .ok_or_else(|| "incremental decode cache position overflows".to_string())?;
         let decode_layers_started = Instant::now();
         let (residual, layer_step_ms) = package_token_ids_incremental_layers_step(
-            &mut context,
             &mut stream,
             &mut layers,
-            &self_layers,
-            &mut self_states,
-            &block_table,
-            block_size,
-            cache_blocks,
             rotary_dim_value,
             rope_base,
             position,
@@ -17261,7 +17016,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "kv_cache_allocated_blocks": kv_cache_allocated_blocks,
             "kv_cache_free_blocks": 0,
             "kv_cache_block_size": block_size,
-            "kv_cache_self_attn_layers": self_layers.len(),
+            "kv_cache_self_attn_layers": self_attn_layer_count,
             "kv_cache_value_dtype": "f32",
             "cache_blocks": cache_blocks,
             "block_size": block_size,
@@ -17271,8 +17026,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "nan_or_inf_detected": false,
         },
         "notes": [
-            "This path keeps selected layer weights resident as dequantized f32 runtime buffers; full-model residency may exceed current GPU memory before sq-format work.",
-            "Decode linear-attention layer_step_ms can shift deferred GPU work to later host-boundary layers when consecutive linear-attention layers stay device-resident; use layers_step_ms and step_wall_summary for throughput comparisons."
+            "This path keeps selected linear-attn and self-attn weights resident as compact AQ4 payloads and runs direct AQ4 matvec without full f32 materialization.",
+            "Decode layer_step_ms records CPU launch timing and can shift deferred GPU work to later host-boundary reads; use layers_step_ms and step_wall_summary for throughput comparisons."
         ],
         "verified": true,
     });
@@ -28316,6 +28071,763 @@ impl PackageAq4ResidentMatvec {
             Some(stream),
         )
         .map_err(|err| format!("failed to run {label} AQ4 fused gate/beta: {err}"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackageSelfAttnQProjectionLayout {
+    Plain,
+    Qwen35Gated,
+}
+
+impl PackageSelfAttnQProjectionLayout {
+    fn as_str(self) -> &'static str {
+        match self {
+            PackageSelfAttnQProjectionLayout::Plain => "plain",
+            PackageSelfAttnQProjectionLayout::Qwen35Gated => "qwen3.5-gated",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PackageSelfAttnResidentStepInput<'a> {
+    InternalInputBuffer,
+    ExternalBuffer(&'a ullm_runtime_sys::RuntimeBuffer),
+}
+
+struct PackageSelfAttnResidentStepLayer {
+    hidden: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    attention_elements: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    written_len: usize,
+    q_projection_layout: PackageSelfAttnQProjectionLayout,
+    input_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    q_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    k_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    post_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    block_table_buffer: ullm_runtime_sys::RuntimeBuffer,
+    q_matrix: PackageAq4ResidentMatvec,
+    k_matrix: PackageAq4ResidentMatvec,
+    v_matrix: PackageAq4ResidentMatvec,
+    o_matrix: PackageAq4ResidentMatvec,
+    mlp_gate_matrix: PackageAq4ResidentMatvec,
+    mlp_up_matrix: PackageAq4ResidentMatvec,
+    mlp_down_matrix: PackageAq4ResidentMatvec,
+    input_buffer: ullm_runtime_sys::RuntimeBuffer,
+    input_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
+    q_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
+    q_query_buffer: ullm_runtime_sys::RuntimeBuffer,
+    q_gate_buffer: ullm_runtime_sys::RuntimeBuffer,
+    k_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
+    v_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
+    q_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
+    k_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
+    q_rope_buffer: ullm_runtime_sys::RuntimeBuffer,
+    k_rope_buffer: ullm_runtime_sys::RuntimeBuffer,
+    k_cache_buffer: ullm_runtime_sys::RuntimeBuffer,
+    v_cache_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attention_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attention_projection_input_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attention_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
+    attention_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
+    mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
+    mlp_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+}
+
+impl PackageSelfAttnResidentStepLayer {
+    #[allow(clippy::too_many_arguments)]
+    fn load(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        block_table: &[u32],
+        block_size: usize,
+        cache_blocks: usize,
+    ) -> Result<Self, String> {
+        if block_table.len() != cache_blocks {
+            return Err(format!(
+                "self-attn resident block table length {} does not match cache blocks {cache_blocks}",
+                block_table.len()
+            ));
+        }
+        let input_norm_tensor =
+            format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
+        let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+        let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
+        let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
+        let o_tensor = format!("model.language_model.layers.{layer_index}.self_attn.o_proj.weight");
+        let q_norm_tensor =
+            format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+        let k_norm_tensor =
+            format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+        let post_norm_tensor =
+            format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+        let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+        let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+        let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+        let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)?;
+        input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+        let mut q_norm = read_named_passthrough_f32(path, &q_norm_tensor, chunk_bytes)?;
+        q_norm.values = effective_rmsnorm_weight_values(&q_norm_tensor, &q_norm.values);
+        let mut k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)?;
+        k_norm.values = effective_rmsnorm_weight_values(&k_norm_tensor, &k_norm.values);
+        let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
+        post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+
+        let mut registry = WeightRegistry::new();
+        let q_matrix = PackageAq4ResidentMatvec::load(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &q_tensor,
+            chunk_bytes,
+        )?;
+        let k_matrix = PackageAq4ResidentMatvec::load(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &k_tensor,
+            chunk_bytes,
+        )?;
+        let v_matrix = PackageAq4ResidentMatvec::load(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &v_tensor,
+            chunk_bytes,
+        )?;
+        let o_matrix = PackageAq4ResidentMatvec::load(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &o_tensor,
+            chunk_bytes,
+        )?;
+        let mlp_gate_matrix = PackageAq4ResidentMatvec::load(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &gate_tensor,
+            chunk_bytes,
+        )?;
+        let mlp_up_matrix = PackageAq4ResidentMatvec::load(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &up_tensor,
+            chunk_bytes,
+        )?;
+        let mlp_down_matrix = PackageAq4ResidentMatvec::load(
+            context,
+            stream,
+            &mut registry,
+            path,
+            &down_tensor,
+            chunk_bytes,
+        )?;
+
+        let hidden = q_matrix.cols;
+        let head_dim = q_norm.values.len();
+        if hidden == 0 || input_norm.values.len() != hidden || post_norm.values.len() != hidden {
+            return Err(format!(
+                "self-attn resident hidden/norm mismatch: hidden={hidden} input_norm={} post_norm={}",
+                input_norm.values.len(),
+                post_norm.values.len()
+            ));
+        }
+        if head_dim == 0 || k_norm.values.len() != head_dim {
+            return Err(format!(
+                "self-attn resident q/k norm mismatch: q_norm={} k_norm={}",
+                head_dim,
+                k_norm.values.len()
+            ));
+        }
+        if k_matrix.cols != hidden || v_matrix.cols != hidden {
+            return Err(format!(
+                "self-attn resident q/k/v hidden mismatch: q_cols={} k_cols={} v_cols={}",
+                q_matrix.cols, k_matrix.cols, v_matrix.cols
+            ));
+        }
+        if !k_matrix.rows.is_multiple_of(head_dim) {
+            return Err(format!(
+                "self-attn resident k rows {} are not a multiple of head_dim {head_dim}",
+                k_matrix.rows
+            ));
+        }
+        let kv_heads = k_matrix.rows / head_dim;
+        if kv_heads == 0 || !v_matrix.rows.is_multiple_of(kv_heads) {
+            return Err(format!(
+                "self-attn resident v rows {} are not compatible with kv_heads {kv_heads}",
+                v_matrix.rows
+            ));
+        }
+        let value_dim = v_matrix.rows / kv_heads;
+        let two_hidden = hidden
+            .checked_mul(2)
+            .ok_or_else(|| "self-attn resident hidden*2 overflows".to_string())?;
+        let two_head_dim = head_dim
+            .checked_mul(2)
+            .ok_or_else(|| "self-attn resident head_dim*2 overflows".to_string())?;
+        let (q_projection_layout, q_heads) =
+            if q_matrix.rows == two_hidden && q_matrix.rows.is_multiple_of(two_head_dim) {
+                (
+                    PackageSelfAttnQProjectionLayout::Qwen35Gated,
+                    q_matrix.rows / two_head_dim,
+                )
+            } else if q_matrix.rows.is_multiple_of(head_dim) {
+                (
+                    PackageSelfAttnQProjectionLayout::Plain,
+                    q_matrix.rows / head_dim,
+                )
+            } else {
+                return Err(format!(
+                    "self-attn resident q rows {} do not match plain or Qwen3.5 gated layout",
+                    q_matrix.rows
+                ));
+            };
+        if q_heads == 0 || !q_heads.is_multiple_of(kv_heads) {
+            return Err(format!(
+                "self-attn resident q_heads {q_heads} must be nonzero and a multiple of kv_heads {kv_heads}"
+            ));
+        }
+        let attention_elements = q_heads
+            .checked_mul(value_dim)
+            .ok_or_else(|| "self-attn resident attention element count overflows".to_string())?;
+        if o_matrix.rows != hidden || o_matrix.cols != attention_elements {
+            return Err(format!(
+                "self-attn resident o shape mismatch: got [{},{}] expected [{hidden},{attention_elements}]",
+                o_matrix.rows, o_matrix.cols
+            ));
+        }
+        if mlp_gate_matrix.rows != mlp_up_matrix.rows
+            || mlp_gate_matrix.cols != mlp_up_matrix.cols
+            || mlp_gate_matrix.cols != hidden
+        {
+            return Err(format!(
+                "self-attn resident MLP gate/up shape mismatch: gate=[{},{}] up=[{},{}] hidden={hidden}",
+                mlp_gate_matrix.rows, mlp_gate_matrix.cols, mlp_up_matrix.rows, mlp_up_matrix.cols
+            ));
+        }
+        if mlp_down_matrix.rows != hidden || mlp_down_matrix.cols != mlp_gate_matrix.rows {
+            return Err(format!(
+                "self-attn resident MLP down shape mismatch: got [{},{}] expected [{hidden},{}]",
+                mlp_down_matrix.rows, mlp_down_matrix.cols, mlp_gate_matrix.rows
+            ));
+        }
+        let intermediate = mlp_gate_matrix.rows;
+
+        let decode_shape = PagedDecodeShape {
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+        };
+        decode_shape.validate()?;
+
+        let hidden_bytes = checked_f32_byte_len(hidden, "self-attn resident hidden")?;
+        let q_projected_bytes =
+            checked_f32_byte_len(q_matrix.rows, "self-attn resident q projected")?;
+        let q_elements = decode_shape.q_elements()?;
+        let q_bytes = checked_f32_byte_len(q_elements, "self-attn resident q")?;
+        let k_bytes =
+            checked_f32_byte_len(decode_shape.k_token_elements()?, "self-attn resident k")?;
+        let v_bytes =
+            checked_f32_byte_len(decode_shape.v_token_elements()?, "self-attn resident v")?;
+        let attention_bytes =
+            checked_f32_byte_len(attention_elements, "self-attn resident attention")?;
+        let k_cache_elements = decode_shape.k_cache_elements()?;
+        let v_cache_elements = decode_shape.v_cache_elements()?;
+        let intermediate_bytes =
+            checked_f32_byte_len(intermediate, "self-attn resident intermediate")?;
+
+        let mut input_norm_weight_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate self-attn resident input norm weight: {err}")
+        })?;
+        let mut q_norm_weight_buffer = context
+            .alloc_buffer(checked_f32_byte_len(head_dim, "self-attn q norm")?)
+            .map_err(|err| format!("failed to allocate self-attn resident q norm weight: {err}"))?;
+        let mut k_norm_weight_buffer = context
+            .alloc_buffer(checked_f32_byte_len(head_dim, "self-attn k norm")?)
+            .map_err(|err| format!("failed to allocate self-attn resident k norm weight: {err}"))?;
+        let mut post_norm_weight_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate self-attn resident post norm weight: {err}")
+        })?;
+        let mut block_table_buffer = context
+            .alloc_buffer(block_table.len() * std::mem::size_of::<u32>())
+            .map_err(|err| format!("failed to allocate self-attn resident block table: {err}"))?;
+
+        let input_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident input: {err}"))?;
+        let input_normed_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident input normed: {err}"))?;
+        let q_projected_buffer = context
+            .alloc_buffer(q_projected_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident q projected: {err}"))?;
+        let q_query_buffer = context
+            .alloc_buffer(q_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident q query: {err}"))?;
+        let q_gate_buffer = context
+            .alloc_buffer(q_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident q gate: {err}"))?;
+        let k_projected_buffer = context
+            .alloc_buffer(k_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident k projected: {err}"))?;
+        let v_projected_buffer = context
+            .alloc_buffer(v_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident v projected: {err}"))?;
+        let q_normed_buffer = context
+            .alloc_buffer(q_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident q normed: {err}"))?;
+        let k_normed_buffer = context
+            .alloc_buffer(k_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident k normed: {err}"))?;
+        let q_rope_buffer = context
+            .alloc_buffer(q_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident q RoPE: {err}"))?;
+        let k_rope_buffer = context
+            .alloc_buffer(k_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident k RoPE: {err}"))?;
+        let mut k_cache_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                k_cache_elements,
+                "self-attn resident k cache",
+            )?)
+            .map_err(|err| format!("failed to allocate self-attn resident k cache: {err}"))?;
+        let mut v_cache_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                v_cache_elements,
+                "self-attn resident v cache",
+            )?)
+            .map_err(|err| format!("failed to allocate self-attn resident v cache: {err}"))?;
+        let attention_output_buffer = context.alloc_buffer(attention_bytes).map_err(|err| {
+            format!("failed to allocate self-attn resident attention output: {err}")
+        })?;
+        let attention_projection_input_buffer =
+            context.alloc_buffer(attention_bytes).map_err(|err| {
+                format!("failed to allocate self-attn resident attention projection input: {err}")
+            })?;
+        let attention_projected_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate self-attn resident attention projected: {err}")
+        })?;
+        let attention_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate self-attn resident attention block output: {err}")
+        })?;
+        let post_normed_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident post normed: {err}"))?;
+        let mlp_activation_buffer = context.alloc_buffer(intermediate_bytes).map_err(|err| {
+            format!("failed to allocate self-attn resident MLP activation: {err}")
+        })?;
+        let mlp_output_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident MLP output: {err}"))?;
+        let layer_output_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident layer output: {err}"))?;
+
+        input_norm_weight_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&input_norm.values), Some(stream))
+            .map_err(|err| format!("failed to copy self-attn resident input norm: {err}"))?;
+        q_norm_weight_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&q_norm.values), Some(stream))
+            .map_err(|err| format!("failed to copy self-attn resident q norm: {err}"))?;
+        k_norm_weight_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&k_norm.values), Some(stream))
+            .map_err(|err| format!("failed to copy self-attn resident k norm: {err}"))?;
+        post_norm_weight_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&post_norm.values), Some(stream))
+            .map_err(|err| format!("failed to copy self-attn resident post norm: {err}"))?;
+        block_table_buffer
+            .copy_from_host(0, &encode_u32_to_bytes(block_table), Some(stream))
+            .map_err(|err| format!("failed to copy self-attn resident block table: {err}"))?;
+        k_cache_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; k_cache_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to initialize self-attn resident k cache: {err}"))?;
+        v_cache_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; v_cache_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to initialize self-attn resident v cache: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize self-attn resident layer setup: {err}")
+        })?;
+
+        Ok(Self {
+            hidden,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            attention_elements,
+            block_size,
+            cache_blocks,
+            written_len: 0,
+            q_projection_layout,
+            input_norm_weight_buffer,
+            q_norm_weight_buffer,
+            k_norm_weight_buffer,
+            post_norm_weight_buffer,
+            block_table_buffer,
+            q_matrix,
+            k_matrix,
+            v_matrix,
+            o_matrix,
+            mlp_gate_matrix,
+            mlp_up_matrix,
+            mlp_down_matrix,
+            input_buffer,
+            input_normed_buffer,
+            q_projected_buffer,
+            q_query_buffer,
+            q_gate_buffer,
+            k_projected_buffer,
+            v_projected_buffer,
+            q_normed_buffer,
+            k_normed_buffer,
+            q_rope_buffer,
+            k_rope_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            attention_output_buffer,
+            attention_projection_input_buffer,
+            attention_projected_buffer,
+            attention_block_output_buffer,
+            post_normed_buffer,
+            mlp_activation_buffer,
+            mlp_output_buffer,
+            layer_output_buffer,
+        })
+    }
+
+    fn step_from_host_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual: &[f32],
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        if residual.len() != self.hidden {
+            return Err(format!(
+                "{label} self-attn resident residual length mismatch: got {} expected {}",
+                residual.len(),
+                self.hidden
+            ));
+        }
+        self.input_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(residual), Some(stream))
+            .map_err(|err| format!("failed to copy self-attn resident residual: {err}"))?;
+        self.run_device_step(
+            stream,
+            PackageSelfAttnResidentStepInput::InternalInputBuffer,
+            rotary_dim,
+            rope_base,
+            rope_position,
+            cache_position,
+            label,
+        )
+    }
+
+    fn step_from_device_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        let expected_bytes = checked_f32_byte_len(self.hidden, "self-attn resident input")?;
+        let actual_bytes = residual_buffer
+            .size()
+            .map_err(|err| format!("failed to query {label} residual buffer size: {err}"))?;
+        if actual_bytes < expected_bytes {
+            return Err(format!(
+                "{label} residual buffer is too small: got {actual_bytes} bytes expected at least {expected_bytes}"
+            ));
+        }
+        self.run_device_step(
+            stream,
+            PackageSelfAttnResidentStepInput::ExternalBuffer(residual_buffer),
+            rotary_dim,
+            rope_base,
+            rope_position,
+            cache_position,
+            label,
+        )
+    }
+
+    fn read_output(
+        &self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+    ) -> Result<Vec<f32>, String> {
+        read_runtime_buffer_f32(
+            &self.layer_output_buffer,
+            stream,
+            self.hidden,
+            "self-attn resident layer output",
+        )
+    }
+
+    fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.layer_output_buffer
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_device_step(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        input: PackageSelfAttnResidentStepInput<'_>,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        if cache_position != self.written_len {
+            return Err(format!(
+                "{label} self-attn resident cache_position {cache_position} does not match written_len {}",
+                self.written_len
+            ));
+        }
+        match input {
+            PackageSelfAttnResidentStepInput::InternalInputBuffer => ullm_runtime_sys::rmsnorm_f32(
+                &self.input_buffer,
+                &self.input_norm_weight_buffer,
+                self.hidden,
+                1e-6_f32,
+                &mut self.input_normed_buffer,
+                Some(stream),
+            ),
+            PackageSelfAttnResidentStepInput::ExternalBuffer(buffer) => {
+                ullm_runtime_sys::rmsnorm_f32(
+                    buffer,
+                    &self.input_norm_weight_buffer,
+                    self.hidden,
+                    1e-6_f32,
+                    &mut self.input_normed_buffer,
+                    Some(stream),
+                )
+            }
+        }
+        .map_err(|err| format!("failed to run {label} self-attn input RMSNorm: {err}"))?;
+
+        self.q_matrix.matvec(
+            &self.input_normed_buffer,
+            &mut self.q_projected_buffer,
+            stream,
+            "self-attn resident q projection",
+        )?;
+        self.k_matrix.matvec(
+            &self.input_normed_buffer,
+            &mut self.k_projected_buffer,
+            stream,
+            "self-attn resident k projection",
+        )?;
+        self.v_matrix.matvec(
+            &self.input_normed_buffer,
+            &mut self.v_projected_buffer,
+            stream,
+            "self-attn resident v projection",
+        )?;
+
+        match self.q_projection_layout {
+            PackageSelfAttnQProjectionLayout::Plain => ullm_runtime_sys::segmented_rmsnorm_f32(
+                &self.q_projected_buffer,
+                &self.q_norm_weight_buffer,
+                self.q_heads,
+                self.head_dim,
+                1e-5_f32,
+                &mut self.q_normed_buffer,
+                Some(stream),
+            ),
+            PackageSelfAttnQProjectionLayout::Qwen35Gated => {
+                ullm_runtime_sys::qwen35_split_q_gate_f32(
+                    &self.q_projected_buffer,
+                    self.q_heads,
+                    self.head_dim,
+                    &mut self.q_query_buffer,
+                    &mut self.q_gate_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to split {label} self-attn q/gate: {err}"))?;
+                ullm_runtime_sys::segmented_rmsnorm_f32(
+                    &self.q_query_buffer,
+                    &self.q_norm_weight_buffer,
+                    self.q_heads,
+                    self.head_dim,
+                    1e-5_f32,
+                    &mut self.q_normed_buffer,
+                    Some(stream),
+                )
+            }
+        }
+        .map_err(|err| format!("failed to run {label} self-attn q RMSNorm: {err}"))?;
+
+        ullm_runtime_sys::segmented_rmsnorm_f32(
+            &self.k_projected_buffer,
+            &self.k_norm_weight_buffer,
+            self.kv_heads,
+            self.head_dim,
+            1e-5_f32,
+            &mut self.k_normed_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn k RMSNorm: {err}"))?;
+        ullm_runtime_sys::rope_f32(
+            &self.q_normed_buffer,
+            1,
+            self.q_heads,
+            self.head_dim,
+            rotary_dim,
+            rope_position,
+            rope_base,
+            &mut self.q_rope_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn q RoPE: {err}"))?;
+        ullm_runtime_sys::rope_f32(
+            &self.k_normed_buffer,
+            1,
+            self.kv_heads,
+            self.head_dim,
+            rotary_dim,
+            rope_position,
+            rope_base,
+            &mut self.k_rope_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn k RoPE: {err}"))?;
+
+        ullm_runtime_sys::paged_kv_write_f32(
+            &self.k_rope_buffer,
+            &self.v_projected_buffer,
+            &self.block_table_buffer,
+            cache_position,
+            self.block_size,
+            self.cache_blocks,
+            self.kv_heads,
+            self.head_dim,
+            self.value_dim,
+            &mut self.k_cache_buffer,
+            &mut self.v_cache_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn paged KV write: {err}"))?;
+        self.written_len = self
+            .written_len
+            .checked_add(1)
+            .ok_or_else(|| format!("{label} self-attn written length overflows"))?;
+
+        ullm_runtime_sys::paged_decode_attn_f32(
+            &self.q_rope_buffer,
+            &self.k_cache_buffer,
+            &self.v_cache_buffer,
+            &self.block_table_buffer,
+            self.written_len,
+            self.block_size,
+            self.cache_blocks,
+            self.q_heads,
+            self.kv_heads,
+            self.head_dim,
+            self.value_dim,
+            1.0_f32 / (self.head_dim as f32).sqrt(),
+            &mut self.attention_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn paged decode: {err}"))?;
+
+        let projection_input_buffer = match self.q_projection_layout {
+            PackageSelfAttnQProjectionLayout::Plain => &self.attention_output_buffer,
+            PackageSelfAttnQProjectionLayout::Qwen35Gated => {
+                ullm_runtime_sys::sigmoid_mul_f32(
+                    &self.q_gate_buffer,
+                    &self.attention_output_buffer,
+                    self.attention_elements,
+                    &mut self.attention_projection_input_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} self-attn output gate: {err}"))?;
+                &self.attention_projection_input_buffer
+            }
+        };
+        self.o_matrix.matvec(
+            projection_input_buffer,
+            &mut self.attention_projected_buffer,
+            stream,
+            "self-attn resident o projection",
+        )?;
+        ullm_runtime_sys::add_f32(
+            match input {
+                PackageSelfAttnResidentStepInput::InternalInputBuffer => &self.input_buffer,
+                PackageSelfAttnResidentStepInput::ExternalBuffer(buffer) => buffer,
+            },
+            &self.attention_projected_buffer,
+            self.hidden,
+            &mut self.attention_block_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn residual add: {err}"))?;
+        ullm_runtime_sys::rmsnorm_f32(
+            &self.attention_block_output_buffer,
+            &self.post_norm_weight_buffer,
+            self.hidden,
+            1e-5_f32,
+            &mut self.post_normed_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn post RMSNorm: {err}"))?;
+        self.mlp_gate_matrix.matvec_silu_mul_with(
+            &self.mlp_up_matrix,
+            &self.post_normed_buffer,
+            &mut self.mlp_activation_buffer,
+            stream,
+            "self-attn resident MLP gate/up activation",
+        )?;
+        self.mlp_down_matrix.matvec(
+            &self.mlp_activation_buffer,
+            &mut self.mlp_output_buffer,
+            stream,
+            "self-attn resident MLP down",
+        )?;
+        ullm_runtime_sys::add_f32(
+            &self.attention_block_output_buffer,
+            &self.mlp_output_buffer,
+            self.hidden,
+            &mut self.layer_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn layer residual: {err}"))?;
+        Ok(())
     }
 }
 

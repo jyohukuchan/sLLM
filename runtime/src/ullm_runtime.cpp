@@ -409,6 +409,18 @@ public:
         return compile_kernel(arch, sigmoid_mul_kernel_source(), "ullm_sigmoid_mul_f32.hip", code, error);
     }
 
+    bool compile_qwen35_split_q_gate_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            qwen35_split_q_gate_kernel_source(),
+            "ullm_qwen35_split_q_gate_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_add_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, add_kernel_source(), "ullm_add_f32.hip", code, error);
     }
@@ -1114,6 +1126,29 @@ extern "C" __global__ void ullm_sigmoid_mul_f32_kernel(
     const float gate_value = gate[index];
     const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
     output[index] = sigmoid * input[index];
+}
+)";
+    }
+
+    static const char *qwen35_split_q_gate_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_qwen35_split_q_gate_f32_kernel(
+    const float *projected,
+    unsigned long long q_heads,
+    unsigned long long head_dim,
+    float *query_output,
+    float *gate_output) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long elements = q_heads * head_dim;
+    if (index >= elements) {
+        return;
+    }
+    const unsigned long long dim = index % head_dim;
+    const unsigned long long head = index / head_dim;
+    const unsigned long long source_base = head * 2ULL * head_dim;
+    query_output[index] = projected[source_base + dim];
+    gate_output[index] = projected[source_base + head_dim + dim];
 }
 )";
     }
@@ -4253,6 +4288,22 @@ void sigmoid_mul_f32_host(
     }
 }
 
+void qwen35_split_q_gate_f32_host(
+    const float *projected,
+    size_t q_heads,
+    size_t head_dim,
+    float *query_output,
+    float *gate_output) {
+    for (size_t head = 0; head < q_heads; ++head) {
+        const size_t source_base = head * 2 * head_dim;
+        const size_t output_base = head * head_dim;
+        for (size_t dim = 0; dim < head_dim; ++dim) {
+            query_output[output_base + dim] = projected[source_base + dim];
+            gate_output[output_base + dim] = projected[source_base + head_dim + dim];
+        }
+    }
+}
+
 void add_f32_host(
     const float *lhs,
     const float *rhs,
@@ -4852,6 +4903,198 @@ ullm_status sigmoid_mul_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 sigmoid-mul HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipQwen35SplitQGateKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_qwen35_split_q_gate_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_qwen35_split_q_gate_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build Qwen3.5 q/gate split HIP kernel"
+                                                  : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipQwen35SplitQGateKernelCache &hip_qwen35_split_q_gate_kernel_cache() {
+    static HipQwen35SplitQGateKernelCache cache;
+    return cache;
+}
+
+bool qwen35_split_q_gate_f32_hip_kernel(
+    const ullm_runtime_buffer *projected_buffer,
+    size_t q_heads,
+    size_t head_dim,
+    ullm_runtime_buffer *query_output_buffer,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = projected_buffer->hip_device_id;
+    void *function = hip_qwen35_split_q_gate_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    const size_t elements = q_heads * head_dim;
+    constexpr unsigned int block_size = 256;
+    const size_t grid_size = (elements + block_size - 1) / block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "Qwen3.5 q/gate split element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    void *projected_ptr = projected_buffer->ptr;
+    void *query_output_ptr = query_output_buffer->ptr;
+    void *gate_output_ptr = gate_output_buffer->ptr;
+    void *kernel_params[] = {
+        &projected_ptr,
+        &kernel_q_heads,
+        &kernel_head_dim,
+        &query_output_ptr,
+        &gate_output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for Qwen3.5 q/gate split";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status qwen35_split_q_gate_f32_hip_staging(
+    const ullm_runtime_buffer *projected_buffer,
+    size_t q_heads,
+    size_t head_dim,
+    size_t projected_bytes,
+    size_t output_bytes,
+    ullm_runtime_buffer *query_output_buffer,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_stream *stream) {
+    const size_t projected_elements = q_heads * head_dim * 2;
+    const size_t output_elements = q_heads * head_dim;
+    std::vector<float> host_projected(projected_elements);
+    std::vector<float> host_query(output_elements);
+    std::vector<float> host_gate(output_elements);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = projected_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_projected.data(),
+            projected_buffer->ptr,
+            projected_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy Qwen3.5 q/gate split HIP input to host staging buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize Qwen3.5 q/gate split HIP input staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    qwen35_split_q_gate_f32_host(
+        host_projected.data(),
+        q_heads,
+        head_dim,
+        host_query.data(),
+        host_gate.data());
+    if (!hip_runtime().copy_async(
+            query_output_buffer->ptr,
+            host_query.data(),
+            output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            gate_output_buffer->ptr,
+            host_gate.data(),
+            output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy Qwen3.5 q/gate split HIP outputs");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize Qwen3.5 q/gate split HIP output staging copies");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -9153,6 +9396,103 @@ ullm_status ullm_runtime_sigmoid_mul_f32(
         elements,
         required_bytes,
         output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_qwen35_split_q_gate_f32(
+    const ullm_runtime_buffer *projected_buffer,
+    size_t q_heads,
+    size_t head_dim,
+    ullm_runtime_buffer *query_output_buffer,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (projected_buffer == nullptr || query_output_buffer == nullptr || gate_output_buffer == nullptr) {
+        set_error("Qwen3.5 q/gate split received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_heads == 0 || head_dim == 0) {
+        set_error("Qwen3.5 q/gate split q_heads and head_dim must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(projected_buffer, query_output_buffer) ||
+        !buffers_share_backend(projected_buffer, gate_output_buffer)) {
+        set_error("Qwen3.5 q/gate split buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(query_output_buffer, stream) ||
+        !stream_matches_buffer(gate_output_buffer, stream)) {
+        set_error("Qwen3.5 q/gate split stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (head_dim > max_size / q_heads) {
+        set_error("Qwen3.5 q/gate split element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t output_elements = q_heads * head_dim;
+    if (output_elements > max_size / 2 || output_elements > max_size / sizeof(float)) {
+        set_error("Qwen3.5 q/gate split byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t projected_elements = output_elements * 2;
+    if (projected_elements > max_size / sizeof(float)) {
+        set_error("Qwen3.5 q/gate split projected byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t output_bytes = output_elements * sizeof(float);
+    const size_t projected_bytes = projected_elements * sizeof(float);
+    if (projected_buffer->bytes < projected_bytes) {
+        set_error("Qwen3.5 q/gate split projected buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (query_output_buffer->bytes < output_bytes) {
+        set_error("Qwen3.5 q/gate split query output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_output_buffer->bytes < output_bytes) {
+        set_error("Qwen3.5 q/gate split gate output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (projected_buffer->backend == BackendKind::Cpu) {
+        qwen35_split_q_gate_f32_host(
+            static_cast<const float *>(projected_buffer->ptr),
+            q_heads,
+            head_dim,
+            static_cast<float *>(query_output_buffer->ptr),
+            static_cast<float *>(gate_output_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (qwen35_split_q_gate_f32_hip_kernel(
+            projected_buffer,
+            q_heads,
+            head_dim,
+            query_output_buffer,
+            gate_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_QWEN35_Q_SPLIT_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty() ? "Qwen3.5 q/gate split HIP kernel is unavailable"
+                                           : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return qwen35_split_q_gate_f32_hip_staging(
+        projected_buffer,
+        q_heads,
+        head_dim,
+        projected_bytes,
+        output_bytes,
+        query_output_buffer,
+        gate_output_buffer,
         stream);
 }
 
