@@ -25,6 +25,7 @@ class PromptCase:
     generated_tokens: int | None
     target_prompt_tokens: int | None
     apply_chat_template: bool
+    stop_texts: list[str]
     notes: list[str]
 
 
@@ -56,6 +57,8 @@ def parse_args() -> argparse.Namespace:
         choices=("cpu_chunked", "gpu_resident_f32"),
     )
     parser.add_argument("--stop-token-ids")
+    parser.add_argument("--stop-token-sequences")
+    parser.add_argument("--stop-text", action="append", default=[])
     parser.add_argument("--stop-on-eos", action="store_true")
     parser.add_argument("--stop-on-special-tokens", action="store_true")
     parser.add_argument(
@@ -120,6 +123,9 @@ def load_suite(path: Path) -> tuple[dict[str, Any], list[PromptCase]]:
         notes = case.get("notes", [])
         if not isinstance(notes, list) or not all(isinstance(item, str) for item in notes):
             raise SystemExit(f"{case_id}.notes must be a list of strings")
+        stop_texts = case.get("stop_texts", [])
+        if not isinstance(stop_texts, list) or not all(isinstance(item, str) for item in stop_texts):
+            raise SystemExit(f"{case_id}.stop_texts must be a list of strings")
         cases.append(
             PromptCase(
                 case_id=case_id,
@@ -128,6 +134,7 @@ def load_suite(path: Path) -> tuple[dict[str, Any], list[PromptCase]]:
                 generated_tokens=generated_tokens,
                 target_prompt_tokens=target_prompt_tokens,
                 apply_chat_template=bool(case.get("apply_chat_template", False)),
+                stop_texts=stop_texts,
                 notes=notes,
             )
         )
@@ -195,6 +202,10 @@ def run_case(args: argparse.Namespace, case: PromptCase, output_json: Path) -> d
         command.append("--apply-chat-template")
     if args.stop_token_ids:
         command.extend(["--stop-token-ids", args.stop_token_ids])
+    if args.stop_token_sequences:
+        command.extend(["--stop-token-sequences", args.stop_token_sequences])
+    for stop_text in [*args.stop_text, *case.stop_texts]:
+        command.extend(["--stop-text", stop_text])
     if args.stop_on_eos:
         command.append("--stop-on-eos")
     if args.stop_on_special_tokens:
@@ -214,7 +225,14 @@ def run_case(args: argparse.Namespace, case: PromptCase, output_json: Path) -> d
     if not isinstance(report, dict):
         raise SystemExit(f"{output_json}: expected JSON object")
     report.setdefault("suite_case", {})
-    report["suite_case"].update({"id": case.case_id, "category": case.category, "notes": case.notes})
+    report["suite_case"].update(
+        {
+            "id": case.case_id,
+            "category": case.category,
+            "stop_texts": case.stop_texts,
+            "notes": case.notes,
+        }
+    )
     output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
 
@@ -235,7 +253,10 @@ def summarize_report(case: PromptCase, report_path: Path, report: dict[str, Any]
     stop = as_mapping(report.get("stop", {}), "report.stop")
     text_prompt = as_mapping(report.get("text_prompt", {}), "report.text_prompt")
     decoded_text = as_mapping(report.get("decoded_text", {}), "report.decoded_text")
-    generated_text = str(decoded_text.get("generated", ""))
+    generated_text = str(
+        decoded_text.get("generated_without_stop_sequence")
+        or decoded_text.get("generated", "")
+    )
     generated_compact = " ".join(generated_text.split())
     generated_token_ids = report.get("generated_token_ids", [])
     if not isinstance(generated_token_ids, list):
@@ -263,6 +284,7 @@ def summarize_report(case: PromptCase, report_path: Path, report: dict[str, Any]
         "stop_reason": stop.get("reason"),
         "stopped": stop.get("stopped"),
         "stopped_on_token_id": stop.get("stopped_on_token_id"),
+        "stopped_on_token_sequence": stop.get("stopped_on_token_sequence"),
         "prefill_tps": metric_float(prefill.get("tps")),
         "decode_tps": metric_float(step.get("all_step_tps")),
         "skip2_tps": metric_float(step.get("warmup_skip_2_step_tps")),
@@ -273,6 +295,7 @@ def summarize_report(case: PromptCase, report_path: Path, report: dict[str, Any]
         "output_status": "ok" if not warnings else "warn",
         "output_warnings": warnings,
         "generated_preview": generated_compact[:240],
+        "stop_texts": case.stop_texts,
         "notes": case.notes,
     }
 
@@ -351,6 +374,8 @@ def write_summary_json(
         "generated_tokens_default": args.generated_tokens,
         "stop_policy": {
             "stop_token_ids": args.stop_token_ids,
+            "stop_token_sequences": args.stop_token_sequences,
+            "stop_text": args.stop_text,
             "stop_on_eos": args.stop_on_eos,
             "stop_on_special_tokens": args.stop_on_special_tokens,
         },

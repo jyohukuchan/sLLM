@@ -669,3 +669,54 @@ New artifacts:
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/python_stop_helper.json`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/short_qa_bandwidth.json`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.2/long_prefill_warmup.json`
+
+## Prompt Suite v0.2: Task-Aware Stop Update
+
+The short QA case previously answered the first question and then continued into a second
+`Question:` block. That was a prompt/stop-policy issue rather than an AQ numerical failure. The
+runtime and prompt tools now support multi-token stop sequences:
+
+- `package-token-ids-generate-smoke` / `package-token-ids-bench` accepts
+  `STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none` after the existing stop-token-id argument;
+- `tools/run-package-token-prompt-bench.py` accepts `--stop-token-sequences` and `--stop-text`;
+- `tools/run-package-token-prompt-suite.py` accepts suite-level `--stop-text` and per-case
+  `stop_texts`;
+- decoded reports include `generated_without_stop_sequence` so summaries can judge the generated
+  answer without the delimiter that caused the stop.
+
+The v0.2 suite now gives `short_qa_bandwidth` a per-case stop text of `\nQuestion:`, which the
+Qwen3.5 tokenizer encodes as `[198, 14162, 25]`.
+
+R9700 v0.2 rerun with task-aware stop:
+
+| case | category | prompt tokens | generated | stop reason | status | warnings | prefill tok/s | decode tok/s | last-8 tok/s | verified |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | :---: |
+| warmup_measurement | technical | 16 | 81 | stop_token | ok | - | 17.176 | 20.300 | 20.130 | true |
+| memory_vs_compute | technical | 26 | 128 | max_generated_tokens | warn | hit_generation_limit, missing_terminal_punctuation | 19.149 | 20.006 | 19.704 | true |
+| throughput_checklist | checklist | 16 | 128 | max_generated_tokens | warn | hit_generation_limit, missing_terminal_punctuation | 17.162 | 19.941 | 19.434 | true |
+| japanese_runtime_summary | japanese | 23 | 128 | max_generated_tokens | warn | hit_generation_limit, control_marker_text, missing_terminal_punctuation | 18.471 | 19.936 | 19.631 | true |
+| python_stop_helper | code | 30 | 84 | stop_token | ok | - | 19.455 | 19.894 | 19.751 | true |
+| short_qa_bandwidth | short_qa | 25 | 35 | stop_sequence | ok | - | 18.971 | 20.146 | 20.114 | true |
+| long_prefill_warmup | timing | 256 | 192 | max_generated_tokens | warn | hit_generation_limit, low_unique_token_ratio, prompt_echo, missing_terminal_punctuation | 21.866 | 18.616 | 18.236 | true |
+
+Updated suite summary:
+
+- mean decode TPS: `19.834`
+- min decode TPS: `18.616`
+- max decode TPS: `20.300`
+- mean prefill TPS: `18.893`
+- verified all: `true`
+- stopped by token or sequence: `3 / 7`
+- output ok: `3 / 7`
+- output warnings: `4 / 7`
+
+Interpretation:
+
+- The task-aware stop fixes the short QA observation without reducing TPS. It now stops after a
+  concise AQ bandwidth answer at `20.146 tok/s`.
+- The overall R9700 text-prompt suite remains in the `~18.6-20.3 tok/s` decode range.
+- The remaining warnings are still real: Japanese output emits `<think>`-style marker text, two
+  English prompts hit the generation limit, and the 256-token repeated timing prompt remains a
+  timing probe rather than semantic-quality evidence.
+- This improves the pre-SQ comparison harness. It does not prove final instruction-following
+  quality, but it gives SQ candidates a fairer speed-plus-output-smoke baseline than raw token caps.

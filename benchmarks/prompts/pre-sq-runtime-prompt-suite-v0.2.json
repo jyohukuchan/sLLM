@@ -3,10 +3,11 @@
     "suite_id": "pre-sq-runtime-prompt-suite-v0.2",
     "purpose": "Expanded text prompt set for pre-SQ runtime TPS and output-collapse observation.",
     "tokenizer": "Qwen3.5-9B",
-    "decode_policy": "greedy with tokenizer special-token stop policy",
+    "decode_policy": "greedy with tokenizer special-token and task-aware stop policies",
     "changes_from_v0.1": [
       "adds prompt categories",
-      "adds Japanese, code, and short QA prompts"
+      "adds Japanese, code, and short QA prompts",
+      "adds per-case stop_texts for task-aware stopping"
     ]
   },
   "prompts": [
@@ -60,6 +61,9 @@
       "category": "short_qa",
       "prompt": "Question: In one sentence, why can an AQ format still be fast when inference is memory-bandwidth-bound?\nAnswer:",
       "generated_tokens": 96,
+      "stop_texts": [
+        "\nQuestion:"
+      ],
       "notes": [
         "Short answer prompt for the AQ/SQ bandwidth discussion."
       ]

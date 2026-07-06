@@ -58,6 +58,19 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated token IDs that should stop generation early",
     )
     parser.add_argument(
+        "--stop-token-sequences",
+        help=(
+            "Semicolon-separated token ID sequences that should stop generation early "
+            "(for example '198,14162,25;198,15666,25')"
+        ),
+    )
+    parser.add_argument(
+        "--stop-text",
+        action="append",
+        default=[],
+        help="Text substring to tokenize and use as a stop token sequence; may be repeated",
+    )
+    parser.add_argument(
         "--stop-on-eos",
         action="store_true",
         help="Append tokenizer.eos_token_id to stop token IDs when available",
@@ -232,6 +245,18 @@ def parse_stop_token_ids(value: str | None) -> list[int]:
     return parsed
 
 
+def parse_stop_token_sequences(value: str | None) -> list[list[int]]:
+    if value is None or not value.strip():
+        return []
+    parsed: list[list[int]] = []
+    for raw_sequence in value.split(";"):
+        sequence = raw_sequence.strip()
+        if not sequence:
+            raise SystemExit(f"invalid --stop-token-sequences {value!r}: empty sequence")
+        parsed.append(parse_stop_token_ids(sequence))
+    return parsed
+
+
 def resolve_stop_token_ids(tokenizer: Any, args: argparse.Namespace) -> list[int]:
     stop_ids = parse_stop_token_ids(args.stop_token_ids)
     if args.stop_on_eos:
@@ -251,7 +276,36 @@ def resolve_stop_token_ids(tokenizer: Any, args: argparse.Namespace) -> list[int
     return unique
 
 
-def run_engine(args: argparse.Namespace, token_ids: list[int], stop_token_ids: list[int]) -> dict[str, Any]:
+def resolve_stop_token_sequences(tokenizer: Any, args: argparse.Namespace) -> list[list[int]]:
+    sequences = parse_stop_token_sequences(args.stop_token_sequences)
+    for text in args.stop_text:
+        encoded = tokenizer(text, add_special_tokens=False)
+        token_ids = [int(token_id) for token_id in encoded["input_ids"]]
+        if not token_ids:
+            raise SystemExit(f"--stop-text {text!r} encoded to zero tokens")
+        sequences.append(token_ids)
+
+    unique: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+    for sequence in sequences:
+        key = tuple(sequence)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(sequence)
+    return unique
+
+
+def format_stop_token_sequences(stop_token_sequences: list[list[int]]) -> str:
+    return ";".join(",".join(str(token_id) for token_id in sequence) for sequence in stop_token_sequences)
+
+
+def run_engine(
+    args: argparse.Namespace,
+    token_ids: list[int],
+    stop_token_ids: list[int],
+    stop_token_sequences: list[list[int]],
+) -> dict[str, Any]:
     token_csv = ",".join(str(token_id) for token_id in token_ids)
     command = [
         args.engine,
@@ -271,6 +325,10 @@ def run_engine(args: argparse.Namespace, token_ids: list[int], stop_token_ids: l
     ]
     if stop_token_ids:
         command.append(",".join(str(token_id) for token_id in stop_token_ids))
+    elif stop_token_sequences:
+        command.append("none")
+    if stop_token_sequences:
+        command.append(format_stop_token_sequences(stop_token_sequences))
     env = os.environ.copy()
     if args.require_hip_kernels:
         env.update(REQUIRED_HIP_KERNEL_ENVS)
@@ -305,6 +363,7 @@ def run_engine(args: argparse.Namespace, token_ids: list[int], stop_token_ids: l
         "command": command,
         "required_hip_kernel_envs": REQUIRED_HIP_KERNEL_ENVS if args.require_hip_kernels else {},
         "resolved_stop_token_ids": stop_token_ids,
+        "resolved_stop_token_sequences": stop_token_sequences,
     }
     if result.stderr.strip():
         report["_runner"]["stderr"] = result.stderr.strip()
@@ -328,6 +387,16 @@ def enrich_report(
         raise SystemExit("engine report has no generated_token_ids list")
     generated_token_ids = [int(token_id) for token_id in generated_token_ids]
     full_token_ids = prompt_token_ids + generated_token_ids
+    generated_without_stop_sequence_ids = generated_token_ids
+    stop = report.get("stop", {})
+    stopped_on_token_sequence = None
+    if isinstance(stop, dict):
+        stopped_on_token_sequence = stop.get("stopped_on_token_sequence")
+    if isinstance(stopped_on_token_sequence, list):
+        stop_sequence = [int(token_id) for token_id in stopped_on_token_sequence]
+        if stop_sequence and generated_token_ids[-len(stop_sequence) :] == stop_sequence:
+            generated_without_stop_sequence_ids = generated_token_ids[: -len(stop_sequence)]
+    full_without_stop_sequence_ids = prompt_token_ids + generated_without_stop_sequence_ids
 
     report["text_prompt"] = {
         "raw": raw_prompt,
@@ -347,6 +416,14 @@ def enrich_report(
             skip_special_tokens=args.skip_special_tokens,
         ),
         "full": tokenizer.decode(full_token_ids, skip_special_tokens=args.skip_special_tokens),
+        "generated_without_stop_sequence": tokenizer.decode(
+            generated_without_stop_sequence_ids,
+            skip_special_tokens=args.skip_special_tokens,
+        ),
+        "full_without_stop_sequence": tokenizer.decode(
+            full_without_stop_sequence_ids,
+            skip_special_tokens=args.skip_special_tokens,
+        ),
     }
     report["tokenizer"] = {
         "class": type(tokenizer).__name__,
@@ -381,7 +458,7 @@ def print_summary(report: dict[str, Any]) -> None:
         ),
         file=sys.stderr,
     )
-    generated = decoded.get("generated")
+    generated = decoded.get("generated_without_stop_sequence") or decoded.get("generated")
     if generated:
         compact = " ".join(str(generated).split())
         print(f"generated_text={compact[:500]}", file=sys.stderr)
@@ -400,6 +477,7 @@ def main() -> int:
     tokenizer = load_tokenizer(args.tokenizer_dir)
     rendered_prompt, token_ids = encode_prompt(tokenizer, args, raw_prompt)
     stop_token_ids = resolve_stop_token_ids(tokenizer, args)
+    stop_token_sequences = resolve_stop_token_sequences(tokenizer, args)
     rendered_prompt, token_ids, token_adjustment = adjust_prompt_token_count(
         tokenizer,
         args,
@@ -414,7 +492,7 @@ def main() -> int:
             f"prompt token count {len(token_ids)} exceeds --max-prompt-tokens {args.max_prompt_tokens}"
         )
 
-    report = run_engine(args, token_ids, stop_token_ids)
+    report = run_engine(args, token_ids, stop_token_ids, stop_token_sequences)
     report = enrich_report(report, tokenizer, args, raw_prompt, rendered_prompt, token_ids)
     report["text_prompt"].update(token_adjustment)
     write_or_print_report(report, args.output_json)
