@@ -397,6 +397,18 @@ public:
             error);
     }
 
+    bool compile_bf16_row_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            bf16_row_kernel_source(),
+            "ullm_bf16_row_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_top1_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, top1_kernel_source(), "ullm_top1_f32.hip", code, error);
     }
@@ -1069,6 +1081,30 @@ extern "C" __global__ void ullm_matvec_bf16_f32_kernel(
     }
     if (tid == 0 && row < rows) {
         output[row] = partial[0];
+    }
+}
+)";
+    }
+
+    static const char *bf16_row_kernel_source() {
+        return R"(
+__device__ float ullm_bf16_to_f32(unsigned short value) {
+    return __uint_as_float(static_cast<unsigned int>(value) << 16);
+}
+
+extern "C" __global__ void ullm_bf16_row_f32_kernel(
+    const unsigned short *matrix,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned long long row_index,
+    float *output) {
+    const unsigned int tid = threadIdx.x;
+    if (row_index >= rows) {
+        return;
+    }
+    const unsigned long long row_offset = row_index * cols;
+    for (unsigned long long col = tid; col < cols; col += blockDim.x) {
+        output[col] = ullm_bf16_to_f32(matrix[row_offset + col]);
     }
 }
 )";
@@ -3798,6 +3834,21 @@ void matvec_bf16_f32_host(
     }
 }
 
+void bf16_row_f32_host(
+    const uint16_t *matrix,
+    size_t rows,
+    size_t cols,
+    size_t row_index,
+    float *output) {
+    if (row_index >= rows) {
+        return;
+    }
+    const uint16_t *row_values = matrix + row_index * cols;
+    for (size_t col = 0; col < cols; ++col) {
+        output[col] = bf16_to_f32_host(row_values[col]);
+    }
+}
+
 class HipMatvecKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -3954,6 +4005,84 @@ HipBf16MatvecKernelCache &hip_bf16_matvec_kernel_cache() {
     return cache;
 }
 
+class HipBf16RowKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_bf16_row_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_bf16_row_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build BF16 row HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipBf16RowKernelCache &hip_bf16_row_kernel_cache() {
+    static HipBf16RowKernelCache cache;
+    return cache;
+}
+
 bool matvec_f32_hip_kernel(
     const ullm_runtime_buffer *matrix_buffer,
     const ullm_runtime_buffer *input_buffer,
@@ -4046,6 +4175,49 @@ bool matvec_bf16_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for BF16 matvec";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool bf16_row_f32_hip_kernel(
+    const ullm_runtime_buffer *matrix_buffer,
+    size_t rows,
+    size_t cols,
+    size_t row_index,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = matrix_buffer->hip_device_id;
+    void *function = hip_bf16_row_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    unsigned long long kernel_row_index = static_cast<unsigned long long>(row_index);
+    void *matrix_ptr = matrix_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &matrix_ptr,
+        &kernel_rows,
+        &kernel_cols,
+        &kernel_row_index,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            1,
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for BF16 row";
         }
         return false;
     }
@@ -4158,6 +4330,63 @@ ullm_status matvec_bf16_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize BF16 matvec HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status bf16_row_f32_hip_staging(
+    const ullm_runtime_buffer *matrix_buffer,
+    size_t rows,
+    size_t cols,
+    size_t row_index,
+    size_t required_matrix_bytes,
+    size_t required_output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<uint16_t> host_row(cols);
+    std::vector<float> host_output(cols);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = matrix_buffer->hip_device_id;
+    const size_t row_bytes = cols * sizeof(uint16_t);
+    if (row_index >= rows) {
+        set_error("BF16 row staging index is out of range");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t row_offset = row_index * row_bytes;
+    if (row_offset > required_matrix_bytes || row_bytes > required_matrix_bytes - row_offset) {
+        set_error("BF16 row byte offset overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!hip_runtime().copy_async(
+            host_row.data(),
+            static_cast<const std::uint8_t *>(matrix_buffer->ptr) + row_offset,
+            row_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy BF16 row HIP input to host staging buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize BF16 row HIP input staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    bf16_row_f32_host(host_row.data(), 1, cols, 0, host_output.data());
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            required_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy BF16 row output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize BF16 row HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -9666,6 +9895,94 @@ ullm_status ullm_runtime_matvec_bf16_f32(
         cols,
         required_matrix_bytes,
         required_input_bytes,
+        required_output_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_bf16_row_f32(
+    const ullm_runtime_buffer *matrix_buffer,
+    size_t rows,
+    size_t cols,
+    size_t row_index,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (matrix_buffer == nullptr || output_buffer == nullptr) {
+        set_error("BF16 row received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rows == 0 || cols == 0) {
+        set_error("BF16 row rows and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (row_index >= rows) {
+        set_error("BF16 row index is out of range");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(matrix_buffer, output_buffer)) {
+        set_error("BF16 row buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("BF16 row stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / rows) {
+        set_error("BF16 row matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t matrix_elements = rows * cols;
+    if (matrix_elements > max_size / sizeof(uint16_t) || cols > max_size / sizeof(float)) {
+        set_error("BF16 row byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_matrix_bytes = matrix_elements * sizeof(uint16_t);
+    const size_t required_output_bytes = cols * sizeof(float);
+    if (matrix_buffer->bytes < required_matrix_bytes) {
+        set_error("BF16 row matrix buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_output_bytes) {
+        set_error("BF16 row output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (matrix_buffer->backend == BackendKind::Cpu) {
+        const auto *matrix = static_cast<const uint16_t *>(matrix_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        bf16_row_f32_host(matrix, rows, cols, row_index, output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (bf16_row_f32_hip_kernel(
+            matrix_buffer,
+            rows,
+            cols,
+            row_index,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_BF16_ROW_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "BF16 row HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return bf16_row_f32_hip_staging(
+        matrix_buffer,
+        rows,
+        cols,
+        row_index,
+        required_matrix_bytes,
         required_output_bytes,
         output_buffer,
         stream);

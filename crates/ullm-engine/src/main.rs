@@ -1,6 +1,8 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
+#![recursion_limit = "256"]
+
 use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -16451,6 +16453,162 @@ struct PackageFinalNormRuntime {
     output_buffer: ullm_runtime_sys::RuntimeBuffer,
 }
 
+struct PackageEmbeddingRuntime {
+    dtype: String,
+    shape: Vec<u64>,
+    vocab: usize,
+    hidden: usize,
+    matrix_buffer: ullm_runtime_sys::RuntimeBuffer,
+    output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    matrix_bytes: usize,
+}
+
+impl PackageEmbeddingRuntime {
+    fn load_bf16_if_available(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        hidden: usize,
+    ) -> Result<Option<Self>, String> {
+        let selector = TensorSelector::Name(QWEN3_EMBED_TOKENS_TENSOR.to_string());
+        let bundle = select_passthrough_payload_bundle(path, &selector)
+            .map_err(|err| format!("failed to select resident embedding tensor: {err}"))?;
+        validate_passthrough_shape_elements(&bundle)
+            .map_err(|err| format!("invalid resident embedding shape: {err}"))?;
+        let dtype = resolve_passthrough_dtype(&bundle, QWEN3_EMBED_TOKENS_TENSOR)?.to_string();
+        if dtype != "BF16" {
+            return Ok(None);
+        }
+        if bundle.shape.len() != 2 {
+            return Err(format!(
+                "resident embedding must be 2D, got shape {:?}",
+                bundle.shape
+            ));
+        }
+        let vocab = usize::try_from(bundle.shape[0])
+            .map_err(|_| "resident embedding vocab size is too large".to_string())?;
+        let cols = usize::try_from(bundle.shape[1])
+            .map_err(|_| "resident embedding hidden size is too large".to_string())?;
+        if cols != hidden {
+            return Err(format!(
+                "resident embedding hidden mismatch: embedding={cols} hidden={hidden}"
+            ));
+        }
+        let expected_values = vocab
+            .checked_mul(hidden)
+            .ok_or_else(|| "resident embedding element count overflows".to_string())?;
+        if u64::try_from(expected_values).ok() != Some(bundle.elements) {
+            return Err(format!(
+                "resident embedding element count mismatch: got {} expected {expected_values}",
+                bundle.elements
+            ));
+        }
+        let matrix_bytes = expected_values
+            .checked_mul(std::mem::size_of::<u16>())
+            .ok_or_else(|| "resident embedding matrix byte size overflows".to_string())?;
+        let payload_bytes = if bundle.payload_bytes == 0 {
+            bundle.payload_file.bytes
+        } else {
+            bundle.payload_bytes
+        };
+        if payload_bytes != bundle.payload_file.bytes {
+            return Err(format!(
+                "resident embedding payload bytes mismatch: declared {} actual {}",
+                payload_bytes, bundle.payload_file.bytes
+            ));
+        }
+        if usize::try_from(payload_bytes).ok() != Some(matrix_bytes) {
+            return Err(format!(
+                "resident embedding BF16 payload bytes mismatch: got {payload_bytes} expected {matrix_bytes}"
+            ));
+        }
+        match bundle.payload_encoding.as_deref() {
+            None | Some("raw_safetensors_payload") => {}
+            Some(encoding) => {
+                return Err(format!(
+                    "resident embedding has unsupported payload encoding {encoding}"
+                ));
+            }
+        }
+
+        let mut matrix_buffer = context
+            .alloc_buffer(matrix_bytes)
+            .map_err(|err| format!("failed to allocate resident embedding matrix: {err}"))?;
+        copy_file_to_runtime_buffer_chunked(
+            &mut matrix_buffer,
+            &bundle.payload_file.absolute_path,
+            matrix_bytes,
+            chunk_bytes,
+            stream,
+            "resident embedding BF16 matrix",
+        )?;
+        let mut output_buffer = context
+            .alloc_buffer(checked_f32_byte_len(hidden, "resident embedding output")?)
+            .map_err(|err| format!("failed to allocate resident embedding output: {err}"))?;
+        ullm_runtime_sys::bf16_row_f32(
+            &matrix_buffer,
+            vocab,
+            hidden,
+            0,
+            &mut output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to prewarm resident embedding row gather: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize resident embedding load: {err}"))?;
+        Ok(Some(Self {
+            dtype,
+            shape: bundle.shape,
+            vocab,
+            hidden,
+            matrix_buffer,
+            output_buffer,
+            matrix_bytes,
+        }))
+    }
+
+    fn gather_token(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        token_id: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        if token_id >= self.vocab {
+            return Err(format!(
+                "{label} token id {token_id} is out of resident embedding range 0..{}",
+                self.vocab
+            ));
+        }
+        ullm_runtime_sys::bf16_row_f32(
+            &self.matrix_buffer,
+            self.vocab,
+            self.hidden,
+            token_id,
+            &mut self.output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to gather {label} resident embedding row: {err}"))
+    }
+
+    fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.output_buffer
+    }
+
+    fn report_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "mode": "gpu_resident_bf16",
+            "tensor": QWEN3_EMBED_TOKENS_TENSOR,
+            "dtype": self.dtype,
+            "shape": self.shape,
+            "vocab": self.vocab,
+            "hidden": self.hidden,
+            "matrix_bytes": self.matrix_bytes,
+        })
+    }
+}
+
 impl PackageFinalNormRuntime {
     fn load(
         context: &mut ullm_runtime_sys::RuntimeContext,
@@ -17011,6 +17169,72 @@ fn package_token_ids_incremental_layers_step_device(
         .ok_or_else(|| format!("{label} missing final device residual"))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_incremental_layers_step_device_input(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layers: &mut [PackageTokenIdsIncrementalLayer],
+    rotary_dim: usize,
+    rope_base: f32,
+    rope_position: usize,
+    cache_position: usize,
+    residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    hidden: usize,
+    label: &str,
+) -> Result<(usize, Vec<f64>), String> {
+    if layers.is_empty() {
+        return Err(format!(
+            "{label} device layer step requires at least one layer"
+        ));
+    }
+    let required_bytes = checked_f32_byte_len(hidden, "incremental decode device residual")?;
+    let actual_bytes = residual_buffer
+        .size()
+        .map_err(|err| format!("failed to query {label} residual buffer size: {err}"))?;
+    if actual_bytes < required_bytes {
+        return Err(format!(
+            "{label} residual buffer is too small: got {actual_bytes} bytes expected at least {required_bytes}"
+        ));
+    }
+
+    let mut layer_step_ms = Vec::with_capacity(layers.len());
+    let first_label = format!("{label} layer 0 position {rope_position}");
+    let first_started = Instant::now();
+    layers[0].step_from_device_to_device(
+        stream,
+        residual_buffer,
+        rotary_dim,
+        rope_base,
+        rope_position,
+        cache_position,
+        &first_label,
+    )?;
+    layer_step_ms.push(first_started.elapsed().as_secs_f64() * 1000.0);
+
+    for layer_position in 1..layers.len() {
+        let layer_step_started = Instant::now();
+        let layer_label = format!("{label} layer {layer_position} position {rope_position}");
+        let (previous_layers, current_layers) = layers.split_at_mut(layer_position);
+        let previous = previous_layers.get(layer_position - 1).ok_or_else(|| {
+            format!(
+                "{layer_label} previous device residual layer {} is missing",
+                layer_position - 1
+            )
+        })?;
+        current_layers[0].step_from_device_to_device(
+            stream,
+            previous.output_buffer(),
+            rotary_dim,
+            rope_base,
+            rope_position,
+            cache_position,
+            &layer_label,
+        )?;
+        layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    Ok((layers.len() - 1, layer_step_ms))
+}
+
 fn package_token_ids_top_logits_result(
     top_logits: Vec<PackageTokenLogit>,
 ) -> Result<(serde_json::Value, usize), String> {
@@ -17295,6 +17519,19 @@ fn package_token_ids_generate_incremental_smoke_impl(
         None
     };
     let lm_head_load_ms = lm_head_load_started.elapsed().as_secs_f64() * 1000.0;
+    let embedding_runtime_load_started = Instant::now();
+    let mut embedding_runtime = if lm_head_runtime.supports_device_input() {
+        PackageEmbeddingRuntime::load_bf16_if_available(
+            &mut context,
+            &mut stream,
+            path,
+            chunk_bytes,
+            hidden,
+        )?
+    } else {
+        None
+    };
+    let embedding_runtime_load_ms = embedding_runtime_load_started.elapsed().as_secs_f64() * 1000.0;
 
     let prefill_started = Instant::now();
     let prefill_layers_started = Instant::now();
@@ -17375,16 +17612,22 @@ fn package_token_ids_generate_incremental_smoke_impl(
             .last()
             .ok_or_else(|| "incremental sequence unexpectedly empty".to_string())?;
         let decode_embedding_started = Instant::now();
-        let embedding =
-            read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &[token_id])
-                .map_err(|err| format!("failed to read incremental decode embedding: {err}"))?;
-        let embedding_step_ms = decode_embedding_started.elapsed().as_secs_f64() * 1000.0;
-        if embedding.values.len() != hidden {
-            return Err(format!(
-                "incremental decode embedding length {} does not match hidden {hidden}",
-                embedding.values.len()
-            ));
+        let mut embedding_values = None;
+        if let Some(runtime) = embedding_runtime.as_mut() {
+            runtime.gather_token(&mut stream, token_id, "incremental decode")?;
+        } else {
+            let embedding =
+                read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &[token_id])
+                    .map_err(|err| format!("failed to read incremental decode embedding: {err}"))?;
+            if embedding.values.len() != hidden {
+                return Err(format!(
+                    "incremental decode embedding length {} does not match hidden {hidden}",
+                    embedding.values.len()
+                ));
+            }
+            embedding_values = Some(embedding.values);
         }
+        let embedding_step_ms = decode_embedding_started.elapsed().as_secs_f64() * 1000.0;
         let decode_index = generated_token_ids.len() - 1;
         let position = position_offset
             .checked_add(prompt_token_ids.len())
@@ -17401,17 +17644,34 @@ fn package_token_ids_generate_incremental_smoke_impl(
                     "incremental decode final RMSNorm runtime is missing".to_string()
                 })?;
                 let (final_layer_position, layer_step_ms) =
-                    package_token_ids_incremental_layers_step_device(
-                        &mut stream,
-                        &mut layers,
-                        rotary_dim_value,
-                        rope_base,
-                        position,
-                        cache_position,
-                        embedding.values,
-                        hidden,
-                        "incremental decode",
-                    )?;
+                    if let Some(runtime) = embedding_runtime.as_ref() {
+                        package_token_ids_incremental_layers_step_device_input(
+                            &mut stream,
+                            &mut layers,
+                            rotary_dim_value,
+                            rope_base,
+                            position,
+                            cache_position,
+                            runtime.output_buffer(),
+                            hidden,
+                            "incremental decode",
+                        )?
+                    } else {
+                        let embedding_values = embedding_values.take().ok_or_else(|| {
+                            "incremental decode missing host embedding".to_string()
+                        })?;
+                        package_token_ids_incremental_layers_step_device(
+                            &mut stream,
+                            &mut layers,
+                            rotary_dim_value,
+                            rope_base,
+                            position,
+                            cache_position,
+                            embedding_values,
+                            hidden,
+                            "incremental decode",
+                        )?
+                    };
                 let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
                 let final_hidden_buffer = layers
                     .get(final_layer_position)
@@ -17432,6 +17692,9 @@ fn package_token_ids_generate_incremental_smoke_impl(
                 decode_lm_head_ms.push(lm_head_step_ms);
                 (top_logits, next, layers_step_ms, layer_step_ms)
             } else {
+                let embedding_values = embedding_values
+                    .take()
+                    .ok_or_else(|| "incremental decode missing host embedding".to_string())?;
                 let (residual, layer_step_ms) = package_token_ids_incremental_layers_step(
                     &mut stream,
                     &mut layers,
@@ -17439,7 +17702,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
                     rope_base,
                     position,
                     cache_position,
-                    embedding.values,
+                    embedding_values,
                     hidden,
                     "incremental decode",
                 )?;
@@ -17505,10 +17768,15 @@ fn package_token_ids_generate_incremental_smoke_impl(
         "top_k": top_k,
         "lm_head_chunk_rows": lm_head_chunk_rows,
         "lm_head_runtime": lm_head_runtime.report_json(lm_head_load_ms),
+        "embedding_runtime": embedding_runtime
+            .as_ref()
+            .map(PackageEmbeddingRuntime::report_json)
+            .unwrap_or(serde_json::Value::Null),
         "final_norm_runtime": final_norm_runtime
             .as_ref()
             .map(PackageFinalNormRuntime::report_json)
             .unwrap_or(serde_json::Value::Null),
+        "decode_embedding_device": embedding_runtime.is_some(),
         "decode_final_logits_device": final_norm_runtime.is_some()
             && lm_head_runtime.supports_device_input(),
         "rotary_dim": resolved_rotary_dim,
@@ -17554,6 +17822,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
         },
         "timing_ms": {
             "embedding_read": embed_ms,
+            "embedding_runtime_load": embedding_runtime_load_ms,
             "layer_load": layer_load_ms,
             "lm_head_load": lm_head_load_ms,
             "prefill": prefill_ms,

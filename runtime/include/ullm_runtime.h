@@ -183,6 +183,14 @@ ullm_status ullm_runtime_matvec_bf16_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_bf16_row_f32(
+    const ullm_runtime_buffer *matrix_buffer,
+    size_t rows,
+    size_t cols,
+    size_t row_index,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_top1_f32(
     const ullm_runtime_buffer *input_buffer,
     size_t elements,
