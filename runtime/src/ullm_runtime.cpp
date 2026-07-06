@@ -1355,6 +1355,63 @@ __device__ float ullm_aq4_qkv_z_gate_beta_thread_sum(
     return sum;
 }
 
+__device__ void ullm_aq4_qkv_z_gate_beta_pair_thread_sums(
+    const unsigned char *a_indices,
+    const unsigned char *a_scale_indices,
+    const float *a_codebook,
+    const float *a_scale_values,
+    unsigned long long a_scale_count,
+    float a_tensor_scale,
+    const unsigned char *b_indices,
+    const unsigned char *b_scale_indices,
+    const float *b_codebook,
+    const float *b_scale_values,
+    unsigned long long b_scale_count,
+    float b_tensor_scale,
+    const float *input,
+    unsigned long long group_size,
+    unsigned long long row,
+    unsigned long long cols,
+    unsigned int tid,
+    unsigned int block_size,
+    float *a_sum_output,
+    float *b_sum_output) {
+    const unsigned long long row_offset = row * cols;
+    const unsigned long long groups_per_row = cols / group_size;
+    float a_sum = 0.0f;
+    float b_sum = 0.0f;
+    for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
+         group_in_row += block_size) {
+        const unsigned long long group = row * groups_per_row + group_in_row;
+        const unsigned int a_scale_index = static_cast<unsigned int>(a_scale_indices[group]);
+        const unsigned int b_scale_index = static_cast<unsigned int>(b_scale_indices[group]);
+        float a_raw_sum = 0.0f;
+        float b_raw_sum = 0.0f;
+        const unsigned long long col_start = group_in_row * group_size;
+        for (unsigned long long offset = 0; offset < group_size; ++offset) {
+            const unsigned long long col = col_start + offset;
+            const unsigned long long element = row_offset + col;
+            const float input_value = input[col];
+            const unsigned char a_packed = a_indices[element >> 1];
+            const unsigned char a_codebook_index =
+                (element & 1ull) == 0ull ? (a_packed & 0x0f) : ((a_packed >> 4) & 0x0f);
+            const unsigned char b_packed = b_indices[element >> 1];
+            const unsigned char b_codebook_index =
+                (element & 1ull) == 0ull ? (b_packed & 0x0f) : ((b_packed >> 4) & 0x0f);
+            a_raw_sum += a_codebook[a_codebook_index] * input_value;
+            b_raw_sum += b_codebook[b_codebook_index] * input_value;
+        }
+        if (a_scale_index < a_scale_count) {
+            a_sum += a_raw_sum * a_scale_values[a_scale_index] * a_tensor_scale;
+        }
+        if (b_scale_index < b_scale_count) {
+            b_sum += b_raw_sum * b_scale_values[b_scale_index] * b_tensor_scale;
+        }
+    }
+    *a_sum_output = a_sum;
+    *b_sum_output = b_sum;
+}
+
 extern "C" __global__ void ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel(
     const unsigned char *qkv_indices,
     const unsigned char *qkv_scale_indices,
@@ -1450,32 +1507,56 @@ extern "C" __global__ void ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel(
             threads_per_row);
     } else if (logical_row < total_rows) {
         const unsigned long long head = logical_row - single_rows;
-        primary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
-            a_indices,
-            a_scale_indices,
-            a_codebook,
-            a_scale_values,
-            input,
-            a_scale_count,
-            a_group_size,
-            a_tensor_scale,
-            head,
-            cols,
-            lane,
-            threads_per_row);
-        secondary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
-            b_indices,
-            b_scale_indices,
-            b_codebook,
-            b_scale_values,
-            input,
-            b_scale_count,
-            b_group_size,
-            b_tensor_scale,
-            head,
-            cols,
-            lane,
-            threads_per_row);
+        if (a_group_size == b_group_size && (cols % a_group_size) == 0ull) {
+            ullm_aq4_qkv_z_gate_beta_pair_thread_sums(
+                a_indices,
+                a_scale_indices,
+                a_codebook,
+                a_scale_values,
+                a_scale_count,
+                a_tensor_scale,
+                b_indices,
+                b_scale_indices,
+                b_codebook,
+                b_scale_values,
+                b_scale_count,
+                b_tensor_scale,
+                input,
+                a_group_size,
+                head,
+                cols,
+                lane,
+                threads_per_row,
+                &primary_sum,
+                &secondary_sum);
+        } else {
+            primary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
+                a_indices,
+                a_scale_indices,
+                a_codebook,
+                a_scale_values,
+                input,
+                a_scale_count,
+                a_group_size,
+                a_tensor_scale,
+                head,
+                cols,
+                lane,
+                threads_per_row);
+            secondary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
+                b_indices,
+                b_scale_indices,
+                b_codebook,
+                b_scale_values,
+                input,
+                b_scale_count,
+                b_group_size,
+                b_tensor_scale,
+                head,
+                cols,
+                lane,
+                threads_per_row);
+        }
     }
     primary_partial[tid] = primary_sum;
     secondary_partial[tid] = secondary_sum;
@@ -1806,6 +1887,63 @@ __device__ float ullm_aq4_gate_beta_thread_sum(
     return sum;
 }
 
+__device__ void ullm_aq4_gate_beta_thread_sums(
+    const unsigned char *a_indices,
+    const unsigned char *a_scale_indices,
+    const float *a_codebook,
+    const float *a_scale_values,
+    unsigned long long a_scale_count,
+    float a_tensor_scale,
+    const unsigned char *b_indices,
+    const unsigned char *b_scale_indices,
+    const float *b_codebook,
+    const float *b_scale_values,
+    unsigned long long b_scale_count,
+    float b_tensor_scale,
+    const float *input,
+    unsigned long long group_size,
+    unsigned long long row,
+    unsigned long long cols,
+    unsigned int tid,
+    unsigned int block_size,
+    float *a_sum_output,
+    float *b_sum_output) {
+    const unsigned long long row_offset = row * cols;
+    const unsigned long long groups_per_row = cols / group_size;
+    float a_sum = 0.0f;
+    float b_sum = 0.0f;
+    for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
+         group_in_row += block_size) {
+        const unsigned long long group = row * groups_per_row + group_in_row;
+        const unsigned int a_scale_index = static_cast<unsigned int>(a_scale_indices[group]);
+        const unsigned int b_scale_index = static_cast<unsigned int>(b_scale_indices[group]);
+        float a_raw_sum = 0.0f;
+        float b_raw_sum = 0.0f;
+        const unsigned long long col_start = group_in_row * group_size;
+        for (unsigned long long offset = 0; offset < group_size; ++offset) {
+            const unsigned long long col = col_start + offset;
+            const unsigned long long element = row_offset + col;
+            const float input_value = input[col];
+            const unsigned char a_packed = a_indices[element >> 1];
+            const unsigned char a_codebook_index =
+                (element & 1ull) == 0ull ? (a_packed & 0x0f) : ((a_packed >> 4) & 0x0f);
+            const unsigned char b_packed = b_indices[element >> 1];
+            const unsigned char b_codebook_index =
+                (element & 1ull) == 0ull ? (b_packed & 0x0f) : ((b_packed >> 4) & 0x0f);
+            a_raw_sum += a_codebook[a_codebook_index] * input_value;
+            b_raw_sum += b_codebook[b_codebook_index] * input_value;
+        }
+        if (a_scale_index < a_scale_count) {
+            a_sum += a_raw_sum * a_scale_values[a_scale_index] * a_tensor_scale;
+        }
+        if (b_scale_index < b_scale_count) {
+            b_sum += b_raw_sum * b_scale_values[b_scale_index] * b_tensor_scale;
+        }
+    }
+    *a_sum_output = a_sum;
+    *b_sum_output = b_sum;
+}
+
 extern "C" __global__ void ullm_aq4_matvec_gate_beta_f32_kernel(
     const unsigned char *a_indices,
     const unsigned char *a_scale_indices,
@@ -1845,32 +1983,56 @@ extern "C" __global__ void ullm_aq4_matvec_gate_beta_f32_kernel(
     float a_sum = 0.0f;
     float b_sum = 0.0f;
     if (head < heads) {
-        a_sum = ullm_aq4_gate_beta_thread_sum(
-            a_indices,
-            a_scale_indices,
-            a_codebook,
-            a_scale_values,
-            input,
-            a_scale_count,
-            a_group_size,
-            a_tensor_scale,
-            head,
-            cols,
-            lane,
-            threads_per_row);
-        b_sum = ullm_aq4_gate_beta_thread_sum(
-            b_indices,
-            b_scale_indices,
-            b_codebook,
-            b_scale_values,
-            input,
-            b_scale_count,
-            b_group_size,
-            b_tensor_scale,
-            head,
-            cols,
-            lane,
-            threads_per_row);
+        if (a_group_size == b_group_size && (cols % a_group_size) == 0ull) {
+            ullm_aq4_gate_beta_thread_sums(
+                a_indices,
+                a_scale_indices,
+                a_codebook,
+                a_scale_values,
+                a_scale_count,
+                a_tensor_scale,
+                b_indices,
+                b_scale_indices,
+                b_codebook,
+                b_scale_values,
+                b_scale_count,
+                b_tensor_scale,
+                input,
+                a_group_size,
+                head,
+                cols,
+                lane,
+                threads_per_row,
+                &a_sum,
+                &b_sum);
+        } else {
+            a_sum = ullm_aq4_gate_beta_thread_sum(
+                a_indices,
+                a_scale_indices,
+                a_codebook,
+                a_scale_values,
+                input,
+                a_scale_count,
+                a_group_size,
+                a_tensor_scale,
+                head,
+                cols,
+                lane,
+                threads_per_row);
+            b_sum = ullm_aq4_gate_beta_thread_sum(
+                b_indices,
+                b_scale_indices,
+                b_codebook,
+                b_scale_values,
+                input,
+                b_scale_count,
+                b_group_size,
+                b_tensor_scale,
+                head,
+                cols,
+                lane,
+                threads_per_row);
+        }
     }
     a_partial[tid] = a_sum;
     b_partial[tid] = b_sum;
