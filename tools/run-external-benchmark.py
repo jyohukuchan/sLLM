@@ -319,6 +319,120 @@ def parse_sglang_serving_metrics(output_json: Path | None, memory: dict[str, Any
     }
 
 
+def parse_json_object_text(text: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end <= start:
+        return {}
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def percentile(values: list[float], pct: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * pct
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = rank - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def parse_ullm_token_ids_report(stdout: str, output_json: Path | None) -> dict[str, Any]:
+    report = parse_json_object_text(stdout)
+    if report and output_json:
+        output_json.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return report
+
+
+def parse_ullm_token_ids_metrics(
+    report: dict[str, Any], memory: dict[str, Any]
+) -> dict[str, Any]:
+    prefill = report.get("prefill") if isinstance(report.get("prefill"), dict) else {}
+    decode = report.get("decode") if isinstance(report.get("decode"), dict) else {}
+    throughput = report.get("throughput") if isinstance(report.get("throughput"), dict) else {}
+    timing = report.get("timing_ms") if isinstance(report.get("timing_ms"), dict) else {}
+
+    prefill_ms = parse_float(prefill.get("wall_ms", timing.get("prefill")))
+    decode_ms = parse_float(decode.get("wall_ms", timing.get("decode")))
+    total_ms = parse_float(throughput.get("total_wall_ms", timing.get("total")))
+    decode_tokens_per_second = parse_float(decode.get("timed_step_tps"))
+    if decode_tokens_per_second is None:
+        decode_tokens_per_second = parse_float(decode.get("end_to_end_generated_tps"))
+    total_tokens_per_second = parse_float(throughput.get("model_input_tps"))
+    if total_tokens_per_second is None:
+        total_tokens_per_second = parse_float(throughput.get("full_forward_tps"))
+    consumed_bytes = memory.get("consumed_total_bytes")
+    consumed_gib = consumed_bytes / 1024**3 if isinstance(consumed_bytes, int) else None
+    product = None
+    if decode_tokens_per_second is not None and consumed_gib is not None:
+        product = decode_tokens_per_second * consumed_gib
+
+    step_ms = decode.get("step_wall_ms")
+    step_values = [parse_float(value) for value in step_ms] if isinstance(step_ms, list) else []
+    step_values = [value for value in step_values if value is not None]
+
+    return {
+        "prefill_tokens_per_second": parse_float(prefill.get("tps")),
+        "decode_tokens_per_second": decode_tokens_per_second,
+        "total_tokens_per_second": total_tokens_per_second,
+        "prefill_wall_time_seconds": prefill_ms / 1000.0 if prefill_ms is not None else None,
+        "decode_wall_time_seconds": decode_ms / 1000.0 if decode_ms is not None else None,
+        "total_wall_time_seconds": total_ms / 1000.0 if total_ms is not None else None,
+        "time_to_first_token_ms": prefill_ms,
+        "time_per_output_token_ms": (1000.0 / decode_tokens_per_second)
+        if decode_tokens_per_second
+        else None,
+        "latency_p50_ms": percentile(step_values, 0.50),
+        "latency_p95_ms": percentile(step_values, 0.95),
+        "vram_baseline_bytes": memory.get("baseline_total_bytes"),
+        "vram_peak_bytes": memory.get("peak_total_bytes"),
+        "vram_consumed_bytes": consumed_bytes,
+        "decode_tokens_per_second_times_vram_consumed_gib": product,
+        "power_watts_avg": None,
+    }
+
+
+def parse_ullm_token_ids_correctness(report: dict[str, Any]) -> dict[str, Any] | None:
+    if not report:
+        return None
+    correctness = report.get("correctness")
+    correctness = correctness if isinstance(correctness, dict) else {}
+    nan_or_inf = correctness.get("nan_or_inf_detected")
+    verified = report.get("verified")
+    if not isinstance(verified, bool):
+        verified = correctness.get("verified")
+    return {
+        "reference": "none",
+        "reference_artifact": None,
+        "logits_relative_mse": None,
+        "logits_max_abs_diff": None,
+        "top_k": parse_int(report.get("top_k")),
+        "top_k_agreement": None,
+        "generated_prefix_matches_reference": verified if isinstance(verified, bool) else None,
+        "nan_count": 0 if nan_or_inf is False else None,
+        "inf_count": 0 if nan_or_inf is False else None,
+        "logit_min": None,
+        "logit_max": None,
+    }
+
+
 def default_metrics(memory: dict[str, Any]) -> dict[str, Any]:
     return {
         "prefill_tokens_per_second": None,
@@ -378,7 +492,11 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--concurrent-requests", type=int, default=1)
     parser.add_argument("--kv-cache-dtype", default="auto")
-    parser.add_argument("--parse", choices=["none", "vllm-throughput", "sglang-serving"], default="none")
+    parser.add_argument(
+        "--parse",
+        choices=["none", "vllm-throughput", "sglang-serving", "ullm-token-ids-generate"],
+        default="none",
+    )
     parser.add_argument("--result-json", type=Path)
     parser.add_argument("--timeout-seconds", type=float, default=None)
     parser.add_argument("--memory-sample-interval", type=float, default=1.0)
@@ -430,7 +548,11 @@ def main() -> int:
     else:
         status, error = classify_failure(returncode, timed_out, combined)
 
-    if args.parse == "vllm-throughput" and status == "ok":
+    ullm_report: dict[str, Any] = {}
+    if args.parse == "ullm-token-ids-generate" and status == "ok":
+        ullm_report = parse_ullm_token_ids_report(stdout_text, args.result_json)
+        metrics = parse_ullm_token_ids_metrics(ullm_report, memory)
+    elif args.parse == "vllm-throughput" and status == "ok":
         metrics = parse_vllm_metrics(stdout_text, args.result_json, memory)
     elif args.parse == "sglang-serving" and status == "ok":
         metrics = parse_sglang_serving_metrics(args.result_json, memory)
@@ -510,6 +632,19 @@ def main() -> int:
         "error": error,
         "notes": args.note,
     }
+    ullm_correctness = parse_ullm_token_ids_correctness(ullm_report)
+    if ullm_correctness is not None:
+        row["correctness"] = ullm_correctness
+        raw_memory = ullm_report.get("memory")
+        if isinstance(raw_memory, dict):
+            row["memory"].update(
+                {
+                    "kv_cache_bytes": raw_memory.get("kv_cache_bytes"),
+                    "kv_cache_allocated_blocks": raw_memory.get("kv_cache_allocated_blocks"),
+                    "kv_cache_free_blocks": raw_memory.get("kv_cache_free_blocks"),
+                    "kv_cache_block_size": raw_memory.get("kv_cache_block_size"),
+                }
+            )
     append_jsonl(args.output_jsonl, row)
     print(json.dumps(row, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if status == "ok" else 2

@@ -260,19 +260,21 @@ fn main() -> ExitCode {
             env::args().nth(10),
             env::args().nth(11),
         ),
-        Some("package-token-ids-generate-smoke") => package_token_ids_generate_smoke(
-            env::args().nth(2),
-            env::args().nth(3),
-            env::args().nth(4),
-            env::args().nth(5),
-            env::args().nth(6),
-            env::args().nth(7),
-            env::args().nth(8),
-            env::args().nth(9),
-            env::args().nth(10),
-            env::args().nth(11),
-            env::args().nth(12),
-        ),
+        Some("package-token-ids-generate-smoke" | "package-token-ids-bench") => {
+            package_token_ids_generate_smoke(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+                env::args().nth(8),
+                env::args().nth(9),
+                env::args().nth(10),
+                env::args().nth(11),
+                env::args().nth(12),
+            )
+        }
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -15642,6 +15644,52 @@ fn package_token_ids_incremental_final_logits(
     Ok((serde_json::Value::Array(top_logits_json), next))
 }
 
+fn checked_product_u64(values: &[usize], label: &str) -> Result<u64, String> {
+    let mut product = 1_u64;
+    for &value in values {
+        let value =
+            u64::try_from(value).map_err(|_| format!("{label} value {value} exceeds u64 range"))?;
+        product = product
+            .checked_mul(value)
+            .ok_or_else(|| format!("{label} byte count overflows u64"))?;
+    }
+    Ok(product)
+}
+
+fn package_token_ids_incremental_kv_cache_bytes(
+    self_layers: &[Qwen3PackageDecoderLayerRuntime],
+    cache_blocks: usize,
+    block_size: usize,
+) -> Result<u64, String> {
+    let mut total = 0_u64;
+    for layer in self_layers {
+        let kv_width = layer
+            .runtime_shape
+            .head_dim
+            .checked_add(layer.runtime_shape.value_dim)
+            .ok_or_else(|| {
+                format!(
+                    "incremental KV width overflows for layer {}",
+                    layer.layer_index
+                )
+            })?;
+        let bytes = checked_product_u64(
+            &[
+                cache_blocks,
+                block_size,
+                layer.runtime_shape.kv_heads,
+                kv_width,
+                std::mem::size_of::<f32>(),
+            ],
+            "incremental KV cache",
+        )?;
+        total = total
+            .checked_add(bytes)
+            .ok_or_else(|| "incremental KV cache total bytes overflow u64".to_string())?;
+    }
+    Ok(total)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn package_token_ids_generate_incremental_smoke_impl(
     path: &str,
@@ -15779,6 +15827,11 @@ fn package_token_ids_generate_incremental_smoke_impl(
         }
     }
     let rotary_dim_value = resolved_rotary_dim.unwrap_or(0);
+    let kv_cache_bytes =
+        package_token_ids_incremental_kv_cache_bytes(&self_layers, cache_blocks, block_size)?;
+    let kv_cache_allocated_blocks = cache_blocks
+        .checked_mul(self_layers.len())
+        .ok_or_else(|| "incremental KV cache allocated block count overflows".to_string())?;
     let mut self_states = Vec::with_capacity(self_layers.len());
     for layer in &self_layers {
         let decode_shape = PagedDecodeShape {
@@ -15994,7 +16047,12 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "vram_baseline_bytes": serde_json::Value::Null,
             "vram_peak_bytes": serde_json::Value::Null,
             "vram_consumed_bytes": serde_json::Value::Null,
-            "kv_cache_bytes": serde_json::Value::Null,
+            "kv_cache_bytes": kv_cache_bytes,
+            "kv_cache_allocated_blocks": kv_cache_allocated_blocks,
+            "kv_cache_free_blocks": 0,
+            "kv_cache_block_size": block_size,
+            "kv_cache_self_attn_layers": self_layers.len(),
+            "kv_cache_value_dtype": "f32",
             "cache_blocks": cache_blocks,
             "block_size": block_size,
         },
@@ -25975,6 +26033,9 @@ fn print_help() {
     );
     eprintln!(
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+    );
+    eprintln!(
+        "package-token-ids-bench: same arguments as package-token-ids-generate-smoke; writes the same measured JSON report"
     );
     eprintln!(
         "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"
