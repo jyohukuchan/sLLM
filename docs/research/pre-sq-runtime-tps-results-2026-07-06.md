@@ -720,3 +720,59 @@ Interpretation:
   timing probe rather than semantic-quality evidence.
 - This improves the pre-SQ comparison harness. It does not prove final instruction-following
   quality, but it gives SQ candidates a fairer speed-plus-output-smoke baseline than raw token caps.
+
+## Prompt Suite v0.3: Controlled Output Contracts
+
+The v0.2 suite was useful for exposing prompt/stop issues, but some warnings were caused by broad
+prompts rather than by runtime instability. `benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.3.json`
+keeps the same broad categories while tightening quality-observed prompts:
+
+- direct-answer prompts use short output contracts and blank-line stop text;
+- the Japanese case explicitly asks for answer-only Japanese text and no reasoning markers;
+- the short QA case keeps the `\nQuestion:` task-aware stop sequence;
+- the repeated 256-token timing prompt remains in the suite but is marked `output_health=false`,
+  so its expected echo/repetition no longer pollutes semantic output-health counts.
+
+The suite summary schema is now `package-token-prompt-suite-summary-v0.3` and includes
+`output_not_evaluated_count`.
+
+R9700 v0.3 suite run:
+
+| case | category | prompt tokens | generated | stop reason | status | warnings | prefill tok/s | decode tok/s | last-8 tok/s | verified |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | :---: |
+| warmup_direct_answer | technical | 26 | 67 | stop_token | ok | - | 19.177 | 20.009 | 19.847 | true |
+| memory_vs_compute_direct | technical | 34 | 62 | stop_sequence | ok | - | 20.001 | 20.001 | 19.814 | true |
+| throughput_checklist_direct | checklist | 26 | 53 | stop_sequence | ok | - | 19.202 | 19.938 | 19.844 | true |
+| japanese_direct_answer | japanese | 41 | 49 | stop_token | ok | - | 20.418 | 19.975 | 19.909 | true |
+| python_stop_helper | code | 30 | 84 | stop_token | ok | - | 19.521 | 19.982 | 19.815 | true |
+| short_qa_bandwidth | short_qa | 25 | 35 | stop_sequence | ok | - | 18.881 | 20.166 | 20.139 | true |
+| long_prefill_warmup_timing | timing | 256 | 192 | max_generated_tokens | not_evaluated | - | 21.752 | 18.500 | 18.113 | true |
+
+Updated suite summary:
+
+- mean decode TPS: `19.796`
+- min decode TPS: `18.500`
+- max decode TPS: `20.166`
+- mean prefill TPS: `19.850`
+- verified all: `true`
+- stopped by token or sequence: `6 / 7`
+- output ok: `6 / 7`
+- output warn: `0 / 7`
+- output not evaluated: `1 / 7`
+
+Interpretation:
+
+- Controlled output prompts remove the remaining quality-observation warnings while preserving
+  `~20 tok/s` decode on all quality-scored cases.
+- The Japanese case no longer emits `<think>`-style marker text under the direct-answer prompt.
+- The timing case still hits the generation cap and repeats prompt text, but this is now explicit:
+  it is a throughput probe, not semantic-quality evidence.
+- For SQ candidate comparison, v0.3 is a cleaner default than v0.2 when the goal is to compare
+  speed and obvious output collapse under controlled prompts. v0.2 remains useful as a rougher
+  prompt-stress set.
+
+New artifacts:
+
+- `benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.3.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.3/summary.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.3/summary.md`

@@ -26,6 +26,7 @@ class PromptCase:
     target_prompt_tokens: int | None
     apply_chat_template: bool
     stop_texts: list[str]
+    output_health: bool
     notes: list[str]
 
 
@@ -126,6 +127,9 @@ def load_suite(path: Path) -> tuple[dict[str, Any], list[PromptCase]]:
         stop_texts = case.get("stop_texts", [])
         if not isinstance(stop_texts, list) or not all(isinstance(item, str) for item in stop_texts):
             raise SystemExit(f"{case_id}.stop_texts must be a list of strings")
+        output_health = case.get("output_health", True)
+        if not isinstance(output_health, bool):
+            raise SystemExit(f"{case_id}.output_health must be a boolean")
         cases.append(
             PromptCase(
                 case_id=case_id,
@@ -135,6 +139,7 @@ def load_suite(path: Path) -> tuple[dict[str, Any], list[PromptCase]]:
                 target_prompt_tokens=target_prompt_tokens,
                 apply_chat_template=bool(case.get("apply_chat_template", False)),
                 stop_texts=stop_texts,
+                output_health=output_health,
                 notes=notes,
             )
         )
@@ -230,6 +235,7 @@ def run_case(args: argparse.Namespace, case: PromptCase, output_json: Path) -> d
             "id": case.case_id,
             "category": case.category,
             "stop_texts": case.stop_texts,
+            "output_health": case.output_health,
             "notes": case.notes,
         }
     )
@@ -264,13 +270,17 @@ def summarize_report(case: PromptCase, report_path: Path, report: dict[str, Any]
     tokens = [int(token) for token in generated_token_ids]
     unique_ratio = (len(set(tokens)) / len(tokens)) if tokens else None
     requested_generated_tokens = decode.get("requested_generated_tokens")
-    warnings = output_warnings(
-        case,
-        generated_text,
-        len(tokens),
-        requested_generated_tokens,
-        str(stop.get("reason")),
-        unique_ratio,
+    warnings = (
+        output_warnings(
+            case,
+            generated_text,
+            len(tokens),
+            requested_generated_tokens,
+            str(stop.get("reason")),
+            unique_ratio,
+        )
+        if case.output_health
+        else []
     )
 
     return {
@@ -292,12 +302,20 @@ def summarize_report(case: PromptCase, report_path: Path, report: dict[str, Any]
         "p50_ms": metric_float(step.get("p50_ms")),
         "generated_chars": len(generated_text),
         "unique_generated_token_ratio": unique_ratio,
-        "output_status": "ok" if not warnings else "warn",
+        "output_health_evaluated": case.output_health,
+        "output_status": output_status(case.output_health, warnings),
         "output_warnings": warnings,
         "generated_preview": generated_compact[:240],
         "stop_texts": case.stop_texts,
+        "output_health": case.output_health,
         "notes": case.notes,
     }
+
+
+def output_status(output_health: bool, warnings: list[str]) -> str:
+    if not output_health:
+        return "not_evaluated"
+    return "ok" if not warnings else "warn"
 
 
 def output_warnings(
@@ -352,6 +370,9 @@ def category_metrics(case_summaries: list[dict[str, Any]]) -> dict[str, dict[str
             "verified_all": all(item.get("verified") is True for item in items),
             "output_ok_count": sum(1 for item in items if item.get("output_status") == "ok"),
             "output_warn_count": sum(1 for item in items if item.get("output_status") == "warn"),
+            "output_not_evaluated_count": sum(
+                1 for item in items if item.get("output_status") == "not_evaluated"
+            ),
         }
     return metrics
 
@@ -365,7 +386,7 @@ def write_summary_json(
     decode_values = [value for item in case_summaries if (value := item.get("decode_tps")) is not None]
     prefill_values = [value for item in case_summaries if (value := item.get("prefill_tps")) is not None]
     payload = {
-        "schema_version": "package-token-prompt-suite-summary-v0.2",
+        "schema_version": "package-token-prompt-suite-summary-v0.3",
         "suite": metadata,
         "package": args.package_dir,
         "tokenizer_dir": args.tokenizer_dir,
@@ -389,6 +410,9 @@ def write_summary_json(
             "stopped_count": sum(1 for item in case_summaries if item.get("stopped") is True),
             "output_ok_count": sum(1 for item in case_summaries if item.get("output_status") == "ok"),
             "output_warn_count": sum(1 for item in case_summaries if item.get("output_status") == "warn"),
+            "output_not_evaluated_count": sum(
+                1 for item in case_summaries if item.get("output_status") == "not_evaluated"
+            ),
             "hit_generation_limit_count": sum(
                 1 for item in case_summaries if "hit_generation_limit" in item.get("output_warnings", [])
             ),

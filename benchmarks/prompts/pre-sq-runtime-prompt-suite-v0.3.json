@@ -1,0 +1,95 @@
+{
+  "metadata": {
+    "suite_id": "pre-sq-runtime-prompt-suite-v0.3",
+    "purpose": "Controlled-output text prompt set for pre-SQ runtime TPS and output-health observation.",
+    "tokenizer": "Qwen3.5-9B",
+    "decode_policy": "greedy with tokenizer special-token stop policy and per-case task-aware stop_texts",
+    "changes_from_v0.2": [
+      "uses shorter output contracts for quality-observed cases",
+      "adds blank-line stop_texts for direct-answer prompts",
+      "keeps the repeated long-prefill timing probe but excludes it from output-health scoring"
+    ]
+  },
+  "prompts": [
+    {
+      "id": "warmup_direct_answer",
+      "category": "technical",
+      "prompt": "Answer in exactly three concise sentences. Do not show reasoning. Explain why GPU warmup can distort token/s measurements.\n\nAnswer:",
+      "generated_tokens": 96,
+      "stop_texts": [
+        "\n\n"
+      ],
+      "notes": [
+        "Controlled short technical answer for warmup measurement policy."
+      ]
+    },
+    {
+      "id": "memory_vs_compute_direct",
+      "category": "technical",
+      "prompt": "Answer in exactly two concise sentences. Do not show reasoning. Compare memory-bandwidth-bound and compute-bound inference bottlenecks in low-bit LLM decoding.\n\nAnswer:",
+      "generated_tokens": 80,
+      "stop_texts": [
+        "\n\n"
+      ],
+      "notes": [
+        "Controlled AQ/SQ bottleneck comparison with a short answer cap."
+      ]
+    },
+    {
+      "id": "throughput_checklist_direct",
+      "category": "checklist",
+      "prompt": "Write exactly four checklist bullets for fair single-GPU LLM throughput reporting. Do not add headings.\n\nChecklist:\n-",
+      "generated_tokens": 128,
+      "stop_texts": [
+        "\n\n"
+      ],
+      "notes": [
+        "Checks structured output without requiring a long list."
+      ]
+    },
+    {
+      "id": "japanese_direct_answer",
+      "category": "japanese",
+      "prompt": "回答だけを日本語で2文書いてください。考え方、手順、<think>タグは書かないでください。GPUのウォームアップがtoken/s測定に与える影響を説明してください。\n\n回答:",
+      "generated_tokens": 96,
+      "stop_texts": [
+        "\n\n"
+      ],
+      "notes": [
+        "Checks whether a direct Japanese prompt avoids reasoning-marker text."
+      ]
+    },
+    {
+      "id": "python_stop_helper",
+      "category": "code",
+      "prompt": "Write a small Python function named should_stop(token_id, stop_ids) that returns True when token_id is in stop_ids. Include one short example.",
+      "generated_tokens": 160,
+      "notes": [
+        "Keeps the v0.2 code-format probe because it already stops cleanly."
+      ]
+    },
+    {
+      "id": "short_qa_bandwidth",
+      "category": "short_qa",
+      "prompt": "Question: In one sentence, why can an AQ format still be fast when inference is memory-bandwidth-bound?\nAnswer:",
+      "generated_tokens": 96,
+      "stop_texts": [
+        "\nQuestion:"
+      ],
+      "notes": [
+        "Short answer prompt for the AQ/SQ bandwidth discussion."
+      ]
+    },
+    {
+      "id": "long_prefill_warmup_timing",
+      "category": "timing",
+      "prompt": "Explain why GPU warmup can distort token/s measurements, and describe a careful way to report throughput.",
+      "generated_tokens": 192,
+      "target_prompt_tokens": 256,
+      "output_health": false,
+      "notes": [
+        "Repeats the prompt to create a reproducible long-prefill timing probe; output health is intentionally not scored."
+      ]
+    }
+  ]
+}
