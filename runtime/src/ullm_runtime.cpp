@@ -2694,7 +2694,7 @@ Aq4MatvecLaunchConfig aq4_matvec_launch_config_for_device(int device_id) {
     int major = 0;
     int minor = 0;
     hip_runtime().device_compute_capability(device_id, &major, &minor);
-    return major >= 12 ? Aq4MatvecLaunchConfig{256u, 4u}
+    return major >= 12 ? Aq4MatvecLaunchConfig{256u, 16u}
                        : Aq4MatvecLaunchConfig{256u, 1u};
 }
 
