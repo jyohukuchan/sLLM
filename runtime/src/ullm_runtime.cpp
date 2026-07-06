@@ -872,7 +872,23 @@ __device__ float ullm_aq4_matvec_add_thread_sum(
             }
             float raw_sum = 0.0f;
             const unsigned long long col_start = group_in_row * group_size;
-            if ((group_size & 1ull) == 0ull) {
+            if (group_size == 16ull) {
+#pragma unroll
+                for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                    const unsigned long long col = col_start + offset;
+                    const unsigned char packed = indices[(row_offset + col) >> 1];
+                    raw_sum += codebook[packed & 0x0f] * input[col];
+                    raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                }
+            } else if (group_size == 8ull) {
+#pragma unroll
+                for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                    const unsigned long long col = col_start + offset;
+                    const unsigned char packed = indices[(row_offset + col) >> 1];
+                    raw_sum += codebook[packed & 0x0f] * input[col];
+                    raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                }
+            } else if ((group_size & 1ull) == 0ull) {
                 for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
                     const unsigned long long col = col_start + offset;
                     const unsigned char packed = indices[(row_offset + col) >> 1];
@@ -996,7 +1012,23 @@ __device__ float ullm_aq4_matvec_pair_thread_sum(
             }
             float raw_sum = 0.0f;
             const unsigned long long col_start = group_in_row * group_size;
-            if ((group_size & 1ull) == 0ull) {
+            if (group_size == 16ull) {
+#pragma unroll
+                for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                    const unsigned long long col = col_start + offset;
+                    const unsigned char packed = indices[(row_offset + col) >> 1];
+                    raw_sum += codebook[packed & 0x0f] * input[col];
+                    raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                }
+            } else if (group_size == 8ull) {
+#pragma unroll
+                for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                    const unsigned long long col = col_start + offset;
+                    const unsigned char packed = indices[(row_offset + col) >> 1];
+                    raw_sum += codebook[packed & 0x0f] * input[col];
+                    raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                }
+            } else if ((group_size & 1ull) == 0ull) {
                 for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
                     const unsigned long long col = col_start + offset;
                     const unsigned char packed = indices[(row_offset + col) >> 1];
@@ -1068,7 +1100,35 @@ __device__ void ullm_aq4_matvec_pair_thread_sums(
         float left_raw_sum = 0.0f;
         float right_raw_sum = 0.0f;
         const unsigned long long col_start = group_in_row * group_size;
-        if ((group_size & 1ull) == 0ull) {
+        if (group_size == 16ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char left_packed = left_indices[packed_index];
+                const unsigned char right_packed = right_indices[packed_index];
+                left_raw_sum += left_codebook[left_packed & 0x0f] * input_low;
+                right_raw_sum += right_codebook[right_packed & 0x0f] * input_low;
+                left_raw_sum += left_codebook[(left_packed >> 4) & 0x0f] * input_high;
+                right_raw_sum += right_codebook[(right_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if (group_size == 8ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char left_packed = left_indices[packed_index];
+                const unsigned char right_packed = right_indices[packed_index];
+                left_raw_sum += left_codebook[left_packed & 0x0f] * input_low;
+                right_raw_sum += right_codebook[right_packed & 0x0f] * input_low;
+                left_raw_sum += left_codebook[(left_packed >> 4) & 0x0f] * input_high;
+                right_raw_sum += right_codebook[(right_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if ((group_size & 1ull) == 0ull) {
             for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
                 const unsigned long long col = col_start + offset;
                 const unsigned long long packed_index = (row_offset + col) >> 1;
@@ -1264,7 +1324,23 @@ __device__ float ullm_aq4_matvec_triple_thread_sum(
             }
             float raw_sum = 0.0f;
             const unsigned long long col_start = group_in_row * group_size;
-            if ((group_size & 1ull) == 0ull) {
+            if (group_size == 16ull) {
+#pragma unroll
+                for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                    const unsigned long long col = col_start + offset;
+                    const unsigned char packed = indices[(row_offset + col) >> 1];
+                    raw_sum += codebook[packed & 0x0f] * input[col];
+                    raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                }
+            } else if (group_size == 8ull) {
+#pragma unroll
+                for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                    const unsigned long long col = col_start + offset;
+                    const unsigned char packed = indices[(row_offset + col) >> 1];
+                    raw_sum += codebook[packed & 0x0f] * input[col];
+                    raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                }
+            } else if ((group_size & 1ull) == 0ull) {
                 for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
                     const unsigned long long col = col_start + offset;
                     const unsigned char packed = indices[(row_offset + col) >> 1];
@@ -1347,7 +1423,41 @@ __device__ void ullm_aq4_matvec_triple_thread_sums(
         float second_raw_sum = 0.0f;
         float third_raw_sum = 0.0f;
         const unsigned long long col_start = group_in_row * group_size;
-        if ((group_size & 1ull) == 0ull) {
+        if (group_size == 16ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char first_packed = first_indices[packed_index];
+                const unsigned char second_packed = second_indices[packed_index];
+                const unsigned char third_packed = third_indices[packed_index];
+                first_raw_sum += first_codebook[first_packed & 0x0f] * input_low;
+                second_raw_sum += second_codebook[second_packed & 0x0f] * input_low;
+                third_raw_sum += third_codebook[third_packed & 0x0f] * input_low;
+                first_raw_sum += first_codebook[(first_packed >> 4) & 0x0f] * input_high;
+                second_raw_sum += second_codebook[(second_packed >> 4) & 0x0f] * input_high;
+                third_raw_sum += third_codebook[(third_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if (group_size == 8ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char first_packed = first_indices[packed_index];
+                const unsigned char second_packed = second_indices[packed_index];
+                const unsigned char third_packed = third_indices[packed_index];
+                first_raw_sum += first_codebook[first_packed & 0x0f] * input_low;
+                second_raw_sum += second_codebook[second_packed & 0x0f] * input_low;
+                third_raw_sum += third_codebook[third_packed & 0x0f] * input_low;
+                first_raw_sum += first_codebook[(first_packed >> 4) & 0x0f] * input_high;
+                second_raw_sum += second_codebook[(second_packed >> 4) & 0x0f] * input_high;
+                third_raw_sum += third_codebook[(third_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if ((group_size & 1ull) == 0ull) {
             for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
                 const unsigned long long col = col_start + offset;
                 const unsigned long long packed_index = (row_offset + col) >> 1;
@@ -1605,13 +1715,31 @@ __device__ float ullm_aq4_qkv_z_gate_beta_thread_sum(
             }
             float raw_sum = 0.0f;
             const unsigned long long col_start = group_in_row * group_size;
-            for (unsigned long long offset = 0; offset < group_size; ++offset) {
-                const unsigned long long col = col_start + offset;
-                const unsigned long long element = row_offset + col;
-                const unsigned char packed = indices[element >> 1];
-                const unsigned char codebook_index =
-                    (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
-                raw_sum += codebook[codebook_index] * input[col];
+            if (group_size == 16ull) {
+#pragma unroll
+                for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                    const unsigned long long col = col_start + offset;
+                    const unsigned char packed = indices[(row_offset + col) >> 1];
+                    raw_sum += codebook[packed & 0x0f] * input[col];
+                    raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                }
+            } else if (group_size == 8ull) {
+#pragma unroll
+                for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                    const unsigned long long col = col_start + offset;
+                    const unsigned char packed = indices[(row_offset + col) >> 1];
+                    raw_sum += codebook[packed & 0x0f] * input[col];
+                    raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                }
+            } else {
+                for (unsigned long long offset = 0; offset < group_size; ++offset) {
+                    const unsigned long long col = col_start + offset;
+                    const unsigned long long element = row_offset + col;
+                    const unsigned char packed = indices[element >> 1];
+                    const unsigned char codebook_index =
+                        (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                    raw_sum += codebook[codebook_index] * input[col];
+                }
             }
             sum += raw_sum * scale_values[scale_index] * tensor_scale;
         }
@@ -1666,7 +1794,35 @@ __device__ void ullm_aq4_qkv_z_gate_beta_pair_thread_sums(
         float a_raw_sum = 0.0f;
         float b_raw_sum = 0.0f;
         const unsigned long long col_start = group_in_row * group_size;
-        if ((group_size & 1ull) == 0ull) {
+        if (group_size == 16ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char a_packed = a_indices[packed_index];
+                const unsigned char b_packed = b_indices[packed_index];
+                a_raw_sum += a_codebook[a_packed & 0x0f] * input_low;
+                b_raw_sum += b_codebook[b_packed & 0x0f] * input_low;
+                a_raw_sum += a_codebook[(a_packed >> 4) & 0x0f] * input_high;
+                b_raw_sum += b_codebook[(b_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if (group_size == 8ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char a_packed = a_indices[packed_index];
+                const unsigned char b_packed = b_indices[packed_index];
+                a_raw_sum += a_codebook[a_packed & 0x0f] * input_low;
+                b_raw_sum += b_codebook[b_packed & 0x0f] * input_low;
+                a_raw_sum += a_codebook[(a_packed >> 4) & 0x0f] * input_high;
+                b_raw_sum += b_codebook[(b_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if ((group_size & 1ull) == 0ull) {
             for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
                 const unsigned long long col = col_start + offset;
                 const unsigned long long packed_index = (row_offset + col) >> 1;
@@ -2014,7 +2170,35 @@ __device__ void ullm_aq4_matvec_silu_mul_thread_sums(
         float gate_raw_sum = 0.0f;
         float up_raw_sum = 0.0f;
         const unsigned long long col_start = group_in_row * group_size;
-        if ((group_size & 1ull) == 0ull) {
+        if (group_size == 16ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char gate_packed = gate_indices[packed_index];
+                const unsigned char up_packed = up_indices[packed_index];
+                gate_raw_sum += gate_codebook[gate_packed & 0x0f] * input_low;
+                up_raw_sum += up_codebook[up_packed & 0x0f] * input_low;
+                gate_raw_sum += gate_codebook[(gate_packed >> 4) & 0x0f] * input_high;
+                up_raw_sum += up_codebook[(up_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if (group_size == 8ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char gate_packed = gate_indices[packed_index];
+                const unsigned char up_packed = up_indices[packed_index];
+                gate_raw_sum += gate_codebook[gate_packed & 0x0f] * input_low;
+                up_raw_sum += up_codebook[up_packed & 0x0f] * input_low;
+                gate_raw_sum += gate_codebook[(gate_packed >> 4) & 0x0f] * input_high;
+                up_raw_sum += up_codebook[(up_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if ((group_size & 1ull) == 0ull) {
             for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
                 const unsigned long long col = col_start + offset;
                 const unsigned long long packed_index = (row_offset + col) >> 1;
@@ -2256,7 +2440,35 @@ __device__ void ullm_aq4_gate_beta_thread_sums(
         float a_raw_sum = 0.0f;
         float b_raw_sum = 0.0f;
         const unsigned long long col_start = group_in_row * group_size;
-        if ((group_size & 1ull) == 0ull) {
+        if (group_size == 16ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char a_packed = a_indices[packed_index];
+                const unsigned char b_packed = b_indices[packed_index];
+                a_raw_sum += a_codebook[a_packed & 0x0f] * input_low;
+                b_raw_sum += b_codebook[b_packed & 0x0f] * input_low;
+                a_raw_sum += a_codebook[(a_packed >> 4) & 0x0f] * input_high;
+                b_raw_sum += b_codebook[(b_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if (group_size == 8ull) {
+#pragma unroll
+            for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long packed_index = (row_offset + col) >> 1;
+                const float input_low = input[col];
+                const float input_high = input[col + 1ull];
+                const unsigned char a_packed = a_indices[packed_index];
+                const unsigned char b_packed = b_indices[packed_index];
+                a_raw_sum += a_codebook[a_packed & 0x0f] * input_low;
+                b_raw_sum += b_codebook[b_packed & 0x0f] * input_low;
+                a_raw_sum += a_codebook[(a_packed >> 4) & 0x0f] * input_high;
+                b_raw_sum += b_codebook[(b_packed >> 4) & 0x0f] * input_high;
+            }
+        } else if ((group_size & 1ull) == 0ull) {
             for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
                 const unsigned long long col = col_start + offset;
                 const unsigned long long packed_index = (row_offset + col) >> 1;
