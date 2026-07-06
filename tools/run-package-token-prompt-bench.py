@@ -54,6 +54,20 @@ def parse_args() -> argparse.Namespace:
         choices=("cpu_chunked", "gpu_resident_f32"),
     )
     parser.add_argument(
+        "--stop-token-ids",
+        help="Comma-separated token IDs that should stop generation early",
+    )
+    parser.add_argument(
+        "--stop-on-eos",
+        action="store_true",
+        help="Append tokenizer.eos_token_id to stop token IDs when available",
+    )
+    parser.add_argument(
+        "--stop-on-special-tokens",
+        action="store_true",
+        help="Append tokenizer.all_special_ids to stop token IDs",
+    )
+    parser.add_argument(
         "--require-hip-kernels",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -203,7 +217,41 @@ def adjust_prompt_token_count(
     return rendered_prompt, token_ids, metadata
 
 
-def run_engine(args: argparse.Namespace, token_ids: list[int]) -> dict[str, Any]:
+def parse_stop_token_ids(value: str | None) -> list[int]:
+    if value is None or not value.strip():
+        return []
+    parsed = []
+    for raw in value.split(","):
+        entry = raw.strip()
+        if not entry:
+            raise SystemExit(f"invalid --stop-token-ids {value!r}: empty entry")
+        try:
+            parsed.append(int(entry))
+        except ValueError as exc:
+            raise SystemExit(f"invalid stop token ID {entry!r}: {exc}") from exc
+    return parsed
+
+
+def resolve_stop_token_ids(tokenizer: Any, args: argparse.Namespace) -> list[int]:
+    stop_ids = parse_stop_token_ids(args.stop_token_ids)
+    if args.stop_on_eos:
+        eos = getattr(tokenizer, "eos_token_id", None)
+        if eos is not None:
+            stop_ids.append(int(eos))
+    if args.stop_on_special_tokens:
+        stop_ids.extend(int(token_id) for token_id in getattr(tokenizer, "all_special_ids", []))
+
+    unique = []
+    seen = set()
+    for token_id in stop_ids:
+        if token_id in seen:
+            continue
+        seen.add(token_id)
+        unique.append(token_id)
+    return unique
+
+
+def run_engine(args: argparse.Namespace, token_ids: list[int], stop_token_ids: list[int]) -> dict[str, Any]:
     token_csv = ",".join(str(token_id) for token_id in token_ids)
     command = [
         args.engine,
@@ -221,6 +269,8 @@ def run_engine(args: argparse.Namespace, token_ids: list[int]) -> dict[str, Any]
         str(args.position_offset),
         args.lm_head_mode,
     ]
+    if stop_token_ids:
+        command.append(",".join(str(token_id) for token_id in stop_token_ids))
     env = os.environ.copy()
     if args.require_hip_kernels:
         env.update(REQUIRED_HIP_KERNEL_ENVS)
@@ -254,6 +304,7 @@ def run_engine(args: argparse.Namespace, token_ids: list[int]) -> dict[str, Any]
     report["_runner"] = {
         "command": command,
         "required_hip_kernel_envs": REQUIRED_HIP_KERNEL_ENVS if args.require_hip_kernels else {},
+        "resolved_stop_token_ids": stop_token_ids,
     }
     if result.stderr.strip():
         report["_runner"]["stderr"] = result.stderr.strip()
@@ -348,6 +399,7 @@ def main() -> int:
     raw_prompt = read_prompt(args)
     tokenizer = load_tokenizer(args.tokenizer_dir)
     rendered_prompt, token_ids = encode_prompt(tokenizer, args, raw_prompt)
+    stop_token_ids = resolve_stop_token_ids(tokenizer, args)
     rendered_prompt, token_ids, token_adjustment = adjust_prompt_token_count(
         tokenizer,
         args,
@@ -362,7 +414,7 @@ def main() -> int:
             f"prompt token count {len(token_ids)} exceeds --max-prompt-tokens {args.max_prompt_tokens}"
         )
 
-    report = run_engine(args, token_ids)
+    report = run_engine(args, token_ids, stop_token_ids)
     report = enrich_report(report, tokenizer, args, raw_prompt, rendered_prompt, token_ids)
     report["text_prompt"].update(token_adjustment)
     write_or_print_report(report, args.output_json)

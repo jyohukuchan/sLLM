@@ -511,13 +511,16 @@ existing token-ID CLI with a local Hugging Face tokenizer:
 - decode generated token IDs back to text and store the prompt text, rendered prompt, tokenizer
   metadata, generated text, and raw engine timing in one JSON report;
 - optionally repeat and truncate a non-chat prompt to a target token count for reproducible
-  long-prefill probes.
+  long-prefill probes;
+- optionally pass stop token IDs, tokenizer EOS, or tokenizer special token IDs through to the Rust
+  runtime so quality probes can stop before control-token continuations.
 
 R9700 prompt probes with `/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B` tokenizer:
 
 | prompt mode | prompt tokens | generated | all-step tok/s | skip-2 tok/s | last-8 tok/s | prefill tok/s | verified | output observation |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: | --- |
 | plain text | 16 | 128 | 20.102 | 20.099 | 19.888 | 17.238 | true | coherent paragraph start, then control-token-like repetition |
+| plain text + stop special | 16 | 81 | 20.232 | 20.232 | 19.748 | 17.199 | true | coherent paragraph, stops on `<\|endoftext\|>` before control-token continuation |
 | chat template | 26 | 128 | 20.026 | 20.023 | 19.669 | 19.163 | true | no numerical collapse, but produces explicit thinking-outline style text |
 | repeated plain text | 256 | 256 | 18.413 | 18.409 | 17.874 | 22.189 | true | repeats the prompt pattern with one relevant warmup sentence |
 
@@ -527,8 +530,9 @@ Interpretation:
   `prompt=256/generated=256` run gives a more realistic long-prefill/long-decode timing point than
   the original synthetic short prompt.
 - Output quality is not catastrophically broken: decoded text is finite and locally grammatical.
-  It is not yet a strong quality signal. Greedy decoding, repeated prompt construction, and missing
-  stop/template policy can still produce repetitions or control-token-like continuations.
+  Adding a stop-special-token policy turns the plain prompt into a clean one-paragraph completion.
+  It is still not a strong quality signal because greedy decoding and repeated prompt construction
+  can produce repetitions.
 - The next quality-facing improvement should add a small prompt set and stop-token policy before SQ
   format comparison, while keeping token-ID input as the official pre-SQ runtime boundary.
 
@@ -536,5 +540,6 @@ New artifacts:
 
 - `tools/run-package-token-prompt-bench.py`
 - `benchmarks/results/2026-07-06/engine/package-token-prompt-bench-aq4-pagedattn-r9700-warmup-prompt-gen128.json`
+- `benchmarks/results/2026-07-06/engine/package-token-prompt-bench-aq4-pagedattn-r9700-warmup-prompt-gen128-stop-special.json`
 - `benchmarks/results/2026-07-06/engine/package-token-prompt-bench-aq4-pagedattn-r9700-warmup-chat-gen128.json`
 - `benchmarks/results/2026-07-06/engine/package-token-prompt-bench-aq4-pagedattn-r9700-warmup-target256-gen256.json`

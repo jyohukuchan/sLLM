@@ -282,6 +282,7 @@ fn main() -> ExitCode {
                 env::args().nth(11),
                 env::args().nth(12),
                 env::args().nth(13),
+                env::args().nth(14),
             )
         }
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
@@ -15622,6 +15623,16 @@ fn parse_package_prompt_token_ids(value: Option<String>) -> Result<Vec<usize>, E
     }
 }
 
+fn parse_package_stop_token_ids(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
+    match value {
+        Some(raw) => match raw.trim() {
+            "" | "-" | "none" | "None" | "NONE" => Ok(Vec::new()),
+            _ => parse_usize_csv(&raw, "stop token IDs"),
+        },
+        None => Ok(Vec::new()),
+    }
+}
+
 fn parse_package_token_ids_rotary_dim(
     head_dim: usize,
     rotary_dim: Option<&str>,
@@ -15747,6 +15758,7 @@ fn package_token_ids_generate_smoke(
     rope_base: Option<String>,
     position_offset: Option<String>,
     lm_head_mode: Option<String>,
+    stop_token_ids: Option<String>,
 ) -> ExitCode {
     let Some(path) = path else {
         eprintln!("package-token-ids-generate-smoke requires a .ullm.d path");
@@ -15805,6 +15817,10 @@ fn package_token_ids_generate_smoke(
         Ok(value) => value,
         Err(code) => return code,
     };
+    let stop_token_ids = match parse_package_stop_token_ids(stop_token_ids) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
 
     match package_token_ids_generate_smoke_impl(
         &path,
@@ -15819,6 +15835,7 @@ fn package_token_ids_generate_smoke(
         rope_base,
         position_offset,
         lm_head_mode,
+        stop_token_ids,
     ) {
         Ok(report) => {
             println!("{report}");
@@ -15947,6 +15964,7 @@ fn package_token_ids_generate_smoke_impl(
     rope_base: f32,
     position_offset: usize,
     lm_head_mode: PackageLmHeadMode,
+    stop_token_ids: Vec<usize>,
 ) -> Result<String, String> {
     if env::var("ULLM_GENERATE_DECODE_MODE")
         .map(|value| value == "full_sequence_recompute_greedy")
@@ -15969,6 +15987,7 @@ fn package_token_ids_generate_smoke_impl(
             rotary_dim,
             rope_base,
             position_offset,
+            stop_token_ids,
         );
     }
     package_token_ids_generate_incremental_smoke_impl(
@@ -15984,6 +16003,7 @@ fn package_token_ids_generate_smoke_impl(
         rope_base,
         position_offset,
         lm_head_mode,
+        stop_token_ids,
     )
 }
 
@@ -16000,6 +16020,7 @@ fn package_token_ids_generate_recompute_smoke_impl(
     rotary_dim: Option<String>,
     rope_base: f32,
     position_offset: usize,
+    stop_token_ids: Vec<usize>,
 ) -> Result<String, String> {
     if prompt_token_ids.is_empty() {
         return Err(
@@ -16052,14 +16073,18 @@ fn package_token_ids_generate_recompute_smoke_impl(
     let mut decode_step_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut decode_sequence_lengths = Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut last_top_logits = prefill_top_logits.clone();
+    let mut stopped_on_token_id = None;
 
     if generated_tokens > 0 {
         let next = package_report_top_token_id(&prefill_report, "prefill")?;
         generated_token_ids.push(next);
         sequence_ids.push(next);
+        if stop_token_ids.contains(&next) {
+            stopped_on_token_id = Some(next);
+        }
     }
 
-    while generated_token_ids.len() < generated_tokens {
+    while generated_token_ids.len() < generated_tokens && stopped_on_token_id.is_none() {
         let step_started = Instant::now();
         let report_text = package_token_ids_logits_smoke_impl(
             path,
@@ -16083,6 +16108,9 @@ fn package_token_ids_generate_recompute_smoke_impl(
         decode_sequence_lengths.push(sequence_ids.len());
         generated_token_ids.push(next);
         sequence_ids.push(next);
+        if stop_token_ids.contains(&next) {
+            stopped_on_token_id = Some(next);
+        }
     }
 
     let decode_ms = if decode_step_ms.is_empty() {
@@ -16099,6 +16127,11 @@ fn package_token_ids_generate_recompute_smoke_impl(
         .checked_add(decode_sequence_lengths.iter().sum::<usize>())
         .ok_or_else(|| "full-sequence token count overflows".to_string())?;
     let kv_cache_bytes = 0_u64;
+    let stop_reason = if stopped_on_token_id.is_some() {
+        "stop_token"
+    } else {
+        "max_generated_tokens"
+    };
     let report = serde_json::json!({
         "schema_version": "package-token-ids-generate-smoke-v0.1",
         "package": path,
@@ -16118,6 +16151,12 @@ fn package_token_ids_generate_recompute_smoke_impl(
         "rotary_dim": resolved_rotary_dim,
         "rope_base": rope_base,
         "position_offset": position_offset,
+        "stop": {
+            "token_ids": stop_token_ids,
+            "stopped": stopped_on_token_id.is_some(),
+            "stopped_on_token_id": stopped_on_token_id,
+            "reason": stop_reason,
+        },
         "decode_mode": "full_sequence_recompute_greedy",
         "incremental_decode": false,
         "prefill": {
@@ -16737,6 +16776,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     rope_base: f32,
     position_offset: usize,
     lm_head_mode: PackageLmHeadMode,
+    stop_token_ids: Vec<usize>,
 ) -> Result<String, String> {
     if prompt_token_ids.is_empty() {
         return Err(
@@ -16978,12 +17018,16 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let mut decode_lm_head_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut decode_positions = Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut last_top_logits = prefill_top_logits.clone();
+    let mut stopped_on_token_id = None;
     if generated_tokens > 0 {
         generated_token_ids.push(first_generated);
         sequence_ids.push(first_generated);
+        if stop_token_ids.contains(&first_generated) {
+            stopped_on_token_id = Some(first_generated);
+        }
     }
 
-    while generated_token_ids.len() < generated_tokens {
+    while generated_token_ids.len() < generated_tokens && stopped_on_token_id.is_none() {
         let decode_started = Instant::now();
         let token_id = *sequence_ids
             .last()
@@ -17046,12 +17090,21 @@ fn package_token_ids_generate_incremental_smoke_impl(
         decode_positions.push(position);
         generated_token_ids.push(next);
         sequence_ids.push(next);
+        if stop_token_ids.contains(&next) {
+            stopped_on_token_id = Some(next);
+        }
     }
 
     let decode_ms = decode_step_ms.iter().sum::<f64>();
     let total_ms = run_started.elapsed().as_secs_f64() * 1000.0;
     let timed_decode_tokens = decode_step_ms.len();
     let decode_step_summary = timed_step_summary_json(&decode_step_ms);
+    let prompt_token_count = prompt_token_ids.len();
+    let stop_reason = if stopped_on_token_id.is_some() {
+        "stop_token"
+    } else {
+        "max_generated_tokens"
+    };
     let report = serde_json::json!({
         "schema_version": "package-token-ids-generate-smoke-v0.1",
         "package": path,
@@ -17073,14 +17126,20 @@ fn package_token_ids_generate_incremental_smoke_impl(
         "rotary_dim": resolved_rotary_dim,
         "rope_base": rope_base,
         "position_offset": position_offset,
+        "stop": {
+            "token_ids": stop_token_ids,
+            "stopped": stopped_on_token_id.is_some(),
+            "stopped_on_token_id": stopped_on_token_id,
+            "reason": stop_reason,
+        },
         "decode_mode": "hybrid_incremental_greedy",
         "incremental_decode": true,
         "prefill": {
-            "prompt_tokens": sequence_ids.len().saturating_sub(generated_tokens),
+            "prompt_tokens": prompt_token_count,
             "wall_ms": prefill_ms,
             "layers_wall_ms": prefill_layers_ms,
             "lm_head_wall_ms": prefill_lm_head_ms,
-            "tps": tps(sequence_ids.len().saturating_sub(generated_tokens), prefill_ms),
+            "tps": tps(prompt_token_count, prefill_ms),
             "top_logits": prefill_top_logits,
         },
         "decode": {
@@ -17526,6 +17585,23 @@ mod package_token_ids_logits_tests {
         assert_eq!(tokens, vec![1, 2, 3]);
 
         assert!(parse_package_prompt_token_ids(Some("len:0".to_string())).is_err());
+    }
+
+    #[test]
+    fn package_stop_token_ids_accepts_none_or_csv() {
+        assert_eq!(
+            parse_package_stop_token_ids(None).unwrap(),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            parse_package_stop_token_ids(Some("none".to_string())).unwrap(),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            parse_package_stop_token_ids(Some("1, 2,3".to_string())).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert!(parse_package_stop_token_ids(Some("1,,2".to_string())).is_err());
     }
 
     #[test]
@@ -27104,7 +27180,7 @@ fn print_help() {
         "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
     );
     eprintln!(
-        "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32]"
+        "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none]"
     );
     eprintln!(
         "package-token-ids-bench: same arguments as package-token-ids-generate-smoke; writes the same measured JSON report"
