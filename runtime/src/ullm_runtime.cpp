@@ -450,6 +450,18 @@ public:
             error);
     }
 
+    bool compile_linear_attn_qkv_prepare_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            linear_attn_qkv_prepare_kernel_source(),
+            "ullm_linear_attn_qkv_prepare_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_linear_attn_gate_beta_kernel(
         const std::string &arch,
         std::vector<char> *code,
@@ -1371,6 +1383,112 @@ extern "C" __global__ void ullm_depthwise_conv1d_f32_kernel(
                weight[channel * kernel_size + kernel];
     }
     output[index] = sum;
+}
+)";
+    }
+
+    static const char *linear_attn_qkv_prepare_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_linear_attn_qkv_conv_step_silu_f32_kernel(
+    const float *qkv,
+    const float *conv_weight,
+    float *conv_history,
+    unsigned long long channels,
+    unsigned long long kernel_size,
+    float *conv_output) {
+    const unsigned long long channel =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (channel >= channels) {
+        return;
+    }
+    for (unsigned long long kernel = 0; kernel + 1 < kernel_size; ++kernel) {
+        conv_history[kernel * channels + channel] =
+            conv_history[(kernel + 1ull) * channels + channel];
+    }
+    conv_history[(kernel_size - 1ull) * channels + channel] = qkv[channel];
+
+    float sum = 0.0f;
+    for (unsigned long long kernel = 0; kernel < kernel_size; ++kernel) {
+        sum += conv_history[kernel * channels + channel] *
+               conv_weight[channel * kernel_size + kernel];
+    }
+    const float sigmoid = 1.0f / (1.0f + expf(-sum));
+    conv_output[channel] = sum * sigmoid;
+}
+
+extern "C" __global__ void ullm_linear_attn_qkv_split_l2norm_f32_kernel(
+    const float *conv_output,
+    unsigned long long key_heads,
+    unsigned long long value_heads,
+    unsigned long long key_dim,
+    unsigned long long value_dim,
+    float q_scale,
+    int qk_l2_norm,
+    float *q_output,
+    float *k_output,
+    float *v_output) {
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[256];
+    const unsigned long long q_elements = key_heads * key_dim;
+    const unsigned long long k_base = q_elements;
+    const unsigned long long v_base = q_elements * 2ull;
+    const unsigned long long v_elements = value_heads * value_dim;
+    const unsigned long long block = blockIdx.x;
+
+    if (block < key_heads) {
+        const unsigned long long head = block;
+        const unsigned long long source_base = head * key_dim;
+        float sum_squares = 0.0f;
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const float value = conv_output[source_base + dim];
+            sum_squares += value * value;
+        }
+        partial[tid] = sum_squares;
+        __syncthreads();
+        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+            if (tid < offset) {
+                partial[tid] += partial[tid + offset];
+            }
+            __syncthreads();
+        }
+        const float norm = sqrtf(partial[0] + 1.0e-6f);
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const float value = conv_output[source_base + dim];
+            q_output[head * key_dim + dim] =
+                qk_l2_norm != 0 ? (value / norm) * q_scale : value * q_scale;
+        }
+        return;
+    }
+
+    if (block < key_heads * 2ull) {
+        const unsigned long long head = block - key_heads;
+        const unsigned long long source_base = k_base + head * key_dim;
+        float sum_squares = 0.0f;
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const float value = conv_output[source_base + dim];
+            sum_squares += value * value;
+        }
+        partial[tid] = sum_squares;
+        __syncthreads();
+        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+            if (tid < offset) {
+                partial[tid] += partial[tid + offset];
+            }
+            __syncthreads();
+        }
+        const float norm = sqrtf(partial[0] + 1.0e-6f);
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const float value = conv_output[source_base + dim];
+            k_output[head * key_dim + dim] = qk_l2_norm != 0 ? value / norm : value;
+        }
+        return;
+    }
+
+    const unsigned long long v_block = block - key_heads * 2ull;
+    const unsigned long long v_index = v_block * blockDim.x + tid;
+    if (v_index < v_elements) {
+        v_output[v_index] = conv_output[v_base + v_index];
+    }
 }
 )";
     }
@@ -5906,6 +6024,399 @@ ullm_status depthwise_conv1d_f32_hip_staging(
     return ULLM_STATUS_OK;
 }
 
+void linear_attn_qkv_prepare_f32_host(
+    const float *qkv,
+    const float *conv_weight,
+    float *conv_history,
+    size_t key_heads,
+    size_t value_heads,
+    size_t key_dim,
+    size_t value_dim,
+    size_t kernel_size,
+    float q_scale,
+    bool qk_l2_norm,
+    float *conv_output,
+    float *q_output,
+    float *k_output,
+    float *v_output) {
+    const size_t q_elements = key_heads * key_dim;
+    const size_t k_elements = q_elements;
+    const size_t v_elements = value_heads * value_dim;
+    const size_t channels = q_elements + k_elements + v_elements;
+    for (size_t channel = 0; channel < channels; ++channel) {
+        for (size_t kernel = 0; kernel + 1 < kernel_size; ++kernel) {
+            conv_history[kernel * channels + channel] =
+                conv_history[(kernel + 1) * channels + channel];
+        }
+        conv_history[(kernel_size - 1) * channels + channel] = qkv[channel];
+
+        float sum = 0.0f;
+        for (size_t kernel = 0; kernel < kernel_size; ++kernel) {
+            sum += conv_history[kernel * channels + channel] *
+                   conv_weight[channel * kernel_size + kernel];
+        }
+        const float sigmoid = 1.0f / (1.0f + std::exp(-sum));
+        conv_output[channel] = sum * sigmoid;
+    }
+
+    for (size_t head = 0; head < key_heads; ++head) {
+        const size_t q_source = head * key_dim;
+        const size_t k_source = q_elements + head * key_dim;
+        const size_t target = head * key_dim;
+        float q_square_sum = 0.0f;
+        float k_square_sum = 0.0f;
+        for (size_t dim = 0; dim < key_dim; ++dim) {
+            const float q_value = conv_output[q_source + dim];
+            const float k_value = conv_output[k_source + dim];
+            q_square_sum += q_value * q_value;
+            k_square_sum += k_value * k_value;
+        }
+        const float q_norm = std::sqrt(q_square_sum + 1.0e-6f);
+        const float k_norm = std::sqrt(k_square_sum + 1.0e-6f);
+        for (size_t dim = 0; dim < key_dim; ++dim) {
+            const float q_value = conv_output[q_source + dim];
+            const float k_value = conv_output[k_source + dim];
+            q_output[target + dim] = qk_l2_norm ? (q_value / q_norm) * q_scale : q_value * q_scale;
+            k_output[target + dim] = qk_l2_norm ? k_value / k_norm : k_value;
+        }
+    }
+
+    const size_t v_source = q_elements + k_elements;
+    std::memcpy(v_output, conv_output + v_source, v_elements * sizeof(float));
+}
+
+class HipLinearAttnQkvPrepareKernelCache {
+public:
+    bool functions_for_device(
+        int device_id,
+        void **conv_function,
+        void **split_function,
+        std::string *error) {
+        if (conv_function == nullptr || split_function == nullptr) {
+            append_error(error, "linear attention qkv prepare requested null function output");
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            *conv_function = found->second->conv_function;
+            *split_function = found->second->split_function;
+            return true;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return false;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_linear_attn_qkv_prepare_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *conv = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &conv,
+                    module,
+                    "ullm_linear_attn_qkv_conv_step_silu_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction conv failed for " + arch);
+                continue;
+            }
+            void *split = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &split,
+                    module,
+                    "ullm_linear_attn_qkv_split_l2norm_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction split failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->conv_function = conv;
+            loaded->split_function = split;
+            loaded->arch = arch;
+            *conv_function = loaded->conv_function;
+            *split_function = loaded->split_function;
+            modules_.emplace(device_id, std::move(loaded));
+            return true;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build linear attention qkv prepare HIP kernels"
+                                   : compile_errors);
+        return false;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *conv_function = nullptr;
+        void *split_function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipLinearAttnQkvPrepareKernelCache &hip_linear_attn_qkv_prepare_kernel_cache() {
+    static HipLinearAttnQkvPrepareKernelCache cache;
+    return cache;
+}
+
+bool linear_attn_qkv_prepare_f32_hip_kernel(
+    const ullm_runtime_buffer *qkv_buffer,
+    const ullm_runtime_buffer *conv_weight_buffer,
+    ullm_runtime_buffer *conv_history_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t key_dim,
+    size_t value_dim,
+    size_t kernel_size,
+    float q_scale,
+    bool qk_l2_norm,
+    ullm_runtime_buffer *conv_output_buffer,
+    ullm_runtime_buffer *q_output_buffer,
+    ullm_runtime_buffer *k_output_buffer,
+    ullm_runtime_buffer *v_output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = qkv_buffer->hip_device_id;
+    void *conv_function = nullptr;
+    void *split_function = nullptr;
+    if (!hip_linear_attn_qkv_prepare_kernel_cache().functions_for_device(
+            device_id,
+            &conv_function,
+            &split_function,
+            error)) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    const size_t q_elements = key_heads * key_dim;
+    const size_t v_elements = value_heads * value_dim;
+    const size_t channels = q_elements + q_elements + v_elements;
+    const size_t conv_grid_size = (channels + block_size - 1) / block_size;
+    const size_t v_grid_size = (v_elements + block_size - 1) / block_size;
+    const size_t split_grid_size = key_heads * 2 + v_grid_size;
+    if (conv_grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) ||
+        split_grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "linear attention qkv prepare grid size exceeds HIP limit";
+        }
+        return false;
+    }
+
+    void *qkv_ptr = qkv_buffer->ptr;
+    void *conv_weight_ptr = conv_weight_buffer->ptr;
+    void *conv_history_ptr = conv_history_buffer->ptr;
+    unsigned long long kernel_channels = static_cast<unsigned long long>(channels);
+    unsigned long long kernel_size_arg = static_cast<unsigned long long>(kernel_size);
+    void *conv_output_ptr = conv_output_buffer->ptr;
+    void *conv_params[] = {
+        &qkv_ptr,
+        &conv_weight_ptr,
+        &conv_history_ptr,
+        &kernel_channels,
+        &kernel_size_arg,
+        &conv_output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            conv_function,
+            static_cast<unsigned int>(conv_grid_size),
+            block_size,
+            conv_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for linear attention qkv conv prepare";
+        }
+        return false;
+    }
+
+    unsigned long long kernel_key_heads = static_cast<unsigned long long>(key_heads);
+    unsigned long long kernel_value_heads = static_cast<unsigned long long>(value_heads);
+    unsigned long long kernel_key_dim = static_cast<unsigned long long>(key_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    int kernel_qk_l2_norm = qk_l2_norm ? 1 : 0;
+    void *q_output_ptr = q_output_buffer->ptr;
+    void *k_output_ptr = k_output_buffer->ptr;
+    void *v_output_ptr = v_output_buffer->ptr;
+    void *split_params[] = {
+        &conv_output_ptr,
+        &kernel_key_heads,
+        &kernel_value_heads,
+        &kernel_key_dim,
+        &kernel_value_dim,
+        &q_scale,
+        &kernel_qk_l2_norm,
+        &q_output_ptr,
+        &k_output_ptr,
+        &v_output_ptr,
+    };
+    if (!hip_runtime().module_launch_kernel(
+            split_function,
+            static_cast<unsigned int>(split_grid_size),
+            block_size,
+            split_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for linear attention qkv split prepare";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status linear_attn_qkv_prepare_f32_hip_staging(
+    const ullm_runtime_buffer *qkv_buffer,
+    const ullm_runtime_buffer *conv_weight_buffer,
+    ullm_runtime_buffer *conv_history_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t key_dim,
+    size_t value_dim,
+    size_t kernel_size,
+    float q_scale,
+    bool qk_l2_norm,
+    size_t qkv_bytes,
+    size_t conv_history_bytes,
+    size_t q_bytes,
+    size_t k_bytes,
+    size_t v_bytes,
+    ullm_runtime_buffer *conv_output_buffer,
+    ullm_runtime_buffer *q_output_buffer,
+    ullm_runtime_buffer *k_output_buffer,
+    ullm_runtime_buffer *v_output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_qkv(qkv_bytes / sizeof(float));
+    std::vector<float> host_conv_weight(conv_history_bytes / sizeof(float));
+    std::vector<float> host_conv_history(conv_history_bytes / sizeof(float));
+    std::vector<float> host_conv_output(qkv_bytes / sizeof(float));
+    std::vector<float> host_q(q_bytes / sizeof(float));
+    std::vector<float> host_k(k_bytes / sizeof(float));
+    std::vector<float> host_v(v_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = qkv_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_qkv.data(),
+            qkv_buffer->ptr,
+            qkv_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_conv_weight.data(),
+            conv_weight_buffer->ptr,
+            conv_history_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_conv_history.data(),
+            conv_history_buffer->ptr,
+            conv_history_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy linear attention qkv prepare HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize linear attention qkv prepare HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+
+    linear_attn_qkv_prepare_f32_host(
+        host_qkv.data(),
+        host_conv_weight.data(),
+        host_conv_history.data(),
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        kernel_size,
+        q_scale,
+        qk_l2_norm,
+        host_conv_output.data(),
+        host_q.data(),
+        host_k.data(),
+        host_v.data());
+
+    if (!hip_runtime().copy_async(
+            conv_history_buffer->ptr,
+            host_conv_history.data(),
+            conv_history_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            conv_output_buffer->ptr,
+            host_conv_output.data(),
+            qkv_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            q_output_buffer->ptr,
+            host_q.data(),
+            q_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            k_output_buffer->ptr,
+            host_k.data(),
+            k_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            v_output_buffer->ptr,
+            host_v.data(),
+            v_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy linear attention qkv prepare outputs to HIP buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize linear attention qkv prepare HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
 void linear_attn_gate_beta_f32_host(
     const float *a,
     const float *b,
@@ -7597,6 +8108,173 @@ ullm_status ullm_runtime_aq4_matvec_gate_beta_f32(
         cols,
         gate_output_buffer,
         beta_output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_linear_attn_qkv_prepare_f32(
+    const ullm_runtime_buffer *qkv_buffer,
+    const ullm_runtime_buffer *conv_weight_buffer,
+    ullm_runtime_buffer *conv_history_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t key_dim,
+    size_t value_dim,
+    size_t kernel_size,
+    float q_scale,
+    int qk_l2_norm,
+    ullm_runtime_buffer *conv_output_buffer,
+    ullm_runtime_buffer *q_output_buffer,
+    ullm_runtime_buffer *k_output_buffer,
+    ullm_runtime_buffer *v_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (qkv_buffer == nullptr || conv_weight_buffer == nullptr ||
+        conv_history_buffer == nullptr || conv_output_buffer == nullptr ||
+        q_output_buffer == nullptr || k_output_buffer == nullptr || v_output_buffer == nullptr) {
+        set_error("linear attention qkv prepare received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (key_heads == 0 || value_heads == 0 || key_dim == 0 || value_dim == 0 ||
+        kernel_size == 0) {
+        set_error("linear attention qkv prepare dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(q_scale)) {
+        set_error("linear attention qkv prepare q_scale must be finite");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(qkv_buffer, conv_weight_buffer) ||
+        !buffers_share_backend(qkv_buffer, conv_history_buffer) ||
+        !buffers_share_backend(qkv_buffer, conv_output_buffer) ||
+        !buffers_share_backend(qkv_buffer, q_output_buffer) ||
+        !buffers_share_backend(qkv_buffer, k_output_buffer) ||
+        !buffers_share_backend(qkv_buffer, v_output_buffer)) {
+        set_error("linear attention qkv prepare buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(conv_output_buffer, stream) ||
+        !stream_matches_buffer(q_output_buffer, stream) ||
+        !stream_matches_buffer(k_output_buffer, stream) ||
+        !stream_matches_buffer(v_output_buffer, stream)) {
+        set_error("linear attention qkv prepare stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (key_heads > max_size / key_dim || value_heads > max_size / value_dim) {
+        set_error("linear attention qkv prepare element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = key_heads * key_dim;
+    const size_t k_elements = q_elements;
+    const size_t v_elements = value_heads * value_dim;
+    if (q_elements > max_size - k_elements || q_elements + k_elements > max_size - v_elements) {
+        set_error("linear attention qkv prepare channel count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t channels = q_elements + k_elements + v_elements;
+    if (channels > max_size / kernel_size ||
+        channels > max_size / sizeof(float) ||
+        q_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float)) {
+        set_error("linear attention qkv prepare byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t qkv_bytes = channels * sizeof(float);
+    const size_t conv_history_bytes = channels * kernel_size * sizeof(float);
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    if (qkv_buffer->bytes < qkv_bytes) {
+        set_error("linear attention qkv prepare qkv buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (conv_weight_buffer->bytes < conv_history_bytes) {
+        set_error("linear attention qkv prepare conv weight buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (conv_history_buffer->bytes < conv_history_bytes) {
+        set_error("linear attention qkv prepare conv history buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (conv_output_buffer->bytes < qkv_bytes) {
+        set_error("linear attention qkv prepare conv output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_output_buffer->bytes < q_bytes || k_output_buffer->bytes < k_bytes ||
+        v_output_buffer->bytes < v_bytes) {
+        set_error("linear attention qkv prepare output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (qkv_buffer->backend == BackendKind::Cpu) {
+        linear_attn_qkv_prepare_f32_host(
+            static_cast<const float *>(qkv_buffer->ptr),
+            static_cast<const float *>(conv_weight_buffer->ptr),
+            static_cast<float *>(conv_history_buffer->ptr),
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            q_scale,
+            qk_l2_norm != 0,
+            static_cast<float *>(conv_output_buffer->ptr),
+            static_cast<float *>(q_output_buffer->ptr),
+            static_cast<float *>(k_output_buffer->ptr),
+            static_cast<float *>(v_output_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (linear_attn_qkv_prepare_f32_hip_kernel(
+            qkv_buffer,
+            conv_weight_buffer,
+            conv_history_buffer,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            q_scale,
+            qk_l2_norm != 0,
+            conv_output_buffer,
+            q_output_buffer,
+            k_output_buffer,
+            v_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "linear attention qkv prepare HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return linear_attn_qkv_prepare_f32_hip_staging(
+        qkv_buffer,
+        conv_weight_buffer,
+        conv_history_buffer,
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        kernel_size,
+        q_scale,
+        qk_l2_norm != 0,
+        qkv_bytes,
+        conv_history_bytes,
+        q_bytes,
+        k_bytes,
+        v_bytes,
+        conv_output_buffer,
+        q_output_buffer,
+        k_output_buffer,
+        v_output_buffer,
         stream);
 }
 

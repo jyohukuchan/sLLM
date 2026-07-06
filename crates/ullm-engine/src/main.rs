@@ -28003,13 +28003,12 @@ struct PackageLinearAttnResidentStepLayer {
     key_dim: usize,
     value_dim: usize,
     hidden: usize,
-    qkv_step_elements: usize,
     q_scale: f32,
     qk_l2_norm: bool,
     kernel_size: usize,
-    conv_history: Vec<f32>,
-    conv_weight: Vec<f32>,
     input_norm_weight: Vec<f32>,
+    conv_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
     a_log_buffer: ullm_runtime_sys::RuntimeBuffer,
     dt_bias_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_norm_weight: Vec<f32>,
@@ -28025,6 +28024,7 @@ struct PackageLinearAttnResidentStepLayer {
     input_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     qkv_buffer: ullm_runtime_sys::RuntimeBuffer,
+    qkv_conv_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     z_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_q_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_k_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -28270,6 +28270,8 @@ impl PackageLinearAttnResidentStepLayer {
             qkv_step_elements.checked_mul(kernel_size).ok_or_else(|| {
                 "linear-attn resident conv history element count overflows".to_string()
             })?;
+        let conv_history_bytes =
+            checked_f32_byte_len(conv_history_elements, "linear-attn resident conv history")?;
         let state_elements = value_heads
             .checked_mul(key_dim)
             .and_then(|value| value.checked_mul(value_dim))
@@ -28298,6 +28300,12 @@ impl PackageLinearAttnResidentStepLayer {
             .map_err(|err| {
                 format!("failed to allocate linear-attn resident post norm weight: {err}")
             })?;
+        let mut conv_weight_buffer = context
+            .alloc_buffer(conv_history_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident conv weight: {err}"))?;
+        let mut conv_history_buffer = context.alloc_buffer(conv_history_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident conv history: {err}")
+        })?;
 
         let input_buffer = context
             .alloc_buffer(hidden_bytes)
@@ -28308,6 +28316,9 @@ impl PackageLinearAttnResidentStepLayer {
         let qkv_buffer = context
             .alloc_buffer(qkv_step_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident qkv: {err}"))?;
+        let qkv_conv_output_buffer = context.alloc_buffer(qkv_step_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident qkv conv output: {err}")
+        })?;
         let z_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident z: {err}"))?;
@@ -28376,6 +28387,18 @@ impl PackageLinearAttnResidentStepLayer {
                 Some(stream),
             )
             .map_err(|err| format!("failed to copy linear-attn resident post norm: {err}"))?;
+        conv_weight_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&conv.values), Some(stream))
+            .map_err(|err| format!("failed to copy linear-attn resident conv weight: {err}"))?;
+        conv_history_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; conv_history_elements]),
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to initialize linear-attn resident conv history: {err}")
+            })?;
         recurrent_state_buffer
             .copy_from_host(
                 0,
@@ -28394,13 +28417,12 @@ impl PackageLinearAttnResidentStepLayer {
             key_dim,
             value_dim,
             hidden,
-            qkv_step_elements,
             q_scale,
             qk_l2_norm,
             kernel_size,
-            conv_history: vec![0.0_f32; conv_history_elements],
-            conv_weight: conv.values,
             input_norm_weight: input_norm_weight_values,
+            conv_weight_buffer,
+            conv_history_buffer,
             a_log_buffer,
             dt_bias_buffer,
             attn_norm_weight: attn_norm.values,
@@ -28416,6 +28438,7 @@ impl PackageLinearAttnResidentStepLayer {
             input_buffer,
             input_normed_buffer,
             qkv_buffer,
+            qkv_conv_output_buffer,
             z_buffer,
             recurrent_q_buffer,
             recurrent_k_buffer,
@@ -28474,39 +28497,25 @@ impl PackageLinearAttnResidentStepLayer {
             stream,
             "linear-attn resident z projection",
         )?;
-        let qkv_step = read_runtime_buffer_f32(
-            &self.qkv_buffer,
-            stream,
-            self.qkv_step_elements,
-            "linear-attn resident qkv",
-        )?;
 
-        if self.kernel_size > 1 {
-            self.conv_history.rotate_left(self.qkv_step_elements);
-        }
-        let latest_start = (self.kernel_size - 1) * self.qkv_step_elements;
-        self.conv_history[latest_start..latest_start + self.qkv_step_elements]
-            .copy_from_slice(&qkv_step);
-        let mut conv_step = vec![0.0_f32; self.qkv_step_elements];
-        for channel in 0..self.qkv_step_elements {
-            let mut value = 0.0_f32;
-            for kernel in 0..self.kernel_size {
-                value += self.conv_history[kernel * self.qkv_step_elements + channel]
-                    * self.conv_weight[channel * self.kernel_size + kernel];
-            }
-            conv_step[channel] = value;
-        }
-        let conv_step = runtime_host_silu_f32(&conv_step);
-        let qkv_split = split_linear_attn_qkv_for_recurrent(
-            &conv_step,
-            1,
+        ullm_runtime_sys::linear_attn_qkv_prepare_f32(
+            &self.qkv_buffer,
+            &self.conv_weight_buffer,
+            &mut self.conv_history_buffer,
             self.key_heads,
             self.value_heads,
             self.key_dim,
             self.value_dim,
-            self.qk_l2_norm,
+            self.kernel_size,
             self.q_scale,
-        )?;
+            self.qk_l2_norm,
+            &mut self.qkv_conv_output_buffer,
+            &mut self.recurrent_q_buffer,
+            &mut self.recurrent_k_buffer,
+            &mut self.recurrent_v_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run linear-attn resident qkv prepare: {err}"))?;
         self.a_matrix.matvec_gate_beta_with(
             &self.b_matrix,
             &self.input_normed_buffer,
@@ -28517,15 +28526,6 @@ impl PackageLinearAttnResidentStepLayer {
             stream,
             "linear-attn resident a/b gate-beta",
         )?;
-        self.recurrent_q_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&qkv_split.q), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident recurrent q: {err}"))?;
-        self.recurrent_k_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&qkv_split.k), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident recurrent k: {err}"))?;
-        self.recurrent_v_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&qkv_split.v), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident recurrent v: {err}"))?;
         ullm_runtime_sys::linear_attn_recurrent_f32(
             &self.recurrent_q_buffer,
             &self.recurrent_k_buffer,

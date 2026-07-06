@@ -280,6 +280,23 @@ ullm_status ullm_runtime_paged_kv_write_f32(
     ullm_runtime_buffer *v_cache_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_linear_attn_qkv_prepare_f32(
+    const ullm_runtime_buffer *qkv_buffer,
+    const ullm_runtime_buffer *conv_weight_buffer,
+    ullm_runtime_buffer *conv_history_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t key_dim,
+    size_t value_dim,
+    size_t kernel_size,
+    float q_scale,
+    int qk_l2_norm,
+    ullm_runtime_buffer *conv_output_buffer,
+    ullm_runtime_buffer *q_output_buffer,
+    ullm_runtime_buffer *k_output_buffer,
+    ullm_runtime_buffer *v_output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_linear_attn_gate_beta_f32(
     const ullm_runtime_buffer *a_buffer,
     const ullm_runtime_buffer *b_buffer,
