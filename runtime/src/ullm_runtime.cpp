@@ -354,16 +354,18 @@ public:
     }
 
     bool compile_aq4_matvec_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
-        return compile_kernel(arch, aq4_matvec_kernel_source(), "ullm_aq4_matvec_f32.hip", code, error);
+        const std::string source = aq4_matvec_kernel_source_for_arch(arch);
+        return compile_kernel(arch, source.c_str(), "ullm_aq4_matvec_f32.hip", code, error);
     }
 
     bool compile_aq4_matvec_add_kernel(
         const std::string &arch,
         std::vector<char> *code,
         std::string *error) {
+        const std::string source = aq4_matvec_add_kernel_source_for_arch(arch);
         return compile_kernel(
             arch,
-            aq4_matvec_add_kernel_source(),
+            source.c_str(),
             "ullm_aq4_matvec_add_f32.hip",
             code,
             error);
@@ -373,9 +375,10 @@ public:
         const std::string &arch,
         std::vector<char> *code,
         std::string *error) {
+        const std::string source = aq4_matvec_silu_mul_kernel_source_for_arch(arch);
         return compile_kernel(
             arch,
-            aq4_matvec_silu_mul_kernel_source(),
+            source.c_str(),
             "ullm_aq4_matvec_silu_mul_f32.hip",
             code,
             error);
@@ -385,9 +388,10 @@ public:
         const std::string &arch,
         std::vector<char> *code,
         std::string *error) {
+        const std::string source = aq4_matvec_gate_beta_kernel_source_for_arch(arch);
         return compile_kernel(
             arch,
-            aq4_matvec_gate_beta_kernel_source(),
+            source.c_str(),
             "ullm_aq4_matvec_gate_beta_f32.hip",
             code,
             error);
@@ -678,6 +682,31 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
 )";
     }
 
+    static unsigned int aq4_rows_per_block_for_arch(const std::string &arch) {
+        return arch.rfind("gfx12", 0) == 0 ? 4u : 1u;
+    }
+
+    static std::string aq4_rows_per_block_preamble(const std::string &arch) {
+        return "#define ULLM_AQ4_ROWS_PER_BLOCK " +
+               std::to_string(aq4_rows_per_block_for_arch(arch)) + "\n";
+    }
+
+    static std::string aq4_matvec_kernel_source_for_arch(const std::string &arch) {
+        return aq4_rows_per_block_preamble(arch) + aq4_matvec_kernel_source();
+    }
+
+    static std::string aq4_matvec_add_kernel_source_for_arch(const std::string &arch) {
+        return aq4_rows_per_block_preamble(arch) + aq4_matvec_add_kernel_source();
+    }
+
+    static std::string aq4_matvec_silu_mul_kernel_source_for_arch(const std::string &arch) {
+        return aq4_rows_per_block_preamble(arch) + aq4_matvec_silu_mul_kernel_source();
+    }
+
+    static std::string aq4_matvec_gate_beta_kernel_source_for_arch(const std::string &arch) {
+        return aq4_rows_per_block_preamble(arch) + aq4_matvec_gate_beta_kernel_source();
+    }
+
     static const char *aq4_matvec_kernel_source() {
         return R"(
 extern "C" __global__ void ullm_aq4_matvec_f32_kernel(
@@ -693,10 +722,10 @@ extern "C" __global__ void ullm_aq4_matvec_f32_kernel(
     unsigned long long row_scale_count,
     unsigned long long rows,
     unsigned long long cols,
-    unsigned int rows_per_block,
     float *output) {
     const unsigned int tid = threadIdx.x;
-    const unsigned int threads_per_row = blockDim.x / rows_per_block;
+    constexpr unsigned int rows_per_block = ULLM_AQ4_ROWS_PER_BLOCK;
+    constexpr unsigned int threads_per_row = 256u / rows_per_block;
     const unsigned int row_in_block = tid / threads_per_row;
     const unsigned int lane = tid - row_in_block * threads_per_row;
     const unsigned long long row =
@@ -833,10 +862,10 @@ extern "C" __global__ void ullm_aq4_matvec_add_f32_kernel(
     unsigned long long row_scale_count,
     unsigned long long rows,
     unsigned long long cols,
-    unsigned int rows_per_block,
     float *output) {
     const unsigned int tid = threadIdx.x;
-    const unsigned int threads_per_row = blockDim.x / rows_per_block;
+    constexpr unsigned int rows_per_block = ULLM_AQ4_ROWS_PER_BLOCK;
+    constexpr unsigned int threads_per_row = 256u / rows_per_block;
     const unsigned int row_in_block = tid / threads_per_row;
     const unsigned int lane = tid - row_in_block * threads_per_row;
     const unsigned long long row =
@@ -956,10 +985,10 @@ extern "C" __global__ void ullm_aq4_matvec_silu_mul_f32_kernel(
     const float *input,
     unsigned long long rows,
     unsigned long long cols,
-    unsigned int rows_per_block,
     float *output) {
     const unsigned int tid = threadIdx.x;
-    const unsigned int threads_per_row = blockDim.x / rows_per_block;
+    constexpr unsigned int rows_per_block = ULLM_AQ4_ROWS_PER_BLOCK;
+    constexpr unsigned int threads_per_row = 256u / rows_per_block;
     const unsigned int row_in_block = tid / threads_per_row;
     const unsigned int lane = tid - row_in_block * threads_per_row;
     const unsigned long long row =
@@ -1103,11 +1132,11 @@ extern "C" __global__ void ullm_aq4_matvec_gate_beta_f32_kernel(
     const float *dt_bias,
     unsigned long long heads,
     unsigned long long cols,
-    unsigned int rows_per_block,
     float *gate_output,
     float *beta_output) {
     const unsigned int tid = threadIdx.x;
-    const unsigned int threads_per_row = blockDim.x / rows_per_block;
+    constexpr unsigned int rows_per_block = ULLM_AQ4_ROWS_PER_BLOCK;
+    constexpr unsigned int threads_per_row = 256u / rows_per_block;
     const unsigned int row_in_block = tid / threads_per_row;
     const unsigned int lane = tid - row_in_block * threads_per_row;
     const unsigned long long head =
@@ -3368,7 +3397,6 @@ bool aq4_matvec_f32_hip_kernel(
     void *row_scale_ptr = row_scale_buffer == nullptr ? nullptr : row_scale_buffer->ptr;
     void *output_ptr = output_buffer->ptr;
     unsigned long long kernel_row_scale_count = static_cast<unsigned long long>(row_scale_count);
-    unsigned int kernel_rows_per_block = launch_config.rows_per_block;
     void *kernel_params[] = {
         &index_ptr,
         &scale_ptr,
@@ -3382,7 +3410,6 @@ bool aq4_matvec_f32_hip_kernel(
         &kernel_row_scale_count,
         &kernel_rows,
         &kernel_cols,
-        &kernel_rows_per_block,
         &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
@@ -3446,7 +3473,6 @@ bool aq4_matvec_add_f32_hip_kernel(
     void *row_scale_ptr = row_scale_buffer == nullptr ? nullptr : row_scale_buffer->ptr;
     void *output_ptr = output_buffer->ptr;
     unsigned long long kernel_row_scale_count = static_cast<unsigned long long>(row_scale_count);
-    unsigned int kernel_rows_per_block = launch_config.rows_per_block;
     void *kernel_params[] = {
         &index_ptr,
         &scale_ptr,
@@ -3461,7 +3487,6 @@ bool aq4_matvec_add_f32_hip_kernel(
         &kernel_row_scale_count,
         &kernel_rows,
         &kernel_cols,
-        &kernel_rows_per_block,
         &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
@@ -3857,7 +3882,6 @@ bool aq4_matvec_silu_mul_f32_hip_kernel(
     void *input_ptr = input_buffer->ptr;
     unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
     unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
-    unsigned int kernel_rows_per_block = launch_config.rows_per_block;
     void *output_ptr = output_buffer->ptr;
     void *kernel_params[] = {
         &gate_index_ptr,
@@ -3881,7 +3905,6 @@ bool aq4_matvec_silu_mul_f32_hip_kernel(
         &input_ptr,
         &kernel_rows,
         &kernel_cols,
-        &kernel_rows_per_block,
         &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
@@ -4220,7 +4243,6 @@ bool aq4_matvec_gate_beta_f32_hip_kernel(
     void *dt_bias_ptr = dt_bias_buffer->ptr;
     unsigned long long kernel_heads = static_cast<unsigned long long>(heads);
     unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
-    unsigned int kernel_rows_per_block = launch_config.rows_per_block;
     void *gate_output_ptr = gate_output_buffer->ptr;
     void *beta_output_ptr = beta_output_buffer->ptr;
     void *kernel_params[] = {
@@ -4247,7 +4269,6 @@ bool aq4_matvec_gate_beta_f32_hip_kernel(
         &dt_bias_ptr,
         &kernel_heads,
         &kernel_cols,
-        &kernel_rows_per_block,
         &gate_output_ptr,
         &beta_output_ptr,
     };
