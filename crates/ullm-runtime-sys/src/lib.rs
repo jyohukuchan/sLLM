@@ -111,6 +111,33 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_aq4_matvec_pair_f32(
+        left_index_buffer: *const RawRuntimeBuffer,
+        left_scale_buffer: *const RawRuntimeBuffer,
+        left_codebook_buffer: *const RawRuntimeBuffer,
+        left_scale_values_buffer: *const RawRuntimeBuffer,
+        left_row_scale_buffer: *const RawRuntimeBuffer,
+        left_scale_count: usize,
+        left_group_size: usize,
+        left_tensor_scale: f32,
+        left_row_scale_count: usize,
+        right_index_buffer: *const RawRuntimeBuffer,
+        right_scale_buffer: *const RawRuntimeBuffer,
+        right_codebook_buffer: *const RawRuntimeBuffer,
+        right_scale_values_buffer: *const RawRuntimeBuffer,
+        right_row_scale_buffer: *const RawRuntimeBuffer,
+        right_scale_count: usize,
+        right_group_size: usize,
+        right_tensor_scale: f32,
+        right_row_scale_count: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        left_rows: usize,
+        right_rows: usize,
+        cols: usize,
+        left_output_buffer: *mut RawRuntimeBuffer,
+        right_output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_aq4_matvec_silu_mul_f32(
         gate_index_buffer: *const RawRuntimeBuffer,
         gate_scale_buffer: *const RawRuntimeBuffer,
@@ -756,6 +783,152 @@ pub fn aq4_matvec_add_f32(
             rows,
             cols,
             output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn aq4_matvec_pair_f32(
+    left_index_buffer: &RuntimeBuffer,
+    left_scale_buffer: &RuntimeBuffer,
+    left_codebook_buffer: &RuntimeBuffer,
+    left_scale_values_buffer: &RuntimeBuffer,
+    left_row_scale_buffer: Option<&RuntimeBuffer>,
+    left_scale_count: usize,
+    left_group_size: usize,
+    left_tensor_scale: f32,
+    left_row_scale_count: usize,
+    right_index_buffer: &RuntimeBuffer,
+    right_scale_buffer: &RuntimeBuffer,
+    right_codebook_buffer: &RuntimeBuffer,
+    right_scale_values_buffer: &RuntimeBuffer,
+    right_row_scale_buffer: Option<&RuntimeBuffer>,
+    right_scale_count: usize,
+    right_group_size: usize,
+    right_tensor_scale: f32,
+    right_row_scale_count: usize,
+    input_buffer: &RuntimeBuffer,
+    left_rows: usize,
+    right_rows: usize,
+    cols: usize,
+    left_output_buffer: &mut RuntimeBuffer,
+    right_output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if left_scale_count == 0 || right_scale_count == 0 {
+        return Err("AQ4 matvec pair scale table is empty".to_string());
+    }
+    if left_group_size == 0 || right_group_size == 0 {
+        return Err("AQ4 matvec pair group size must be greater than zero".to_string());
+    }
+    if left_rows == 0 || right_rows == 0 || cols == 0 {
+        return Err("AQ4 matvec pair rows and cols must be greater than zero".to_string());
+    }
+    if !left_tensor_scale.is_finite()
+        || left_tensor_scale <= 0.0
+        || !right_tensor_scale.is_finite()
+        || right_tensor_scale <= 0.0
+    {
+        return Err(
+            "AQ4 matvec pair tensor scale must be finite and greater than zero".to_string(),
+        );
+    }
+    let left_elements = left_rows
+        .checked_mul(cols)
+        .ok_or_else(|| "AQ4 matvec pair left matrix element count overflows".to_string())?;
+    let right_elements = right_rows
+        .checked_mul(cols)
+        .ok_or_else(|| "AQ4 matvec pair right matrix element count overflows".to_string())?;
+    let left_index_bytes = left_elements / 2 + usize::from(!left_elements.is_multiple_of(2));
+    let right_index_bytes = right_elements / 2 + usize::from(!right_elements.is_multiple_of(2));
+    let left_groups = left_elements / left_group_size
+        + usize::from(!left_elements.is_multiple_of(left_group_size));
+    let right_groups = right_elements / right_group_size
+        + usize::from(!right_elements.is_multiple_of(right_group_size));
+    let left_scale_value_bytes = left_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec pair left scale value byte size overflows".to_string())?;
+    let right_scale_value_bytes = right_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec pair right scale value byte size overflows".to_string())?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec pair input byte size overflows".to_string())?;
+    let left_output_bytes = left_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec pair left output byte size overflows".to_string())?;
+    let right_output_bytes = right_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec pair right output byte size overflows".to_string())?;
+    let left_row_scale_bytes = left_row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec pair left row scale byte size overflows".to_string())?;
+    let right_row_scale_bytes = right_row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec pair right row scale byte size overflows".to_string())?;
+    check_copy_range(0, left_index_bytes, left_index_buffer.size()?)?;
+    check_copy_range(0, right_index_bytes, right_index_buffer.size()?)?;
+    check_copy_range(0, left_groups, left_scale_buffer.size()?)?;
+    check_copy_range(0, right_groups, right_scale_buffer.size()?)?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        left_codebook_buffer.size()?,
+    )?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        right_codebook_buffer.size()?,
+    )?;
+    check_copy_range(0, left_scale_value_bytes, left_scale_values_buffer.size()?)?;
+    check_copy_range(
+        0,
+        right_scale_value_bytes,
+        right_scale_values_buffer.size()?,
+    )?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    if let Some(left_row_scale_buffer) = left_row_scale_buffer {
+        check_copy_range(0, left_row_scale_bytes, left_row_scale_buffer.size()?)?;
+    }
+    if let Some(right_row_scale_buffer) = right_row_scale_buffer {
+        check_copy_range(0, right_row_scale_bytes, right_row_scale_buffer.size()?)?;
+    }
+    check_copy_range(0, left_output_bytes, left_output_buffer.size()?)?;
+    check_copy_range(0, right_output_bytes, right_output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    let left_row_scale_raw = left_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let right_row_scale_raw = right_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    status_to_result(unsafe {
+        ullm_runtime_aq4_matvec_pair_f32(
+            left_index_buffer.raw.as_ptr(),
+            left_scale_buffer.raw.as_ptr(),
+            left_codebook_buffer.raw.as_ptr(),
+            left_scale_values_buffer.raw.as_ptr(),
+            left_row_scale_raw,
+            left_scale_count,
+            left_group_size,
+            left_tensor_scale,
+            left_row_scale_count,
+            right_index_buffer.raw.as_ptr(),
+            right_scale_buffer.raw.as_ptr(),
+            right_codebook_buffer.raw.as_ptr(),
+            right_scale_values_buffer.raw.as_ptr(),
+            right_row_scale_raw,
+            right_scale_count,
+            right_group_size,
+            right_tensor_scale,
+            right_row_scale_count,
+            input_buffer.raw.as_ptr(),
+            left_rows,
+            right_rows,
+            cols,
+            left_output_buffer.raw.as_ptr(),
+            right_output_buffer.raw.as_ptr(),
             stream,
         )
     })
@@ -4181,6 +4354,103 @@ mod tests {
     }
 
     #[test]
+    fn cpu_aq4_matvec_pair_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut left_index = context.alloc_buffer(2).unwrap();
+        let mut left_scale = context.alloc_buffer(2).unwrap();
+        let mut left_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut left_scale_values = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut right_index = context.alloc_buffer(1).unwrap();
+        let mut right_scale = context.alloc_buffer(1).unwrap();
+        let mut right_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut right_scale_values = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut input = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut left_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut right_output = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+
+        left_index
+            .copy_from_host(0, &[0x21_u8, 0x43], Some(&mut stream))
+            .unwrap();
+        left_scale
+            .copy_from_host(0, &[0_u8, 0], Some(&mut stream))
+            .unwrap();
+        right_index
+            .copy_from_host(0, &[0x65_u8], Some(&mut stream))
+            .unwrap();
+        right_scale
+            .copy_from_host(0, &[0_u8], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        left_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        right_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        left_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[1.0]), Some(&mut stream))
+            .unwrap();
+        right_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[1.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[2.0, 3.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_matvec_pair_f32(
+            &left_index,
+            &left_scale,
+            &left_codebook,
+            &left_scale_values,
+            None,
+            1,
+            2,
+            1.0,
+            0,
+            &right_index,
+            &right_scale,
+            &right_codebook,
+            &right_scale_values,
+            None,
+            1,
+            2,
+            1.0,
+            0,
+            &input,
+            2,
+            1,
+            2,
+            &mut left_output,
+            &mut right_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut left_output_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut right_output_bytes = vec![0_u8; std::mem::size_of::<f32>()];
+        left_output
+            .copy_to_host(0, &mut left_output_bytes, Some(&mut stream))
+            .unwrap();
+        right_output
+            .copy_to_host(0, &mut right_output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&left_output_bytes), vec![8.0, 18.0]);
+        assert_eq!(le_bytes_to_f32s(&right_output_bytes), vec![28.0]);
+    }
+
+    #[test]
     fn cpu_aq4_matvec_add_f32_computes_expected_values() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -4584,6 +4854,106 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_eq!(le_bytes_to_f32s(&output_bytes), vec![112.5, 30.0]);
+    }
+
+    #[test]
+    fn first_hip_aq4_matvec_pair_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut left_index = context.alloc_buffer(2).unwrap();
+        let mut left_scale = context.alloc_buffer(2).unwrap();
+        let mut left_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut left_scale_values = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut right_index = context.alloc_buffer(1).unwrap();
+        let mut right_scale = context.alloc_buffer(1).unwrap();
+        let mut right_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut right_scale_values = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut input = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut left_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut right_output = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+
+        left_index
+            .copy_from_host(0, &[0x21_u8, 0x43], Some(&mut stream))
+            .unwrap();
+        left_scale
+            .copy_from_host(0, &[0_u8, 0], Some(&mut stream))
+            .unwrap();
+        right_index
+            .copy_from_host(0, &[0x65_u8], Some(&mut stream))
+            .unwrap();
+        right_scale
+            .copy_from_host(0, &[0_u8], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        left_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        right_codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        left_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[1.0]), Some(&mut stream))
+            .unwrap();
+        right_scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[1.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[2.0, 3.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_matvec_pair_f32(
+            &left_index,
+            &left_scale,
+            &left_codebook,
+            &left_scale_values,
+            None,
+            1,
+            2,
+            1.0,
+            0,
+            &right_index,
+            &right_scale,
+            &right_codebook,
+            &right_scale_values,
+            None,
+            1,
+            2,
+            1.0,
+            0,
+            &input,
+            2,
+            1,
+            2,
+            &mut left_output,
+            &mut right_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut left_output_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut right_output_bytes = vec![0_u8; std::mem::size_of::<f32>()];
+        left_output
+            .copy_to_host(0, &mut left_output_bytes, Some(&mut stream))
+            .unwrap();
+        right_output
+            .copy_to_host(0, &mut right_output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&left_output_bytes), vec![8.0, 18.0]);
+        assert_eq!(le_bytes_to_f32s(&right_output_bytes), vec![28.0]);
     }
 
     #[test]

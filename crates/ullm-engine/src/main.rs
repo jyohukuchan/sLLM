@@ -17481,6 +17481,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     }
     let sync_linear_attn_components_for_timing =
         env_flag_enabled("ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING");
+    let use_aq4_matvec_pair_qkv_z = !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_QKV_Z");
 
     let run_started = Instant::now();
     let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
@@ -17958,6 +17959,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "sync_layers_for_timing": sync_decode_layers_for_timing,
             "sync_each_layer_for_timing": sync_decode_each_layer_for_timing,
             "sync_linear_attn_components_for_timing": sync_linear_attn_components_for_timing,
+            "use_aq4_matvec_pair_qkv_z": use_aq4_matvec_pair_qkv_z,
             "positions": decode_positions,
             "step_wall_ms": decode_step_ms,
             "step_wall_summary": decode_step_summary,
@@ -28848,6 +28850,7 @@ struct PackageAq4ResidentMatvec {
 }
 
 static AQ4_MATVEC_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_PAIR_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_ADD_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_SILU_MUL_PREWARMED: AtomicBool = AtomicBool::new(false);
@@ -28882,6 +28885,47 @@ fn prewarm_aq4_matvec_once(
     })();
     if result.is_err() {
         AQ4_MATVEC_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+fn prewarm_aq4_matvec_pair_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    left: &PackageAq4ResidentMatvec,
+    right: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    left_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    right_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_PAIR_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; left.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        left.matvec_pair_with(
+            right,
+            input_buffer,
+            left_output_buffer,
+            right_output_buffer,
+            stream,
+            label,
+        )?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_PAIR_PREWARMED.store(false, Ordering::Release);
     }
     result
 }
@@ -29299,6 +29343,60 @@ impl PackageAq4ResidentMatvec {
             Some(stream),
         )
         .map_err(|err| format!("failed to run {label} AQ4 matvec add: {err}"))
+    }
+
+    fn matvec_pair_with(
+        &self,
+        right: &Self,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        left_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        right_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<(), String> {
+        if self.cols != right.cols {
+            return Err(format!(
+                "{label} AQ4 matvec pair column mismatch: left=[{},{}] right=[{},{}]",
+                self.rows, self.cols, right.rows, right.cols
+            ));
+        }
+        let result = ullm_runtime_sys::aq4_matvec_pair_f32(
+            self.index_buffer.as_ref(),
+            self.scale_buffer.as_ref(),
+            self.codebook_buffer.as_ref(),
+            &self.scale_values_buffer,
+            self.row_scale_buffer.as_ref(),
+            self.scale_count,
+            self.group_size,
+            self.tensor_scale,
+            self.row_scale_count,
+            right.index_buffer.as_ref(),
+            right.scale_buffer.as_ref(),
+            right.codebook_buffer.as_ref(),
+            &right.scale_values_buffer,
+            right.row_scale_buffer.as_ref(),
+            right.scale_count,
+            right.group_size,
+            right.tensor_scale,
+            right.row_scale_count,
+            input_buffer,
+            self.rows,
+            right.rows,
+            self.cols,
+            left_output_buffer,
+            right_output_buffer,
+            Some(stream),
+        );
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) if env_flag_enabled("ULLM_REQUIRE_HIP_AQ4_MATVEC_PAIR_KERNEL") => {
+                Err(format!("failed to run {label} AQ4 matvec pair: {err}"))
+            }
+            Err(_) => {
+                self.matvec(input_buffer, left_output_buffer, stream, label)?;
+                right.matvec(input_buffer, right_output_buffer, stream, label)
+            }
+        }
     }
 
     fn matvec_silu_mul_with(
@@ -30145,6 +30243,7 @@ struct PackageLinearAttnResidentStepLayer {
     layer_index: usize,
     sync_component_timing: bool,
     last_component_step_ms: Option<PackageLinearAttnComponentStepMs>,
+    use_qkv_z_pair: bool,
     key_heads: usize,
     value_heads: usize,
     key_dim: usize,
@@ -30207,6 +30306,7 @@ impl PackageLinearAttnResidentStepLayer {
         let value_dim = 128_usize;
         let hidden = value_heads * value_dim;
         let sync_component_timing = env_flag_enabled("ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING");
+        let use_qkv_z_pair = !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_QKV_Z");
         let q_elements_per_step = key_heads * key_dim;
         let k_elements_per_step = q_elements_per_step;
         let v_elements_per_step = hidden;
@@ -30592,6 +30692,17 @@ impl PackageLinearAttnResidentStepLayer {
                 &mut qkv_buffer,
                 "linear-attn resident AQ4 matvec",
             )?;
+            if use_qkv_z_pair {
+                prewarm_aq4_matvec_pair_once(
+                    stream,
+                    &qkv_matrix,
+                    &z_matrix,
+                    &mut input_normed_buffer,
+                    &mut qkv_buffer,
+                    &mut z_buffer,
+                    "linear-attn resident AQ4 qkv/z pair",
+                )?;
+            }
             prewarm_aq4_matvec_gate_beta_once(
                 stream,
                 &a_matrix,
@@ -30655,6 +30766,7 @@ impl PackageLinearAttnResidentStepLayer {
             layer_index,
             sync_component_timing,
             last_component_step_ms: None,
+            use_qkv_z_pair,
             key_heads,
             value_heads,
             key_dim,
@@ -30828,22 +30940,33 @@ impl PackageLinearAttnResidentStepLayer {
         .map_err(|err| format!("failed to run {label} input RMSNorm: {err}"))?;
         finish_component!(component_started, input_rmsnorm_ms, "input RMSNorm");
 
-        let component_started = component_started!();
-        self.qkv_matrix.matvec(
-            &self.input_normed_buffer,
-            &mut self.qkv_buffer,
-            stream,
-            "linear-attn resident qkv projection",
-        )?;
-        finish_component!(component_started, qkv_projection_ms, "qkv projection");
-        let component_started = component_started!();
-        self.z_matrix.matvec(
-            &self.input_normed_buffer,
-            &mut self.z_buffer,
-            stream,
-            "linear-attn resident z projection",
-        )?;
-        finish_component!(component_started, z_projection_ms, "z projection");
+        if self.use_qkv_z_pair && !sync_component_timing {
+            self.qkv_matrix.matvec_pair_with(
+                &self.z_matrix,
+                &self.input_normed_buffer,
+                &mut self.qkv_buffer,
+                &mut self.z_buffer,
+                stream,
+                "linear-attn resident qkv/z projection",
+            )?;
+        } else {
+            let component_started = component_started!();
+            self.qkv_matrix.matvec(
+                &self.input_normed_buffer,
+                &mut self.qkv_buffer,
+                stream,
+                "linear-attn resident qkv projection",
+            )?;
+            finish_component!(component_started, qkv_projection_ms, "qkv projection");
+            let component_started = component_started!();
+            self.z_matrix.matvec(
+                &self.input_normed_buffer,
+                &mut self.z_buffer,
+                stream,
+                "linear-attn resident z projection",
+            )?;
+            finish_component!(component_started, z_projection_ms, "z projection");
+        }
 
         let component_started = component_started!();
         ullm_runtime_sys::linear_attn_qkv_prepare_f32(

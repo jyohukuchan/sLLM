@@ -371,6 +371,19 @@ public:
             error);
     }
 
+    bool compile_aq4_matvec_pair_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        const std::string source = aq4_matvec_pair_kernel_source_for_arch(arch);
+        return compile_kernel(
+            arch,
+            source.c_str(),
+            "ullm_aq4_matvec_pair_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_aq4_matvec_silu_mul_kernel(
         const std::string &arch,
         std::vector<char> *code,
@@ -699,6 +712,10 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
         return aq4_rows_per_block_preamble(arch) + aq4_matvec_add_kernel_source();
     }
 
+    static std::string aq4_matvec_pair_kernel_source_for_arch(const std::string &arch) {
+        return aq4_rows_per_block_preamble(arch) + aq4_matvec_pair_kernel_source();
+    }
+
     static std::string aq4_matvec_silu_mul_kernel_source_for_arch(const std::string &arch) {
         return aq4_rows_per_block_preamble(arch) + aq4_matvec_silu_mul_kernel_source();
     }
@@ -902,6 +919,158 @@ extern "C" __global__ void ullm_aq4_matvec_add_f32_kernel(
             value *= row_scales[row];
         }
         output[row] = residual[row] + value;
+    }
+}
+)";
+    }
+
+    static const char *aq4_matvec_pair_kernel_source() {
+        return R"(
+__device__ float ullm_aq4_matvec_pair_thread_sum(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row,
+    unsigned long long cols,
+    unsigned int tid,
+    unsigned int block_size) {
+    const unsigned long long row_offset = row * cols;
+    float sum = 0.0f;
+    if ((cols % group_size) == 0ull) {
+        const unsigned long long groups_per_row = cols / group_size;
+        for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
+             group_in_row += block_size) {
+            const unsigned long long group = row * groups_per_row + group_in_row;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index >= scale_count) {
+                continue;
+            }
+            float raw_sum = 0.0f;
+            const unsigned long long col_start = group_in_row * group_size;
+            for (unsigned long long offset = 0; offset < group_size; ++offset) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long element = row_offset + col;
+                const unsigned char packed = indices[element >> 1];
+                const unsigned char codebook_index =
+                    (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                raw_sum += codebook[codebook_index] * input[col];
+            }
+            sum += raw_sum * scale_values[scale_index] * tensor_scale;
+        }
+    } else {
+        for (unsigned long long col = tid; col < cols; col += block_size) {
+            const unsigned long long element = row_offset + col;
+            const unsigned char packed = indices[element >> 1];
+            const unsigned char codebook_index =
+                (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+            const unsigned long long group = element / group_size;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index < scale_count) {
+                const float value =
+                    codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+                sum += value * input[col];
+            }
+        }
+    }
+    return sum;
+}
+
+extern "C" __global__ void ullm_aq4_matvec_pair_f32_kernel(
+    const unsigned char *left_indices,
+    const unsigned char *left_scale_indices,
+    const float *left_codebook,
+    const float *left_scale_values,
+    const float *left_row_scales,
+    unsigned long long left_scale_count,
+    unsigned long long left_group_size,
+    float left_tensor_scale,
+    unsigned long long left_row_scale_count,
+    const unsigned char *right_indices,
+    const unsigned char *right_scale_indices,
+    const float *right_codebook,
+    const float *right_scale_values,
+    const float *right_row_scales,
+    unsigned long long right_scale_count,
+    unsigned long long right_group_size,
+    float right_tensor_scale,
+    unsigned long long right_row_scale_count,
+    const float *input,
+    unsigned long long left_rows,
+    unsigned long long right_rows,
+    unsigned long long cols,
+    float *left_output,
+    float *right_output) {
+    const unsigned int tid = threadIdx.x;
+    constexpr unsigned int rows_per_block = ULLM_AQ4_ROWS_PER_BLOCK;
+    constexpr unsigned int threads_per_row = 256u / rows_per_block;
+    const unsigned int row_in_block = tid / threads_per_row;
+    const unsigned int lane = tid - row_in_block * threads_per_row;
+    const unsigned long long logical_row =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
+    const unsigned long long total_rows = left_rows + right_rows;
+    const unsigned int partial_offset = row_in_block * threads_per_row;
+    __shared__ float partial[256];
+    float sum = 0.0f;
+    bool is_left = logical_row < left_rows;
+    unsigned long long row = logical_row;
+    if (logical_row < total_rows) {
+        if (is_left) {
+            sum = ullm_aq4_matvec_pair_thread_sum(
+                left_indices,
+                left_scale_indices,
+                left_codebook,
+                left_scale_values,
+                input,
+                left_scale_count,
+                left_group_size,
+                left_tensor_scale,
+                row,
+                cols,
+                lane,
+                threads_per_row);
+        } else {
+            row = logical_row - left_rows;
+            sum = ullm_aq4_matvec_pair_thread_sum(
+                right_indices,
+                right_scale_indices,
+                right_codebook,
+                right_scale_values,
+                input,
+                right_scale_count,
+                right_group_size,
+                right_tensor_scale,
+                row,
+                cols,
+                lane,
+                threads_per_row);
+        }
+    }
+    partial[tid] = sum;
+    __syncthreads();
+    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
+        if (lane < offset) {
+            partial[partial_offset + lane] += partial[partial_offset + lane + offset];
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && logical_row < total_rows) {
+        float value = partial[partial_offset];
+        if (is_left) {
+            if (left_row_scales != nullptr && row < left_row_scale_count) {
+                value *= left_row_scales[row];
+            }
+            left_output[row] = value;
+        } else {
+            if (right_row_scales != nullptr && row < right_row_scale_count) {
+                value *= right_row_scales[row];
+            }
+            right_output[row] = value;
+        }
     }
 }
 )";
@@ -3354,6 +3523,87 @@ HipAq4MatvecAddKernelCache &hip_aq4_matvec_add_kernel_cache() {
     return cache;
 }
 
+class HipAq4MatvecPairKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_aq4_matvec_pair_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_aq4_matvec_pair_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build AQ4 matvec pair HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipAq4MatvecPairKernelCache &hip_aq4_matvec_pair_kernel_cache() {
+    static HipAq4MatvecPairKernelCache cache;
+    return cache;
+}
+
 bool aq4_matvec_f32_hip_kernel(
     const ullm_runtime_buffer *index_buffer,
     const ullm_runtime_buffer *scale_buffer,
@@ -3499,6 +3749,121 @@ bool aq4_matvec_add_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for AQ4 matvec add";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool aq4_matvec_pair_f32_hip_kernel(
+    const ullm_runtime_buffer *left_index_buffer,
+    const ullm_runtime_buffer *left_scale_buffer,
+    const ullm_runtime_buffer *left_codebook_buffer,
+    const ullm_runtime_buffer *left_scale_values_buffer,
+    const ullm_runtime_buffer *left_row_scale_buffer,
+    size_t left_scale_count,
+    size_t left_group_size,
+    float left_tensor_scale,
+    size_t left_row_scale_count,
+    const ullm_runtime_buffer *right_index_buffer,
+    const ullm_runtime_buffer *right_scale_buffer,
+    const ullm_runtime_buffer *right_codebook_buffer,
+    const ullm_runtime_buffer *right_scale_values_buffer,
+    const ullm_runtime_buffer *right_row_scale_buffer,
+    size_t right_scale_count,
+    size_t right_group_size,
+    float right_tensor_scale,
+    size_t right_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    size_t left_rows,
+    size_t right_rows,
+    size_t cols,
+    ullm_runtime_buffer *left_output_buffer,
+    ullm_runtime_buffer *right_output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = left_index_buffer->hip_device_id;
+    void *function = hip_aq4_matvec_pair_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const size_t total_rows = left_rows + right_rows;
+    const size_t grid_size =
+        (total_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "AQ4 matvec pair row count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    void *left_index_ptr = left_index_buffer->ptr;
+    void *left_scale_ptr = left_scale_buffer->ptr;
+    void *left_codebook_ptr = left_codebook_buffer->ptr;
+    void *left_scale_values_ptr = left_scale_values_buffer->ptr;
+    void *left_row_scale_ptr =
+        left_row_scale_buffer == nullptr ? nullptr : left_row_scale_buffer->ptr;
+    unsigned long long kernel_left_scale_count =
+        static_cast<unsigned long long>(left_scale_count);
+    unsigned long long kernel_left_group_size =
+        static_cast<unsigned long long>(left_group_size);
+    unsigned long long kernel_left_row_scale_count =
+        static_cast<unsigned long long>(left_row_scale_count);
+    void *right_index_ptr = right_index_buffer->ptr;
+    void *right_scale_ptr = right_scale_buffer->ptr;
+    void *right_codebook_ptr = right_codebook_buffer->ptr;
+    void *right_scale_values_ptr = right_scale_values_buffer->ptr;
+    void *right_row_scale_ptr =
+        right_row_scale_buffer == nullptr ? nullptr : right_row_scale_buffer->ptr;
+    unsigned long long kernel_right_scale_count =
+        static_cast<unsigned long long>(right_scale_count);
+    unsigned long long kernel_right_group_size =
+        static_cast<unsigned long long>(right_group_size);
+    unsigned long long kernel_right_row_scale_count =
+        static_cast<unsigned long long>(right_row_scale_count);
+    void *input_ptr = input_buffer->ptr;
+    unsigned long long kernel_left_rows = static_cast<unsigned long long>(left_rows);
+    unsigned long long kernel_right_rows = static_cast<unsigned long long>(right_rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    void *left_output_ptr = left_output_buffer->ptr;
+    void *right_output_ptr = right_output_buffer->ptr;
+    void *kernel_params[] = {
+        &left_index_ptr,
+        &left_scale_ptr,
+        &left_codebook_ptr,
+        &left_scale_values_ptr,
+        &left_row_scale_ptr,
+        &kernel_left_scale_count,
+        &kernel_left_group_size,
+        &left_tensor_scale,
+        &kernel_left_row_scale_count,
+        &right_index_ptr,
+        &right_scale_ptr,
+        &right_codebook_ptr,
+        &right_scale_values_ptr,
+        &right_row_scale_ptr,
+        &kernel_right_scale_count,
+        &kernel_right_group_size,
+        &right_tensor_scale,
+        &kernel_right_row_scale_count,
+        &input_ptr,
+        &kernel_left_rows,
+        &kernel_right_rows,
+        &kernel_cols,
+        &left_output_ptr,
+        &right_output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            launch_config.block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for AQ4 matvec pair";
         }
         return false;
     }
@@ -10093,6 +10458,230 @@ ullm_status ullm_runtime_aq4_matvec_add_f32(
         codebook_entries,
         output_buffer,
         stream);
+}
+
+ullm_status ullm_runtime_aq4_matvec_pair_f32(
+    const ullm_runtime_buffer *left_index_buffer,
+    const ullm_runtime_buffer *left_scale_buffer,
+    const ullm_runtime_buffer *left_codebook_buffer,
+    const ullm_runtime_buffer *left_scale_values_buffer,
+    const ullm_runtime_buffer *left_row_scale_buffer,
+    size_t left_scale_count,
+    size_t left_group_size,
+    float left_tensor_scale,
+    size_t left_row_scale_count,
+    const ullm_runtime_buffer *right_index_buffer,
+    const ullm_runtime_buffer *right_scale_buffer,
+    const ullm_runtime_buffer *right_codebook_buffer,
+    const ullm_runtime_buffer *right_scale_values_buffer,
+    const ullm_runtime_buffer *right_row_scale_buffer,
+    size_t right_scale_count,
+    size_t right_group_size,
+    float right_tensor_scale,
+    size_t right_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    size_t left_rows,
+    size_t right_rows,
+    size_t cols,
+    ullm_runtime_buffer *left_output_buffer,
+    ullm_runtime_buffer *right_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (left_index_buffer == nullptr || left_scale_buffer == nullptr ||
+        left_codebook_buffer == nullptr || left_scale_values_buffer == nullptr ||
+        right_index_buffer == nullptr || right_scale_buffer == nullptr ||
+        right_codebook_buffer == nullptr || right_scale_values_buffer == nullptr ||
+        input_buffer == nullptr || left_output_buffer == nullptr || right_output_buffer == nullptr) {
+        set_error("AQ4 matvec pair received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (left_scale_count == 0 || right_scale_count == 0) {
+        set_error("AQ4 matvec pair scale table is empty");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (left_group_size == 0 || right_group_size == 0) {
+        set_error("AQ4 matvec pair group size must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (left_rows == 0 || right_rows == 0 || cols == 0) {
+        set_error("AQ4 matvec pair rows and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(left_tensor_scale) || left_tensor_scale <= 0.0f ||
+        !std::isfinite(right_tensor_scale) || right_tensor_scale <= 0.0f) {
+        set_error("AQ4 matvec pair tensor scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(left_index_buffer, left_scale_buffer) ||
+        !buffers_share_backend(left_index_buffer, left_codebook_buffer) ||
+        !buffers_share_backend(left_index_buffer, left_scale_values_buffer) ||
+        !buffers_share_backend(left_index_buffer, right_index_buffer) ||
+        !buffers_share_backend(left_index_buffer, right_scale_buffer) ||
+        !buffers_share_backend(left_index_buffer, right_codebook_buffer) ||
+        !buffers_share_backend(left_index_buffer, right_scale_values_buffer) ||
+        !buffers_share_backend(left_index_buffer, input_buffer) ||
+        !buffers_share_backend(left_index_buffer, left_output_buffer) ||
+        !buffers_share_backend(left_index_buffer, right_output_buffer) ||
+        (left_row_scale_buffer != nullptr &&
+         !buffers_share_backend(left_index_buffer, left_row_scale_buffer)) ||
+        (right_row_scale_buffer != nullptr &&
+         !buffers_share_backend(left_index_buffer, right_row_scale_buffer))) {
+        set_error("AQ4 matvec pair buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(left_output_buffer, stream) ||
+        !stream_matches_buffer(right_output_buffer, stream)) {
+        set_error("AQ4 matvec pair stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / left_rows || cols > max_size / right_rows ||
+        left_rows > max_size - right_rows) {
+        set_error("AQ4 matvec pair matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t left_elements = left_rows * cols;
+    const size_t right_elements = right_rows * cols;
+    const size_t left_required_index_bytes = left_elements / 2 + (left_elements % 2);
+    const size_t right_required_index_bytes = right_elements / 2 + (right_elements % 2);
+    const size_t left_groups =
+        left_elements / left_group_size + (left_elements % left_group_size == 0 ? 0 : 1);
+    const size_t right_groups =
+        right_elements / right_group_size + (right_elements % right_group_size == 0 ? 0 : 1);
+    if (cols > max_size / sizeof(float) ||
+        left_rows > max_size / sizeof(float) ||
+        right_rows > max_size / sizeof(float) ||
+        left_scale_count > max_size / sizeof(float) ||
+        right_scale_count > max_size / sizeof(float) ||
+        left_row_scale_count > max_size / sizeof(float) ||
+        right_row_scale_count > max_size / sizeof(float)) {
+        set_error("AQ4 matvec pair byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_input_bytes = cols * sizeof(float);
+    const size_t left_required_output_bytes = left_rows * sizeof(float);
+    const size_t right_required_output_bytes = right_rows * sizeof(float);
+    const size_t left_required_scale_value_bytes = left_scale_count * sizeof(float);
+    const size_t right_required_scale_value_bytes = right_scale_count * sizeof(float);
+    const size_t left_required_row_scale_bytes = left_row_scale_count * sizeof(float);
+    const size_t right_required_row_scale_bytes = right_row_scale_count * sizeof(float);
+    if (left_index_buffer->bytes < left_required_index_bytes ||
+        right_index_buffer->bytes < right_required_index_bytes) {
+        set_error("AQ4 matvec pair index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (left_scale_buffer->bytes < left_groups || right_scale_buffer->bytes < right_groups) {
+        set_error("AQ4 matvec pair scale index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (left_scale_values_buffer->bytes < left_required_scale_value_bytes ||
+        right_scale_values_buffer->bytes < right_required_scale_value_bytes) {
+        set_error("AQ4 matvec pair scale value buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("AQ4 matvec pair input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((left_row_scale_buffer != nullptr &&
+         left_row_scale_buffer->bytes < left_required_row_scale_bytes) ||
+        (right_row_scale_buffer != nullptr &&
+         right_row_scale_buffer->bytes < right_required_row_scale_bytes)) {
+        set_error("AQ4 matvec pair row scale buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (left_output_buffer->bytes < left_required_output_bytes ||
+        right_output_buffer->bytes < right_required_output_bytes) {
+        set_error("AQ4 matvec pair output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (left_codebook_buffer->bytes % sizeof(float) != 0 ||
+        right_codebook_buffer->bytes % sizeof(float) != 0) {
+        set_error("AQ4 matvec pair codebook buffer size is not a multiple of f32");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t left_codebook_entries = left_codebook_buffer->bytes / sizeof(float);
+    const size_t right_codebook_entries = right_codebook_buffer->bytes / sizeof(float);
+    if (left_codebook_entries < 16 || right_codebook_entries < 16) {
+        set_error("AQ4 matvec pair requires at least 16 codebook entries");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (left_index_buffer->backend == BackendKind::Cpu) {
+        if (!aq4_matvec_f32_host(
+                static_cast<const std::uint8_t *>(left_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(left_scale_buffer->ptr),
+                static_cast<const float *>(left_codebook_buffer->ptr),
+                static_cast<const float *>(left_scale_values_buffer->ptr),
+                left_scale_count,
+                left_group_size,
+                left_tensor_scale,
+                static_cast<const float *>(input_buffer->ptr),
+                left_row_scale_buffer == nullptr
+                    ? nullptr
+                    : static_cast<const float *>(left_row_scale_buffer->ptr),
+                left_row_scale_count,
+                left_rows,
+                cols,
+                static_cast<float *>(left_output_buffer->ptr)) ||
+            !aq4_matvec_f32_host(
+                static_cast<const std::uint8_t *>(right_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(right_scale_buffer->ptr),
+                static_cast<const float *>(right_codebook_buffer->ptr),
+                static_cast<const float *>(right_scale_values_buffer->ptr),
+                right_scale_count,
+                right_group_size,
+                right_tensor_scale,
+                static_cast<const float *>(input_buffer->ptr),
+                right_row_scale_buffer == nullptr
+                    ? nullptr
+                    : static_cast<const float *>(right_row_scale_buffer->ptr),
+                right_row_scale_count,
+                right_rows,
+                cols,
+                static_cast<float *>(right_output_buffer->ptr))) {
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (aq4_matvec_pair_f32_hip_kernel(
+            left_index_buffer,
+            left_scale_buffer,
+            left_codebook_buffer,
+            left_scale_values_buffer,
+            left_row_scale_buffer,
+            left_scale_count,
+            left_group_size,
+            left_tensor_scale,
+            left_row_scale_count,
+            right_index_buffer,
+            right_scale_buffer,
+            right_codebook_buffer,
+            right_scale_values_buffer,
+            right_row_scale_buffer,
+            right_scale_count,
+            right_group_size,
+            right_tensor_scale,
+            right_row_scale_count,
+            input_buffer,
+            left_rows,
+            right_rows,
+            cols,
+            left_output_buffer,
+            right_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    set_error(
+        hip_kernel_error.empty() ? "AQ4 matvec pair HIP kernel is unavailable" :
+                                   hip_kernel_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
 }
 
 ullm_status ullm_runtime_aq4_matvec_silu_mul_f32(
