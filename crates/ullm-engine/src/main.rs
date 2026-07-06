@@ -7,7 +7,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::process::{Command, ExitCode};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use ullm_engine::decode_runner::{
     Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerDecodeInputLayout,
@@ -28693,6 +28693,7 @@ struct PackageAq4ResidentMatvec {
 }
 
 static AQ4_MATVEC_ADD_PREWARMED: AtomicBool = AtomicBool::new(false);
+static LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
 
 fn prewarm_aq4_matvec_add_once(
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -28730,6 +28731,103 @@ fn prewarm_aq4_matvec_add_once(
     })();
     if result.is_err() {
         AQ4_MATVEC_ADD_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+fn linear_attn_qkv_prepare_prewarm_mask(device_id: i32) -> Option<u64> {
+    let bit = u32::try_from(device_id).ok()?.checked_add(1)?;
+    (bit < u64::BITS).then(|| 1_u64 << bit)
+}
+
+fn claim_linear_attn_qkv_prepare_prewarm(device_id: i32) -> bool {
+    let Some(mask) = linear_attn_qkv_prepare_prewarm_mask(device_id) else {
+        return true;
+    };
+    LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES.fetch_or(mask, Ordering::AcqRel) & mask == 0
+}
+
+fn release_linear_attn_qkv_prepare_prewarm(device_id: i32) {
+    if let Some(mask) = linear_attn_qkv_prepare_prewarm_mask(device_id) {
+        LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES.fetch_and(!mask, Ordering::AcqRel);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prewarm_linear_attn_qkv_prepare_once(
+    device_id: i32,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    qkv_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    conv_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    conv_history_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    key_heads: usize,
+    value_heads: usize,
+    key_dim: usize,
+    value_dim: usize,
+    kernel_size: usize,
+    q_scale: f32,
+    qk_l2_norm: bool,
+    conv_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    q_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    k_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    v_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if !claim_linear_attn_qkv_prepare_prewarm(device_id) {
+        return Ok(());
+    }
+    let result = (|| {
+        let q_elements = key_heads
+            .checked_mul(key_dim)
+            .ok_or_else(|| format!("{label} prewarm q element count overflows"))?;
+        let v_elements = value_heads
+            .checked_mul(value_dim)
+            .ok_or_else(|| format!("{label} prewarm v element count overflows"))?;
+        let channels = q_elements
+            .checked_add(q_elements)
+            .and_then(|value| value.checked_add(v_elements))
+            .ok_or_else(|| format!("{label} prewarm channel count overflows"))?;
+        let history_elements = channels
+            .checked_mul(kernel_size)
+            .ok_or_else(|| format!("{label} prewarm history element count overflows"))?;
+        qkv_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; channels]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm qkv: {err}"))?;
+        ullm_runtime_sys::linear_attn_qkv_prepare_f32(
+            qkv_buffer,
+            conv_weight_buffer,
+            conv_history_buffer,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            q_scale,
+            qk_l2_norm,
+            conv_output_buffer,
+            q_output_buffer,
+            k_output_buffer,
+            v_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
+        conv_history_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; history_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to reset {label} prewarm history: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        release_linear_attn_qkv_prepare_prewarm(device_id);
     }
     result
 }
@@ -30051,28 +30149,28 @@ impl PackageLinearAttnResidentStepLayer {
         let input_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident input normed: {err}")
         })?;
-        let qkv_buffer = context
+        let mut qkv_buffer = context
             .alloc_buffer(qkv_step_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident qkv: {err}"))?;
-        let qkv_conv_output_buffer = context.alloc_buffer(qkv_step_bytes).map_err(|err| {
+        let mut qkv_conv_output_buffer = context.alloc_buffer(qkv_step_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident qkv conv output: {err}")
         })?;
         let z_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident z: {err}"))?;
-        let recurrent_q_buffer = context
+        let mut recurrent_q_buffer = context
             .alloc_buffer(checked_f32_byte_len(
                 q_elements_per_step,
                 "linear-attn resident recurrent q",
             )?)
             .map_err(|err| format!("failed to allocate linear-attn resident q: {err}"))?;
-        let recurrent_k_buffer = context
+        let mut recurrent_k_buffer = context
             .alloc_buffer(checked_f32_byte_len(
                 k_elements_per_step,
                 "linear-attn resident recurrent k",
             )?)
             .map_err(|err| format!("failed to allocate linear-attn resident k: {err}"))?;
-        let recurrent_v_buffer = context
+        let mut recurrent_v_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident v: {err}"))?;
         let recurrent_gate_buffer = context
@@ -30154,6 +30252,30 @@ impl PackageLinearAttnResidentStepLayer {
         stream.synchronize().map_err(|err| {
             format!("failed to synchronize linear-attn resident layer setup: {err}")
         })?;
+        let device_info = context
+            .device_info()
+            .map_err(|err| format!("failed to get linear-attn resident device info: {err}"))?;
+        if device_info.backend == "hip" {
+            prewarm_linear_attn_qkv_prepare_once(
+                device_info.device_id,
+                stream,
+                &mut qkv_buffer,
+                &conv_weight_buffer,
+                &mut conv_history_buffer,
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+                kernel_size,
+                q_scale,
+                qk_l2_norm,
+                &mut qkv_conv_output_buffer,
+                &mut recurrent_q_buffer,
+                &mut recurrent_k_buffer,
+                &mut recurrent_v_buffer,
+                "linear-attn resident qkv prepare",
+            )?;
+        }
         prewarm_aq4_matvec_add_once(
             stream,
             &out_matrix,

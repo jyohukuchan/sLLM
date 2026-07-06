@@ -1804,6 +1804,135 @@ extern "C" __global__ void ullm_depthwise_conv1d_f32_kernel(
 
     static const char *linear_attn_qkv_prepare_kernel_source() {
         return R"(
+__device__ float ullm_linear_attn_qkv_conv_step_value(
+    const float *qkv,
+    const float *conv_weight,
+    float *conv_history,
+    unsigned long long channels,
+    unsigned long long kernel_size,
+    unsigned long long channel) {
+    for (unsigned long long kernel = 0; kernel + 1 < kernel_size; ++kernel) {
+        conv_history[kernel * channels + channel] =
+            conv_history[(kernel + 1ull) * channels + channel];
+    }
+    conv_history[(kernel_size - 1ull) * channels + channel] = qkv[channel];
+
+    float sum = 0.0f;
+    for (unsigned long long kernel = 0; kernel < kernel_size; ++kernel) {
+        sum += conv_history[kernel * channels + channel] *
+               conv_weight[channel * kernel_size + kernel];
+    }
+    const float sigmoid = 1.0f / (1.0f + expf(-sum));
+    return sum * sigmoid;
+}
+
+extern "C" __global__ void ullm_linear_attn_qkv_prepare_f32_kernel(
+    const float *qkv,
+    const float *conv_weight,
+    float *conv_history,
+    unsigned long long key_heads,
+    unsigned long long value_heads,
+    unsigned long long key_dim,
+    unsigned long long value_dim,
+    unsigned long long kernel_size,
+    float q_scale,
+    int qk_l2_norm,
+    float *conv_output,
+    float *q_output,
+    float *k_output,
+    float *v_output) {
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[256];
+    const unsigned long long q_elements = key_heads * key_dim;
+    const unsigned long long k_base = q_elements;
+    const unsigned long long v_base = q_elements * 2ull;
+    const unsigned long long v_elements = value_heads * value_dim;
+    const unsigned long long channels = q_elements + q_elements + v_elements;
+    const unsigned long long block = blockIdx.x;
+
+    if (block < key_heads) {
+        const unsigned long long head = block;
+        const unsigned long long source_base = head * key_dim;
+        float sum_squares = 0.0f;
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const unsigned long long channel = source_base + dim;
+            const float value = ullm_linear_attn_qkv_conv_step_value(
+                qkv,
+                conv_weight,
+                conv_history,
+                channels,
+                kernel_size,
+                channel);
+            conv_output[channel] = value;
+            sum_squares += value * value;
+        }
+        partial[tid] = sum_squares;
+        __syncthreads();
+        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+            if (tid < offset) {
+                partial[tid] += partial[tid + offset];
+            }
+            __syncthreads();
+        }
+        const float norm = sqrtf(partial[0] + 1.0e-6f);
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const unsigned long long channel = source_base + dim;
+            const float value = conv_output[channel];
+            q_output[head * key_dim + dim] =
+                qk_l2_norm != 0 ? (value / norm) * q_scale : value * q_scale;
+        }
+        return;
+    }
+
+    if (block < key_heads * 2ull) {
+        const unsigned long long head = block - key_heads;
+        const unsigned long long source_base = k_base + head * key_dim;
+        float sum_squares = 0.0f;
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const unsigned long long channel = source_base + dim;
+            const float value = ullm_linear_attn_qkv_conv_step_value(
+                qkv,
+                conv_weight,
+                conv_history,
+                channels,
+                kernel_size,
+                channel);
+            conv_output[channel] = value;
+            sum_squares += value * value;
+        }
+        partial[tid] = sum_squares;
+        __syncthreads();
+        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+            if (tid < offset) {
+                partial[tid] += partial[tid + offset];
+            }
+            __syncthreads();
+        }
+        const float norm = sqrtf(partial[0] + 1.0e-6f);
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const unsigned long long channel = source_base + dim;
+            const float value = conv_output[channel];
+            k_output[head * key_dim + dim] = qk_l2_norm != 0 ? value / norm : value;
+        }
+        return;
+    }
+
+    const unsigned long long v_block = block - key_heads * 2ull;
+    const unsigned long long v_index = v_block * blockDim.x + tid;
+    if (v_index < v_elements) {
+        const unsigned long long channel = v_base + v_index;
+        const float value = ullm_linear_attn_qkv_conv_step_value(
+            qkv,
+            conv_weight,
+            conv_history,
+            channels,
+            kernel_size,
+            channel);
+        conv_output[channel] = value;
+        v_output[v_index] = value;
+    }
+}
+
 extern "C" __global__ void ullm_linear_attn_qkv_conv_step_silu_f32_kernel(
     const float *qkv,
     const float *conv_weight,
@@ -7917,27 +8046,17 @@ void linear_attn_qkv_prepare_f32_host(
 
 class HipLinearAttnQkvPrepareKernelCache {
 public:
-    bool functions_for_device(
-        int device_id,
-        void **conv_function,
-        void **split_function,
-        std::string *error) {
-        if (conv_function == nullptr || split_function == nullptr) {
-            append_error(error, "linear attention qkv prepare requested null function output");
-            return false;
-        }
+    void *function_for_device(int device_id, std::string *error) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto found = modules_.find(device_id);
         if (found != modules_.end()) {
-            *conv_function = found->second->conv_function;
-            *split_function = found->second->split_function;
-            return true;
+            return found->second->function;
         }
 
         const std::vector<std::string> candidates = hip_arch_candidates(device_id);
         if (candidates.empty()) {
             append_error(error, "unable to infer HIP offload architecture for device");
-            return false;
+            return nullptr;
         }
 
         std::string compile_errors;
@@ -7954,49 +8073,36 @@ public:
                 append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
                 continue;
             }
-            void *conv = nullptr;
+            void *function = nullptr;
             if (!hip_runtime().module_get_function(
-                    &conv,
+                    &function,
                     module,
-                    "ullm_linear_attn_qkv_conv_step_silu_f32_kernel",
+                    "ullm_linear_attn_qkv_prepare_f32_kernel",
                     device_id)) {
                 hip_runtime().module_unload(module, device_id);
-                append_error(&compile_errors, "hipModuleGetFunction conv failed for " + arch);
-                continue;
-            }
-            void *split = nullptr;
-            if (!hip_runtime().module_get_function(
-                    &split,
-                    module,
-                    "ullm_linear_attn_qkv_split_l2norm_f32_kernel",
-                    device_id)) {
-                hip_runtime().module_unload(module, device_id);
-                append_error(&compile_errors, "hipModuleGetFunction split failed for " + arch);
+                append_error(&compile_errors, "hipModuleGetFunction qkv prepare failed for " + arch);
                 continue;
             }
 
             auto loaded = std::make_unique<LoadedModule>();
             loaded->module = module;
-            loaded->conv_function = conv;
-            loaded->split_function = split;
+            loaded->function = function;
             loaded->arch = arch;
-            *conv_function = loaded->conv_function;
-            *split_function = loaded->split_function;
+            void *result = loaded->function;
             modules_.emplace(device_id, std::move(loaded));
-            return true;
+            return result;
         }
         append_error(
             error,
-            compile_errors.empty() ? "failed to build linear attention qkv prepare HIP kernels"
+            compile_errors.empty() ? "failed to build linear attention qkv prepare HIP kernel"
                                    : compile_errors);
-        return false;
+        return nullptr;
     }
 
 private:
     struct LoadedModule {
         void *module = nullptr;
-        void *conv_function = nullptr;
-        void *split_function = nullptr;
+        void *function = nullptr;
         std::string arch;
     };
 
@@ -8037,25 +8143,16 @@ bool linear_attn_qkv_prepare_f32_hip_kernel(
     ullm_runtime_stream *stream,
     std::string *error) {
     const int device_id = qkv_buffer->hip_device_id;
-    void *conv_function = nullptr;
-    void *split_function = nullptr;
-    if (!hip_linear_attn_qkv_prepare_kernel_cache().functions_for_device(
-            device_id,
-            &conv_function,
-            &split_function,
-            error)) {
+    void *function = hip_linear_attn_qkv_prepare_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
         return false;
     }
 
     constexpr unsigned int block_size = 256;
-    const size_t q_elements = key_heads * key_dim;
     const size_t v_elements = value_heads * value_dim;
-    const size_t channels = q_elements + q_elements + v_elements;
-    const size_t conv_grid_size = (channels + block_size - 1) / block_size;
     const size_t v_grid_size = (v_elements + block_size - 1) / block_size;
-    const size_t split_grid_size = key_heads * 2 + v_grid_size;
-    if (conv_grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) ||
-        split_grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+    const size_t grid_size = key_heads * 2 + v_grid_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "linear attention qkv prepare grid size exceeds HIP limit";
         }
@@ -8065,60 +8162,42 @@ bool linear_attn_qkv_prepare_f32_hip_kernel(
     void *qkv_ptr = qkv_buffer->ptr;
     void *conv_weight_ptr = conv_weight_buffer->ptr;
     void *conv_history_ptr = conv_history_buffer->ptr;
-    unsigned long long kernel_channels = static_cast<unsigned long long>(channels);
-    unsigned long long kernel_size_arg = static_cast<unsigned long long>(kernel_size);
-    void *conv_output_ptr = conv_output_buffer->ptr;
-    void *conv_params[] = {
-        &qkv_ptr,
-        &conv_weight_ptr,
-        &conv_history_ptr,
-        &kernel_channels,
-        &kernel_size_arg,
-        &conv_output_ptr,
-    };
-    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
-    if (!hip_runtime().module_launch_kernel(
-            conv_function,
-            static_cast<unsigned int>(conv_grid_size),
-            block_size,
-            conv_params,
-            hip_stream,
-            device_id)) {
-        if (error != nullptr) {
-            *error = "hipModuleLaunchKernel failed for linear attention qkv conv prepare";
-        }
-        return false;
-    }
-
     unsigned long long kernel_key_heads = static_cast<unsigned long long>(key_heads);
     unsigned long long kernel_value_heads = static_cast<unsigned long long>(value_heads);
     unsigned long long kernel_key_dim = static_cast<unsigned long long>(key_dim);
     unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    unsigned long long kernel_size_arg = static_cast<unsigned long long>(kernel_size);
     int kernel_qk_l2_norm = qk_l2_norm ? 1 : 0;
+    void *conv_output_ptr = conv_output_buffer->ptr;
     void *q_output_ptr = q_output_buffer->ptr;
     void *k_output_ptr = k_output_buffer->ptr;
     void *v_output_ptr = v_output_buffer->ptr;
-    void *split_params[] = {
-        &conv_output_ptr,
+    void *kernel_params[] = {
+        &qkv_ptr,
+        &conv_weight_ptr,
+        &conv_history_ptr,
         &kernel_key_heads,
         &kernel_value_heads,
         &kernel_key_dim,
         &kernel_value_dim,
+        &kernel_size_arg,
         &q_scale,
         &kernel_qk_l2_norm,
+        &conv_output_ptr,
         &q_output_ptr,
         &k_output_ptr,
         &v_output_ptr,
     };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
     if (!hip_runtime().module_launch_kernel(
-            split_function,
-            static_cast<unsigned int>(split_grid_size),
+            function,
+            static_cast<unsigned int>(grid_size),
             block_size,
-            split_params,
+            kernel_params,
             hip_stream,
             device_id)) {
         if (error != nullptr) {
-            *error = "hipModuleLaunchKernel failed for linear attention qkv split prepare";
+            *error = "hipModuleLaunchKernel failed for linear attention qkv prepare";
         }
         return false;
     }
