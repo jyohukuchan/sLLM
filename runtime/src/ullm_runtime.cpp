@@ -1306,6 +1306,78 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
     unsigned long long value_dim,
     float softmax_scale,
     float *output) {
+    __shared__ float partial[256];
+    if (gridDim.x == q_heads && blockDim.x == 256u && head_dim <= 256ull &&
+        value_dim <= 256ull) {
+        const unsigned long long q_head = blockIdx.x;
+        const unsigned int tid = threadIdx.x;
+        const unsigned long long q_per_kv = q_heads / kv_heads;
+        const unsigned long long kv_head = q_head / q_per_kv;
+        const unsigned long long q_base = q_head * head_dim;
+
+        float max_score = -3.4028234663852886e38f;
+        for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+            const unsigned long long block_index = source_timestep / block_size;
+            const unsigned long long block_offset = source_timestep - block_index * block_size;
+            const unsigned long long block_id =
+                static_cast<unsigned long long>(block_table[block_index]);
+            if (block_id >= cache_blocks) {
+                if (tid < value_dim) {
+                    output[q_head * value_dim + tid] = 0.0f;
+                }
+                return;
+            }
+            const unsigned long long physical_timestep = block_id * block_size + block_offset;
+            const unsigned long long k_base = (physical_timestep * kv_heads + kv_head) * head_dim;
+            partial[tid] = tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
+            __syncthreads();
+            for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+                if (tid < offset) {
+                    partial[tid] += partial[tid + offset];
+                }
+                __syncthreads();
+            }
+            const float score = partial[0] * softmax_scale;
+            max_score = score > max_score ? score : max_score;
+        }
+
+        float denominator = 0.0f;
+        float weighted = 0.0f;
+        for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+            const unsigned long long block_index = source_timestep / block_size;
+            const unsigned long long block_offset = source_timestep - block_index * block_size;
+            const unsigned long long block_id =
+                static_cast<unsigned long long>(block_table[block_index]);
+            if (block_id >= cache_blocks) {
+                if (tid < value_dim) {
+                    output[q_head * value_dim + tid] = 0.0f;
+                }
+                return;
+            }
+            const unsigned long long physical_timestep = block_id * block_size + block_offset;
+            const unsigned long long k_base = (physical_timestep * kv_heads + kv_head) * head_dim;
+            partial[tid] = tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
+            __syncthreads();
+            for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+                if (tid < offset) {
+                    partial[tid] += partial[tid + offset];
+                }
+                __syncthreads();
+            }
+            const float weight = expf(partial[0] * softmax_scale - max_score);
+            denominator += weight;
+            if (tid < value_dim) {
+                const unsigned long long v_index =
+                    (physical_timestep * kv_heads + kv_head) * value_dim + tid;
+                weighted += weight * v_cache[v_index];
+            }
+        }
+        if (tid < value_dim) {
+            output[q_head * value_dim + tid] = weighted / denominator;
+        }
+        return;
+    }
+
     const unsigned long long index =
         static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     const unsigned long long elements = q_heads * value_dim;
@@ -5715,10 +5787,14 @@ bool paged_decode_attn_f32_hip_kernel(
 
     constexpr unsigned int launch_block_size = 256;
     const size_t output_elements = q_heads * value_dim;
-    const size_t grid_size = (output_elements + launch_block_size - 1) / launch_block_size;
+    const bool use_head_parallel_kernel =
+        head_dim <= launch_block_size && value_dim <= launch_block_size;
+    const size_t grid_size = use_head_parallel_kernel
+                                 ? q_heads
+                                 : (output_elements + launch_block_size - 1) / launch_block_size;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
-            *error = "paged decode attention output element count exceeds HIP grid limit";
+            *error = "paged decode attention launch grid exceeds HIP grid limit";
         }
         return false;
     }
