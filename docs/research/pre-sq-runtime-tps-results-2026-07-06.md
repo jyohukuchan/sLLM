@@ -13,11 +13,12 @@
 - `tools/summarize-runtime-tps.py` を追加し、raw smoke JSONからMarkdown summaryと `inference-benchmark-result-v0.1` 風JSONLを生成できるようにした。
 - `tools/run-external-benchmark.py` に `--parse ullm-token-ids-generate` を追加し、uLLM stdout JSON、rocm-smi VRAM監視、correctness summaryを同じJSONL行にまとめられるようにした。
 - R9700とV620で `prompt_tokens=512`, `generated_tokens=256` のVRAM監視付きrunを完走した。
+- materialized-AQ baseline packageでR9700 `512/256` を完走した。V620側の同一長decodeは、R9700/V620ともdecode約 `0.14 tok/s` に張り付くことが既に確認できたため、途中で意図的に停止した。
 
 ## 次の行動
 
-1. BF16/materialized AQ baselineを同じschemaで最低1本作る。
-2. `2048/256` または `2048/512` のstretch runをR9700優先で試す。
+1. BF16 baselineの実装可否を整理する。真のBF16 runtimeが重い場合は、まず比較不能な点を明記してT6へ進む。
+2. 以後のTPS測定は、長いprefillと短いdecodeを分ける。decodeが約 `0.14 tok/s` の経路で長時間測定を繰り返さない。
 3. sq format案では、F32常駐を避ける保存形式とdecode時のmaterialize範囲を最優先で検討する。
 
 ## Artifacts
@@ -26,6 +27,8 @@
 - Raw runtime smoke JSONL: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-bench-summary.jsonl`
 - VRAM-monitored benchmark JSONL: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-bench-vram.jsonl`
 - VRAM-monitored benchmark summary: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-bench-vram-summary.md`
+- Materialized-AQ baseline JSONL: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-baseline-vram.jsonl`
+- Materialized-AQ baseline summary: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-baseline-vram-summary.md`
 
 Local raw logs are under `benchmarks/results/2026-07-06/engine/logs/`, but that directory is intentionally ignored by git. The tracked JSONL above contains the comparable metrics, memory summary, correctness summary, and artifact paths.
 
@@ -70,6 +73,7 @@ V620 note: the engine `device_index=1` run mapped to rocm-smi `card1` in the mem
 - The first sq format should prioritize avoiding whole-layer f32 residency.
 - Weight storage and decode-time materialization granularity matter more than KV compression for this specific `512/256` single-request case.
 - The current decode path should not be used to judge final RDNA2 vs RDNA4 hardware potential because lm_head/top-k and per-step host/runtime orchestration are still heavy.
+- Because decode is already pathologically slow and stable, repeating long `256` token decode runs on the same current path has low value. Future measurement should split long prefill pressure from short decode probes until runtime or sq implementation changes.
 - A useful sq prototype should make the following visible in the benchmark record:
   - compact resident bytes
   - materialized working-set bytes
@@ -78,9 +82,31 @@ V620 note: the engine `device_index=1` run mapped to rocm-smi `card1` in the mem
   - materialization time
   - steady-state decode time
 
+## Materialized-AQ Baseline Update
+
+Baseline package:
+
+```text
+/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p46-inproj-row-scale-layer6-layer10.ullm.d
+```
+
+R9700 `512/256` completed with the same benchmark schema:
+
+| target | uLLM device | rocm-smi card | prefill tok/s | decode tok/s | total wall s | consumed GiB | peak total GiB | KV bytes | verified |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| R9700/RDNA4 | `2` | `card2` | 2.912 | 0.140 | 1998.935 | 26.257 | 26.424 | 50331648 | true |
+
+V620 `512/256` was intentionally stopped after the R9700 result showed the same decode bottleneck already seen in the accepted package runs. The partial V620 memory log has 294 samples and reached `card1` used `26.268 GiB`, total used `26.411 GiB`. This is enough to confirm that the baseline reaches the same resident-memory regime, but it is not a formal V620 TPS record.
+
+Conclusion:
+
+- The materialized-AQ baseline is not meaningfully faster than the accepted package on the current runtime path.
+- The bottleneck to address before sq format measurement is runtime decode cost and f32 materialized residency, not RDNA2 vs RDNA4 selection.
+- Long decode runs should resume only after the execution path changes or when a publication-quality sustained number is specifically needed.
+
 ## Remaining Plan Items
 
 - T3 is now substantially satisfied for the minimum `512/256` grid, including VRAM.
 - T4 still needs a stricter short reference check against HF/PyTorch or existing golden fixture.
-- T5 is not complete: BF16/materialized AQ baseline comparison still needs to be added.
-- T6 decision pack is not final until T5 exists and at least one stretch context run is attempted or explicitly deferred.
+- T5 is partially complete: materialized-AQ baseline has an R9700 long-run anchor, but true BF16 baseline is not available yet.
+- T6 decision pack is not final until T4 and the BF16 baseline decision are closed. Stretch context runs should be deferred unless a faster path is introduced.
