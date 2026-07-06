@@ -17481,6 +17481,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
     }
     let sync_linear_attn_components_for_timing =
         env_flag_enabled("ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING");
+    let use_aq4_matvec_qkv_z_gate_beta_requested =
+        !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA");
     let use_aq4_matvec_pair_qkv_z = !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_QKV_Z");
 
     let run_started = Instant::now();
@@ -17489,6 +17491,9 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let info = context
         .device_info()
         .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let use_aq4_matvec_qkv_z_gate_beta = use_aq4_matvec_qkv_z_gate_beta_requested
+        && info.backend == "hip"
+        && info.compute_major >= 12;
     let mut stream = context
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
@@ -17959,6 +17964,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "sync_layers_for_timing": sync_decode_layers_for_timing,
             "sync_each_layer_for_timing": sync_decode_each_layer_for_timing,
             "sync_linear_attn_components_for_timing": sync_linear_attn_components_for_timing,
+            "use_aq4_matvec_qkv_z_gate_beta": use_aq4_matvec_qkv_z_gate_beta,
             "use_aq4_matvec_pair_qkv_z": use_aq4_matvec_pair_qkv_z,
             "positions": decode_positions,
             "step_wall_ms": decode_step_ms,
@@ -28851,6 +28857,7 @@ struct PackageAq4ResidentMatvec {
 
 static AQ4_MATVEC_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_PAIR_PREWARMED: AtomicBool = AtomicBool::new(false);
+static AQ4_MATVEC_QKV_Z_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_ADD_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_SILU_MUL_PREWARMED: AtomicBool = AtomicBool::new(false);
@@ -28926,6 +28933,60 @@ fn prewarm_aq4_matvec_pair_once(
     })();
     if result.is_err() {
         AQ4_MATVEC_PAIR_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prewarm_aq4_matvec_qkv_z_gate_beta_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    qkv: &PackageAq4ResidentMatvec,
+    z: &PackageAq4ResidentMatvec,
+    a: &PackageAq4ResidentMatvec,
+    b: &PackageAq4ResidentMatvec,
+    input_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    a_log_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    dt_bias_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    qkv_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    z_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    beta_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if AQ4_MATVEC_QKV_Z_GATE_BETA_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        input_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; qkv.cols]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm input: {err}"))?;
+        qkv.matvec_qkv_z_gate_beta_with(
+            z,
+            a,
+            b,
+            input_buffer,
+            a_log_buffer,
+            dt_bias_buffer,
+            qkv_output_buffer,
+            z_output_buffer,
+            gate_output_buffer,
+            beta_output_buffer,
+            stream,
+            label,
+        )?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        AQ4_MATVEC_QKV_Z_GATE_BETA_PREWARMED.store(false, Ordering::Release);
     }
     result
 }
@@ -29395,6 +29456,112 @@ impl PackageAq4ResidentMatvec {
             Err(_) => {
                 self.matvec(input_buffer, left_output_buffer, stream, label)?;
                 right.matvec(input_buffer, right_output_buffer, stream, label)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matvec_qkv_z_gate_beta_with(
+        &self,
+        z: &Self,
+        a: &Self,
+        b: &Self,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        a_log_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        dt_bias_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        qkv_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        z_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        beta_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<(), String> {
+        if self.cols != z.cols || self.cols != a.cols || self.cols != b.cols {
+            return Err(format!(
+                "{label} AQ4 qkv/z gate/beta column mismatch: qkv=[{},{}] z=[{},{}] a=[{},{}] b=[{},{}]",
+                self.rows, self.cols, z.rows, z.cols, a.rows, a.cols, b.rows, b.cols
+            ));
+        }
+        if a.rows != b.rows {
+            return Err(format!(
+                "{label} AQ4 qkv/z gate/beta head mismatch: a=[{},{}] b=[{},{}]",
+                a.rows, a.cols, b.rows, b.cols
+            ));
+        }
+        let result = ullm_runtime_sys::aq4_matvec_qkv_z_gate_beta_f32(
+            self.index_buffer.as_ref(),
+            self.scale_buffer.as_ref(),
+            self.codebook_buffer.as_ref(),
+            &self.scale_values_buffer,
+            self.row_scale_buffer.as_ref(),
+            self.scale_count,
+            self.group_size,
+            self.tensor_scale,
+            self.row_scale_count,
+            z.index_buffer.as_ref(),
+            z.scale_buffer.as_ref(),
+            z.codebook_buffer.as_ref(),
+            &z.scale_values_buffer,
+            z.row_scale_buffer.as_ref(),
+            z.scale_count,
+            z.group_size,
+            z.tensor_scale,
+            z.row_scale_count,
+            a.index_buffer.as_ref(),
+            a.scale_buffer.as_ref(),
+            a.codebook_buffer.as_ref(),
+            &a.scale_values_buffer,
+            a.row_scale_buffer.as_ref(),
+            a.scale_count,
+            a.group_size,
+            a.tensor_scale,
+            a.row_scale_count,
+            b.index_buffer.as_ref(),
+            b.scale_buffer.as_ref(),
+            b.codebook_buffer.as_ref(),
+            &b.scale_values_buffer,
+            b.row_scale_buffer.as_ref(),
+            b.scale_count,
+            b.group_size,
+            b.tensor_scale,
+            b.row_scale_count,
+            input_buffer,
+            a_log_buffer,
+            dt_bias_buffer,
+            self.rows,
+            z.rows,
+            a.rows,
+            self.cols,
+            qkv_output_buffer,
+            z_output_buffer,
+            gate_output_buffer,
+            beta_output_buffer,
+            Some(stream),
+        );
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) if env_flag_enabled("ULLM_REQUIRE_HIP_AQ4_MATVEC_QKV_Z_GATE_BETA_KERNEL") => {
+                Err(format!("failed to run {label} AQ4 qkv/z gate/beta: {err}"))
+            }
+            Err(_) => {
+                self.matvec_pair_with(
+                    z,
+                    input_buffer,
+                    qkv_output_buffer,
+                    z_output_buffer,
+                    stream,
+                    label,
+                )?;
+                a.matvec_gate_beta_with(
+                    b,
+                    input_buffer,
+                    a_log_buffer,
+                    dt_bias_buffer,
+                    gate_output_buffer,
+                    beta_output_buffer,
+                    stream,
+                    label,
+                )
             }
         }
     }
@@ -30243,6 +30410,7 @@ struct PackageLinearAttnResidentStepLayer {
     layer_index: usize,
     sync_component_timing: bool,
     last_component_step_ms: Option<PackageLinearAttnComponentStepMs>,
+    use_qkv_z_gate_beta_fusion: bool,
     use_qkv_z_pair: bool,
     key_heads: usize,
     value_heads: usize,
@@ -30306,6 +30474,8 @@ impl PackageLinearAttnResidentStepLayer {
         let value_dim = 128_usize;
         let hidden = value_heads * value_dim;
         let sync_component_timing = env_flag_enabled("ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING");
+        let use_qkv_z_gate_beta_fusion_requested =
+            !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA");
         let use_qkv_z_pair = !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_QKV_Z");
         let q_elements_per_step = key_heads * key_dim;
         let k_elements_per_step = q_elements_per_step;
@@ -30684,6 +30854,9 @@ impl PackageLinearAttnResidentStepLayer {
         let device_info = context
             .device_info()
             .map_err(|err| format!("failed to get linear-attn resident device info: {err}"))?;
+        let use_qkv_z_gate_beta_fusion = use_qkv_z_gate_beta_fusion_requested
+            && device_info.backend == "hip"
+            && device_info.compute_major >= 12;
         if device_info.backend == "hip" {
             prewarm_aq4_matvec_once(
                 stream,
@@ -30701,6 +30874,23 @@ impl PackageLinearAttnResidentStepLayer {
                     &mut qkv_buffer,
                     &mut z_buffer,
                     "linear-attn resident AQ4 qkv/z pair",
+                )?;
+            }
+            if use_qkv_z_gate_beta_fusion {
+                prewarm_aq4_matvec_qkv_z_gate_beta_once(
+                    stream,
+                    &qkv_matrix,
+                    &z_matrix,
+                    &a_matrix,
+                    &b_matrix,
+                    &mut input_normed_buffer,
+                    &a_log_buffer,
+                    &dt_bias_buffer,
+                    &mut qkv_buffer,
+                    &mut z_buffer,
+                    &mut recurrent_gate_buffer,
+                    &mut recurrent_beta_buffer,
+                    "linear-attn resident AQ4 qkv/z gate-beta",
                 )?;
             }
             prewarm_aq4_matvec_gate_beta_once(
@@ -30766,6 +30956,7 @@ impl PackageLinearAttnResidentStepLayer {
             layer_index,
             sync_component_timing,
             last_component_step_ms: None,
+            use_qkv_z_gate_beta_fusion,
             use_qkv_z_pair,
             key_heads,
             value_heads,
@@ -30940,7 +31131,23 @@ impl PackageLinearAttnResidentStepLayer {
         .map_err(|err| format!("failed to run {label} input RMSNorm: {err}"))?;
         finish_component!(component_started, input_rmsnorm_ms, "input RMSNorm");
 
-        if self.use_qkv_z_pair && !sync_component_timing {
+        let use_qkv_z_gate_beta_fusion = self.use_qkv_z_gate_beta_fusion && !sync_component_timing;
+        if use_qkv_z_gate_beta_fusion {
+            self.qkv_matrix.matvec_qkv_z_gate_beta_with(
+                &self.z_matrix,
+                &self.a_matrix,
+                &self.b_matrix,
+                &self.input_normed_buffer,
+                &self.a_log_buffer,
+                &self.dt_bias_buffer,
+                &mut self.qkv_buffer,
+                &mut self.z_buffer,
+                &mut self.recurrent_gate_buffer,
+                &mut self.recurrent_beta_buffer,
+                stream,
+                "linear-attn resident qkv/z gate-beta projection",
+            )?;
+        } else if self.use_qkv_z_pair && !sync_component_timing {
             self.qkv_matrix.matvec_pair_with(
                 &self.z_matrix,
                 &self.input_normed_buffer,
@@ -30988,18 +31195,20 @@ impl PackageLinearAttnResidentStepLayer {
         )
         .map_err(|err| format!("failed to run linear-attn resident qkv prepare: {err}"))?;
         finish_component!(component_started, qkv_prepare_ms, "qkv prepare");
-        let component_started = component_started!();
-        self.a_matrix.matvec_gate_beta_with(
-            &self.b_matrix,
-            &self.input_normed_buffer,
-            &self.a_log_buffer,
-            &self.dt_bias_buffer,
-            &mut self.recurrent_gate_buffer,
-            &mut self.recurrent_beta_buffer,
-            stream,
-            "linear-attn resident a/b gate-beta",
-        )?;
-        finish_component!(component_started, gate_beta_projection_ms, "a/b gate-beta");
+        if !use_qkv_z_gate_beta_fusion {
+            let component_started = component_started!();
+            self.a_matrix.matvec_gate_beta_with(
+                &self.b_matrix,
+                &self.input_normed_buffer,
+                &self.a_log_buffer,
+                &self.dt_bias_buffer,
+                &mut self.recurrent_gate_buffer,
+                &mut self.recurrent_beta_buffer,
+                stream,
+                "linear-attn resident a/b gate-beta",
+            )?;
+            finish_component!(component_started, gate_beta_projection_ms, "a/b gate-beta");
+        }
         let component_started = component_started!();
         ullm_runtime_sys::linear_attn_recurrent_f32(
             &self.recurrent_q_buffer,

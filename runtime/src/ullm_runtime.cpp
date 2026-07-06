@@ -384,6 +384,19 @@ public:
             error);
     }
 
+    bool compile_aq4_matvec_qkv_z_gate_beta_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        const std::string source = aq4_matvec_qkv_z_gate_beta_kernel_source_for_arch(arch);
+        return compile_kernel(
+            arch,
+            source.c_str(),
+            "ullm_aq4_matvec_qkv_z_gate_beta_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_aq4_matvec_silu_mul_kernel(
         const std::string &arch,
         std::vector<char> *code,
@@ -714,6 +727,11 @@ extern "C" __global__ void ullm_aq4_dequant_f32_kernel(
 
     static std::string aq4_matvec_pair_kernel_source_for_arch(const std::string &arch) {
         return aq4_rows_per_block_preamble(arch) + aq4_matvec_pair_kernel_source();
+    }
+
+    static std::string aq4_matvec_qkv_z_gate_beta_kernel_source_for_arch(
+        const std::string &arch) {
+        return aq4_rows_per_block_preamble(arch) + aq4_matvec_qkv_z_gate_beta_kernel_source();
     }
 
     static std::string aq4_matvec_silu_mul_kernel_source_for_arch(const std::string &arch) {
@@ -1070,6 +1088,229 @@ extern "C" __global__ void ullm_aq4_matvec_pair_f32_kernel(
                 value *= right_row_scales[row];
             }
             right_output[row] = value;
+        }
+    }
+}
+)";
+    }
+
+    static const char *aq4_matvec_qkv_z_gate_beta_kernel_source() {
+        return R"(
+__device__ float ullm_aq4_qkv_z_gate_beta_thread_sum(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row,
+    unsigned long long cols,
+    unsigned int tid,
+    unsigned int block_size) {
+    const unsigned long long row_offset = row * cols;
+    float sum = 0.0f;
+    if ((cols % group_size) == 0ull) {
+        const unsigned long long groups_per_row = cols / group_size;
+        for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
+             group_in_row += block_size) {
+            const unsigned long long group = row * groups_per_row + group_in_row;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index >= scale_count) {
+                continue;
+            }
+            float raw_sum = 0.0f;
+            const unsigned long long col_start = group_in_row * group_size;
+            for (unsigned long long offset = 0; offset < group_size; ++offset) {
+                const unsigned long long col = col_start + offset;
+                const unsigned long long element = row_offset + col;
+                const unsigned char packed = indices[element >> 1];
+                const unsigned char codebook_index =
+                    (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                raw_sum += codebook[codebook_index] * input[col];
+            }
+            sum += raw_sum * scale_values[scale_index] * tensor_scale;
+        }
+    } else {
+        for (unsigned long long col = tid; col < cols; col += block_size) {
+            const unsigned long long element = row_offset + col;
+            const unsigned char packed = indices[element >> 1];
+            const unsigned char codebook_index =
+                (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+            const unsigned long long group = element / group_size;
+            const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+            if (scale_index < scale_count) {
+                const float value =
+                    codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+                sum += value * input[col];
+            }
+        }
+    }
+    return sum;
+}
+
+extern "C" __global__ void ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel(
+    const unsigned char *qkv_indices,
+    const unsigned char *qkv_scale_indices,
+    const float *qkv_codebook,
+    const float *qkv_scale_values,
+    const float *qkv_row_scales,
+    unsigned long long qkv_scale_count,
+    unsigned long long qkv_group_size,
+    float qkv_tensor_scale,
+    unsigned long long qkv_row_scale_count,
+    const unsigned char *z_indices,
+    const unsigned char *z_scale_indices,
+    const float *z_codebook,
+    const float *z_scale_values,
+    const float *z_row_scales,
+    unsigned long long z_scale_count,
+    unsigned long long z_group_size,
+    float z_tensor_scale,
+    unsigned long long z_row_scale_count,
+    const unsigned char *a_indices,
+    const unsigned char *a_scale_indices,
+    const float *a_codebook,
+    const float *a_scale_values,
+    const float *a_row_scales,
+    unsigned long long a_scale_count,
+    unsigned long long a_group_size,
+    float a_tensor_scale,
+    unsigned long long a_row_scale_count,
+    const unsigned char *b_indices,
+    const unsigned char *b_scale_indices,
+    const float *b_codebook,
+    const float *b_scale_values,
+    const float *b_row_scales,
+    unsigned long long b_scale_count,
+    unsigned long long b_group_size,
+    float b_tensor_scale,
+    unsigned long long b_row_scale_count,
+    const float *input,
+    const float *a_log,
+    const float *dt_bias,
+    unsigned long long qkv_rows,
+    unsigned long long z_rows,
+    unsigned long long heads,
+    unsigned long long cols,
+    float *qkv_output,
+    float *z_output,
+    float *gate_output,
+    float *beta_output) {
+    const unsigned int tid = threadIdx.x;
+    constexpr unsigned int rows_per_block = ULLM_AQ4_ROWS_PER_BLOCK;
+    constexpr unsigned int threads_per_row = 256u / rows_per_block;
+    const unsigned int row_in_block = tid / threads_per_row;
+    const unsigned int lane = tid - row_in_block * threads_per_row;
+    const unsigned long long block_start =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block;
+    const unsigned long long logical_row = block_start + row_in_block;
+    const unsigned long long single_rows = qkv_rows + z_rows;
+    const unsigned long long total_rows = single_rows + heads;
+    const bool block_needs_secondary = block_start + rows_per_block > single_rows;
+    const unsigned int partial_offset = row_in_block * threads_per_row;
+    __shared__ float primary_partial[256];
+    __shared__ float secondary_partial[256];
+    float primary_sum = 0.0f;
+    float secondary_sum = 0.0f;
+    if (logical_row < qkv_rows) {
+        primary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
+            qkv_indices,
+            qkv_scale_indices,
+            qkv_codebook,
+            qkv_scale_values,
+            input,
+            qkv_scale_count,
+            qkv_group_size,
+            qkv_tensor_scale,
+            logical_row,
+            cols,
+            lane,
+            threads_per_row);
+    } else if (logical_row < single_rows) {
+        const unsigned long long z_row = logical_row - qkv_rows;
+        primary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
+            z_indices,
+            z_scale_indices,
+            z_codebook,
+            z_scale_values,
+            input,
+            z_scale_count,
+            z_group_size,
+            z_tensor_scale,
+            z_row,
+            cols,
+            lane,
+            threads_per_row);
+    } else if (logical_row < total_rows) {
+        const unsigned long long head = logical_row - single_rows;
+        primary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
+            a_indices,
+            a_scale_indices,
+            a_codebook,
+            a_scale_values,
+            input,
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            head,
+            cols,
+            lane,
+            threads_per_row);
+        secondary_sum = ullm_aq4_qkv_z_gate_beta_thread_sum(
+            b_indices,
+            b_scale_indices,
+            b_codebook,
+            b_scale_values,
+            input,
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            head,
+            cols,
+            lane,
+            threads_per_row);
+    }
+    primary_partial[tid] = primary_sum;
+    secondary_partial[tid] = secondary_sum;
+    __syncthreads();
+    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
+        if (lane < offset) {
+            primary_partial[partial_offset + lane] += primary_partial[partial_offset + lane + offset];
+            if (block_needs_secondary) {
+                secondary_partial[partial_offset + lane] +=
+                    secondary_partial[partial_offset + lane + offset];
+            }
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && logical_row < total_rows) {
+        float value = primary_partial[partial_offset];
+        if (logical_row < qkv_rows) {
+            if (qkv_row_scales != nullptr && logical_row < qkv_row_scale_count) {
+                value *= qkv_row_scales[logical_row];
+            }
+            qkv_output[logical_row] = value;
+        } else if (logical_row < single_rows) {
+            const unsigned long long z_row = logical_row - qkv_rows;
+            if (z_row_scales != nullptr && z_row < z_row_scale_count) {
+                value *= z_row_scales[z_row];
+            }
+            z_output[z_row] = value;
+        } else {
+            const unsigned long long head = logical_row - single_rows;
+            float b_value = secondary_partial[partial_offset];
+            if (a_row_scales != nullptr && head < a_row_scale_count) {
+                value *= a_row_scales[head];
+            }
+            if (b_row_scales != nullptr && head < b_row_scale_count) {
+                b_value *= b_row_scales[head];
+            }
+            const float x = value + dt_bias[head];
+            const float softplus = x <= 20.0f ? log1pf(expf(x)) : x;
+            gate_output[head] = -expf(a_log[head]) * softplus;
+            beta_output[head] = 1.0f / (1.0f + expf(-b_value));
         }
     }
 }
@@ -3604,6 +3845,90 @@ HipAq4MatvecPairKernelCache &hip_aq4_matvec_pair_kernel_cache() {
     return cache;
 }
 
+class HipAq4MatvecQkvZGateBetaKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_aq4_matvec_qkv_z_gate_beta_kernel(
+                    arch,
+                    &code,
+                    &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_aq4_matvec_qkv_z_gate_beta_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build AQ4 qkv/z gate/beta HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipAq4MatvecQkvZGateBetaKernelCache &hip_aq4_matvec_qkv_z_gate_beta_kernel_cache() {
+    static HipAq4MatvecQkvZGateBetaKernelCache cache;
+    return cache;
+}
+
 bool aq4_matvec_f32_hip_kernel(
     const ullm_runtime_buffer *index_buffer,
     const ullm_runtime_buffer *scale_buffer,
@@ -3864,6 +4189,196 @@ bool aq4_matvec_pair_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for AQ4 matvec pair";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool aq4_matvec_qkv_z_gate_beta_f32_hip_kernel(
+    const ullm_runtime_buffer *qkv_index_buffer,
+    const ullm_runtime_buffer *qkv_scale_buffer,
+    const ullm_runtime_buffer *qkv_codebook_buffer,
+    const ullm_runtime_buffer *qkv_scale_values_buffer,
+    const ullm_runtime_buffer *qkv_row_scale_buffer,
+    size_t qkv_scale_count,
+    size_t qkv_group_size,
+    float qkv_tensor_scale,
+    size_t qkv_row_scale_count,
+    const ullm_runtime_buffer *z_index_buffer,
+    const ullm_runtime_buffer *z_scale_buffer,
+    const ullm_runtime_buffer *z_codebook_buffer,
+    const ullm_runtime_buffer *z_scale_values_buffer,
+    const ullm_runtime_buffer *z_row_scale_buffer,
+    size_t z_scale_count,
+    size_t z_group_size,
+    float z_tensor_scale,
+    size_t z_row_scale_count,
+    const ullm_runtime_buffer *a_index_buffer,
+    const ullm_runtime_buffer *a_scale_buffer,
+    const ullm_runtime_buffer *a_codebook_buffer,
+    const ullm_runtime_buffer *a_scale_values_buffer,
+    const ullm_runtime_buffer *a_row_scale_buffer,
+    size_t a_scale_count,
+    size_t a_group_size,
+    float a_tensor_scale,
+    size_t a_row_scale_count,
+    const ullm_runtime_buffer *b_index_buffer,
+    const ullm_runtime_buffer *b_scale_buffer,
+    const ullm_runtime_buffer *b_codebook_buffer,
+    const ullm_runtime_buffer *b_scale_values_buffer,
+    const ullm_runtime_buffer *b_row_scale_buffer,
+    size_t b_scale_count,
+    size_t b_group_size,
+    float b_tensor_scale,
+    size_t b_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t qkv_rows,
+    size_t z_rows,
+    size_t heads,
+    size_t cols,
+    ullm_runtime_buffer *qkv_output_buffer,
+    ullm_runtime_buffer *z_output_buffer,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = qkv_index_buffer->hip_device_id;
+    void *function =
+        hip_aq4_matvec_qkv_z_gate_beta_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (qkv_rows > max_size - z_rows || qkv_rows + z_rows > max_size - heads) {
+        if (error != nullptr) {
+            *error = "AQ4 qkv/z gate/beta row count overflows";
+        }
+        return false;
+    }
+    const size_t total_rows = qkv_rows + z_rows + heads;
+    const size_t grid_size =
+        (total_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "AQ4 qkv/z gate/beta row count exceeds HIP grid limit";
+        }
+        return false;
+    }
+
+    void *qkv_index_ptr = qkv_index_buffer->ptr;
+    void *qkv_scale_ptr = qkv_scale_buffer->ptr;
+    void *qkv_codebook_ptr = qkv_codebook_buffer->ptr;
+    void *qkv_scale_values_ptr = qkv_scale_values_buffer->ptr;
+    void *qkv_row_scale_ptr =
+        qkv_row_scale_buffer == nullptr ? nullptr : qkv_row_scale_buffer->ptr;
+    unsigned long long kernel_qkv_scale_count =
+        static_cast<unsigned long long>(qkv_scale_count);
+    unsigned long long kernel_qkv_group_size =
+        static_cast<unsigned long long>(qkv_group_size);
+    unsigned long long kernel_qkv_row_scale_count =
+        static_cast<unsigned long long>(qkv_row_scale_count);
+    void *z_index_ptr = z_index_buffer->ptr;
+    void *z_scale_ptr = z_scale_buffer->ptr;
+    void *z_codebook_ptr = z_codebook_buffer->ptr;
+    void *z_scale_values_ptr = z_scale_values_buffer->ptr;
+    void *z_row_scale_ptr = z_row_scale_buffer == nullptr ? nullptr : z_row_scale_buffer->ptr;
+    unsigned long long kernel_z_scale_count = static_cast<unsigned long long>(z_scale_count);
+    unsigned long long kernel_z_group_size = static_cast<unsigned long long>(z_group_size);
+    unsigned long long kernel_z_row_scale_count =
+        static_cast<unsigned long long>(z_row_scale_count);
+    void *a_index_ptr = a_index_buffer->ptr;
+    void *a_scale_ptr = a_scale_buffer->ptr;
+    void *a_codebook_ptr = a_codebook_buffer->ptr;
+    void *a_scale_values_ptr = a_scale_values_buffer->ptr;
+    void *a_row_scale_ptr = a_row_scale_buffer == nullptr ? nullptr : a_row_scale_buffer->ptr;
+    unsigned long long kernel_a_scale_count = static_cast<unsigned long long>(a_scale_count);
+    unsigned long long kernel_a_group_size = static_cast<unsigned long long>(a_group_size);
+    unsigned long long kernel_a_row_scale_count =
+        static_cast<unsigned long long>(a_row_scale_count);
+    void *b_index_ptr = b_index_buffer->ptr;
+    void *b_scale_ptr = b_scale_buffer->ptr;
+    void *b_codebook_ptr = b_codebook_buffer->ptr;
+    void *b_scale_values_ptr = b_scale_values_buffer->ptr;
+    void *b_row_scale_ptr = b_row_scale_buffer == nullptr ? nullptr : b_row_scale_buffer->ptr;
+    unsigned long long kernel_b_scale_count = static_cast<unsigned long long>(b_scale_count);
+    unsigned long long kernel_b_group_size = static_cast<unsigned long long>(b_group_size);
+    unsigned long long kernel_b_row_scale_count =
+        static_cast<unsigned long long>(b_row_scale_count);
+    void *input_ptr = input_buffer->ptr;
+    void *a_log_ptr = a_log_buffer->ptr;
+    void *dt_bias_ptr = dt_bias_buffer->ptr;
+    unsigned long long kernel_qkv_rows = static_cast<unsigned long long>(qkv_rows);
+    unsigned long long kernel_z_rows = static_cast<unsigned long long>(z_rows);
+    unsigned long long kernel_heads = static_cast<unsigned long long>(heads);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    void *qkv_output_ptr = qkv_output_buffer->ptr;
+    void *z_output_ptr = z_output_buffer->ptr;
+    void *gate_output_ptr = gate_output_buffer->ptr;
+    void *beta_output_ptr = beta_output_buffer->ptr;
+    void *kernel_params[] = {
+        &qkv_index_ptr,
+        &qkv_scale_ptr,
+        &qkv_codebook_ptr,
+        &qkv_scale_values_ptr,
+        &qkv_row_scale_ptr,
+        &kernel_qkv_scale_count,
+        &kernel_qkv_group_size,
+        &qkv_tensor_scale,
+        &kernel_qkv_row_scale_count,
+        &z_index_ptr,
+        &z_scale_ptr,
+        &z_codebook_ptr,
+        &z_scale_values_ptr,
+        &z_row_scale_ptr,
+        &kernel_z_scale_count,
+        &kernel_z_group_size,
+        &z_tensor_scale,
+        &kernel_z_row_scale_count,
+        &a_index_ptr,
+        &a_scale_ptr,
+        &a_codebook_ptr,
+        &a_scale_values_ptr,
+        &a_row_scale_ptr,
+        &kernel_a_scale_count,
+        &kernel_a_group_size,
+        &a_tensor_scale,
+        &kernel_a_row_scale_count,
+        &b_index_ptr,
+        &b_scale_ptr,
+        &b_codebook_ptr,
+        &b_scale_values_ptr,
+        &b_row_scale_ptr,
+        &kernel_b_scale_count,
+        &kernel_b_group_size,
+        &b_tensor_scale,
+        &kernel_b_row_scale_count,
+        &input_ptr,
+        &a_log_ptr,
+        &dt_bias_ptr,
+        &kernel_qkv_rows,
+        &kernel_z_rows,
+        &kernel_heads,
+        &kernel_cols,
+        &qkv_output_ptr,
+        &z_output_ptr,
+        &gate_output_ptr,
+        &beta_output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            launch_config.block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for AQ4 qkv/z gate/beta";
         }
         return false;
     }
@@ -10680,6 +11195,373 @@ ullm_status ullm_runtime_aq4_matvec_pair_f32(
 
     set_error(
         hip_kernel_error.empty() ? "AQ4 matvec pair HIP kernel is unavailable" :
+                                   hip_kernel_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
+ullm_status ullm_runtime_aq4_matvec_qkv_z_gate_beta_f32(
+    const ullm_runtime_buffer *qkv_index_buffer,
+    const ullm_runtime_buffer *qkv_scale_buffer,
+    const ullm_runtime_buffer *qkv_codebook_buffer,
+    const ullm_runtime_buffer *qkv_scale_values_buffer,
+    const ullm_runtime_buffer *qkv_row_scale_buffer,
+    size_t qkv_scale_count,
+    size_t qkv_group_size,
+    float qkv_tensor_scale,
+    size_t qkv_row_scale_count,
+    const ullm_runtime_buffer *z_index_buffer,
+    const ullm_runtime_buffer *z_scale_buffer,
+    const ullm_runtime_buffer *z_codebook_buffer,
+    const ullm_runtime_buffer *z_scale_values_buffer,
+    const ullm_runtime_buffer *z_row_scale_buffer,
+    size_t z_scale_count,
+    size_t z_group_size,
+    float z_tensor_scale,
+    size_t z_row_scale_count,
+    const ullm_runtime_buffer *a_index_buffer,
+    const ullm_runtime_buffer *a_scale_buffer,
+    const ullm_runtime_buffer *a_codebook_buffer,
+    const ullm_runtime_buffer *a_scale_values_buffer,
+    const ullm_runtime_buffer *a_row_scale_buffer,
+    size_t a_scale_count,
+    size_t a_group_size,
+    float a_tensor_scale,
+    size_t a_row_scale_count,
+    const ullm_runtime_buffer *b_index_buffer,
+    const ullm_runtime_buffer *b_scale_buffer,
+    const ullm_runtime_buffer *b_codebook_buffer,
+    const ullm_runtime_buffer *b_scale_values_buffer,
+    const ullm_runtime_buffer *b_row_scale_buffer,
+    size_t b_scale_count,
+    size_t b_group_size,
+    float b_tensor_scale,
+    size_t b_row_scale_count,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *a_log_buffer,
+    const ullm_runtime_buffer *dt_bias_buffer,
+    size_t qkv_rows,
+    size_t z_rows,
+    size_t heads,
+    size_t cols,
+    ullm_runtime_buffer *qkv_output_buffer,
+    ullm_runtime_buffer *z_output_buffer,
+    ullm_runtime_buffer *gate_output_buffer,
+    ullm_runtime_buffer *beta_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (qkv_index_buffer == nullptr || qkv_scale_buffer == nullptr ||
+        qkv_codebook_buffer == nullptr || qkv_scale_values_buffer == nullptr ||
+        z_index_buffer == nullptr || z_scale_buffer == nullptr ||
+        z_codebook_buffer == nullptr || z_scale_values_buffer == nullptr ||
+        a_index_buffer == nullptr || a_scale_buffer == nullptr ||
+        a_codebook_buffer == nullptr || a_scale_values_buffer == nullptr ||
+        b_index_buffer == nullptr || b_scale_buffer == nullptr ||
+        b_codebook_buffer == nullptr || b_scale_values_buffer == nullptr ||
+        input_buffer == nullptr || a_log_buffer == nullptr || dt_bias_buffer == nullptr ||
+        qkv_output_buffer == nullptr || z_output_buffer == nullptr ||
+        gate_output_buffer == nullptr || beta_output_buffer == nullptr) {
+        set_error("AQ4 qkv/z gate/beta received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (qkv_scale_count == 0 || z_scale_count == 0 ||
+        a_scale_count == 0 || b_scale_count == 0) {
+        set_error("AQ4 qkv/z gate/beta scale table is empty");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (qkv_group_size == 0 || z_group_size == 0 ||
+        a_group_size == 0 || b_group_size == 0) {
+        set_error("AQ4 qkv/z gate/beta group size must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (qkv_rows == 0 || z_rows == 0 || heads == 0 || cols == 0) {
+        set_error("AQ4 qkv/z gate/beta rows and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(qkv_tensor_scale) || qkv_tensor_scale <= 0.0f ||
+        !std::isfinite(z_tensor_scale) || z_tensor_scale <= 0.0f ||
+        !std::isfinite(a_tensor_scale) || a_tensor_scale <= 0.0f ||
+        !std::isfinite(b_tensor_scale) || b_tensor_scale <= 0.0f) {
+        set_error("AQ4 qkv/z gate/beta tensor scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(qkv_index_buffer, qkv_scale_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, qkv_codebook_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, qkv_scale_values_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, z_index_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, z_scale_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, z_codebook_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, z_scale_values_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, a_index_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, a_scale_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, a_codebook_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, a_scale_values_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, b_index_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, b_scale_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, b_codebook_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, b_scale_values_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, input_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, a_log_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, dt_bias_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, qkv_output_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, z_output_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, gate_output_buffer) ||
+        !buffers_share_backend(qkv_index_buffer, beta_output_buffer) ||
+        (qkv_row_scale_buffer != nullptr &&
+         !buffers_share_backend(qkv_index_buffer, qkv_row_scale_buffer)) ||
+        (z_row_scale_buffer != nullptr &&
+         !buffers_share_backend(qkv_index_buffer, z_row_scale_buffer)) ||
+        (a_row_scale_buffer != nullptr &&
+         !buffers_share_backend(qkv_index_buffer, a_row_scale_buffer)) ||
+        (b_row_scale_buffer != nullptr &&
+         !buffers_share_backend(qkv_index_buffer, b_row_scale_buffer))) {
+        set_error("AQ4 qkv/z gate/beta buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(qkv_output_buffer, stream) ||
+        !stream_matches_buffer(z_output_buffer, stream) ||
+        !stream_matches_buffer(gate_output_buffer, stream) ||
+        !stream_matches_buffer(beta_output_buffer, stream)) {
+        set_error("AQ4 qkv/z gate/beta stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / qkv_rows || cols > max_size / z_rows ||
+        cols > max_size / heads) {
+        set_error("AQ4 qkv/z gate/beta matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t qkv_elements = qkv_rows * cols;
+    const size_t z_elements = z_rows * cols;
+    const size_t gate_elements = heads * cols;
+    const size_t qkv_required_index_bytes = qkv_elements / 2 + (qkv_elements % 2);
+    const size_t z_required_index_bytes = z_elements / 2 + (z_elements % 2);
+    const size_t gate_required_index_bytes = gate_elements / 2 + (gate_elements % 2);
+    const size_t qkv_groups =
+        qkv_elements / qkv_group_size + (qkv_elements % qkv_group_size == 0 ? 0 : 1);
+    const size_t z_groups =
+        z_elements / z_group_size + (z_elements % z_group_size == 0 ? 0 : 1);
+    const size_t a_groups =
+        gate_elements / a_group_size + (gate_elements % a_group_size == 0 ? 0 : 1);
+    const size_t b_groups =
+        gate_elements / b_group_size + (gate_elements % b_group_size == 0 ? 0 : 1);
+    if (cols > max_size / sizeof(float) ||
+        qkv_rows > max_size / sizeof(float) ||
+        z_rows > max_size / sizeof(float) ||
+        heads > max_size / sizeof(float) ||
+        qkv_scale_count > max_size / sizeof(float) ||
+        z_scale_count > max_size / sizeof(float) ||
+        a_scale_count > max_size / sizeof(float) ||
+        b_scale_count > max_size / sizeof(float) ||
+        qkv_row_scale_count > max_size / sizeof(float) ||
+        z_row_scale_count > max_size / sizeof(float) ||
+        a_row_scale_count > max_size / sizeof(float) ||
+        b_row_scale_count > max_size / sizeof(float)) {
+        set_error("AQ4 qkv/z gate/beta byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_input_bytes = cols * sizeof(float);
+    const size_t qkv_required_output_bytes = qkv_rows * sizeof(float);
+    const size_t z_required_output_bytes = z_rows * sizeof(float);
+    const size_t gate_required_output_bytes = heads * sizeof(float);
+    const size_t qkv_required_scale_value_bytes = qkv_scale_count * sizeof(float);
+    const size_t z_required_scale_value_bytes = z_scale_count * sizeof(float);
+    const size_t a_required_scale_value_bytes = a_scale_count * sizeof(float);
+    const size_t b_required_scale_value_bytes = b_scale_count * sizeof(float);
+    const size_t qkv_required_row_scale_bytes = qkv_row_scale_count * sizeof(float);
+    const size_t z_required_row_scale_bytes = z_row_scale_count * sizeof(float);
+    const size_t a_required_row_scale_bytes = a_row_scale_count * sizeof(float);
+    const size_t b_required_row_scale_bytes = b_row_scale_count * sizeof(float);
+    if (qkv_index_buffer->bytes < qkv_required_index_bytes ||
+        z_index_buffer->bytes < z_required_index_bytes ||
+        a_index_buffer->bytes < gate_required_index_bytes ||
+        b_index_buffer->bytes < gate_required_index_bytes) {
+        set_error("AQ4 qkv/z gate/beta index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (qkv_scale_buffer->bytes < qkv_groups ||
+        z_scale_buffer->bytes < z_groups ||
+        a_scale_buffer->bytes < a_groups ||
+        b_scale_buffer->bytes < b_groups) {
+        set_error("AQ4 qkv/z gate/beta scale index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (qkv_scale_values_buffer->bytes < qkv_required_scale_value_bytes ||
+        z_scale_values_buffer->bytes < z_required_scale_value_bytes ||
+        a_scale_values_buffer->bytes < a_required_scale_value_bytes ||
+        b_scale_values_buffer->bytes < b_required_scale_value_bytes) {
+        set_error("AQ4 qkv/z gate/beta scale value buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("AQ4 qkv/z gate/beta input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (a_log_buffer->bytes < gate_required_output_bytes ||
+        dt_bias_buffer->bytes < gate_required_output_bytes) {
+        set_error("AQ4 qkv/z gate/beta parameter buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((qkv_row_scale_buffer != nullptr &&
+         qkv_row_scale_buffer->bytes < qkv_required_row_scale_bytes) ||
+        (z_row_scale_buffer != nullptr &&
+         z_row_scale_buffer->bytes < z_required_row_scale_bytes) ||
+        (a_row_scale_buffer != nullptr &&
+         a_row_scale_buffer->bytes < a_required_row_scale_bytes) ||
+        (b_row_scale_buffer != nullptr &&
+         b_row_scale_buffer->bytes < b_required_row_scale_bytes)) {
+        set_error("AQ4 qkv/z gate/beta row scale buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (qkv_output_buffer->bytes < qkv_required_output_bytes ||
+        z_output_buffer->bytes < z_required_output_bytes ||
+        gate_output_buffer->bytes < gate_required_output_bytes ||
+        beta_output_buffer->bytes < gate_required_output_bytes) {
+        set_error("AQ4 qkv/z gate/beta output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (qkv_codebook_buffer->bytes % sizeof(float) != 0 ||
+        z_codebook_buffer->bytes % sizeof(float) != 0 ||
+        a_codebook_buffer->bytes % sizeof(float) != 0 ||
+        b_codebook_buffer->bytes % sizeof(float) != 0) {
+        set_error("AQ4 qkv/z gate/beta codebook buffer size is not a multiple of f32");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t qkv_codebook_entries = qkv_codebook_buffer->bytes / sizeof(float);
+    const size_t z_codebook_entries = z_codebook_buffer->bytes / sizeof(float);
+    const size_t a_codebook_entries = a_codebook_buffer->bytes / sizeof(float);
+    const size_t b_codebook_entries = b_codebook_buffer->bytes / sizeof(float);
+    if (qkv_codebook_entries < 16 || z_codebook_entries < 16 ||
+        a_codebook_entries < 16 || b_codebook_entries < 16) {
+        set_error("AQ4 qkv/z gate/beta requires at least 16 codebook entries");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (qkv_index_buffer->backend == BackendKind::Cpu) {
+        if (!aq4_matvec_f32_host(
+                static_cast<const std::uint8_t *>(qkv_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(qkv_scale_buffer->ptr),
+                static_cast<const float *>(qkv_codebook_buffer->ptr),
+                static_cast<const float *>(qkv_scale_values_buffer->ptr),
+                qkv_scale_count,
+                qkv_group_size,
+                qkv_tensor_scale,
+                static_cast<const float *>(input_buffer->ptr),
+                qkv_row_scale_buffer == nullptr
+                    ? nullptr
+                    : static_cast<const float *>(qkv_row_scale_buffer->ptr),
+                qkv_row_scale_count,
+                qkv_rows,
+                cols,
+                static_cast<float *>(qkv_output_buffer->ptr)) ||
+            !aq4_matvec_f32_host(
+                static_cast<const std::uint8_t *>(z_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(z_scale_buffer->ptr),
+                static_cast<const float *>(z_codebook_buffer->ptr),
+                static_cast<const float *>(z_scale_values_buffer->ptr),
+                z_scale_count,
+                z_group_size,
+                z_tensor_scale,
+                static_cast<const float *>(input_buffer->ptr),
+                z_row_scale_buffer == nullptr
+                    ? nullptr
+                    : static_cast<const float *>(z_row_scale_buffer->ptr),
+                z_row_scale_count,
+                z_rows,
+                cols,
+                static_cast<float *>(z_output_buffer->ptr)) ||
+            !aq4_matvec_gate_beta_f32_host(
+                static_cast<const std::uint8_t *>(a_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(a_scale_buffer->ptr),
+                static_cast<const float *>(a_codebook_buffer->ptr),
+                static_cast<const float *>(a_scale_values_buffer->ptr),
+                a_scale_count,
+                a_group_size,
+                a_tensor_scale,
+                a_row_scale_buffer == nullptr
+                    ? nullptr
+                    : static_cast<const float *>(a_row_scale_buffer->ptr),
+                a_row_scale_count,
+                static_cast<const std::uint8_t *>(b_index_buffer->ptr),
+                static_cast<const std::uint8_t *>(b_scale_buffer->ptr),
+                static_cast<const float *>(b_codebook_buffer->ptr),
+                static_cast<const float *>(b_scale_values_buffer->ptr),
+                b_scale_count,
+                b_group_size,
+                b_tensor_scale,
+                b_row_scale_buffer == nullptr
+                    ? nullptr
+                    : static_cast<const float *>(b_row_scale_buffer->ptr),
+                b_row_scale_count,
+                static_cast<const float *>(input_buffer->ptr),
+                static_cast<const float *>(a_log_buffer->ptr),
+                static_cast<const float *>(dt_bias_buffer->ptr),
+                heads,
+                cols,
+                static_cast<float *>(gate_output_buffer->ptr),
+                static_cast<float *>(beta_output_buffer->ptr))) {
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (aq4_matvec_qkv_z_gate_beta_f32_hip_kernel(
+            qkv_index_buffer,
+            qkv_scale_buffer,
+            qkv_codebook_buffer,
+            qkv_scale_values_buffer,
+            qkv_row_scale_buffer,
+            qkv_scale_count,
+            qkv_group_size,
+            qkv_tensor_scale,
+            qkv_row_scale_count,
+            z_index_buffer,
+            z_scale_buffer,
+            z_codebook_buffer,
+            z_scale_values_buffer,
+            z_row_scale_buffer,
+            z_scale_count,
+            z_group_size,
+            z_tensor_scale,
+            z_row_scale_count,
+            a_index_buffer,
+            a_scale_buffer,
+            a_codebook_buffer,
+            a_scale_values_buffer,
+            a_row_scale_buffer,
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            a_row_scale_count,
+            b_index_buffer,
+            b_scale_buffer,
+            b_codebook_buffer,
+            b_scale_values_buffer,
+            b_row_scale_buffer,
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            b_row_scale_count,
+            input_buffer,
+            a_log_buffer,
+            dt_bias_buffer,
+            qkv_rows,
+            z_rows,
+            heads,
+            cols,
+            qkv_output_buffer,
+            z_output_buffer,
+            gate_output_buffer,
+            beta_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    set_error(
+        hip_kernel_error.empty() ? "AQ4 qkv/z gate/beta HIP kernel is unavailable" :
                                    hip_kernel_error.c_str());
     return ULLM_STATUS_RUNTIME_ERROR;
 }

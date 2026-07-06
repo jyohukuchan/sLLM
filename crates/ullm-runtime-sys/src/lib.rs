@@ -138,6 +138,56 @@ unsafe extern "C" {
         right_output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_aq4_matvec_qkv_z_gate_beta_f32(
+        qkv_index_buffer: *const RawRuntimeBuffer,
+        qkv_scale_buffer: *const RawRuntimeBuffer,
+        qkv_codebook_buffer: *const RawRuntimeBuffer,
+        qkv_scale_values_buffer: *const RawRuntimeBuffer,
+        qkv_row_scale_buffer: *const RawRuntimeBuffer,
+        qkv_scale_count: usize,
+        qkv_group_size: usize,
+        qkv_tensor_scale: f32,
+        qkv_row_scale_count: usize,
+        z_index_buffer: *const RawRuntimeBuffer,
+        z_scale_buffer: *const RawRuntimeBuffer,
+        z_codebook_buffer: *const RawRuntimeBuffer,
+        z_scale_values_buffer: *const RawRuntimeBuffer,
+        z_row_scale_buffer: *const RawRuntimeBuffer,
+        z_scale_count: usize,
+        z_group_size: usize,
+        z_tensor_scale: f32,
+        z_row_scale_count: usize,
+        a_index_buffer: *const RawRuntimeBuffer,
+        a_scale_buffer: *const RawRuntimeBuffer,
+        a_codebook_buffer: *const RawRuntimeBuffer,
+        a_scale_values_buffer: *const RawRuntimeBuffer,
+        a_row_scale_buffer: *const RawRuntimeBuffer,
+        a_scale_count: usize,
+        a_group_size: usize,
+        a_tensor_scale: f32,
+        a_row_scale_count: usize,
+        b_index_buffer: *const RawRuntimeBuffer,
+        b_scale_buffer: *const RawRuntimeBuffer,
+        b_codebook_buffer: *const RawRuntimeBuffer,
+        b_scale_values_buffer: *const RawRuntimeBuffer,
+        b_row_scale_buffer: *const RawRuntimeBuffer,
+        b_scale_count: usize,
+        b_group_size: usize,
+        b_tensor_scale: f32,
+        b_row_scale_count: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        a_log_buffer: *const RawRuntimeBuffer,
+        dt_bias_buffer: *const RawRuntimeBuffer,
+        qkv_rows: usize,
+        z_rows: usize,
+        heads: usize,
+        cols: usize,
+        qkv_output_buffer: *mut RawRuntimeBuffer,
+        z_output_buffer: *mut RawRuntimeBuffer,
+        gate_output_buffer: *mut RawRuntimeBuffer,
+        beta_output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_aq4_matvec_silu_mul_f32(
         gate_index_buffer: *const RawRuntimeBuffer,
         gate_scale_buffer: *const RawRuntimeBuffer,
@@ -929,6 +979,244 @@ pub fn aq4_matvec_pair_f32(
             cols,
             left_output_buffer.raw.as_ptr(),
             right_output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn aq4_matvec_qkv_z_gate_beta_f32(
+    qkv_index_buffer: &RuntimeBuffer,
+    qkv_scale_buffer: &RuntimeBuffer,
+    qkv_codebook_buffer: &RuntimeBuffer,
+    qkv_scale_values_buffer: &RuntimeBuffer,
+    qkv_row_scale_buffer: Option<&RuntimeBuffer>,
+    qkv_scale_count: usize,
+    qkv_group_size: usize,
+    qkv_tensor_scale: f32,
+    qkv_row_scale_count: usize,
+    z_index_buffer: &RuntimeBuffer,
+    z_scale_buffer: &RuntimeBuffer,
+    z_codebook_buffer: &RuntimeBuffer,
+    z_scale_values_buffer: &RuntimeBuffer,
+    z_row_scale_buffer: Option<&RuntimeBuffer>,
+    z_scale_count: usize,
+    z_group_size: usize,
+    z_tensor_scale: f32,
+    z_row_scale_count: usize,
+    a_index_buffer: &RuntimeBuffer,
+    a_scale_buffer: &RuntimeBuffer,
+    a_codebook_buffer: &RuntimeBuffer,
+    a_scale_values_buffer: &RuntimeBuffer,
+    a_row_scale_buffer: Option<&RuntimeBuffer>,
+    a_scale_count: usize,
+    a_group_size: usize,
+    a_tensor_scale: f32,
+    a_row_scale_count: usize,
+    b_index_buffer: &RuntimeBuffer,
+    b_scale_buffer: &RuntimeBuffer,
+    b_codebook_buffer: &RuntimeBuffer,
+    b_scale_values_buffer: &RuntimeBuffer,
+    b_row_scale_buffer: Option<&RuntimeBuffer>,
+    b_scale_count: usize,
+    b_group_size: usize,
+    b_tensor_scale: f32,
+    b_row_scale_count: usize,
+    input_buffer: &RuntimeBuffer,
+    a_log_buffer: &RuntimeBuffer,
+    dt_bias_buffer: &RuntimeBuffer,
+    qkv_rows: usize,
+    z_rows: usize,
+    heads: usize,
+    cols: usize,
+    qkv_output_buffer: &mut RuntimeBuffer,
+    z_output_buffer: &mut RuntimeBuffer,
+    gate_output_buffer: &mut RuntimeBuffer,
+    beta_output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if qkv_scale_count == 0 || z_scale_count == 0 || a_scale_count == 0 || b_scale_count == 0 {
+        return Err("AQ4 qkv/z gate/beta scale table is empty".to_string());
+    }
+    if qkv_group_size == 0 || z_group_size == 0 || a_group_size == 0 || b_group_size == 0 {
+        return Err("AQ4 qkv/z gate/beta group size must be greater than zero".to_string());
+    }
+    if qkv_rows == 0 || z_rows == 0 || heads == 0 || cols == 0 {
+        return Err("AQ4 qkv/z gate/beta rows and cols must be greater than zero".to_string());
+    }
+    if !qkv_tensor_scale.is_finite()
+        || qkv_tensor_scale <= 0.0
+        || !z_tensor_scale.is_finite()
+        || z_tensor_scale <= 0.0
+        || !a_tensor_scale.is_finite()
+        || a_tensor_scale <= 0.0
+        || !b_tensor_scale.is_finite()
+        || b_tensor_scale <= 0.0
+    {
+        return Err(
+            "AQ4 qkv/z gate/beta tensor scale must be finite and greater than zero".to_string(),
+        );
+    }
+    let layout = |label: &str,
+                  rows: usize,
+                  group_size: usize,
+                  scale_count: usize,
+                  row_scale_count: usize|
+     -> Result<(usize, usize, usize, usize, usize), String> {
+        let elements = rows
+            .checked_mul(cols)
+            .ok_or_else(|| format!("AQ4 qkv/z gate/beta {label} element count overflows"))?;
+        let index_bytes = elements / 2 + usize::from(!elements.is_multiple_of(2));
+        let groups = elements / group_size + usize::from(!elements.is_multiple_of(group_size));
+        let scale_value_bytes = scale_count
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                format!("AQ4 qkv/z gate/beta {label} scale value byte size overflows")
+            })?;
+        let row_scale_bytes = row_scale_count
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| format!("AQ4 qkv/z gate/beta {label} row scale byte size overflows"))?;
+        let output_bytes = rows
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| format!("AQ4 qkv/z gate/beta {label} output byte size overflows"))?;
+        Ok((
+            index_bytes,
+            groups,
+            scale_value_bytes,
+            row_scale_bytes,
+            output_bytes,
+        ))
+    };
+    let (qkv_index_bytes, qkv_groups, qkv_scale_value_bytes, qkv_row_scale_bytes, qkv_output_bytes) =
+        layout(
+            "qkv",
+            qkv_rows,
+            qkv_group_size,
+            qkv_scale_count,
+            qkv_row_scale_count,
+        )?;
+    let (z_index_bytes, z_groups, z_scale_value_bytes, z_row_scale_bytes, z_output_bytes) =
+        layout("z", z_rows, z_group_size, z_scale_count, z_row_scale_count)?;
+    let (a_index_bytes, a_groups, a_scale_value_bytes, a_row_scale_bytes, gate_output_bytes) =
+        layout("a", heads, a_group_size, a_scale_count, a_row_scale_count)?;
+    let (b_index_bytes, b_groups, b_scale_value_bytes, b_row_scale_bytes, beta_output_bytes) =
+        layout("b", heads, b_group_size, b_scale_count, b_row_scale_count)?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 qkv/z gate/beta input byte size overflows".to_string())?;
+    check_copy_range(0, qkv_index_bytes, qkv_index_buffer.size()?)?;
+    check_copy_range(0, z_index_bytes, z_index_buffer.size()?)?;
+    check_copy_range(0, a_index_bytes, a_index_buffer.size()?)?;
+    check_copy_range(0, b_index_bytes, b_index_buffer.size()?)?;
+    check_copy_range(0, qkv_groups, qkv_scale_buffer.size()?)?;
+    check_copy_range(0, z_groups, z_scale_buffer.size()?)?;
+    check_copy_range(0, a_groups, a_scale_buffer.size()?)?;
+    check_copy_range(0, b_groups, b_scale_buffer.size()?)?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        qkv_codebook_buffer.size()?,
+    )?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        z_codebook_buffer.size()?,
+    )?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        a_codebook_buffer.size()?,
+    )?;
+    check_copy_range(
+        0,
+        16 * std::mem::size_of::<f32>(),
+        b_codebook_buffer.size()?,
+    )?;
+    check_copy_range(0, qkv_scale_value_bytes, qkv_scale_values_buffer.size()?)?;
+    check_copy_range(0, z_scale_value_bytes, z_scale_values_buffer.size()?)?;
+    check_copy_range(0, a_scale_value_bytes, a_scale_values_buffer.size()?)?;
+    check_copy_range(0, b_scale_value_bytes, b_scale_values_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    check_copy_range(0, gate_output_bytes, a_log_buffer.size()?)?;
+    check_copy_range(0, gate_output_bytes, dt_bias_buffer.size()?)?;
+    if let Some(qkv_row_scale_buffer) = qkv_row_scale_buffer {
+        check_copy_range(0, qkv_row_scale_bytes, qkv_row_scale_buffer.size()?)?;
+    }
+    if let Some(z_row_scale_buffer) = z_row_scale_buffer {
+        check_copy_range(0, z_row_scale_bytes, z_row_scale_buffer.size()?)?;
+    }
+    if let Some(a_row_scale_buffer) = a_row_scale_buffer {
+        check_copy_range(0, a_row_scale_bytes, a_row_scale_buffer.size()?)?;
+    }
+    if let Some(b_row_scale_buffer) = b_row_scale_buffer {
+        check_copy_range(0, b_row_scale_bytes, b_row_scale_buffer.size()?)?;
+    }
+    check_copy_range(0, qkv_output_bytes, qkv_output_buffer.size()?)?;
+    check_copy_range(0, z_output_bytes, z_output_buffer.size()?)?;
+    check_copy_range(0, gate_output_bytes, gate_output_buffer.size()?)?;
+    check_copy_range(0, beta_output_bytes, beta_output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    let qkv_row_scale_raw = qkv_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let z_row_scale_raw = z_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let a_row_scale_raw = a_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let b_row_scale_raw = b_row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    status_to_result(unsafe {
+        ullm_runtime_aq4_matvec_qkv_z_gate_beta_f32(
+            qkv_index_buffer.raw.as_ptr(),
+            qkv_scale_buffer.raw.as_ptr(),
+            qkv_codebook_buffer.raw.as_ptr(),
+            qkv_scale_values_buffer.raw.as_ptr(),
+            qkv_row_scale_raw,
+            qkv_scale_count,
+            qkv_group_size,
+            qkv_tensor_scale,
+            qkv_row_scale_count,
+            z_index_buffer.raw.as_ptr(),
+            z_scale_buffer.raw.as_ptr(),
+            z_codebook_buffer.raw.as_ptr(),
+            z_scale_values_buffer.raw.as_ptr(),
+            z_row_scale_raw,
+            z_scale_count,
+            z_group_size,
+            z_tensor_scale,
+            z_row_scale_count,
+            a_index_buffer.raw.as_ptr(),
+            a_scale_buffer.raw.as_ptr(),
+            a_codebook_buffer.raw.as_ptr(),
+            a_scale_values_buffer.raw.as_ptr(),
+            a_row_scale_raw,
+            a_scale_count,
+            a_group_size,
+            a_tensor_scale,
+            a_row_scale_count,
+            b_index_buffer.raw.as_ptr(),
+            b_scale_buffer.raw.as_ptr(),
+            b_codebook_buffer.raw.as_ptr(),
+            b_scale_values_buffer.raw.as_ptr(),
+            b_row_scale_raw,
+            b_scale_count,
+            b_group_size,
+            b_tensor_scale,
+            b_row_scale_count,
+            input_buffer.raw.as_ptr(),
+            a_log_buffer.raw.as_ptr(),
+            dt_bias_buffer.raw.as_ptr(),
+            qkv_rows,
+            z_rows,
+            heads,
+            cols,
+            qkv_output_buffer.raw.as_ptr(),
+            z_output_buffer.raw.as_ptr(),
+            gate_output_buffer.raw.as_ptr(),
+            beta_output_buffer.raw.as_ptr(),
             stream,
         )
     })
@@ -4448,6 +4736,189 @@ mod tests {
         stream.synchronize().unwrap();
         assert_eq!(le_bytes_to_f32s(&left_output_bytes), vec![8.0, 18.0]);
         assert_eq!(le_bytes_to_f32s(&right_output_bytes), vec![28.0]);
+    }
+
+    #[test]
+    fn cpu_aq4_matvec_qkv_z_gate_beta_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut qkv_index = context.alloc_buffer(2).unwrap();
+        let mut qkv_scale = context.alloc_buffer(2).unwrap();
+        let mut qkv_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut qkv_scale_values = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut z_index = context.alloc_buffer(1).unwrap();
+        let mut z_scale = context.alloc_buffer(1).unwrap();
+        let mut z_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut z_scale_values = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut a_index = context.alloc_buffer(1).unwrap();
+        let mut a_scale = context.alloc_buffer(1).unwrap();
+        let mut a_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut a_scale_values = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut b_index = context.alloc_buffer(1).unwrap();
+        let mut b_scale = context.alloc_buffer(1).unwrap();
+        let mut b_codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut b_scale_values = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut input = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut a_log = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut dt_bias = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut qkv_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut z_output = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut gate_output = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut beta_output = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+
+        qkv_index
+            .copy_from_host(0, &[0x21_u8, 0x43], Some(&mut stream))
+            .unwrap();
+        qkv_scale
+            .copy_from_host(0, &[0_u8, 0], Some(&mut stream))
+            .unwrap();
+        z_index
+            .copy_from_host(0, &[0x65_u8], Some(&mut stream))
+            .unwrap();
+        z_scale
+            .copy_from_host(0, &[0_u8], Some(&mut stream))
+            .unwrap();
+        a_index
+            .copy_from_host(0, &[0x87_u8], Some(&mut stream))
+            .unwrap();
+        a_scale
+            .copy_from_host(0, &[0_u8], Some(&mut stream))
+            .unwrap();
+        b_index
+            .copy_from_host(0, &[0xa9_u8], Some(&mut stream))
+            .unwrap();
+        b_scale
+            .copy_from_host(0, &[0_u8], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        for codebook in [
+            &mut qkv_codebook,
+            &mut z_codebook,
+            &mut a_codebook,
+            &mut b_codebook,
+        ] {
+            codebook
+                .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+                .unwrap();
+        }
+        for scale_values in [
+            &mut qkv_scale_values,
+            &mut z_scale_values,
+            &mut a_scale_values,
+            &mut b_scale_values,
+        ] {
+            scale_values
+                .copy_from_host(0, &f32s_to_le_bytes(&[1.0]), Some(&mut stream))
+                .unwrap();
+        }
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[2.0, 3.0]), Some(&mut stream))
+            .unwrap();
+        a_log
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.0]), Some(&mut stream))
+            .unwrap();
+        dt_bias
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_matvec_qkv_z_gate_beta_f32(
+            &qkv_index,
+            &qkv_scale,
+            &qkv_codebook,
+            &qkv_scale_values,
+            None,
+            1,
+            2,
+            1.0,
+            0,
+            &z_index,
+            &z_scale,
+            &z_codebook,
+            &z_scale_values,
+            None,
+            1,
+            2,
+            1.0,
+            0,
+            &a_index,
+            &a_scale,
+            &a_codebook,
+            &a_scale_values,
+            None,
+            1,
+            2,
+            0.1,
+            0,
+            &b_index,
+            &b_scale,
+            &b_codebook,
+            &b_scale_values,
+            None,
+            1,
+            2,
+            0.1,
+            0,
+            &input,
+            &a_log,
+            &dt_bias,
+            2,
+            1,
+            1,
+            2,
+            &mut qkv_output,
+            &mut z_output,
+            &mut gate_output,
+            &mut beta_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut qkv_output_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut z_output_bytes = vec![0_u8; std::mem::size_of::<f32>()];
+        let mut gate_output_bytes = vec![0_u8; std::mem::size_of::<f32>()];
+        let mut beta_output_bytes = vec![0_u8; std::mem::size_of::<f32>()];
+        qkv_output
+            .copy_to_host(0, &mut qkv_output_bytes, Some(&mut stream))
+            .unwrap();
+        z_output
+            .copy_to_host(0, &mut z_output_bytes, Some(&mut stream))
+            .unwrap();
+        gate_output
+            .copy_to_host(0, &mut gate_output_bytes, Some(&mut stream))
+            .unwrap();
+        beta_output
+            .copy_to_host(0, &mut beta_output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let x = 3.8_f32 + 0.5;
+        let expected_gate = -x.exp().ln_1p();
+        let expected_beta = 1.0_f32 / (1.0 + (-4.8_f32).exp());
+        assert_eq!(le_bytes_to_f32s(&qkv_output_bytes), vec![8.0, 18.0]);
+        assert_eq!(le_bytes_to_f32s(&z_output_bytes), vec![28.0]);
+        assert_f32s_close(
+            &le_bytes_to_f32s(&gate_output_bytes),
+            &[expected_gate],
+            1e-5,
+        );
+        assert_f32s_close(
+            &le_bytes_to_f32s(&beta_output_bytes),
+            &[expected_beta],
+            1e-6,
+        );
     }
 
     #[test]
