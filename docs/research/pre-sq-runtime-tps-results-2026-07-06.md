@@ -318,3 +318,35 @@ Interpretation:
 New artifact:
 
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-direct-matvec-r9700-prompt16-gen16.json`
+
+## AQ4 Fused Decode Follow-Up
+
+After direct AQ4 matvec proved correctness but only modest decode speedup, the next runtime pass
+reduced host mediation and small-kernel count in the linear-attention resident path:
+
+- `6a5bd5d` fused MLP `gate` + `up` AQ4 matvecs with the SiLU-mul activation.
+- `e7f32df` fused linear-attention `a` + `b` AQ4 matvecs with gate/beta conversion.
+- `84ced5e` moved qkv conv-history update, depthwise conv, SiLU, q/k/v split, and q/k L2
+  normalization to GPU runtime buffers.
+
+R9700 `prompt=16/generated=16` decode comparison:
+
+| path | all-step tok/s | skip-1 tok/s | skip-2 tok/s | last-4 tok/s | p50 step ms | layers mean ms | generated-token agreement | verified |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |
+| direct AQ4 matvec | 5.517 | 5.508 | 5.498 | 5.465 | 182.178 | 172.807 | baseline | true |
+| fused MLP + fused gate/beta + GPU qkv prepare | 5.736 | 5.727 | 5.714 | 5.667 | 174.999 | 166.244 | matches direct AQ4 gen16 | true |
+
+Interpretation:
+
+- The short decode probe still produces the same generated token IDs, so these fused paths did not
+  cause immediate quality collapse.
+- The cumulative improvement over direct AQ4 is about `+4.0%` all-step TPS, with layer mean reduced
+  by about `6.56 ms/token`.
+- MLP fusion was the main small-kernel win; gate/beta fusion helped only slightly. GPU qkv prepare
+  was useful because it removes a qkv GPU->host->GPU round trip from every linear-attention layer.
+- This is still far from `15-20 tok/s`. The remaining path needs broader GPU-resident layer
+  execution and larger fused projection/workflow kernels rather than more one-off small fusions.
+
+New artifact:
+
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fused-mlp-gatebeta-qkvprepare-r9700-prompt16-gen16.json`
