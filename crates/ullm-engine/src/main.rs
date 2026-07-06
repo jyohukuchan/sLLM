@@ -17495,9 +17495,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let info = context
         .device_info()
         .map_err(|err| format!("failed to query runtime context device: {err}"))?;
-    let use_aq4_matvec_qkv_z_gate_beta = use_aq4_matvec_qkv_z_gate_beta_requested
-        && info.backend == "hip"
-        && info.compute_major >= 12;
+    let use_aq4_matvec_qkv_z_gate_beta =
+        use_aq4_matvec_qkv_z_gate_beta_requested && info.backend == "hip";
     let mut stream = context
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
@@ -31163,9 +31162,8 @@ impl PackageLinearAttnResidentStepLayer {
         let device_info = context
             .device_info()
             .map_err(|err| format!("failed to get linear-attn resident device info: {err}"))?;
-        let use_qkv_z_gate_beta_fusion = use_qkv_z_gate_beta_fusion_requested
-            && device_info.backend == "hip"
-            && device_info.compute_major >= 12;
+        let use_qkv_z_gate_beta_fusion =
+            use_qkv_z_gate_beta_fusion_requested && device_info.backend == "hip";
         if device_info.backend == "hip" {
             prewarm_aq4_matvec_once(
                 stream,
