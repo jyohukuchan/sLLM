@@ -13,6 +13,8 @@ from typing import Any
 
 
 DEFAULT_BENCH_SCRIPT = Path("tools/run-package-token-prompt-bench.py")
+CONTROL_MARKERS = ("<|", "<think>", "</think>", "user\nassistant", "assistant\n", "user\n")
+TERMINAL_TEXT_ENDINGS = (".", "!", "?", "。", "！", "？", "```")
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--summary-json", default="summary.json")
     parser.add_argument("--summary-md", default="summary.md")
+    parser.add_argument(
+        "--summarize-existing",
+        action="store_true",
+        help="Read existing per-case reports and rewrite summaries without rerunning inference",
+    )
     return parser.parse_args()
 
 
@@ -226,18 +233,28 @@ def summarize_report(case: PromptCase, report_path: Path, report: dict[str, Any]
     text_prompt = as_mapping(report.get("text_prompt", {}), "report.text_prompt")
     decoded_text = as_mapping(report.get("decoded_text", {}), "report.decoded_text")
     generated_text = str(decoded_text.get("generated", ""))
+    generated_compact = " ".join(generated_text.split())
     generated_token_ids = report.get("generated_token_ids", [])
     if not isinstance(generated_token_ids, list):
         generated_token_ids = []
     tokens = [int(token) for token in generated_token_ids]
     unique_ratio = (len(set(tokens)) / len(tokens)) if tokens else None
+    requested_generated_tokens = decode.get("requested_generated_tokens")
+    warnings = output_warnings(
+        case,
+        generated_text,
+        len(tokens),
+        requested_generated_tokens,
+        str(stop.get("reason")),
+        unique_ratio,
+    )
 
     return {
         "id": case.case_id,
         "report": str(report_path),
         "prompt_tokens": text_prompt.get("token_count"),
         "generated_tokens": len(tokens),
-        "requested_generated_tokens": decode.get("requested_generated_tokens"),
+        "requested_generated_tokens": requested_generated_tokens,
         "verified": report.get("verified"),
         "stop_reason": stop.get("reason"),
         "stopped": stop.get("stopped"),
@@ -249,9 +266,42 @@ def summarize_report(case: PromptCase, report_path: Path, report: dict[str, Any]
         "p50_ms": metric_float(step.get("p50_ms")),
         "generated_chars": len(generated_text),
         "unique_generated_token_ratio": unique_ratio,
-        "generated_preview": " ".join(generated_text.split())[:240],
+        "output_status": "ok" if not warnings else "warn",
+        "output_warnings": warnings,
+        "generated_preview": generated_compact[:240],
         "notes": case.notes,
     }
+
+
+def output_warnings(
+    case: PromptCase,
+    generated_text: str,
+    generated_tokens: int,
+    requested_generated_tokens: Any,
+    stop_reason: str,
+    unique_ratio: float | None,
+) -> list[str]:
+    warnings: list[str] = []
+    compact = " ".join(generated_text.split())
+    lowered = generated_text.lower()
+    if not compact:
+        warnings.append("empty_generated_text")
+    try:
+        requested = int(requested_generated_tokens)
+    except (TypeError, ValueError):
+        requested = None
+    if requested is not None and generated_tokens >= requested and stop_reason == "max_generated_tokens":
+        warnings.append("hit_generation_limit")
+    if unique_ratio is not None and generated_tokens >= 32 and unique_ratio < 0.35:
+        warnings.append("low_unique_token_ratio")
+    if any(marker in lowered for marker in CONTROL_MARKERS):
+        warnings.append("control_marker_text")
+    prompt_prefix = " ".join(case.prompt.split())[:80]
+    if prompt_prefix and prompt_prefix in compact:
+        warnings.append("prompt_echo")
+    if compact and generated_tokens >= 64 and not compact.endswith(TERMINAL_TEXT_ENDINGS):
+        warnings.append("missing_terminal_punctuation")
+    return warnings
 
 
 def mean(values: list[float]) -> float | None:
@@ -267,7 +317,7 @@ def write_summary_json(
     decode_values = [value for item in case_summaries if (value := item.get("decode_tps")) is not None]
     prefill_values = [value for item in case_summaries if (value := item.get("prefill_tps")) is not None]
     payload = {
-        "schema_version": "package-token-prompt-suite-summary-v0.1",
+        "schema_version": "package-token-prompt-suite-summary-v0.2",
         "suite": metadata,
         "package": args.package_dir,
         "tokenizer_dir": args.tokenizer_dir,
@@ -287,6 +337,15 @@ def write_summary_json(
             "prefill_tps_mean": mean(prefill_values),
             "verified_all": all(item.get("verified") is True for item in case_summaries),
             "stopped_count": sum(1 for item in case_summaries if item.get("stopped") is True),
+            "output_ok_count": sum(1 for item in case_summaries if item.get("output_status") == "ok"),
+            "output_warn_count": sum(1 for item in case_summaries if item.get("output_status") == "warn"),
+            "hit_generation_limit_count": sum(
+                1 for item in case_summaries if "hit_generation_limit" in item.get("output_warnings", [])
+            ),
+            "low_unique_token_ratio_count": sum(
+                1 for item in case_summaries if "low_unique_token_ratio" in item.get("output_warnings", [])
+            ),
+            "prompt_echo_count": sum(1 for item in case_summaries if "prompt_echo" in item.get("output_warnings", [])),
         },
         "cases": case_summaries,
     }
@@ -307,16 +366,18 @@ def write_summary_md(path: Path, summary_json: Path, case_summaries: list[dict[s
         "",
         f"- Summary JSON: `{summary_json}`",
         "",
-        "| case | prompt | generated | stop | prefill tok/s | decode tok/s | skip-2 tok/s | last-8 tok/s | p50 ms | verified | preview |",
-        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | :---: | --- |",
+        "| case | prompt | generated | stop | status | warnings | prefill tok/s | decode tok/s | skip-2 tok/s | last-8 tok/s | p50 ms | verified | preview |",
+        "| --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | :---: | --- |",
     ]
     for item in case_summaries:
         lines.append(
-            "| {case} | {prompt} | {generated} | {stop} | {prefill} | {decode} | {skip2} | {last8} | {p50} | {verified} | {preview} |".format(
+            "| {case} | {prompt} | {generated} | {stop} | {status} | {warnings} | {prefill} | {decode} | {skip2} | {last8} | {p50} | {verified} | {preview} |".format(
                 case=item["id"],
                 prompt=fmt(item.get("prompt_tokens")),
                 generated=fmt(item.get("generated_tokens")),
                 stop=fmt(item.get("stop_reason")),
+                status=fmt(item.get("output_status")),
+                warnings=", ".join(item.get("output_warnings", [])),
                 prefill=fmt(item.get("prefill_tps")),
                 decode=fmt(item.get("decode_tps")),
                 skip2=fmt(item.get("skip2_tps")),
@@ -330,6 +391,19 @@ def write_summary_md(path: Path, summary_json: Path, case_summaries: list[dict[s
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def load_existing_case(case: PromptCase, output_dir: Path) -> tuple[Path, dict[str, Any]]:
+    report_path = output_dir / f"{safe_filename(case.case_id)}.json"
+    if not report_path.exists():
+        raise SystemExit(f"missing existing report for {case.case_id}: {report_path}")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"failed to parse {report_path}: {exc}") from exc
+    if not isinstance(report, dict):
+        raise SystemExit(f"{report_path}: expected JSON object")
+    return report_path, report
+
+
 def main() -> int:
     args = parse_args()
     if args.generated_tokens <= 0:
@@ -340,7 +414,10 @@ def main() -> int:
     case_summaries: list[dict[str, Any]] = []
     for case in cases:
         report_path = args.output_dir / f"{safe_filename(case.case_id)}.json"
-        report = run_case(args, case, report_path)
+        if args.summarize_existing:
+            report_path, report = load_existing_case(case, args.output_dir)
+        else:
+            report = run_case(args, case, report_path)
         case_summaries.append(summarize_report(case, report_path, report))
 
     summary_json = args.output_dir / args.summary_json

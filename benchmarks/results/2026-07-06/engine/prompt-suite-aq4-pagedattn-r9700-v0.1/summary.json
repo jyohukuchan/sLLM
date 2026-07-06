@@ -1,5 +1,5 @@
 {
-  "schema_version": "package-token-prompt-suite-summary-v0.1",
+  "schema_version": "package-token-prompt-suite-summary-v0.2",
   "suite": {
     "suite_id": "pre-sq-runtime-prompt-suite-v0.1",
     "purpose": "Small text prompt set for pre-SQ runtime TPS and output-collapse observation.",
@@ -23,7 +23,12 @@
     "decode_tps_max": 20.158036740264546,
     "prefill_tps_mean": 18.859844478934647,
     "verified_all": true,
-    "stopped_count": 1
+    "stopped_count": 1,
+    "output_ok_count": 1,
+    "output_warn_count": 3,
+    "hit_generation_limit_count": 3,
+    "low_unique_token_ratio_count": 1,
+    "prompt_echo_count": 1
   },
   "cases": [
     {
@@ -43,6 +48,8 @@
       "p50_ms": 49.598728,
       "generated_chars": 486,
       "unique_generated_token_ratio": 0.8641975308641975,
+      "output_status": "ok",
+      "output_warnings": [],
       "generated_preview": "GPU warmup distorts token/s measurements because the initial frames of inference are dominated by the overhead of loading model weights into high-bandwidth memory and initializing CUDA kernels, rather than pure computation; consequently, th",
       "notes": [
         "Checks whether a short technical explanation completes cleanly with stop tokens."
@@ -65,6 +72,11 @@
       "p50_ms": 49.924863,
       "generated_chars": 772,
       "unique_generated_token_ratio": 0.75,
+      "output_status": "warn",
+      "output_warnings": [
+        "hit_generation_limit",
+        "missing_terminal_punctuation"
+      ],
       "generated_preview": "Memory-bandwidth-bound bottlenecks occur when the GPU cannot fetch weights fast enough to keep the compute units saturated, which is common in low-bit quantization due to increased memory access frequency. In contrast, compute-bound bottlen",
       "notes": [
         "Targets the AQ/SQ design question about where quantization format differences matter."
@@ -87,6 +99,11 @@
       "p50_ms": 50.148976999999995,
       "generated_chars": 580,
       "unique_generated_token_ratio": 0.7109375,
+      "output_status": "warn",
+      "output_warnings": [
+        "hit_generation_limit",
+        "missing_terminal_punctuation"
+      ],
       "generated_preview": "Here is a short checklist for reporting LLM inference throughput fairly on a single GPU. ### 1. Define the Metric Clearly * **[ ] Use Tokens Per Second (TPS):** Avoid reporting \"requests per second.\" TPS is the industry standard because it ",
       "notes": [
         "Looks for list formatting and repeated-token failure modes under greedy decode."
@@ -109,6 +126,13 @@
       "p50_ms": 53.750529,
       "generated_chars": 942,
       "unique_generated_token_ratio": 0.203125,
+      "output_status": "warn",
+      "output_warnings": [
+        "hit_generation_limit",
+        "low_unique_token_ratio",
+        "prompt_echo",
+        "missing_terminal_punctuation"
+      ],
       "generated_preview": "a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, and describe a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, after running a few iterations, the GPU m",
       "notes": [
         "Repeats the prompt to create a reproducible long-prefill timing probe."

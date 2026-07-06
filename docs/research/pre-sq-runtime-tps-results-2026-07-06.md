@@ -549,7 +549,14 @@ New artifacts:
 Single prompt runs were still too easy to cherry-pick. `tools/run-package-token-prompt-suite.py`
 now runs a JSON prompt suite through the text-prompt wrapper, writes one enriched report per prompt,
 and emits summary JSON/Markdown tables. The first suite is
-`benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.1.json`.
+`benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.1.json`. The suite summary schema is now v0.2
+and includes coarse output-health flags:
+
+- `hit_generation_limit`: generation reached the configured token cap instead of a stop token;
+- `low_unique_token_ratio`: generated-token diversity is very low;
+- `prompt_echo`: generated text contains the prompt prefix;
+- `control_marker_text`: decoded text contains control-marker-like text;
+- `missing_terminal_punctuation`: long generated text ended without a simple terminal marker.
 
 R9700 suite run:
 
@@ -568,6 +575,12 @@ Suite summary:
 - mean prefill TPS: `18.860`
 - verified all: `true`
 - stopped by stop token: `1 / 4`
+- output ok: `1 / 4`
+- output warnings:
+  - `memory_vs_compute`: `hit_generation_limit`, `missing_terminal_punctuation`
+  - `throughput_checklist`: `hit_generation_limit`, `missing_terminal_punctuation`
+  - `long_prefill_warmup`: `hit_generation_limit`, `low_unique_token_ratio`, `prompt_echo`,
+    `missing_terminal_punctuation`
 
 Interpretation:
 
@@ -579,6 +592,8 @@ Interpretation:
 - The long-prefill case is intentionally a repeated prompt to reach 256 prompt tokens. It is useful
   for prefill/decode timing, but its low unique-token ratio and repeated decoded text mean it should
   not be used as semantic quality evidence.
+- The new output-health flags make this explicit in the machine-readable summary, so later SQ
+  candidate comparisons can separate TPS regressions from prompt-quality warnings.
 
 New artifacts:
 
