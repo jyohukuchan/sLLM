@@ -356,3 +356,60 @@ New artifact:
 
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fused-mlp-gatebeta-qkvprepare-r9700-prompt16-gen16.json`
 - `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-fused-mlp-gatebeta-qkvprepare-segrms-r9700-prompt16-gen16.json`
+
+## AQ4 Decode Recurrent Kernel Follow-Up
+
+The next pass tested whether remaining host/device boundaries were still the main limiter. It first
+kept consecutive linear-attention layers device-resident across decode (`85f9a48`). That was correct
+but small: `5.785 -> 5.826 tok/s` on R9700 `prompt=16/generated=16`.
+
+Single AQ4 projection smoke tests showed representative matvecs were not slow enough to explain a
+`~5.6 ms` linear-attention layer by themselves:
+
+| tensor | rows x cols | AQ4 ms | f32 materialized ms | AQ4/f32 speedup |
+| --- | ---: | ---: | ---: | ---: |
+| layer 0 linear_attn qkv | 8192 x 4096 | 0.215 | 0.278 | 1.294 |
+| layer 0 linear_attn z | 4096 x 4096 | 0.119 | 0.099 | 0.836 |
+| layer 0 linear_attn out | 4096 x 4096 | 0.107 | 0.104 | 0.977 |
+| layer 0 MLP gate | 12288 x 4096 | 0.296 | 0.365 | 1.231 |
+| layer 0 MLP up | 12288 x 4096 | 0.321 | 0.366 | 1.141 |
+| layer 0 MLP down | 4096 x 12288 | 0.247 | 0.363 | 1.469 |
+
+The actual blocker was `linear_attn_recurrent_f32`: the HIP kernel launched only one thread per
+value head, so each thread performed the `128 x 128` state decay/update/output loops serially.
+`f38b097` added a decode-only `sequence_len == 1` fast path that launches one block per
+`(value_head, value_dim)` and reduces over `key_dim` with 256 threads. The old serial path remains
+for `sequence_len > 1`.
+
+R9700 `prompt=16/generated=16` comparison:
+
+| path | all-step tok/s | skip-1 tok/s | skip-2 tok/s | last-4 tok/s | p50 step ms | layers mean ms | generated-token agreement | verified |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | :---: | :---: |
+| above + segmented attention RMSNorm | 5.785 | 5.774 | 5.761 | 5.706 | 173.191 | 164.706 | baseline | true |
+| above + linear layer device chaining | 5.826 | 5.815 | 5.803 | 5.750 | 172.126 | 163.538 | matches baseline gen16 | true |
+| above + recurrent decode fast path | 15.800 | 15.752 | 15.704 | 15.335 | 63.518 | 55.149 | matches baseline gen16 | true |
+
+Longer decode probes after `f38b097`:
+
+| prompt | generated | all-step tok/s | skip-1 tok/s | skip-2 tok/s | last-4 tok/s | p50 step ms | layers mean ms | verified |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| 16 | 16 | 15.800 | 15.752 | 15.704 | 15.335 | 63.518 | 55.149 | true |
+| 16 | 128 | 13.650 | 13.631 | 13.613 | 12.263 | 73.816 | 65.088 | true |
+| 16 | 256 | 11.792 | 11.779 | 11.766 | 9.153 | 83.020 | 76.426 | true |
+
+Interpretation:
+
+- The short decode target of `15-20 tok/s` is now met on R9700 for this AQ4 path.
+- AQ4 matvec is not the current primary wall. The next long-context limiter is the older f32
+  self-attention decode/runtime path, whose cost grows with cache length.
+- The gen128/gen256 probes stayed finite and verified, but the synthetic `len:16` prompt naturally
+  creates repeating token patterns; this is not a useful semantic quality prompt. It is enough for a
+  smoke check that the fast recurrent path did not immediately collapse to NaN, constant token, or
+  a changed gen16 prefix.
+
+New artifacts:
+
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-linear-chain-r9700-prompt16-gen16.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-linear-chain-fast-recurrent-r9700-prompt16-gen16.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-linear-chain-fast-recurrent-r9700-prompt16-gen128.json`
+- `benchmarks/results/2026-07-06/engine/package-token-ids-generate-aq4-linear-chain-fast-recurrent-r9700-prompt16-gen256.json`
