@@ -15,10 +15,11 @@
 - R9700とV620で `prompt_tokens=512`, `generated_tokens=256` のVRAM監視付きrunを完走した。
 - materialized-AQ baseline packageでR9700 `512/256` を完走した。V620側の同一長decodeは、R9700/V620ともdecode約 `0.14 tok/s` に張り付くことが既に確認できたため、途中で意図的に停止した。
 - BF16 baseline feasibilityを確認し、現行package/runtimeだけでは真のBF16 baselineを作れないと判断した。
+- R9700/V620で短いgolden prefix reference guardを実行し、accepted packageが12層のfixture比較でverifiedになることを確認した。
 
 ## 次の行動
 
-1. T4の短いreference guardを作り、長いTPS runが壊れた値を測っていないことを確認する。
+1. T6 decision packを作り、sq format策定へ入るための判断材料をまとめる。
 2. 以後のTPS測定は、長いprefillと短いdecodeを分ける。decodeが約 `0.14 tok/s` の経路で長時間測定を繰り返さない。
 3. sq format案では、F32常駐を避ける保存形式とdecode時のmaterialize範囲を最優先で検討する。
 
@@ -31,6 +32,9 @@
 - Materialized-AQ baseline JSONL: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-baseline-vram.jsonl`
 - Materialized-AQ baseline summary: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-baseline-vram-summary.md`
 - BF16 baseline feasibility note: `docs/research/pre-sq-bf16-baseline-feasibility-2026-07-06.md`
+- T4 reference guard summary: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-t4-reference-guard-summary.md`
+- T4 R9700 reference guard JSONL: `benchmarks/results/2026-07-06/engine/package-golden-prefix-t4-r9700-actual-prefix0-12-accepted-qwen35-hidden3994-v1.jsonl`
+- T4 V620 reference guard JSONL: `benchmarks/results/2026-07-06/engine/package-golden-prefix-t4-v620-actual-prefix0-12-accepted-qwen35-hidden3994-v1.jsonl`
 
 Local raw logs are under `benchmarks/results/2026-07-06/engine/logs/`, but that directory is intentionally ignored by git. The tracked JSONL above contains the comparable metrics, memory summary, correctness summary, and artifact paths.
 
@@ -114,9 +118,39 @@ The loader can read BF16 passthrough payloads, but `read_named_passthrough_f32*`
 
 For this pre-sq stage, the true BF16 baseline is deferred rather than implemented. Implementing it would require at least a passthrough-only full decoder package, loader branches that select passthrough decoder matrices, and runtime kernels or buffer paths that preserve the intended BF16 baseline semantics.
 
+## T4 Reference Guard
+
+Fixture:
+
+```text
+benchmarks/golden/2026-07-05/qwen35-9b-prefix0-12-seq16
+```
+
+Package:
+
+```text
+/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-qwen35-hidden3994-v1-row-scale-layer6-layer10.ullm.d
+```
+
+Condition:
+
+- command: `package-golden-prefix-smoke`
+- run mode: `actual_prefix`
+- layers: `0..12`
+- sequence length: `16`
+- rotary dim: `64`
+- rope base: `10000000`
+
+| target | uLLM device | backend | layers | max MSE | max mean abs diff | max abs diff | min cosine similarity | verified |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | :---: |
+| R9700/RDNA4 | `2` | hip | 12 | 0.003055947561 | 0.043167665239 | 0.629638672 | 0.994777962 | true |
+| V620/RDNA2 | `1` | hip | 12 | 0.003055947561 | 0.043167665239 | 0.629638672 | 0.994777962 | true |
+
+This is not a full logits or generated-token reference check. It is a short hidden-state fixture guard proving that the accepted package still matches the existing golden prefix fixture within the known AQ error envelope on both RDNA4 and RDNA2.
+
 ## Remaining Plan Items
 
 - T3 is now substantially satisfied for the minimum `512/256` grid, including VRAM.
-- T4 still needs a stricter short reference check against HF/PyTorch or existing golden fixture.
+- T4 is satisfied for this pre-sq scope by the short golden prefix reference guard on R9700 and V620.
 - T5 is closed for the current pre-sq scope: materialized-AQ has an R9700 long-run anchor, and true BF16 baseline is explicitly deferred because current artifacts/runtime do not support it.
-- T6 decision pack is not final until T4 is closed. Stretch context runs should be deferred unless a faster path is introduced.
+- T6 decision pack remains. Stretch context runs should be deferred unless a faster path is introduced.
