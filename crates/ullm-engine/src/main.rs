@@ -15910,6 +15910,9 @@ fn package_token_ids_generate_smoke_impl(
     let sync_decode_layers_for_timing = env::var("ULLM_SYNC_DECODE_LAYERS_FOR_TIMING")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false);
+    let sync_decode_each_layer_for_timing = env::var("ULLM_SYNC_DECODE_EACH_LAYER_FOR_TIMING")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
     package_token_ids_generate_incremental_smoke_impl(
         path,
         device_index,
@@ -15926,6 +15929,7 @@ fn package_token_ids_generate_smoke_impl(
         stop_token_ids,
         stop_token_sequences,
         sync_decode_layers_for_timing,
+        sync_decode_each_layer_for_timing,
     )
 }
 
@@ -17142,6 +17146,7 @@ fn package_token_ids_incremental_layers_step_device(
     residual: Vec<f32>,
     hidden: usize,
     label: &str,
+    sync_each_layer_for_timing: bool,
 ) -> Result<(usize, Vec<f64>), String> {
     if residual.len() != hidden {
         return Err(format!(
@@ -17192,6 +17197,11 @@ fn package_token_ids_incremental_layers_step_device(
             )?;
         }
         residual_device_layer = Some(layer_position);
+        if sync_each_layer_for_timing {
+            stream
+                .synchronize()
+                .map_err(|err| format!("failed to synchronize {layer_label}: {err}"))?;
+        }
         layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
     }
 
@@ -17211,6 +17221,7 @@ fn package_token_ids_incremental_layers_step_device_input(
     residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
     hidden: usize,
     label: &str,
+    sync_each_layer_for_timing: bool,
 ) -> Result<(usize, Vec<f64>), String> {
     if layers.is_empty() {
         return Err(format!(
@@ -17239,6 +17250,11 @@ fn package_token_ids_incremental_layers_step_device_input(
         cache_position,
         &first_label,
     )?;
+    if sync_each_layer_for_timing {
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {first_label}: {err}"))?;
+    }
     layer_step_ms.push(first_started.elapsed().as_secs_f64() * 1000.0);
 
     for layer_position in 1..layers.len() {
@@ -17260,6 +17276,11 @@ fn package_token_ids_incremental_layers_step_device_input(
             cache_position,
             &layer_label,
         )?;
+        if sync_each_layer_for_timing {
+            stream
+                .synchronize()
+                .map_err(|err| format!("failed to synchronize {layer_label}: {err}"))?;
+        }
         layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
     }
 
@@ -17376,6 +17397,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     stop_token_ids: Vec<usize>,
     stop_token_sequences: Vec<Vec<usize>>,
     sync_decode_layers_for_timing: bool,
+    sync_decode_each_layer_for_timing: bool,
 ) -> Result<String, String> {
     if prompt_token_ids.is_empty() {
         return Err(
@@ -17687,6 +17709,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
                             runtime.output_buffer(),
                             hidden,
                             "incremental decode",
+                            sync_decode_each_layer_for_timing,
                         )?
                     } else {
                         let embedding_values = embedding_values.take().ok_or_else(|| {
@@ -17702,9 +17725,10 @@ fn package_token_ids_generate_incremental_smoke_impl(
                             embedding_values,
                             hidden,
                             "incremental decode",
+                            sync_decode_each_layer_for_timing,
                         )?
                     };
-                if sync_decode_layers_for_timing {
+                if sync_decode_layers_for_timing && !sync_decode_each_layer_for_timing {
                     stream.synchronize().map_err(|err| {
                         format!("failed to synchronize incremental decode layers: {err}")
                     })?;
@@ -17841,6 +17865,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "requested_generated_tokens": generated_tokens,
             "timed_incremental_steps": timed_decode_tokens,
             "sync_layers_for_timing": sync_decode_layers_for_timing,
+            "sync_each_layer_for_timing": sync_decode_each_layer_for_timing,
             "positions": decode_positions,
             "step_wall_ms": decode_step_ms,
             "step_wall_summary": decode_step_summary,
