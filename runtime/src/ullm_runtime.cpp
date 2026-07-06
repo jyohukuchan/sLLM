@@ -1015,6 +1015,68 @@ __device__ float ullm_aq4_matvec_pair_thread_sum(
     return sum;
 }
 
+__device__ void ullm_aq4_matvec_pair_thread_sums(
+    const unsigned char *left_indices,
+    const unsigned char *left_scale_indices,
+    const float *left_codebook,
+    const float *left_scale_values,
+    unsigned long long left_scale_count,
+    float left_tensor_scale,
+    const unsigned char *right_indices,
+    const unsigned char *right_scale_indices,
+    const float *right_codebook,
+    const float *right_scale_values,
+    unsigned long long right_scale_count,
+    float right_tensor_scale,
+    const float *input,
+    unsigned long long group_size,
+    unsigned long long row,
+    unsigned long long cols,
+    unsigned int tid,
+    unsigned int block_size,
+    float *left_sum_output,
+    float *right_sum_output) {
+    const unsigned long long row_offset = row * cols;
+    const unsigned long long groups_per_row = cols / group_size;
+    float left_sum = 0.0f;
+    float right_sum = 0.0f;
+    for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
+         group_in_row += block_size) {
+        const unsigned long long group = row * groups_per_row + group_in_row;
+        const unsigned int left_scale_index =
+            static_cast<unsigned int>(left_scale_indices[group]);
+        const unsigned int right_scale_index =
+            static_cast<unsigned int>(right_scale_indices[group]);
+        float left_raw_sum = 0.0f;
+        float right_raw_sum = 0.0f;
+        const unsigned long long col_start = group_in_row * group_size;
+        for (unsigned long long offset = 0; offset < group_size; ++offset) {
+            const unsigned long long col = col_start + offset;
+            const unsigned long long element = row_offset + col;
+            const float input_value = input[col];
+            const unsigned char left_packed = left_indices[element >> 1];
+            const unsigned char left_codebook_index =
+                (element & 1ull) == 0ull ? (left_packed & 0x0f) :
+                                           ((left_packed >> 4) & 0x0f);
+            const unsigned char right_packed = right_indices[element >> 1];
+            const unsigned char right_codebook_index =
+                (element & 1ull) == 0ull ? (right_packed & 0x0f) :
+                                           ((right_packed >> 4) & 0x0f);
+            left_raw_sum += left_codebook[left_codebook_index] * input_value;
+            right_raw_sum += right_codebook[right_codebook_index] * input_value;
+        }
+        if (left_scale_index < left_scale_count) {
+            left_sum += left_raw_sum * left_scale_values[left_scale_index] * left_tensor_scale;
+        }
+        if (right_scale_index < right_scale_count) {
+            right_sum +=
+                right_raw_sum * right_scale_values[right_scale_index] * right_tensor_scale;
+        }
+    }
+    *left_sum_output = left_sum;
+    *right_sum_output = right_sum;
+}
+
 extern "C" __global__ void ullm_aq4_matvec_pair_f32_kernel(
     const unsigned char *left_indices,
     const unsigned char *left_scale_indices,
@@ -1045,66 +1107,96 @@ extern "C" __global__ void ullm_aq4_matvec_pair_f32_kernel(
     constexpr unsigned int threads_per_row = 256u / rows_per_block;
     const unsigned int row_in_block = tid / threads_per_row;
     const unsigned int lane = tid - row_in_block * threads_per_row;
-    const unsigned long long logical_row =
+    const unsigned long long row =
         static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
-    const unsigned long long total_rows = left_rows + right_rows;
+    const unsigned long long work_rows = left_rows > right_rows ? left_rows : right_rows;
     const unsigned int partial_offset = row_in_block * threads_per_row;
-    __shared__ float partial[256];
-    float sum = 0.0f;
-    bool is_left = logical_row < left_rows;
-    unsigned long long row = logical_row;
-    if (logical_row < total_rows) {
-        if (is_left) {
-            sum = ullm_aq4_matvec_pair_thread_sum(
+    __shared__ float left_partial[256];
+    __shared__ float right_partial[256];
+    float left_sum = 0.0f;
+    float right_sum = 0.0f;
+    if (row < work_rows) {
+        if (row < left_rows && row < right_rows && left_group_size == right_group_size &&
+            (cols % left_group_size) == 0ull) {
+            ullm_aq4_matvec_pair_thread_sums(
                 left_indices,
                 left_scale_indices,
                 left_codebook,
                 left_scale_values,
-                input,
                 left_scale_count,
-                left_group_size,
                 left_tensor_scale,
-                row,
-                cols,
-                lane,
-                threads_per_row);
-        } else {
-            row = logical_row - left_rows;
-            sum = ullm_aq4_matvec_pair_thread_sum(
                 right_indices,
                 right_scale_indices,
                 right_codebook,
                 right_scale_values,
-                input,
                 right_scale_count,
-                right_group_size,
                 right_tensor_scale,
+                input,
+                left_group_size,
                 row,
                 cols,
                 lane,
-                threads_per_row);
+                threads_per_row,
+                &left_sum,
+                &right_sum);
+        } else {
+            if (row < left_rows) {
+                left_sum = ullm_aq4_matvec_pair_thread_sum(
+                    left_indices,
+                    left_scale_indices,
+                    left_codebook,
+                    left_scale_values,
+                    input,
+                    left_scale_count,
+                    left_group_size,
+                    left_tensor_scale,
+                    row,
+                    cols,
+                    lane,
+                    threads_per_row);
+            }
+            if (row < right_rows) {
+                right_sum = ullm_aq4_matvec_pair_thread_sum(
+                    right_indices,
+                    right_scale_indices,
+                    right_codebook,
+                    right_scale_values,
+                    input,
+                    right_scale_count,
+                    right_group_size,
+                    right_tensor_scale,
+                    row,
+                    cols,
+                    lane,
+                    threads_per_row);
+            }
         }
     }
-    partial[tid] = sum;
+    left_partial[tid] = left_sum;
+    right_partial[tid] = right_sum;
     __syncthreads();
     for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
         if (lane < offset) {
-            partial[partial_offset + lane] += partial[partial_offset + lane + offset];
+            left_partial[partial_offset + lane] += left_partial[partial_offset + lane + offset];
+            right_partial[partial_offset + lane] +=
+                right_partial[partial_offset + lane + offset];
         }
         __syncthreads();
     }
-    if (lane == 0 && logical_row < total_rows) {
-        float value = partial[partial_offset];
-        if (is_left) {
+    if (lane == 0) {
+        if (row < left_rows) {
+            float left_value = left_partial[partial_offset];
             if (left_row_scales != nullptr && row < left_row_scale_count) {
-                value *= left_row_scales[row];
+                left_value *= left_row_scales[row];
             }
-            left_output[row] = value;
-        } else {
+            left_output[row] = left_value;
+        }
+        if (row < right_rows) {
+            float right_value = right_partial[partial_offset];
             if (right_row_scales != nullptr && row < right_row_scale_count) {
-                value *= right_row_scales[row];
+                right_value *= right_row_scales[row];
             }
-            right_output[row] = value;
+            right_output[row] = right_value;
         }
     }
 }
@@ -1167,6 +1259,90 @@ __device__ float ullm_aq4_matvec_triple_thread_sum(
     return sum;
 }
 
+__device__ void ullm_aq4_matvec_triple_thread_sums(
+    const unsigned char *first_indices,
+    const unsigned char *first_scale_indices,
+    const float *first_codebook,
+    const float *first_scale_values,
+    unsigned long long first_scale_count,
+    float first_tensor_scale,
+    const unsigned char *second_indices,
+    const unsigned char *second_scale_indices,
+    const float *second_codebook,
+    const float *second_scale_values,
+    unsigned long long second_scale_count,
+    float second_tensor_scale,
+    const unsigned char *third_indices,
+    const unsigned char *third_scale_indices,
+    const float *third_codebook,
+    const float *third_scale_values,
+    unsigned long long third_scale_count,
+    float third_tensor_scale,
+    const float *input,
+    unsigned long long group_size,
+    unsigned long long row,
+    unsigned long long cols,
+    unsigned int tid,
+    unsigned int block_size,
+    float *first_sum_output,
+    float *second_sum_output,
+    float *third_sum_output) {
+    const unsigned long long row_offset = row * cols;
+    const unsigned long long groups_per_row = cols / group_size;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+    float third_sum = 0.0f;
+    for (unsigned long long group_in_row = tid; group_in_row < groups_per_row;
+         group_in_row += block_size) {
+        const unsigned long long group = row * groups_per_row + group_in_row;
+        const unsigned int first_scale_index =
+            static_cast<unsigned int>(first_scale_indices[group]);
+        const unsigned int second_scale_index =
+            static_cast<unsigned int>(second_scale_indices[group]);
+        const unsigned int third_scale_index =
+            static_cast<unsigned int>(third_scale_indices[group]);
+        float first_raw_sum = 0.0f;
+        float second_raw_sum = 0.0f;
+        float third_raw_sum = 0.0f;
+        const unsigned long long col_start = group_in_row * group_size;
+        for (unsigned long long offset = 0; offset < group_size; ++offset) {
+            const unsigned long long col = col_start + offset;
+            const unsigned long long element = row_offset + col;
+            const float input_value = input[col];
+            const unsigned char first_packed = first_indices[element >> 1];
+            const unsigned char first_codebook_index =
+                (element & 1ull) == 0ull ? (first_packed & 0x0f) :
+                                           ((first_packed >> 4) & 0x0f);
+            const unsigned char second_packed = second_indices[element >> 1];
+            const unsigned char second_codebook_index =
+                (element & 1ull) == 0ull ? (second_packed & 0x0f) :
+                                           ((second_packed >> 4) & 0x0f);
+            const unsigned char third_packed = third_indices[element >> 1];
+            const unsigned char third_codebook_index =
+                (element & 1ull) == 0ull ? (third_packed & 0x0f) :
+                                           ((third_packed >> 4) & 0x0f);
+            first_raw_sum += first_codebook[first_codebook_index] * input_value;
+            second_raw_sum += second_codebook[second_codebook_index] * input_value;
+            third_raw_sum += third_codebook[third_codebook_index] * input_value;
+        }
+        if (first_scale_index < first_scale_count) {
+            first_sum += first_raw_sum * first_scale_values[first_scale_index] *
+                         first_tensor_scale;
+        }
+        if (second_scale_index < second_scale_count) {
+            second_sum += second_raw_sum * second_scale_values[second_scale_index] *
+                          second_tensor_scale;
+        }
+        if (third_scale_index < third_scale_count) {
+            third_sum += third_raw_sum * third_scale_values[third_scale_index] *
+                         third_tensor_scale;
+        }
+    }
+    *first_sum_output = first_sum;
+    *second_sum_output = second_sum;
+    *third_sum_output = third_sum;
+}
+
 extern "C" __global__ void ullm_aq4_matvec_triple_f32_kernel(
     const unsigned char *first_indices,
     const unsigned char *first_scale_indices,
@@ -1208,91 +1384,133 @@ extern "C" __global__ void ullm_aq4_matvec_triple_f32_kernel(
     constexpr unsigned int threads_per_row = 256u / rows_per_block;
     const unsigned int row_in_block = tid / threads_per_row;
     const unsigned int lane = tid - row_in_block * threads_per_row;
-    const unsigned long long logical_row =
+    const unsigned long long row =
         static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
-    const unsigned long long second_start = first_rows;
-    const unsigned long long third_start = first_rows + second_rows;
-    const unsigned long long total_rows = third_start + third_rows;
+    unsigned long long work_rows = first_rows > second_rows ? first_rows : second_rows;
+    work_rows = work_rows > third_rows ? work_rows : third_rows;
     const unsigned int partial_offset = row_in_block * threads_per_row;
-    __shared__ float partial[256];
-    float sum = 0.0f;
-    unsigned int which = 0u;
-    unsigned long long row = logical_row;
-    if (logical_row < total_rows) {
-        if (logical_row < second_start) {
-            which = 0u;
-            sum = ullm_aq4_matvec_triple_thread_sum(
+    __shared__ float first_partial[256];
+    __shared__ float second_partial[256];
+    __shared__ float third_partial[256];
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+    float third_sum = 0.0f;
+    if (row < work_rows) {
+        if (row < first_rows && row < second_rows && row < third_rows &&
+            first_group_size == second_group_size && first_group_size == third_group_size &&
+            (cols % first_group_size) == 0ull) {
+            ullm_aq4_matvec_triple_thread_sums(
                 first_indices,
                 first_scale_indices,
                 first_codebook,
                 first_scale_values,
-                input,
                 first_scale_count,
-                first_group_size,
                 first_tensor_scale,
-                row,
-                cols,
-                lane,
-                threads_per_row);
-        } else if (logical_row < third_start) {
-            which = 1u;
-            row = logical_row - second_start;
-            sum = ullm_aq4_matvec_triple_thread_sum(
                 second_indices,
                 second_scale_indices,
                 second_codebook,
                 second_scale_values,
-                input,
                 second_scale_count,
-                second_group_size,
                 second_tensor_scale,
-                row,
-                cols,
-                lane,
-                threads_per_row);
-        } else {
-            which = 2u;
-            row = logical_row - third_start;
-            sum = ullm_aq4_matvec_triple_thread_sum(
                 third_indices,
                 third_scale_indices,
                 third_codebook,
                 third_scale_values,
-                input,
                 third_scale_count,
-                third_group_size,
                 third_tensor_scale,
+                input,
+                first_group_size,
                 row,
                 cols,
                 lane,
-                threads_per_row);
+                threads_per_row,
+                &first_sum,
+                &second_sum,
+                &third_sum);
+        } else {
+            if (row < first_rows) {
+                first_sum = ullm_aq4_matvec_triple_thread_sum(
+                    first_indices,
+                    first_scale_indices,
+                    first_codebook,
+                    first_scale_values,
+                    input,
+                    first_scale_count,
+                    first_group_size,
+                    first_tensor_scale,
+                    row,
+                    cols,
+                    lane,
+                    threads_per_row);
+            }
+            if (row < second_rows) {
+                second_sum = ullm_aq4_matvec_triple_thread_sum(
+                    second_indices,
+                    second_scale_indices,
+                    second_codebook,
+                    second_scale_values,
+                    input,
+                    second_scale_count,
+                    second_group_size,
+                    second_tensor_scale,
+                    row,
+                    cols,
+                    lane,
+                    threads_per_row);
+            }
+            if (row < third_rows) {
+                third_sum = ullm_aq4_matvec_triple_thread_sum(
+                    third_indices,
+                    third_scale_indices,
+                    third_codebook,
+                    third_scale_values,
+                    input,
+                    third_scale_count,
+                    third_group_size,
+                    third_tensor_scale,
+                    row,
+                    cols,
+                    lane,
+                    threads_per_row);
+            }
         }
     }
-    partial[tid] = sum;
+    first_partial[tid] = first_sum;
+    second_partial[tid] = second_sum;
+    third_partial[tid] = third_sum;
     __syncthreads();
     for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
         if (lane < offset) {
-            partial[partial_offset + lane] += partial[partial_offset + lane + offset];
+            first_partial[partial_offset + lane] +=
+                first_partial[partial_offset + lane + offset];
+            second_partial[partial_offset + lane] +=
+                second_partial[partial_offset + lane + offset];
+            third_partial[partial_offset + lane] +=
+                third_partial[partial_offset + lane + offset];
         }
         __syncthreads();
     }
-    if (lane == 0 && logical_row < total_rows) {
-        float value = partial[partial_offset];
-        if (which == 0u) {
+    if (lane == 0) {
+        if (row < first_rows) {
+            float first_value = first_partial[partial_offset];
             if (first_row_scales != nullptr && row < first_row_scale_count) {
-                value *= first_row_scales[row];
+                first_value *= first_row_scales[row];
             }
-            first_output[row] = value;
-        } else if (which == 1u) {
+            first_output[row] = first_value;
+        }
+        if (row < second_rows) {
+            float second_value = second_partial[partial_offset];
             if (second_row_scales != nullptr && row < second_row_scale_count) {
-                value *= second_row_scales[row];
+                second_value *= second_row_scales[row];
             }
-            second_output[row] = value;
-        } else {
+            second_output[row] = second_value;
+        }
+        if (row < third_rows) {
+            float third_value = third_partial[partial_offset];
             if (third_row_scales != nullptr && row < third_row_scale_count) {
-                value *= third_row_scales[row];
+                third_value *= third_row_scales[row];
             }
-            third_output[row] = value;
+            third_output[row] = third_value;
         }
     }
 }
@@ -4648,9 +4866,9 @@ bool aq4_matvec_pair_f32_hip_kernel(
     }
 
     const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
-    const size_t total_rows = left_rows + right_rows;
+    const size_t work_rows = std::max(left_rows, right_rows);
     const size_t grid_size =
-        (total_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+        (work_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec pair row count exceeds HIP grid limit";
@@ -4774,17 +4992,9 @@ bool aq4_matvec_triple_f32_hip_kernel(
     }
 
     const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
-    const size_t max_size = std::numeric_limits<size_t>::max();
-    if (first_rows > max_size - second_rows ||
-        first_rows + second_rows > max_size - third_rows) {
-        if (error != nullptr) {
-            *error = "AQ4 matvec triple row count overflows";
-        }
-        return false;
-    }
-    const size_t total_rows = first_rows + second_rows + third_rows;
+    const size_t work_rows = std::max(first_rows, std::max(second_rows, third_rows));
     const size_t grid_size =
-        (total_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+        (work_rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "AQ4 matvec triple row count exceeds HIP grid limit";
