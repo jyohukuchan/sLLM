@@ -36,7 +36,7 @@ use ullm_engine::loader::{
 };
 use ullm_engine::package::{
     ReferencedFile, ReferencedFileRole, TensorSelector, list_tensor_payload_bundles,
-    select_tensor_payload_bundle,
+    select_passthrough_payload_bundle, select_tensor_payload_bundle,
 };
 use ullm_engine::qwen3_loader::{
     Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
@@ -15411,6 +15411,28 @@ impl PackageLmHeadMode {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PackageLmHeadMatrixStorage {
+    F32,
+    Bf16,
+}
+
+impl PackageLmHeadMatrixStorage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "F32",
+            Self::Bf16 => "BF16",
+        }
+    }
+
+    fn element_size(self) -> usize {
+        match self {
+            Self::F32 => std::mem::size_of::<f32>(),
+            Self::Bf16 => std::mem::size_of::<u16>(),
+        }
+    }
+}
+
 fn parse_package_lm_head_mode(value: Option<String>) -> Result<PackageLmHeadMode, ExitCode> {
     match value.as_deref() {
         None | Some("") | Some("cpu") | Some("cpu_chunked") => Ok(PackageLmHeadMode::CpuChunked),
@@ -16120,9 +16142,15 @@ enum PackageLmHeadRuntime {
         shape: Vec<u64>,
         vocab: usize,
         hidden: usize,
+        matrix_storage: PackageLmHeadMatrixStorage,
+        top1_partial_count: usize,
         matrix_buffer: ullm_runtime_sys::RuntimeBuffer,
         input_buffer: ullm_runtime_sys::RuntimeBuffer,
         logits_buffer: ullm_runtime_sys::RuntimeBuffer,
+        top1_partial_values_buffer: ullm_runtime_sys::RuntimeBuffer,
+        top1_partial_indices_buffer: ullm_runtime_sys::RuntimeBuffer,
+        top1_partial_values_host: Vec<u8>,
+        top1_partial_indices_host: Vec<u8>,
         logits_host: Vec<u8>,
         matrix_bytes: usize,
     },
@@ -16141,17 +16169,21 @@ impl PackageLmHeadRuntime {
         match mode {
             PackageLmHeadMode::CpuChunked => Ok(Self::CpuChunked { chunk_rows }),
             PackageLmHeadMode::GpuResidentF32 => {
-                let data = read_named_passthrough_f32(path, QWEN3_LM_HEAD_TENSOR, chunk_bytes)
-                    .map_err(|err| format!("failed to read resident lm_head tensor: {err}"))?;
-                if data.shape.len() != 2 {
+                let selector = TensorSelector::Name(QWEN3_LM_HEAD_TENSOR.to_string());
+                let bundle = select_passthrough_payload_bundle(path, &selector)
+                    .map_err(|err| format!("failed to select resident lm_head tensor: {err}"))?;
+                validate_passthrough_shape_elements(&bundle)
+                    .map_err(|err| format!("invalid resident lm_head shape: {err}"))?;
+                let dtype = resolve_passthrough_dtype(&bundle, QWEN3_LM_HEAD_TENSOR)?.to_string();
+                if bundle.shape.len() != 2 {
                     return Err(format!(
                         "resident lm_head must be 2D, got shape {:?}",
-                        data.shape
+                        bundle.shape
                     ));
                 }
-                let vocab = usize::try_from(data.shape[0])
+                let vocab = usize::try_from(bundle.shape[0])
                     .map_err(|_| "resident lm_head vocab size is too large".to_string())?;
-                let cols = usize::try_from(data.shape[1])
+                let cols = usize::try_from(bundle.shape[1])
                     .map_err(|_| "resident lm_head hidden size is too large".to_string())?;
                 if cols != hidden {
                     return Err(format!(
@@ -16161,42 +16193,119 @@ impl PackageLmHeadRuntime {
                 let expected_values = vocab
                     .checked_mul(hidden)
                     .ok_or_else(|| "resident lm_head element count overflows".to_string())?;
-                if data.values.len() != expected_values {
+                if u64::try_from(expected_values).ok() != Some(bundle.elements) {
                     return Err(format!(
-                        "resident lm_head value count mismatch: got {} expected {expected_values}",
-                        data.values.len()
+                        "resident lm_head element count mismatch: got {} expected {expected_values}",
+                        bundle.elements
                     ));
                 }
-                let matrix_bytes =
-                    checked_f32_byte_len(data.values.len(), "resident lm_head matrix")?;
+                let matrix_storage = match dtype.as_str() {
+                    "BF16" => PackageLmHeadMatrixStorage::Bf16,
+                    _ => PackageLmHeadMatrixStorage::F32,
+                };
+                let matrix_bytes = expected_values
+                    .checked_mul(matrix_storage.element_size())
+                    .ok_or_else(|| "resident lm_head matrix byte size overflows".to_string())?;
                 let hidden_bytes = checked_f32_byte_len(hidden, "resident lm_head input")?;
                 let logits_bytes = checked_f32_byte_len(vocab, "resident lm_head logits")?;
+                let top1_partial_count = ullm_runtime_sys::top1_partial_count(vocab)
+                    .map_err(|err| format!("failed to size resident lm_head top1: {err}"))?;
+                let top1_partial_values_bytes =
+                    checked_f32_byte_len(top1_partial_count, "resident lm_head top1 values")?;
+                let top1_partial_indices_bytes = top1_partial_count
+                    .checked_mul(std::mem::size_of::<u32>())
+                    .ok_or_else(|| "resident lm_head top1 index byte size overflows".to_string())?;
                 let mut matrix_buffer = context
                     .alloc_buffer(matrix_bytes)
                     .map_err(|err| format!("failed to allocate resident lm_head matrix: {err}"))?;
-                copy_f32_values_to_runtime_buffer_chunked(
-                    &mut matrix_buffer,
-                    &data.values,
-                    stream,
-                    "resident lm_head matrix",
-                )?;
+                match matrix_storage {
+                    PackageLmHeadMatrixStorage::Bf16 => {
+                        let payload_bytes = if bundle.payload_bytes == 0 {
+                            bundle.payload_file.bytes
+                        } else {
+                            bundle.payload_bytes
+                        };
+                        if payload_bytes != bundle.payload_file.bytes {
+                            return Err(format!(
+                                "resident lm_head payload bytes mismatch: declared {} actual {}",
+                                payload_bytes, bundle.payload_file.bytes
+                            ));
+                        }
+                        if usize::try_from(payload_bytes).ok() != Some(matrix_bytes) {
+                            return Err(format!(
+                                "resident lm_head BF16 payload bytes mismatch: got {payload_bytes} expected {matrix_bytes}"
+                            ));
+                        }
+                        match bundle.payload_encoding.as_deref() {
+                            None | Some("raw_safetensors_payload") => {}
+                            Some(encoding) => {
+                                return Err(format!(
+                                    "resident lm_head has unsupported payload encoding {encoding}"
+                                ));
+                            }
+                        }
+                        copy_file_to_runtime_buffer_chunked(
+                            &mut matrix_buffer,
+                            &bundle.payload_file.absolute_path,
+                            matrix_bytes,
+                            chunk_bytes,
+                            stream,
+                            "resident lm_head BF16 matrix",
+                        )?;
+                    }
+                    PackageLmHeadMatrixStorage::F32 => {
+                        let data =
+                            read_named_passthrough_f32(path, QWEN3_LM_HEAD_TENSOR, chunk_bytes)
+                                .map_err(|err| {
+                                    format!("failed to read resident lm_head tensor: {err}")
+                                })?;
+                        if data.values.len() != expected_values {
+                            return Err(format!(
+                                "resident lm_head value count mismatch: got {} expected {expected_values}",
+                                data.values.len()
+                            ));
+                        }
+                        copy_f32_values_to_runtime_buffer_chunked(
+                            &mut matrix_buffer,
+                            &data.values,
+                            stream,
+                            "resident lm_head matrix",
+                        )?;
+                    }
+                }
                 let input_buffer = context
                     .alloc_buffer(hidden_bytes)
                     .map_err(|err| format!("failed to allocate resident lm_head input: {err}"))?;
                 let logits_buffer = context
                     .alloc_buffer(logits_bytes)
                     .map_err(|err| format!("failed to allocate resident lm_head logits: {err}"))?;
+                let top1_partial_values_buffer = context
+                    .alloc_buffer(top1_partial_values_bytes)
+                    .map_err(|err| {
+                        format!("failed to allocate resident lm_head top1 values: {err}")
+                    })?;
+                let top1_partial_indices_buffer = context
+                    .alloc_buffer(top1_partial_indices_bytes)
+                    .map_err(|err| {
+                        format!("failed to allocate resident lm_head top1 indices: {err}")
+                    })?;
                 stream
                     .synchronize()
                     .map_err(|err| format!("failed to synchronize resident lm_head load: {err}"))?;
                 Ok(Self::GpuResidentF32 {
-                    dtype: data.dtype,
-                    shape: data.shape,
+                    dtype,
+                    shape: bundle.shape,
                     vocab,
                     hidden,
+                    matrix_storage,
+                    top1_partial_count,
                     matrix_buffer,
                     input_buffer,
                     logits_buffer,
+                    top1_partial_values_buffer,
+                    top1_partial_indices_buffer,
+                    top1_partial_values_host: vec![0_u8; top1_partial_values_bytes],
+                    top1_partial_indices_host: vec![0_u8; top1_partial_indices_bytes],
                     logits_host: vec![0_u8; logits_bytes],
                     matrix_bytes,
                 })
@@ -16220,9 +16329,14 @@ impl PackageLmHeadRuntime {
             Self::GpuResidentF32 {
                 vocab,
                 hidden,
+                matrix_storage,
                 matrix_buffer,
                 input_buffer,
                 logits_buffer,
+                top1_partial_values_buffer,
+                top1_partial_indices_buffer,
+                top1_partial_values_host,
+                top1_partial_indices_host,
                 logits_host,
                 ..
             } => {
@@ -16236,23 +16350,66 @@ impl PackageLmHeadRuntime {
                 input_buffer
                     .copy_from_host(0, &encode_f32_to_bytes(hidden_values), Some(stream))
                     .map_err(|err| format!("failed to copy resident lm_head input: {err}"))?;
-                ullm_runtime_sys::matvec_f32(
+                package_gpu_resident_lm_head_top_logits(
+                    stream,
                     matrix_buffer,
                     input_buffer,
+                    *matrix_storage,
                     *vocab,
                     *hidden,
                     logits_buffer,
-                    Some(stream),
+                    top1_partial_values_buffer,
+                    top1_partial_indices_buffer,
+                    top1_partial_values_host,
+                    top1_partial_indices_host,
+                    logits_host,
+                    top_k,
                 )
-                .map_err(|err| format!("resident lm_head matvec failed: {err}"))?;
-                logits_buffer
-                    .copy_to_host(0, logits_host, Some(stream))
-                    .map_err(|err| format!("failed to copy resident lm_head logits: {err}"))?;
-                stream.synchronize().map_err(|err| {
-                    format!("failed to synchronize resident lm_head logits: {err}")
-                })?;
-                package_top_logits_from_f32_bytes(logits_host, top_k)
             }
+        }
+    }
+
+    fn supports_device_input(&self) -> bool {
+        matches!(self, Self::GpuResidentF32 { .. })
+    }
+
+    fn top_logits_from_device_buffer(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        hidden_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        top_k: usize,
+    ) -> Result<Vec<PackageTokenLogit>, String> {
+        match self {
+            Self::CpuChunked { .. } => {
+                Err("device lm_head input requires gpu_resident_f32 lm_head mode".to_string())
+            }
+            Self::GpuResidentF32 {
+                vocab,
+                hidden,
+                matrix_storage,
+                matrix_buffer,
+                logits_buffer,
+                top1_partial_values_buffer,
+                top1_partial_indices_buffer,
+                top1_partial_values_host,
+                top1_partial_indices_host,
+                logits_host,
+                ..
+            } => package_gpu_resident_lm_head_top_logits(
+                stream,
+                matrix_buffer,
+                hidden_buffer,
+                *matrix_storage,
+                *vocab,
+                *hidden,
+                logits_buffer,
+                top1_partial_values_buffer,
+                top1_partial_indices_buffer,
+                top1_partial_values_host,
+                top1_partial_indices_host,
+                logits_host,
+                top_k,
+            ),
         }
     }
 
@@ -16268,6 +16425,8 @@ impl PackageLmHeadRuntime {
                 shape,
                 vocab,
                 hidden,
+                matrix_storage,
+                top1_partial_count,
                 matrix_bytes,
                 ..
             } => serde_json::json!({
@@ -16277,11 +16436,168 @@ impl PackageLmHeadRuntime {
                 "shape": shape,
                 "vocab": vocab,
                 "hidden": hidden,
+                "matrix_storage_dtype": matrix_storage.as_str(),
+                "top1_partial_count": top1_partial_count,
                 "matrix_bytes": matrix_bytes,
                 "load_ms": load_ms,
             }),
         }
     }
+}
+
+struct PackageFinalNormRuntime {
+    hidden: usize,
+    weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    output_buffer: ullm_runtime_sys::RuntimeBuffer,
+}
+
+impl PackageFinalNormRuntime {
+    fn load(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        final_norm: &PassthroughF32Data,
+        hidden: usize,
+    ) -> Result<Self, String> {
+        if final_norm.values.len() != hidden {
+            return Err(format!(
+                "incremental final RMSNorm length mismatch: len={} hidden={hidden}",
+                final_norm.values.len()
+            ));
+        }
+        let norm_bytes = checked_f32_byte_len(hidden, "incremental final RMSNorm")?;
+        let mut weight_buffer = context
+            .alloc_buffer(norm_bytes)
+            .map_err(|err| format!("failed to allocate incremental final RMSNorm weight: {err}"))?;
+        let output_buffer = context
+            .alloc_buffer(norm_bytes)
+            .map_err(|err| format!("failed to allocate incremental final RMSNorm output: {err}"))?;
+        weight_buffer
+            .copy_from_host(0, &encode_f32_to_bytes(&final_norm.values), Some(stream))
+            .map_err(|err| format!("failed to copy incremental final RMSNorm weight: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize incremental final RMSNorm runtime setup: {err}")
+        })?;
+        Ok(Self {
+            hidden,
+            weight_buffer,
+            output_buffer,
+        })
+    }
+
+    fn normalize_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<(), String> {
+        let input_bytes = input_buffer
+            .size()
+            .map_err(|err| format!("failed to query {label} final hidden buffer size: {err}"))?;
+        let required_bytes = checked_f32_byte_len(self.hidden, "incremental final RMSNorm input")?;
+        if input_bytes < required_bytes {
+            return Err(format!(
+                "{label} final hidden buffer is too small: got {input_bytes} bytes expected at least {required_bytes}"
+            ));
+        }
+        ullm_runtime_sys::rmsnorm_f32(
+            input_buffer,
+            &self.weight_buffer,
+            self.hidden,
+            1e-6_f32,
+            &mut self.output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} final RMSNorm: {err}"))
+    }
+
+    fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        &self.output_buffer
+    }
+
+    fn report_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "mode": "gpu_resident_f32",
+            "hidden": self.hidden,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_gpu_resident_lm_head_top_logits(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    matrix_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    matrix_storage: PackageLmHeadMatrixStorage,
+    vocab: usize,
+    hidden: usize,
+    logits_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    top1_partial_values_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    top1_partial_indices_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    top1_partial_values_host: &mut [u8],
+    top1_partial_indices_host: &mut [u8],
+    logits_host: &mut [u8],
+    top_k: usize,
+) -> Result<Vec<PackageTokenLogit>, String> {
+    let required_input_bytes = checked_f32_byte_len(hidden, "resident lm_head input")?;
+    let input_bytes = input_buffer
+        .size()
+        .map_err(|err| format!("failed to query resident lm_head input buffer size: {err}"))?;
+    if input_bytes < required_input_bytes {
+        return Err(format!(
+            "resident lm_head input buffer is too small: got {input_bytes} bytes expected at least {required_input_bytes}"
+        ));
+    }
+    match matrix_storage {
+        PackageLmHeadMatrixStorage::F32 => ullm_runtime_sys::matvec_f32(
+            matrix_buffer,
+            input_buffer,
+            vocab,
+            hidden,
+            logits_buffer,
+            Some(stream),
+        ),
+        PackageLmHeadMatrixStorage::Bf16 => ullm_runtime_sys::matvec_bf16_f32(
+            matrix_buffer,
+            input_buffer,
+            vocab,
+            hidden,
+            logits_buffer,
+            Some(stream),
+        ),
+    }
+    .map_err(|err| format!("resident lm_head matvec failed: {err}"))?;
+    if top_k == 1 {
+        ullm_runtime_sys::top1_f32(
+            logits_buffer,
+            vocab,
+            top1_partial_values_buffer,
+            top1_partial_indices_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("resident lm_head top1 failed: {err}"))?;
+        top1_partial_values_buffer
+            .copy_to_host(0, top1_partial_values_host, Some(stream))
+            .map_err(|err| format!("failed to copy resident lm_head top1 partial values: {err}"))?;
+        top1_partial_indices_buffer
+            .copy_to_host(0, top1_partial_indices_host, Some(stream))
+            .map_err(|err| {
+                format!("failed to copy resident lm_head top1 partial indices: {err}")
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize resident lm_head top1 partials: {err}")
+        })?;
+        return package_top1_from_partial_bytes(
+            top1_partial_values_host,
+            top1_partial_indices_host,
+        );
+    }
+    logits_buffer
+        .copy_to_host(0, logits_host, Some(stream))
+        .map_err(|err| format!("failed to copy resident lm_head logits: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize resident lm_head logits: {err}"))?;
+    package_top_logits_from_f32_bytes(logits_host, top_k)
 }
 
 fn copy_f32_values_to_runtime_buffer_chunked(
@@ -16302,6 +16618,38 @@ fn copy_f32_values_to_runtime_buffer_chunked(
         buffer
             .copy_from_host(offset_bytes, &bytes, Some(stream))
             .map_err(|err| format!("failed to copy {label} chunk {chunk_index}: {err}"))?;
+    }
+    Ok(())
+}
+
+fn copy_file_to_runtime_buffer_chunked(
+    buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    path: &std::path::Path,
+    bytes: usize,
+    chunk_bytes: usize,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    label: &str,
+) -> Result<(), String> {
+    if chunk_bytes == 0 {
+        return Err(format!("{label} chunk bytes must be greater than zero"));
+    }
+    let mut file = File::open(path)
+        .map_err(|err| format!("failed to open {label} {}: {err}", path.display()))?;
+    let mut chunk = vec![0_u8; chunk_bytes.min(bytes.max(1))];
+    let mut offset = 0_usize;
+    while offset < bytes {
+        let remaining = bytes - offset;
+        let read_len = remaining.min(chunk.len());
+        file.read_exact(&mut chunk[..read_len])
+            .map_err(|err| format!("failed to read {label} at byte offset {offset}: {err}"))?;
+        buffer
+            .copy_from_host(offset, &chunk[..read_len], Some(stream))
+            .map_err(|err| {
+                format!("failed to copy {label} chunk at byte offset {offset}: {err}")
+            })?;
+        offset = offset
+            .checked_add(read_len)
+            .ok_or_else(|| format!("{label} copy offset overflows"))?;
     }
     Ok(())
 }
@@ -16374,6 +16722,61 @@ fn package_top_logits_from_f32_bytes(
         );
     }
     Ok(top_logits)
+}
+
+fn package_top1_from_partial_bytes(
+    partial_value_bytes: &[u8],
+    partial_index_bytes: &[u8],
+) -> Result<Vec<PackageTokenLogit>, String> {
+    if !partial_value_bytes
+        .len()
+        .is_multiple_of(std::mem::size_of::<f32>())
+    {
+        return Err("resident lm_head top1 partial value byte length is not f32-aligned".into());
+    }
+    if !partial_index_bytes
+        .len()
+        .is_multiple_of(std::mem::size_of::<u32>())
+    {
+        return Err("resident lm_head top1 partial index byte length is not u32-aligned".into());
+    }
+    let partial_count = partial_value_bytes.len() / std::mem::size_of::<f32>();
+    if partial_count == 0 || partial_index_bytes.len() / std::mem::size_of::<u32>() != partial_count
+    {
+        return Err("resident lm_head top1 partial value/index length mismatch".into());
+    }
+    let mut best: Option<PackageTokenLogit> = None;
+    for partial in 0..partial_count {
+        let value_offset = partial * std::mem::size_of::<f32>();
+        let index_offset = partial * std::mem::size_of::<u32>();
+        let logit = f32::from_le_bytes(
+            partial_value_bytes[value_offset..value_offset + std::mem::size_of::<f32>()]
+                .try_into()
+                .expect("f32 partial"),
+        );
+        let token_id_u32 = u32::from_le_bytes(
+            partial_index_bytes[index_offset..index_offset + std::mem::size_of::<u32>()]
+                .try_into()
+                .expect("u32 partial"),
+        );
+        if !logit.is_finite() {
+            return Err(format!(
+                "resident lm_head top1 partial {partial} is not finite"
+            ));
+        }
+        let token_id = usize::try_from(token_id_u32)
+            .map_err(|_| format!("resident lm_head top1 token id {token_id_u32} is too large"))?;
+        let candidate = PackageTokenLogit { token_id, logit };
+        if best
+            .as_ref()
+            .map(|current| package_logit_precedes(&candidate, current))
+            .unwrap_or(true)
+        {
+            best = Some(candidate);
+        }
+    }
+    best.map(|entry| vec![entry])
+        .ok_or_else(|| "resident lm_head top1 produced no partials".into())
 }
 
 enum PackageTokenIdsIncrementalLayer {
@@ -16540,6 +16943,93 @@ fn package_token_ids_incremental_layers_step(
     Ok((output, layer_step_ms))
 }
 
+fn package_token_ids_incremental_layers_step_device(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layers: &mut [PackageTokenIdsIncrementalLayer],
+    rotary_dim: usize,
+    rope_base: f32,
+    rope_position: usize,
+    cache_position: usize,
+    residual: Vec<f32>,
+    hidden: usize,
+    label: &str,
+) -> Result<(usize, Vec<f64>), String> {
+    if residual.len() != hidden {
+        return Err(format!(
+            "{label} residual length {} does not match hidden {hidden}",
+            residual.len()
+        ));
+    }
+    if layers.is_empty() {
+        return Err(format!(
+            "{label} device layer step requires at least one layer"
+        ));
+    }
+    let mut residual_host = Some(residual);
+    let mut residual_device_layer: Option<usize> = None;
+    let mut layer_step_ms = Vec::with_capacity(layers.len());
+
+    for layer_position in 0..layers.len() {
+        let layer_step_started = Instant::now();
+        let layer_label = format!("{label} layer {layer_position} position {rope_position}");
+        if let Some(previous_position) = residual_device_layer {
+            let (previous_layers, current_layers) = layers.split_at_mut(layer_position);
+            let previous = previous_layers.get(previous_position).ok_or_else(|| {
+                format!(
+                    "{layer_label} previous device residual layer {previous_position} is missing"
+                )
+            })?;
+            current_layers[0].step_from_device_to_device(
+                stream,
+                previous.output_buffer(),
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                &layer_label,
+            )?;
+        } else {
+            let residual = residual_host
+                .take()
+                .ok_or_else(|| format!("{layer_label} missing host residual"))?;
+            layers[layer_position].step_from_host_to_device(
+                stream,
+                &residual,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                &layer_label,
+            )?;
+        }
+        residual_device_layer = Some(layer_position);
+        layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    residual_device_layer
+        .map(|layer_position| (layer_position, layer_step_ms))
+        .ok_or_else(|| format!("{label} missing final device residual"))
+}
+
+fn package_token_ids_top_logits_result(
+    top_logits: Vec<PackageTokenLogit>,
+) -> Result<(serde_json::Value, usize), String> {
+    let next = top_logits
+        .first()
+        .map(|entry| entry.token_id)
+        .ok_or_else(|| "incremental lm_head returned no top logits".to_string())?;
+    let top_logits_json = top_logits
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "token_id": entry.token_id,
+                "logit": entry.logit,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok((serde_json::Value::Array(top_logits_json), next))
+}
+
 fn package_token_ids_incremental_final_logits(
     path: &str,
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -16556,21 +17046,28 @@ fn package_token_ids_incremental_final_logits(
             "incremental final normalized hidden state contains invalid values".to_string(),
         );
     }
-    let top_logits = lm_head_runtime.top_logits(path, stream, &final_normed, top_k)?;
-    let next = top_logits
-        .first()
-        .map(|entry| entry.token_id)
-        .ok_or_else(|| "incremental lm_head returned no top logits".to_string())?;
-    let top_logits_json = top_logits
-        .iter()
-        .map(|entry| {
-            serde_json::json!({
-                "token_id": entry.token_id,
-                "logit": entry.logit,
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok((serde_json::Value::Array(top_logits_json), next))
+    package_token_ids_top_logits_result(lm_head_runtime.top_logits(
+        path,
+        stream,
+        &final_normed,
+        top_k,
+    )?)
+}
+
+fn package_token_ids_incremental_final_logits_device(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    lm_head_runtime: &mut PackageLmHeadRuntime,
+    final_norm_runtime: &mut PackageFinalNormRuntime,
+    final_hidden_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    top_k: usize,
+    label: &str,
+) -> Result<(serde_json::Value, usize), String> {
+    final_norm_runtime.normalize_device(stream, final_hidden_buffer, label)?;
+    package_token_ids_top_logits_result(lm_head_runtime.top_logits_from_device_buffer(
+        stream,
+        final_norm_runtime.output_buffer(),
+        top_k,
+    )?)
 }
 
 fn checked_product_u64(values: &[usize], label: &str) -> Result<u64, String> {
@@ -16787,6 +17284,16 @@ fn package_token_ids_generate_incremental_smoke_impl(
         hidden,
         lm_head_chunk_rows,
     )?;
+    let mut final_norm_runtime = if lm_head_runtime.supports_device_input() {
+        Some(PackageFinalNormRuntime::load(
+            &mut context,
+            &mut stream,
+            &final_norm,
+            hidden,
+        )?)
+    } else {
+        None
+    };
     let lm_head_load_ms = lm_head_load_started.elapsed().as_secs_f64() * 1000.0;
 
     let prefill_started = Instant::now();
@@ -16888,34 +17395,73 @@ fn package_token_ids_generate_incremental_smoke_impl(
             .checked_add(decode_index)
             .ok_or_else(|| "incremental decode cache position overflows".to_string())?;
         let decode_layers_started = Instant::now();
-        let (residual, layer_step_ms) = package_token_ids_incremental_layers_step(
-            &mut stream,
-            &mut layers,
-            rotary_dim_value,
-            rope_base,
-            position,
-            cache_position,
-            embedding.values,
-            hidden,
-            "incremental decode",
-        )?;
-        let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
-        let decode_lm_head_started = Instant::now();
-        let (top_logits, next) = package_token_ids_incremental_final_logits(
-            path,
-            &mut stream,
-            &mut lm_head_runtime,
-            &residual,
-            &final_norm,
-            top_k,
-        )?;
-        let lm_head_step_ms = decode_lm_head_started.elapsed().as_secs_f64() * 1000.0;
+        let (top_logits, next, layers_step_ms, layer_step_ms) =
+            if lm_head_runtime.supports_device_input() {
+                let final_norm_runtime = final_norm_runtime.as_mut().ok_or_else(|| {
+                    "incremental decode final RMSNorm runtime is missing".to_string()
+                })?;
+                let (final_layer_position, layer_step_ms) =
+                    package_token_ids_incremental_layers_step_device(
+                        &mut stream,
+                        &mut layers,
+                        rotary_dim_value,
+                        rope_base,
+                        position,
+                        cache_position,
+                        embedding.values,
+                        hidden,
+                        "incremental decode",
+                    )?;
+                let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
+                let final_hidden_buffer = layers
+                    .get(final_layer_position)
+                    .ok_or_else(|| {
+                        format!("incremental decode final layer {final_layer_position} is missing")
+                    })?
+                    .output_buffer();
+                let decode_lm_head_started = Instant::now();
+                let (top_logits, next) = package_token_ids_incremental_final_logits_device(
+                    &mut stream,
+                    &mut lm_head_runtime,
+                    final_norm_runtime,
+                    final_hidden_buffer,
+                    top_k,
+                    "incremental decode",
+                )?;
+                let lm_head_step_ms = decode_lm_head_started.elapsed().as_secs_f64() * 1000.0;
+                decode_lm_head_ms.push(lm_head_step_ms);
+                (top_logits, next, layers_step_ms, layer_step_ms)
+            } else {
+                let (residual, layer_step_ms) = package_token_ids_incremental_layers_step(
+                    &mut stream,
+                    &mut layers,
+                    rotary_dim_value,
+                    rope_base,
+                    position,
+                    cache_position,
+                    embedding.values,
+                    hidden,
+                    "incremental decode",
+                )?;
+                let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
+                let decode_lm_head_started = Instant::now();
+                let (top_logits, next) = package_token_ids_incremental_final_logits(
+                    path,
+                    &mut stream,
+                    &mut lm_head_runtime,
+                    &residual,
+                    &final_norm,
+                    top_k,
+                )?;
+                let lm_head_step_ms = decode_lm_head_started.elapsed().as_secs_f64() * 1000.0;
+                decode_lm_head_ms.push(lm_head_step_ms);
+                (top_logits, next, layers_step_ms, layer_step_ms)
+            };
         last_top_logits = top_logits;
         decode_step_ms.push(decode_started.elapsed().as_secs_f64() * 1000.0);
         decode_embedding_ms.push(embedding_step_ms);
         decode_layers_ms.push(layers_step_ms);
         decode_layer_step_ms.push(layer_step_ms);
-        decode_lm_head_ms.push(lm_head_step_ms);
         decode_positions.push(position);
         generated_token_ids.push(next);
         sequence_ids.push(next);
@@ -16959,6 +17505,12 @@ fn package_token_ids_generate_incremental_smoke_impl(
         "top_k": top_k,
         "lm_head_chunk_rows": lm_head_chunk_rows,
         "lm_head_runtime": lm_head_runtime.report_json(lm_head_load_ms),
+        "final_norm_runtime": final_norm_runtime
+            .as_ref()
+            .map(PackageFinalNormRuntime::report_json)
+            .unwrap_or(serde_json::Value::Null),
+        "decode_final_logits_device": final_norm_runtime.is_some()
+            && lm_head_runtime.supports_device_input(),
         "rotary_dim": resolved_rotary_dim,
         "rope_base": rope_base,
         "position_offset": position_offset,

@@ -385,6 +385,22 @@ public:
         return compile_kernel(arch, matvec_kernel_source(), "ullm_matvec_f32.hip", code, error);
     }
 
+    bool compile_matvec_bf16_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            matvec_bf16_kernel_source(),
+            "ullm_matvec_bf16_f32.hip",
+            code,
+            error);
+    }
+
+    bool compile_top1_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(arch, top1_kernel_source(), "ullm_top1_f32.hip", code, error);
+    }
+
     bool compile_rmsnorm_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, rmsnorm_kernel_source(), "ullm_rmsnorm_f32.hip", code, error);
     }
@@ -1021,6 +1037,43 @@ extern "C" __global__ void ullm_matvec_f32_kernel(
 )";
     }
 
+    static const char *matvec_bf16_kernel_source() {
+        return R"(
+__device__ float ullm_bf16_to_f32(unsigned short value) {
+    return __uint_as_float(static_cast<unsigned int>(value) << 16);
+}
+
+extern "C" __global__ void ullm_matvec_bf16_f32_kernel(
+    const unsigned short *matrix,
+    const float *input,
+    unsigned long long rows,
+    unsigned long long cols,
+    float *output) {
+    const unsigned int row = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[256];
+    float sum = 0.0f;
+    if (row < rows) {
+        const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
+        for (unsigned long long col = tid; col < cols; col += blockDim.x) {
+            sum += ullm_bf16_to_f32(matrix[row_offset + col]) * input[col];
+        }
+    }
+    partial[tid] = sum;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            partial[tid] += partial[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (tid == 0 && row < rows) {
+        output[row] = partial[0];
+    }
+}
+)";
+    }
+
     static const char *rmsnorm_kernel_source() {
         return R"(
 extern "C" __global__ void ullm_rmsnorm_f32_kernel(
@@ -1047,6 +1100,52 @@ extern "C" __global__ void ullm_rmsnorm_f32_kernel(
     const float inv_rms = rsqrtf(partial[0] / static_cast<float>(elements) + epsilon);
     for (unsigned long long index = tid; index < elements; index += blockDim.x) {
         output[index] = input[index] * inv_rms * weight[index];
+    }
+}
+)";
+    }
+
+    static const char *top1_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_top1_f32_kernel(
+    const float *input,
+    unsigned long long elements,
+    float *partial_values,
+    unsigned int *partial_indices) {
+    const unsigned int tid = threadIdx.x;
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + tid;
+    __shared__ float values[256];
+    __shared__ unsigned int indices[256];
+    float value = -3.4028234663852886e38f;
+    unsigned int token_index = 0xffffffffu;
+    if (index < elements) {
+        value = input[index];
+        if (!(value == value)) {
+            value = -3.4028234663852886e38f;
+        }
+        token_index = static_cast<unsigned int>(index);
+    }
+    values[tid] = value;
+    indices[tid] = token_index;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            const float right_value = values[tid + offset];
+            const unsigned int right_index = indices[tid + offset];
+            const float left_value = values[tid];
+            const unsigned int left_index = indices[tid];
+            if (right_value > left_value ||
+                (right_value == left_value && right_index < left_index)) {
+                values[tid] = right_value;
+                indices[tid] = right_index;
+            }
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        partial_values[blockIdx.x] = values[0];
+        partial_indices[blockIdx.x] = indices[0];
     }
 }
 )";
@@ -3676,6 +3775,29 @@ void matvec_f32_host(
     }
 }
 
+float bf16_to_f32_host(uint16_t value) {
+    const uint32_t bits = static_cast<uint32_t>(value) << 16;
+    float result = 0.0f;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+void matvec_bf16_f32_host(
+    const uint16_t *matrix,
+    const float *input,
+    size_t rows,
+    size_t cols,
+    float *output) {
+    for (size_t row = 0; row < rows; ++row) {
+        const uint16_t *row_values = matrix + row * cols;
+        float sum = 0.0f;
+        for (size_t col = 0; col < cols; ++col) {
+            sum += bf16_to_f32_host(row_values[col]) * input[col];
+        }
+        output[row] = sum;
+    }
+}
+
 class HipMatvecKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -3754,6 +3876,84 @@ HipMatvecKernelCache &hip_matvec_kernel_cache() {
     return cache;
 }
 
+class HipBf16MatvecKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_matvec_bf16_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_matvec_bf16_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build BF16 matvec HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipBf16MatvecKernelCache &hip_bf16_matvec_kernel_cache() {
+    static HipBf16MatvecKernelCache cache;
+    return cache;
+}
+
 bool matvec_f32_hip_kernel(
     const ullm_runtime_buffer *matrix_buffer,
     const ullm_runtime_buffer *input_buffer,
@@ -3797,6 +3997,55 @@ bool matvec_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 matvec";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool matvec_bf16_f32_hip_kernel(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = matrix_buffer->hip_device_id;
+    void *function = hip_bf16_matvec_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "BF16 matvec row count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    void *matrix_ptr = matrix_buffer->ptr;
+    void *input_ptr = input_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &matrix_ptr,
+        &input_ptr,
+        &kernel_rows,
+        &kernel_cols,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(rows),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for BF16 matvec";
         }
         return false;
     }
@@ -3853,6 +4102,276 @@ ullm_status matvec_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 matvec HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status matvec_bf16_f32_hip_staging(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t required_matrix_bytes,
+    size_t required_input_bytes,
+    size_t required_output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<uint16_t> host_matrix(required_matrix_bytes / sizeof(uint16_t));
+    std::vector<float> host_input(cols);
+    std::vector<float> host_output(rows);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = matrix_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_matrix.data(),
+            matrix_buffer->ptr,
+            required_matrix_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            required_input_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy BF16 matvec HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize BF16 matvec HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    matvec_bf16_f32_host(host_matrix.data(), host_input.data(), rows, cols, host_output.data());
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            required_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy BF16 matvec output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize BF16 matvec HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+void top1_f32_partials_host(
+    const float *input,
+    size_t elements,
+    size_t partial_count,
+    float *partial_values,
+    uint32_t *partial_indices) {
+    constexpr size_t block_size = 256;
+    for (size_t block = 0; block < partial_count; ++block) {
+        const size_t start = block * block_size;
+        const size_t end = std::min(start + block_size, elements);
+        float best_value = -std::numeric_limits<float>::max();
+        uint32_t best_index = std::numeric_limits<uint32_t>::max();
+        for (size_t index = start; index < end; ++index) {
+            float value = input[index];
+            if (value != value) {
+                value = -std::numeric_limits<float>::max();
+            }
+            const auto token_index = static_cast<uint32_t>(index);
+            if (value > best_value || (value == best_value && token_index < best_index)) {
+                best_value = value;
+                best_index = token_index;
+            }
+        }
+        partial_values[block] = best_value;
+        partial_indices[block] = best_index;
+    }
+}
+
+class HipTop1KernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_top1_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_top1_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty() ? "failed to build top1 HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipTop1KernelCache &hip_top1_kernel_cache() {
+    static HipTop1KernelCache cache;
+    return cache;
+}
+
+bool top1_f32_hip_kernel(
+    const ullm_runtime_buffer *input_buffer,
+    size_t elements,
+    ullm_runtime_buffer *partial_values_buffer,
+    ullm_runtime_buffer *partial_indices_buffer,
+    size_t partial_count,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = input_buffer->hip_device_id;
+    void *function = hip_top1_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    if (partial_count > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "top1 partial count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_elements = static_cast<unsigned long long>(elements);
+    void *input_ptr = input_buffer->ptr;
+    void *partial_values_ptr = partial_values_buffer->ptr;
+    void *partial_indices_ptr = partial_indices_buffer->ptr;
+    void *kernel_params[] = {
+        &input_ptr,
+        &kernel_elements,
+        &partial_values_ptr,
+        &partial_indices_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(partial_count),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 top1";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status top1_f32_hip_staging(
+    const ullm_runtime_buffer *input_buffer,
+    size_t elements,
+    size_t input_bytes,
+    ullm_runtime_buffer *partial_values_buffer,
+    ullm_runtime_buffer *partial_indices_buffer,
+    size_t partial_count,
+    size_t partial_values_bytes,
+    size_t partial_indices_bytes,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_input(elements);
+    std::vector<float> host_partial_values(partial_count);
+    std::vector<uint32_t> host_partial_indices(partial_count);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = input_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            input_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 top1 HIP input to host staging buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 top1 HIP input staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    top1_f32_partials_host(
+        host_input.data(),
+        elements,
+        partial_count,
+        host_partial_values.data(),
+        host_partial_indices.data());
+    if (!hip_runtime().copy_async(
+            partial_values_buffer->ptr,
+            host_partial_values.data(),
+            partial_values_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            partial_indices_buffer->ptr,
+            host_partial_indices.data(),
+            partial_indices_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 top1 partial outputs to HIP buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 top1 HIP output staging copies");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -9055,6 +9574,200 @@ ullm_status ullm_runtime_matvec_f32(
         required_input_bytes,
         required_output_bytes,
         output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_matvec_bf16_f32(
+    const ullm_runtime_buffer *matrix_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (matrix_buffer == nullptr || input_buffer == nullptr || output_buffer == nullptr) {
+        set_error("BF16 matvec received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rows == 0 || cols == 0) {
+        set_error("BF16 matvec rows and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(matrix_buffer, input_buffer) ||
+        !buffers_share_backend(matrix_buffer, output_buffer)) {
+        set_error("BF16 matvec buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("BF16 matvec stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / rows) {
+        set_error("BF16 matvec matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t matrix_elements = rows * cols;
+    if (matrix_elements > max_size / sizeof(uint16_t) ||
+        cols > max_size / sizeof(float) ||
+        rows > max_size / sizeof(float)) {
+        set_error("BF16 matvec byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_matrix_bytes = matrix_elements * sizeof(uint16_t);
+    const size_t required_input_bytes = cols * sizeof(float);
+    const size_t required_output_bytes = rows * sizeof(float);
+    if (matrix_buffer->bytes < required_matrix_bytes) {
+        set_error("BF16 matvec matrix buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("BF16 matvec input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_output_bytes) {
+        set_error("BF16 matvec output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (matrix_buffer->backend == BackendKind::Cpu) {
+        const auto *matrix = static_cast<const uint16_t *>(matrix_buffer->ptr);
+        const auto *input = static_cast<const float *>(input_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        matvec_bf16_f32_host(matrix, input, rows, cols, output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (matvec_bf16_f32_hip_kernel(
+            matrix_buffer,
+            input_buffer,
+            rows,
+            cols,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "BF16 matvec HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return matvec_bf16_f32_hip_staging(
+        matrix_buffer,
+        input_buffer,
+        rows,
+        cols,
+        required_matrix_bytes,
+        required_input_bytes,
+        required_output_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_top1_f32(
+    const ullm_runtime_buffer *input_buffer,
+    size_t elements,
+    ullm_runtime_buffer *partial_values_buffer,
+    ullm_runtime_buffer *partial_indices_buffer,
+    size_t partial_count,
+    ullm_runtime_stream *stream) {
+    if (input_buffer == nullptr || partial_values_buffer == nullptr || partial_indices_buffer == nullptr) {
+        set_error("f32 top1 received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (elements == 0 || partial_count == 0) {
+        set_error("f32 top1 elements and partial_count must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    constexpr size_t block_size = 256;
+    const size_t expected_partials = (elements + block_size - 1) / block_size;
+    if (partial_count != expected_partials) {
+        set_error("f32 top1 partial_count does not match expected block count");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(input_buffer, partial_values_buffer) ||
+        !buffers_share_backend(input_buffer, partial_indices_buffer)) {
+        set_error("f32 top1 buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(partial_values_buffer, stream) ||
+        !stream_matches_buffer(partial_indices_buffer, stream)) {
+        set_error("f32 top1 stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (elements > max_size / sizeof(float) ||
+        partial_count > max_size / sizeof(float) ||
+        partial_count > max_size / sizeof(uint32_t)) {
+        set_error("f32 top1 byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (elements > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        set_error("f32 top1 elements exceed uint32 index range");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t input_bytes = elements * sizeof(float);
+    const size_t partial_values_bytes = partial_count * sizeof(float);
+    const size_t partial_indices_bytes = partial_count * sizeof(uint32_t);
+    if (input_buffer->bytes < input_bytes) {
+        set_error("f32 top1 input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (partial_values_buffer->bytes < partial_values_bytes) {
+        set_error("f32 top1 partial values buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (partial_indices_buffer->bytes < partial_indices_bytes) {
+        set_error("f32 top1 partial indices buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (input_buffer->backend == BackendKind::Cpu) {
+        top1_f32_partials_host(
+            static_cast<const float *>(input_buffer->ptr),
+            elements,
+            partial_count,
+            static_cast<float *>(partial_values_buffer->ptr),
+            static_cast<uint32_t *>(partial_indices_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (top1_f32_hip_kernel(
+            input_buffer,
+            elements,
+            partial_values_buffer,
+            partial_indices_buffer,
+            partial_count,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel = std::getenv("ULLM_REQUIRE_HIP_TOP1_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty() ? "f32 top1 HIP kernel is unavailable" : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return top1_f32_hip_staging(
+        input_buffer,
+        elements,
+        input_bytes,
+        partial_values_buffer,
+        partial_indices_buffer,
+        partial_count,
+        partial_values_bytes,
+        partial_indices_bytes,
         stream);
 }
 

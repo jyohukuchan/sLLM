@@ -155,6 +155,22 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_matvec_bf16_f32(
+        matrix_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_top1_f32(
+        input_buffer: *const RawRuntimeBuffer,
+        elements: usize,
+        partial_values_buffer: *mut RawRuntimeBuffer,
+        partial_indices_buffer: *mut RawRuntimeBuffer,
+        partial_count: usize,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_rmsnorm_f32(
         input_buffer: *const RawRuntimeBuffer,
         weight_buffer: *const RawRuntimeBuffer,
@@ -934,6 +950,90 @@ pub fn matvec_f32(
             stream,
         )
     })
+}
+
+pub fn matvec_bf16_f32(
+    matrix_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if rows == 0 || cols == 0 {
+        return Err("BF16 matvec rows and cols must be greater than zero".to_string());
+    }
+    let matrix_elements = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "BF16 matvec matrix element count overflows".to_string())?;
+    let matrix_bytes = matrix_elements
+        .checked_mul(std::mem::size_of::<u16>())
+        .ok_or_else(|| "BF16 matvec matrix byte size overflows".to_string())?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "BF16 matvec input byte size overflows".to_string())?;
+    let output_bytes = rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "BF16 matvec output byte size overflows".to_string())?;
+    check_copy_range(0, matrix_bytes, matrix_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_matvec_bf16_f32(
+            matrix_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            rows,
+            cols,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn top1_partial_count(elements: usize) -> Result<usize, String> {
+    if elements == 0 {
+        return Err("f32 top1 elements must be greater than zero".to_string());
+    }
+    const BLOCK_SIZE: usize = 256;
+    elements
+        .checked_add(BLOCK_SIZE - 1)
+        .map(|value| value / BLOCK_SIZE)
+        .ok_or_else(|| "f32 top1 partial count overflows".to_string())
+}
+
+pub fn top1_f32(
+    input_buffer: &RuntimeBuffer,
+    elements: usize,
+    partial_values_buffer: &mut RuntimeBuffer,
+    partial_indices_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<usize, String> {
+    let partial_count = top1_partial_count(elements)?;
+    let input_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 top1 input byte size overflows".to_string())?;
+    let partial_values_bytes = partial_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 top1 partial value byte size overflows".to_string())?;
+    let partial_indices_bytes = partial_count
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "f32 top1 partial index byte size overflows".to_string())?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    check_copy_range(0, partial_values_bytes, partial_values_buffer.size()?)?;
+    check_copy_range(0, partial_indices_bytes, partial_indices_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_top1_f32(
+            input_buffer.raw.as_ptr(),
+            elements,
+            partial_values_buffer.raw.as_ptr(),
+            partial_indices_buffer.raw.as_ptr(),
+            partial_count,
+            stream,
+        )
+    })?;
+    Ok(partial_count)
 }
 
 pub fn rmsnorm_f32(
@@ -2080,6 +2180,43 @@ mod tests {
     }
 
     #[test]
+    fn cpu_matvec_bf16_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut matrix = context
+            .alloc_buffer(6 * std::mem::size_of::<u16>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        matrix
+            .copy_from_host(
+                0,
+                &f32s_to_bf16_le_bytes(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        matvec_bf16_f32(&matrix, &input, 2, 3, &mut output, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&output_bytes), vec![4.5, 9.0]);
+    }
+
+    #[test]
     fn cpu_matvec_f32_rejects_short_output() {
         let mut context = RuntimeContext::create(0).unwrap();
         let matrix = context
@@ -2092,6 +2229,54 @@ mod tests {
 
         let err = matvec_f32(&matrix, &input, 2, 3, &mut output, None).unwrap_err();
         assert!(err.contains("out of bounds") || err.contains("output"));
+    }
+
+    #[test]
+    fn cpu_top1_f32_writes_partial_maxima() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut values = vec![-1.0_f32; 300];
+        values[123] = 8.0;
+        values[259] = 9.0;
+        values[260] = 9.0;
+        let mut input = context
+            .alloc_buffer(values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let partial_count = top1_partial_count(values.len()).unwrap();
+        assert_eq!(partial_count, 2);
+        let mut partial_values = context
+            .alloc_buffer(partial_count * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut partial_indices = context
+            .alloc_buffer(partial_count * std::mem::size_of::<u32>())
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let written = top1_f32(
+            &input,
+            values.len(),
+            &mut partial_values,
+            &mut partial_indices,
+            Some(&mut stream),
+        )
+        .unwrap();
+        assert_eq!(written, partial_count);
+        stream.synchronize().unwrap();
+
+        let mut value_bytes = vec![0_u8; partial_count * std::mem::size_of::<f32>()];
+        let mut index_bytes = vec![0_u8; partial_count * std::mem::size_of::<u32>()];
+        partial_values
+            .copy_to_host(0, &mut value_bytes, Some(&mut stream))
+            .unwrap();
+        partial_indices
+            .copy_to_host(0, &mut index_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&value_bytes), vec![8.0, 9.0]);
+        assert_eq!(le_bytes_to_u32s(&index_bytes), vec![123, 259]);
     }
 
     #[test]
@@ -5481,10 +5666,27 @@ mod tests {
         bytes
     }
 
+    fn f32s_to_bf16_le_bytes(values: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(std::mem::size_of_val(values) / 2);
+        for value in values {
+            let bits = value.to_bits();
+            let bf16 = (bits >> 16) as u16;
+            bytes.extend_from_slice(&bf16.to_le_bytes());
+        }
+        bytes
+    }
+
     fn le_bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
         bytes
             .chunks_exact(std::mem::size_of::<f32>())
             .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect()
+    }
+
+    fn le_bytes_to_u32s(bytes: &[u8]) -> Vec<u32> {
+        bytes
+            .chunks_exact(std::mem::size_of::<u32>())
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect()
     }
 
