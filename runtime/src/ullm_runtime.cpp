@@ -846,13 +846,38 @@ extern "C" __global__ void ullm_aq4_matvec_f32_kernel(
                 }
                 float raw_sum = 0.0f;
                 const unsigned long long col_start = group_in_row * group_size;
-                for (unsigned long long offset = 0; offset < group_size; ++offset) {
-                    const unsigned long long col = col_start + offset;
-                    const unsigned long long element = row_offset + col;
-                    const unsigned char packed = indices[element >> 1];
-                    const unsigned char codebook_index =
-                        (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
-                    raw_sum += codebook[codebook_index] * input[col];
+                if (group_size == 16ull) {
+#pragma unroll
+                    for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                        const unsigned long long col = col_start + offset;
+                        const unsigned char packed = indices[(row_offset + col) >> 1];
+                        raw_sum += codebook[packed & 0x0f] * input[col];
+                        raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                    }
+                } else if (group_size == 8ull) {
+#pragma unroll
+                    for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                        const unsigned long long col = col_start + offset;
+                        const unsigned char packed = indices[(row_offset + col) >> 1];
+                        raw_sum += codebook[packed & 0x0f] * input[col];
+                        raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                    }
+                } else if ((group_size & 1ull) == 0ull) {
+                    for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
+                        const unsigned long long col = col_start + offset;
+                        const unsigned char packed = indices[(row_offset + col) >> 1];
+                        raw_sum += codebook[packed & 0x0f] * input[col];
+                        raw_sum += codebook[(packed >> 4) & 0x0f] * input[col + 1ull];
+                    }
+                } else {
+                    for (unsigned long long offset = 0; offset < group_size; ++offset) {
+                        const unsigned long long col = col_start + offset;
+                        const unsigned long long element = row_offset + col;
+                        const unsigned char packed = indices[element >> 1];
+                        const unsigned char codebook_index =
+                            (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                        raw_sum += codebook[codebook_index] * input[col];
+                    }
                 }
                 sum += raw_sum * scale_values[scale_index] * tensor_scale;
             }
