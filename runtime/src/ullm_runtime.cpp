@@ -441,6 +441,18 @@ public:
             error);
     }
 
+    bool compile_segmented_rmsnorm_silu_mul_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            segmented_rmsnorm_silu_mul_kernel_source(),
+            "ullm_segmented_rmsnorm_silu_mul_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_silu_mul_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, silu_mul_kernel_source(), "ullm_silu_mul_f32.hip", code, error);
     }
@@ -1343,6 +1355,51 @@ extern "C" __global__ void ullm_segmented_rmsnorm_f32_kernel(
     const unsigned long long base = segment * segment_size;
     for (unsigned long long dim = tid; dim < segment_size; dim += blockDim.x) {
         output[base + dim] = input[base + dim] * inv_rms * weight[dim];
+    }
+}
+)";
+    }
+
+    static const char *segmented_rmsnorm_silu_mul_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_segmented_rmsnorm_silu_mul_f32_kernel(
+    const float *input,
+    const float *weight,
+    const float *gate,
+    unsigned long long segments,
+    unsigned long long segment_size,
+    float epsilon,
+    float *output) {
+    const unsigned long long segment = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[256];
+    float sum_squares = 0.0f;
+    if (segment < segments) {
+        const unsigned long long base = segment * segment_size;
+        for (unsigned long long dim = tid; dim < segment_size; dim += blockDim.x) {
+            const float value = input[base + dim];
+            sum_squares += value * value;
+        }
+    }
+    partial[tid] = sum_squares;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            partial[tid] += partial[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (segment >= segments) {
+        return;
+    }
+    const float inv_rms = rsqrtf(partial[0] / static_cast<float>(segment_size) + epsilon);
+    const unsigned long long base = segment * segment_size;
+    for (unsigned long long dim = tid; dim < segment_size; dim += blockDim.x) {
+        const unsigned long long index = base + dim;
+        const float gate_value = gate[index];
+        const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
+        const float normed = input[index] * inv_rms * weight[dim];
+        output[index] = gate_value * sigmoid * normed;
     }
 }
 )";
@@ -5385,6 +5442,33 @@ void segmented_rmsnorm_f32_host(
     }
 }
 
+void segmented_rmsnorm_silu_mul_f32_host(
+    const float *input,
+    const float *weight,
+    const float *gate,
+    size_t segments,
+    size_t segment_size,
+    float epsilon,
+    float *output) {
+    for (size_t segment = 0; segment < segments; ++segment) {
+        const size_t base = segment * segment_size;
+        float sum_squares = 0.0f;
+        for (size_t dim = 0; dim < segment_size; ++dim) {
+            const float value = input[base + dim];
+            sum_squares += value * value;
+        }
+        const float inv_rms =
+            1.0f / std::sqrt(sum_squares / static_cast<float>(segment_size) + epsilon);
+        for (size_t dim = 0; dim < segment_size; ++dim) {
+            const size_t index = base + dim;
+            const float gate_value = gate[index];
+            const float sigmoid = 1.0f / (1.0f + std::exp(-gate_value));
+            const float normed = input[index] * inv_rms * weight[dim];
+            output[index] = gate_value * sigmoid * normed;
+        }
+    }
+}
+
 class HipSegmentedRmsNormKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -5572,6 +5656,213 @@ ullm_status segmented_rmsnorm_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 segmented RMSNorm HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipSegmentedRmsNormSiluMulKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_segmented_rmsnorm_silu_mul_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_segmented_rmsnorm_silu_mul_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build segmented RMSNorm SiLU-mul HIP kernel"
+                                   : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipSegmentedRmsNormSiluMulKernelCache &hip_segmented_rmsnorm_silu_mul_kernel_cache() {
+    static HipSegmentedRmsNormSiluMulKernelCache cache;
+    return cache;
+}
+
+bool segmented_rmsnorm_silu_mul_f32_hip_kernel(
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *weight_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    size_t segments,
+    size_t segment_size,
+    float epsilon,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = input_buffer->hip_device_id;
+    void *function = hip_segmented_rmsnorm_silu_mul_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    if (segments > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "segmented RMSNorm SiLU-mul segment count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_segments = static_cast<unsigned long long>(segments);
+    unsigned long long kernel_segment_size = static_cast<unsigned long long>(segment_size);
+    void *input_ptr = input_buffer->ptr;
+    void *weight_ptr = weight_buffer->ptr;
+    void *gate_ptr = gate_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &input_ptr,
+        &weight_ptr,
+        &gate_ptr,
+        &kernel_segments,
+        &kernel_segment_size,
+        &epsilon,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(segments),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 segmented RMSNorm SiLU-mul";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status segmented_rmsnorm_silu_mul_f32_hip_staging(
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *weight_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    size_t segments,
+    size_t segment_size,
+    float epsilon,
+    size_t input_output_bytes,
+    size_t weight_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_input(input_output_bytes / sizeof(float));
+    std::vector<float> host_weight(weight_bytes / sizeof(float));
+    std::vector<float> host_gate(input_output_bytes / sizeof(float));
+    std::vector<float> host_output(input_output_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = input_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            input_output_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_weight.data(),
+            weight_buffer->ptr,
+            weight_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_gate.data(),
+            gate_buffer->ptr,
+            input_output_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 segmented RMSNorm SiLU-mul HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 segmented RMSNorm SiLU-mul HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    segmented_rmsnorm_silu_mul_f32_host(
+        host_input.data(),
+        host_weight.data(),
+        host_gate.data(),
+        segments,
+        segment_size,
+        epsilon,
+        host_output.data());
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            input_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 segmented RMSNorm SiLU-mul output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 segmented RMSNorm SiLU-mul HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -10972,6 +11263,117 @@ ullm_status ullm_runtime_segmented_rmsnorm_f32(
     return segmented_rmsnorm_f32_hip_staging(
         input_buffer,
         weight_buffer,
+        segments,
+        segment_size,
+        epsilon,
+        input_output_bytes,
+        weight_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_segmented_rmsnorm_silu_mul_f32(
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *weight_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    size_t segments,
+    size_t segment_size,
+    float epsilon,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (input_buffer == nullptr || weight_buffer == nullptr || gate_buffer == nullptr ||
+        output_buffer == nullptr) {
+        set_error("f32 segmented RMSNorm SiLU-mul received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (segments == 0 || segment_size == 0) {
+        set_error("f32 segmented RMSNorm SiLU-mul segments and segment size must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(epsilon) || epsilon <= 0.0f) {
+        set_error("f32 segmented RMSNorm SiLU-mul epsilon must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(input_buffer, weight_buffer) ||
+        !buffers_share_backend(input_buffer, gate_buffer) ||
+        !buffers_share_backend(input_buffer, output_buffer)) {
+        set_error("f32 segmented RMSNorm SiLU-mul buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 segmented RMSNorm SiLU-mul stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (segment_size > max_size / segments ||
+        segment_size > max_size / sizeof(float)) {
+        set_error("f32 segmented RMSNorm SiLU-mul byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t elements = segments * segment_size;
+    if (elements > max_size / sizeof(float)) {
+        set_error("f32 segmented RMSNorm SiLU-mul element byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t input_output_bytes = elements * sizeof(float);
+    const size_t weight_bytes = segment_size * sizeof(float);
+    if (input_buffer->bytes < input_output_bytes) {
+        set_error("f32 segmented RMSNorm SiLU-mul input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (weight_buffer->bytes < weight_bytes) {
+        set_error("f32 segmented RMSNorm SiLU-mul weight buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_buffer->bytes < input_output_bytes) {
+        set_error("f32 segmented RMSNorm SiLU-mul gate buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < input_output_bytes) {
+        set_error("f32 segmented RMSNorm SiLU-mul output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (input_buffer->backend == BackendKind::Cpu) {
+        segmented_rmsnorm_silu_mul_f32_host(
+            static_cast<const float *>(input_buffer->ptr),
+            static_cast<const float *>(weight_buffer->ptr),
+            static_cast<const float *>(gate_buffer->ptr),
+            segments,
+            segment_size,
+            epsilon,
+            static_cast<float *>(output_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (segmented_rmsnorm_silu_mul_f32_hip_kernel(
+            input_buffer,
+            weight_buffer,
+            gate_buffer,
+            segments,
+            segment_size,
+            epsilon,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty() ? "f32 segmented RMSNorm SiLU-mul HIP kernel is unavailable"
+                                           : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return segmented_rmsnorm_silu_mul_f32_hip_staging(
+        input_buffer,
+        weight_buffer,
+        gate_buffer,
         segments,
         segment_size,
         epsilon,

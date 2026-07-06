@@ -233,6 +233,16 @@ ullm_status ullm_runtime_segmented_rmsnorm_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_segmented_rmsnorm_silu_mul_f32(
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *weight_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    size_t segments,
+    size_t segment_size,
+    float epsilon,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_silu_mul_f32(
     const ullm_runtime_buffer *gate_buffer,
     const ullm_runtime_buffer *up_buffer,

@@ -28694,6 +28694,7 @@ struct PackageAq4ResidentMatvec {
 
 static AQ4_MATVEC_ADD_PREWARMED: AtomicBool = AtomicBool::new(false);
 static LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
+static LINEAR_ATTN_POST_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
 
 fn prewarm_aq4_matvec_add_once(
     stream: &mut ullm_runtime_sys::RuntimeStream,
@@ -28750,6 +28751,19 @@ fn claim_linear_attn_qkv_prepare_prewarm(device_id: i32) -> bool {
 fn release_linear_attn_qkv_prepare_prewarm(device_id: i32) {
     if let Some(mask) = linear_attn_qkv_prepare_prewarm_mask(device_id) {
         LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES.fetch_and(!mask, Ordering::AcqRel);
+    }
+}
+
+fn claim_linear_attn_post_prewarm(device_id: i32) -> bool {
+    let Some(mask) = linear_attn_qkv_prepare_prewarm_mask(device_id) else {
+        return true;
+    };
+    LINEAR_ATTN_POST_PREWARMED_DEVICES.fetch_or(mask, Ordering::AcqRel) & mask == 0
+}
+
+fn release_linear_attn_post_prewarm(device_id: i32) {
+    if let Some(mask) = linear_attn_qkv_prepare_prewarm_mask(device_id) {
+        LINEAR_ATTN_POST_PREWARMED_DEVICES.fetch_and(!mask, Ordering::AcqRel);
     }
 }
 
@@ -28828,6 +28842,52 @@ fn prewarm_linear_attn_qkv_prepare_once(
     })();
     if result.is_err() {
         release_linear_attn_qkv_prepare_prewarm(device_id);
+    }
+    result
+}
+
+fn prewarm_linear_attn_post_once(
+    device_id: i32,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    recurrent_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    attn_norm_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    z_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    value_heads: usize,
+    value_dim: usize,
+    output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if !claim_linear_attn_post_prewarm(device_id) {
+        return Ok(());
+    }
+    let result = (|| {
+        let elements = value_heads
+            .checked_mul(value_dim)
+            .ok_or_else(|| format!("{label} prewarm element count overflows"))?;
+        let zero_bytes = encode_f32_to_bytes(&vec![0.0_f32; elements]);
+        recurrent_output_buffer
+            .copy_from_host(0, &zero_bytes, Some(stream))
+            .map_err(|err| format!("failed to zero {label} prewarm recurrent output: {err}"))?;
+        z_buffer
+            .copy_from_host(0, &zero_bytes, Some(stream))
+            .map_err(|err| format!("failed to zero {label} prewarm z: {err}"))?;
+        ullm_runtime_sys::segmented_rmsnorm_silu_mul_f32(
+            recurrent_output_buffer,
+            attn_norm_weight_buffer,
+            z_buffer,
+            value_heads,
+            value_dim,
+            1e-6_f32,
+            output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        release_linear_attn_post_prewarm(device_id);
     }
     result
 }
@@ -29849,7 +29909,6 @@ struct PackageLinearAttnResidentStepLayer {
     recurrent_beta_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_state_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_output_buffer: ullm_runtime_sys::RuntimeBuffer,
-    attn_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_projection_input_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -30155,7 +30214,7 @@ impl PackageLinearAttnResidentStepLayer {
         let mut qkv_conv_output_buffer = context.alloc_buffer(qkv_step_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident qkv conv output: {err}")
         })?;
-        let z_buffer = context
+        let mut z_buffer = context
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident z: {err}"))?;
         let mut recurrent_q_buffer = context
@@ -30182,11 +30241,8 @@ impl PackageLinearAttnResidentStepLayer {
         let mut recurrent_state_buffer = context
             .alloc_buffer(state_bytes)
             .map_err(|err| format!("failed to allocate linear-attn resident state: {err}"))?;
-        let recurrent_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+        let mut recurrent_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident recurrent output: {err}")
-        })?;
-        let attn_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate linear-attn resident attention normed: {err}")
         })?;
         let mut attn_projection_input_buffer =
             context.alloc_buffer(hidden_bytes).map_err(|err| {
@@ -30275,6 +30331,17 @@ impl PackageLinearAttnResidentStepLayer {
                 &mut recurrent_v_buffer,
                 "linear-attn resident qkv prepare",
             )?;
+            prewarm_linear_attn_post_once(
+                device_info.device_id,
+                stream,
+                &mut recurrent_output_buffer,
+                &attn_norm_weight_buffer,
+                &mut z_buffer,
+                value_heads,
+                value_dim,
+                &mut attn_projection_input_buffer,
+                "linear-attn resident post RMSNorm SiLU-mul",
+            )?;
         }
         prewarm_aq4_matvec_add_once(
             stream,
@@ -30322,7 +30389,6 @@ impl PackageLinearAttnResidentStepLayer {
             recurrent_beta_buffer,
             recurrent_state_buffer,
             recurrent_output_buffer,
-            attn_normed_buffer,
             attn_projection_input_buffer,
             attn_block_output_buffer,
             post_normed_buffer,
@@ -30490,24 +30556,19 @@ impl PackageLinearAttnResidentStepLayer {
         )
         .map_err(|err| format!("failed to run linear-attn resident recurrent step: {err}"))?;
 
-        ullm_runtime_sys::segmented_rmsnorm_f32(
+        ullm_runtime_sys::segmented_rmsnorm_silu_mul_f32(
             &self.recurrent_output_buffer,
             &self.attn_norm_weight_buffer,
+            &self.z_buffer,
             self.value_heads,
             self.value_dim,
             1e-6_f32,
-            &mut self.attn_normed_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run linear-attn resident attention RMSNorm: {err}"))?;
-        ullm_runtime_sys::silu_mul_f32(
-            &self.z_buffer,
-            &self.attn_normed_buffer,
-            self.hidden,
             &mut self.attn_projection_input_buffer,
             Some(stream),
         )
-        .map_err(|err| format!("failed to run linear-attn resident attention SiLU-mul: {err}"))?;
+        .map_err(|err| {
+            format!("failed to run linear-attn resident attention RMSNorm SiLU-mul: {err}")
+        })?;
         self.out_matrix
             .matvec_add(
                 &self.attn_projection_input_buffer,

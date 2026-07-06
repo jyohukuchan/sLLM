@@ -213,6 +213,16 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_segmented_rmsnorm_silu_mul_f32(
+        input_buffer: *const RawRuntimeBuffer,
+        weight_buffer: *const RawRuntimeBuffer,
+        gate_buffer: *const RawRuntimeBuffer,
+        segments: usize,
+        segment_size: usize,
+        epsilon: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_silu_mul_f32(
         gate_buffer: *const RawRuntimeBuffer,
         up_buffer: *const RawRuntimeBuffer,
@@ -1247,6 +1257,58 @@ pub fn segmented_rmsnorm_f32(
         ullm_runtime_segmented_rmsnorm_f32(
             input_buffer.raw.as_ptr(),
             weight_buffer.raw.as_ptr(),
+            segments,
+            segment_size,
+            epsilon,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn segmented_rmsnorm_silu_mul_f32(
+    input_buffer: &RuntimeBuffer,
+    weight_buffer: &RuntimeBuffer,
+    gate_buffer: &RuntimeBuffer,
+    segments: usize,
+    segment_size: usize,
+    epsilon: f32,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if segments == 0 || segment_size == 0 {
+        return Err(
+            "f32 segmented RMSNorm SiLU-mul segments and segment size must be greater than zero"
+                .to_string(),
+        );
+    }
+    if !epsilon.is_finite() || epsilon <= 0.0 {
+        return Err(
+            "f32 segmented RMSNorm SiLU-mul epsilon must be finite and greater than zero"
+                .to_string(),
+        );
+    }
+    let elements = segments
+        .checked_mul(segment_size)
+        .ok_or_else(|| "f32 segmented RMSNorm SiLU-mul element count overflows".to_string())?;
+    let input_output_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "f32 segmented RMSNorm SiLU-mul input/output byte size overflows".to_string()
+        })?;
+    let weight_bytes = segment_size
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 segmented RMSNorm SiLU-mul weight byte size overflows".to_string())?;
+    check_copy_range(0, input_output_bytes, input_buffer.size()?)?;
+    check_copy_range(0, weight_bytes, weight_buffer.size()?)?;
+    check_copy_range(0, input_output_bytes, gate_buffer.size()?)?;
+    check_copy_range(0, input_output_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_segmented_rmsnorm_silu_mul_f32(
+            input_buffer.raw.as_ptr(),
+            weight_buffer.raw.as_ptr(),
+            gate_buffer.raw.as_ptr(),
             segments,
             segment_size,
             epsilon,
@@ -2543,6 +2605,63 @@ mod tests {
             .chunks_exact(3)
             .flat_map(|segment| expected_rmsnorm(segment, &weight_values, epsilon))
             .collect::<Vec<_>>();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_segmented_rmsnorm_silu_mul_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let input_values = [1.0_f32, 2.0, -3.0, 4.0, -5.0, 6.0];
+        let weight_values = [0.5_f32, 1.0, -1.5];
+        let gate_values = [-1.0_f32, 0.25, 1.0, -2.0, 0.5, 3.0];
+        let epsilon = 1e-5_f32;
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut weight = context
+            .alloc_buffer(weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        weight
+            .copy_from_host(0, &f32s_to_le_bytes(&weight_values), Some(&mut stream))
+            .unwrap();
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        segmented_rmsnorm_silu_mul_f32(
+            &input,
+            &weight,
+            &gate,
+            2,
+            3,
+            epsilon,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; input_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let normed = input_values
+            .chunks_exact(3)
+            .flat_map(|segment| expected_rmsnorm(segment, &weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected = expected_silu_mul(&gate_values, &normed);
         assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
     }
 
@@ -4902,6 +5021,66 @@ mod tests {
             .chunks_exact(3)
             .flat_map(|segment| expected_rmsnorm(segment, &weight_values, epsilon))
             .collect::<Vec<_>>();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn first_hip_segmented_rmsnorm_silu_mul_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let input_values = [1.0_f32, 2.0, -3.0, 4.0, -5.0, 6.0];
+        let weight_values = [0.5_f32, 1.0, -1.5];
+        let gate_values = [-1.0_f32, 0.25, 1.0, -2.0, 0.5, 3.0];
+        let epsilon = 1e-5_f32;
+        let mut input = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut weight = context
+            .alloc_buffer(weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        weight
+            .copy_from_host(0, &f32s_to_le_bytes(&weight_values), Some(&mut stream))
+            .unwrap();
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        segmented_rmsnorm_silu_mul_f32(
+            &input,
+            &weight,
+            &gate,
+            2,
+            3,
+            epsilon,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; input_values.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let normed = input_values
+            .chunks_exact(3)
+            .flat_map(|segment| expected_rmsnorm(segment, &weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected = expected_silu_mul(&gate_values, &normed);
         assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
     }
 
