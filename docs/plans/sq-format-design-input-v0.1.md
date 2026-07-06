@@ -53,6 +53,12 @@ Guard bundle driver:
 tools/run-package-prompt-guard-bundle.py
 ```
 
+SQ candidate runtime result schema:
+
+```text
+docs/specs/sq-candidate-runtime-result-v0.1.md
+```
+
 ## Measured Facts
 
 | condition | R9700/RDNA4 | V620/RDNA2 |
@@ -135,6 +141,7 @@ The first useful performance comparison is not BF16 vs AQ. It is:
 An sq candidate is not comparable to the current AQ4 prototype unless all of these are recorded:
 
 - package or runtime artifact path;
+- `sq-candidate-runtime-result-v0.1` JSONL row;
 - target GPUs and device indices;
 - compact resident bytes;
 - materialized working-set bytes;
