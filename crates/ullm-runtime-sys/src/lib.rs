@@ -5068,6 +5068,114 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_linear_attn_recurrent_f32_decode_step_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let key_heads = 1_usize;
+        let value_heads = 2_usize;
+        let sequence_len = 1_usize;
+        let key_dim = 4_usize;
+        let value_dim = 3_usize;
+        let q = [0.2_f32, -0.1, 0.4, 0.7];
+        let k = [-0.3_f32, 0.6, 0.2, -0.5];
+        let v = [0.4_f32, -0.1, 0.6, 0.3, -0.2, 0.4];
+        let gate = [0.05_f32, -0.1];
+        let beta = [0.9_f32, 1.1];
+        let initial_state = [
+            0.1_f32, 0.2, 0.3, 0.4, -0.1, 0.0, 0.05, -0.05, 0.2, 0.1, -0.2, 0.3, -0.3, 0.25, 0.15,
+            -0.1, 0.05, 0.35, -0.15, 0.45, 0.2, -0.25, 0.1, -0.05,
+        ];
+        let (expected_output, expected_state) = expected_linear_attn_recurrent_f32(
+            &q,
+            &k,
+            &v,
+            &gate,
+            &beta,
+            key_heads,
+            value_heads,
+            sequence_len,
+            key_dim,
+            value_dim,
+            &initial_state,
+        );
+
+        let mut q_buffer = context
+            .alloc_buffer(q.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_buffer = context
+            .alloc_buffer(k.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_buffer = context
+            .alloc_buffer(v.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate_buffer = context
+            .alloc_buffer(gate.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut beta_buffer = context
+            .alloc_buffer(beta.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut state_buffer = context
+            .alloc_buffer(initial_state.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output_buffer = context
+            .alloc_buffer(v.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&q), Some(&mut stream))
+            .unwrap();
+        k_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&k), Some(&mut stream))
+            .unwrap();
+        v_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&v), Some(&mut stream))
+            .unwrap();
+        gate_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&gate), Some(&mut stream))
+            .unwrap();
+        beta_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&beta), Some(&mut stream))
+            .unwrap();
+        state_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&initial_state), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        linear_attn_recurrent_f32(
+            &q_buffer,
+            &k_buffer,
+            &v_buffer,
+            &gate_buffer,
+            &beta_buffer,
+            key_heads,
+            value_heads,
+            sequence_len,
+            key_dim,
+            value_dim,
+            &mut state_buffer,
+            &mut output_buffer,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; output_buffer.size().unwrap()];
+        output_buffer
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        let mut state_bytes = vec![0_u8; state_buffer.size().unwrap()];
+        state_buffer
+            .copy_to_host(0, &mut state_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected_output, 1e-5);
+        assert_f32s_close(&le_bytes_to_f32s(&state_bytes), &expected_state, 1e-5);
+    }
+
+    #[test]
     fn first_hip_depthwise_conv1d_f32_computes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;

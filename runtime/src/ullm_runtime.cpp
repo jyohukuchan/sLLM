@@ -1587,6 +1587,65 @@ extern "C" __global__ void ullm_linear_attn_recurrent_f32_kernel(
     unsigned long long value_dim,
     float *state,
     float *output) {
+    if (sequence_len == 1ull && blockDim.x > 1u) {
+        const unsigned long long block = blockIdx.x;
+        const unsigned long long value_head = block / value_dim;
+        const unsigned long long value = block - value_head * value_dim;
+        const unsigned int tid = threadIdx.x;
+        __shared__ float partial[256];
+        __shared__ float v_prime_shared;
+        if (value_head >= value_heads || value >= value_dim) {
+            return;
+        }
+        const unsigned long long key_head_group = value_heads / key_heads;
+        const unsigned long long key_head = value_head / key_head_group;
+        const unsigned long long qk_base = key_head * key_dim;
+        const unsigned long long v_base = value_head * value_dim;
+        const unsigned long long state_head_offset = value_head * key_dim * value_dim;
+        const float decay = expf(gate[value_head]);
+        const float beta_value = beta[value_head];
+
+        float current = 0.0f;
+        for (unsigned long long key = tid; key < key_dim; key += blockDim.x) {
+            const unsigned long long state_index = state_head_offset + key * value_dim + value;
+            const float decayed = state[state_index] * decay;
+            state[state_index] = decayed;
+            current += decayed * k[qk_base + key];
+        }
+        partial[tid] = current;
+        __syncthreads();
+        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+            if (tid < offset) {
+                partial[tid] += partial[tid + offset];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            v_prime_shared = (v[v_base + value] - partial[0]) * beta_value;
+        }
+        __syncthreads();
+
+        float sum = 0.0f;
+        for (unsigned long long key = tid; key < key_dim; key += blockDim.x) {
+            const unsigned long long state_index = state_head_offset + key * value_dim + value;
+            const float updated = state[state_index] + k[qk_base + key] * v_prime_shared;
+            state[state_index] = updated;
+            sum += updated * q[qk_base + key];
+        }
+        partial[tid] = sum;
+        __syncthreads();
+        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+            if (tid < offset) {
+                partial[tid] += partial[tid + offset];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            output[v_base + value] = partial[0];
+        }
+        return;
+    }
+
     const unsigned long long value_head = blockIdx.x;
     if (value_head >= value_heads || threadIdx.x != 0) {
         return;
@@ -7127,11 +7186,25 @@ bool linear_attn_recurrent_f32_hip_kernel(
         &state_ptr,
         &output_ptr,
     };
+    unsigned int grid_size = static_cast<unsigned int>(value_heads);
+    unsigned int block_size = 1;
+    if (sequence_len == 1) {
+        if (value_dim != 0 &&
+            value_heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) / value_dim) {
+            if (error != nullptr) {
+                *error = "linear attention recurrent fast decode grid exceeds HIP grid limit";
+            }
+            return false;
+        }
+        grid_size = static_cast<unsigned int>(value_heads * value_dim);
+        block_size = 256;
+    }
+
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
     if (!hip_runtime().module_launch_kernel(
             function,
-            static_cast<unsigned int>(value_heads),
-            1,
+            grid_size,
+            block_size,
             kernel_params,
             hip_stream,
             device_id)) {
