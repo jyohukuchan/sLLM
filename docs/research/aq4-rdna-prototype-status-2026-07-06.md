@@ -5,18 +5,20 @@
 - R9700/RDNA4では、AQ4 prototype pathがsynthetic `prompt=16/generated=512` で `18.957 tok/s` まで到達した。
 - 実text promptでも、controlled v0.3 suiteでR9700/RDNA4はmean decode `19.796 tok/s`、V620/RDNA2はmean decode `15.434 tok/s` を記録した。
 - v0.3 suiteでは、品質評価対象6件がR9700/V620の両方でwarningなし、timing probe 1件は品質評価から分離した。
+- R9700/V620間のgenerated-token guardはv0.3 suite全7件でpassedになった。
 
 ## 今回の変更点
 
 - 現時点で外に出せるAQ4 prototype claimと、まだ出せないclaimを分けた。
 - SQ format設計へ進む前に残すべき測定・正しさ・制約を整理した。
 - 発表時に必要なartifactと、次のgateを1ページにまとめた。
+- cross-device generated-token guardをprototype evidenceへ追加した。
 
 ## 次の行動
 
 1. SQ format v0.1では、compact resident storageとbounded materialized working setを最優先にする。
 2. 発表用には、このstatus briefとv0.3 suite summaryを根拠にして、single-request prototypeの範囲に限定して説明する。
-3. product-quality claimへ進む前に、final logitsまたはgenerated-token reference guardを追加する。
+3. product-quality claimへ進む前に、独立final-logits reference guardを追加する。
 
 ## Current Claim
 
@@ -48,6 +50,7 @@ Summary artifacts:
 ```text
 benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.3/summary.json
 benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.json
+benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-token-guard.json
 ```
 
 | target | device | mean decode tok/s | min decode tok/s | max decode tok/s | mean prefill tok/s | verified all | output ok | output warn | output not evaluated |
@@ -64,6 +67,12 @@ Quality-scored cases only:
 
 The seventh v0.3 case is a repeated 256-token prefill timing probe. It is retained for throughput
 pressure but marked `not_evaluated` for output health because prompt echo is expected there.
+
+Generated-token guard:
+
+| comparison | compared cases | prompt token matches | generated token matches | stop matches | both verified | passed |
+| --- | ---: | ---: | ---: | ---: | ---: | :---: |
+| R9700/RDNA4 -> V620/RDNA2 | 7 | 7 | 7 | 7 | 7 | true |
 
 ## What Improved
 
@@ -87,7 +96,7 @@ pressure but marked `not_evaluated` for output health because prompt echo is exp
 | server API | not implemented |
 | sampling | greedy only in the measured suite |
 | tokenizer integration | handled by Python wrapper, not native runtime API |
-| correctness guard | hidden-state golden prefix guard exists; final logits/generated-token reference is still missing |
+| correctness guard | hidden-state golden prefix guard exists; cross-device generated-token guard exists for v0.3; independent final-logits reference is still missing |
 | BF16 baseline | deferred because current package/runtime cannot express a full decoder BF16 baseline cleanly |
 | memory residency | current path still uses large resident/runtime buffers; SQ must address compact residency |
 | model scope | Qwen3.5-9B package path, not a broad model zoo claim |
@@ -99,7 +108,8 @@ SQ baseline is:
 
 1. current AQ4 prototype with v0.3 suite on R9700 and V620;
 2. SQ compact-resident candidate with the same v0.3 suite;
-3. the same short reference guard plus an added logits or generated-token guard.
+3. the same short reference guard plus the generated-token guard;
+4. an independent final-logits guard before product-quality claims.
 
 The SQ run record should include at least:
 

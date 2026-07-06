@@ -1,0 +1,278 @@
+{
+  "schema_version": "package-token-prompt-suite-generated-token-guard-v0.1",
+  "reference": {
+    "label": "R9700-RDNA4",
+    "summary": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v0.3/summary.json",
+    "suite": {
+      "suite_id": "pre-sq-runtime-prompt-suite-v0.3",
+      "purpose": "Controlled-output text prompt set for pre-SQ runtime TPS and output-health observation.",
+      "tokenizer": "Qwen3.5-9B",
+      "decode_policy": "greedy with tokenizer special-token stop policy and per-case task-aware stop_texts",
+      "changes_from_v0.2": [
+        "uses shorter output contracts for quality-observed cases",
+        "adds blank-line stop_texts for direct-answer prompts",
+        "keeps the repeated long-prefill timing probe but excludes it from output-health scoring"
+      ]
+    },
+    "device_index": 2
+  },
+  "candidate": {
+    "label": "V620-RDNA2",
+    "summary": "benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.json",
+    "suite": {
+      "suite_id": "pre-sq-runtime-prompt-suite-v0.3",
+      "purpose": "Controlled-output text prompt set for pre-SQ runtime TPS and output-health observation.",
+      "tokenizer": "Qwen3.5-9B",
+      "decode_policy": "greedy with tokenizer special-token stop policy and per-case task-aware stop_texts",
+      "changes_from_v0.2": [
+        "uses shorter output contracts for quality-observed cases",
+        "adds blank-line stop_texts for direct-answer prompts",
+        "keeps the repeated long-prefill timing probe but excludes it from output-health scoring"
+      ]
+    },
+    "device_index": 1
+  },
+  "metrics": {
+    "reference_case_count": 7,
+    "candidate_case_count": 7,
+    "compared_case_count": 7,
+    "missing_in_candidate_count": 0,
+    "extra_in_candidate_count": 0,
+    "prompt_token_match_count": 7,
+    "generated_token_match_count": 7,
+    "stop_match_count": 7,
+    "both_verified_count": 7,
+    "output_status_match_count": 7,
+    "passed": true
+  },
+  "missing_in_candidate": [],
+  "extra_in_candidate": [],
+  "cases": [
+    {
+      "id": "japanese_direct_answer",
+      "category": "japanese",
+      "prompt_tokens": 41,
+      "reference_generated_tokens": 49,
+      "candidate_generated_tokens": 49,
+      "prompt_tokens_match": true,
+      "generated_tokens_match": true,
+      "generated_first_mismatch_index": null,
+      "generated_token_sha256": "f9ba6ba327e9e382a5961e6ec071004c4b190fc58abd523511256b02e0fca555",
+      "stop_match": true,
+      "reference_stop": {
+        "reason": "stop_token",
+        "stopped": true,
+        "stopped_on_token_id": 248044,
+        "stopped_on_token_sequence": null
+      },
+      "candidate_stop": {
+        "reason": "stop_token",
+        "stopped": true,
+        "stopped_on_token_id": 248044,
+        "stopped_on_token_sequence": null
+      },
+      "reference_verified": true,
+      "candidate_verified": true,
+      "both_verified": true,
+      "reference_output_status": "ok",
+      "candidate_output_status": "ok",
+      "output_status_match": true
+    },
+    {
+      "id": "long_prefill_warmup_timing",
+      "category": "timing",
+      "prompt_tokens": 256,
+      "reference_generated_tokens": 192,
+      "candidate_generated_tokens": 192,
+      "prompt_tokens_match": true,
+      "generated_tokens_match": true,
+      "generated_first_mismatch_index": null,
+      "generated_token_sha256": "6be141962dcb081a807a1aa7da9ece256ea0e573caa129c18248b11e63078e4a",
+      "stop_match": true,
+      "reference_stop": {
+        "reason": "max_generated_tokens",
+        "stopped": false,
+        "stopped_on_token_id": null,
+        "stopped_on_token_sequence": null
+      },
+      "candidate_stop": {
+        "reason": "max_generated_tokens",
+        "stopped": false,
+        "stopped_on_token_id": null,
+        "stopped_on_token_sequence": null
+      },
+      "reference_verified": true,
+      "candidate_verified": true,
+      "both_verified": true,
+      "reference_output_status": "not_evaluated",
+      "candidate_output_status": "not_evaluated",
+      "output_status_match": true
+    },
+    {
+      "id": "memory_vs_compute_direct",
+      "category": "technical",
+      "prompt_tokens": 34,
+      "reference_generated_tokens": 62,
+      "candidate_generated_tokens": 62,
+      "prompt_tokens_match": true,
+      "generated_tokens_match": true,
+      "generated_first_mismatch_index": null,
+      "generated_token_sha256": "3876cd8b6a716ab054e84b59a857a55c1b5ad47d32a39278d3dfd1a2b1fc7b11",
+      "stop_match": true,
+      "reference_stop": {
+        "reason": "stop_sequence",
+        "stopped": true,
+        "stopped_on_token_id": null,
+        "stopped_on_token_sequence": [
+          271
+        ]
+      },
+      "candidate_stop": {
+        "reason": "stop_sequence",
+        "stopped": true,
+        "stopped_on_token_id": null,
+        "stopped_on_token_sequence": [
+          271
+        ]
+      },
+      "reference_verified": true,
+      "candidate_verified": true,
+      "both_verified": true,
+      "reference_output_status": "ok",
+      "candidate_output_status": "ok",
+      "output_status_match": true
+    },
+    {
+      "id": "python_stop_helper",
+      "category": "code",
+      "prompt_tokens": 30,
+      "reference_generated_tokens": 84,
+      "candidate_generated_tokens": 84,
+      "prompt_tokens_match": true,
+      "generated_tokens_match": true,
+      "generated_first_mismatch_index": null,
+      "generated_token_sha256": "37c03e076f19178d29a240d26d1cc6e06970dbef0ccd0b573d62976444c12e2b",
+      "stop_match": true,
+      "reference_stop": {
+        "reason": "stop_token",
+        "stopped": true,
+        "stopped_on_token_id": 248046,
+        "stopped_on_token_sequence": null
+      },
+      "candidate_stop": {
+        "reason": "stop_token",
+        "stopped": true,
+        "stopped_on_token_id": 248046,
+        "stopped_on_token_sequence": null
+      },
+      "reference_verified": true,
+      "candidate_verified": true,
+      "both_verified": true,
+      "reference_output_status": "ok",
+      "candidate_output_status": "ok",
+      "output_status_match": true
+    },
+    {
+      "id": "short_qa_bandwidth",
+      "category": "short_qa",
+      "prompt_tokens": 25,
+      "reference_generated_tokens": 35,
+      "candidate_generated_tokens": 35,
+      "prompt_tokens_match": true,
+      "generated_tokens_match": true,
+      "generated_first_mismatch_index": null,
+      "generated_token_sha256": "d30b2709cb879de4e14627a633a12c074053f89568ae0ff1aa3c540ac2f7f440",
+      "stop_match": true,
+      "reference_stop": {
+        "reason": "stop_sequence",
+        "stopped": true,
+        "stopped_on_token_id": null,
+        "stopped_on_token_sequence": [
+          198,
+          14162,
+          25
+        ]
+      },
+      "candidate_stop": {
+        "reason": "stop_sequence",
+        "stopped": true,
+        "stopped_on_token_id": null,
+        "stopped_on_token_sequence": [
+          198,
+          14162,
+          25
+        ]
+      },
+      "reference_verified": true,
+      "candidate_verified": true,
+      "both_verified": true,
+      "reference_output_status": "ok",
+      "candidate_output_status": "ok",
+      "output_status_match": true
+    },
+    {
+      "id": "throughput_checklist_direct",
+      "category": "checklist",
+      "prompt_tokens": 26,
+      "reference_generated_tokens": 53,
+      "candidate_generated_tokens": 53,
+      "prompt_tokens_match": true,
+      "generated_tokens_match": true,
+      "generated_first_mismatch_index": null,
+      "generated_token_sha256": "c855ce236defcb736c7571007e1d89078e47947c254b1f6b4b456d5e39a66aea",
+      "stop_match": true,
+      "reference_stop": {
+        "reason": "stop_sequence",
+        "stopped": true,
+        "stopped_on_token_id": null,
+        "stopped_on_token_sequence": [
+          271
+        ]
+      },
+      "candidate_stop": {
+        "reason": "stop_sequence",
+        "stopped": true,
+        "stopped_on_token_id": null,
+        "stopped_on_token_sequence": [
+          271
+        ]
+      },
+      "reference_verified": true,
+      "candidate_verified": true,
+      "both_verified": true,
+      "reference_output_status": "ok",
+      "candidate_output_status": "ok",
+      "output_status_match": true
+    },
+    {
+      "id": "warmup_direct_answer",
+      "category": "technical",
+      "prompt_tokens": 26,
+      "reference_generated_tokens": 67,
+      "candidate_generated_tokens": 67,
+      "prompt_tokens_match": true,
+      "generated_tokens_match": true,
+      "generated_first_mismatch_index": null,
+      "generated_token_sha256": "1775ce6734cb10c0025dbc01c4d7298bcb8e2e0f24bf19d5490c83498d8c99a3",
+      "stop_match": true,
+      "reference_stop": {
+        "reason": "stop_token",
+        "stopped": true,
+        "stopped_on_token_id": 248046,
+        "stopped_on_token_sequence": null
+      },
+      "candidate_stop": {
+        "reason": "stop_token",
+        "stopped": true,
+        "stopped_on_token_id": 248046,
+        "stopped_on_token_sequence": null
+      },
+      "reference_verified": true,
+      "candidate_verified": true,
+      "both_verified": true,
+      "reference_output_status": "ok",
+      "candidate_output_status": "ok",
+      "output_status_match": true
+    }
+  ]
+}

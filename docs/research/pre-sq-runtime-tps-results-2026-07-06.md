@@ -816,3 +816,53 @@ New artifacts:
 
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.json`
 - `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-v620-v0.3/summary.md`
+
+## Prompt Suite v0.3: Cross-Device Generated-Token Guard
+
+`tools/compare-package-token-prompt-suite.py` now compares two prompt-suite summaries and verifies
+exact generated-token agreement case by case. The guard compares:
+
+- prompt token IDs;
+- generated token IDs;
+- stop reason and stop token/sequence;
+- per-case `verified`;
+- output status.
+
+R9700/RDNA4 was used as the reference and V620/RDNA2 as the candidate for the v0.3 suite.
+
+Guard result:
+
+| metric | value |
+| --- | ---: |
+| compared cases | 7 |
+| prompt token matches | 7 |
+| generated token matches | 7 |
+| stop matches | 7 |
+| both verified | 7 |
+| output status matches | 7 |
+| passed | true |
+
+Per-case generated-token hashes:
+
+| case | generated tokens | sha256 prefix |
+| --- | ---: | --- |
+| japanese_direct_answer | 49 | `f9ba6ba327e9e382` |
+| long_prefill_warmup_timing | 192 | `6be141962dcb081a` |
+| memory_vs_compute_direct | 62 | `3876cd8b6a716ab0` |
+| python_stop_helper | 84 | `37c03e076f19178d` |
+| short_qa_bandwidth | 35 | `d30b2709cb879de4` |
+| throughput_checklist_direct | 53 | `c855ce236defcb73` |
+| warmup_direct_answer | 67 | `1775ce6734cb10c0` |
+
+Interpretation:
+
+- The controlled prompt suite now has a generated-token guard across RDNA4 and RDNA2, not only
+  matching output text previews.
+- This does not replace an independent final-logits reference check against a CPU or external
+  reference, but it is a stronger prototype guard than per-device `verified=true` alone.
+
+New artifacts:
+
+- `tools/compare-package-token-prompt-suite.py`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-token-guard.json`
+- `benchmarks/results/2026-07-06/engine/prompt-suite-aq4-pagedattn-r9700-v620-v0.3-token-guard.md`
