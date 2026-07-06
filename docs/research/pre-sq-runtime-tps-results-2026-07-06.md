@@ -35,6 +35,7 @@
 - T4 reference guard summary: `benchmarks/results/2026-07-06/engine/pre-sq-runtime-t4-reference-guard-summary.md`
 - T4 R9700 reference guard JSONL: `benchmarks/results/2026-07-06/engine/package-golden-prefix-t4-r9700-actual-prefix0-12-accepted-qwen35-hidden3994-v1.jsonl`
 - T4 V620 reference guard JSONL: `benchmarks/results/2026-07-06/engine/package-golden-prefix-t4-v620-actual-prefix0-12-accepted-qwen35-hidden3994-v1.jsonl`
+- SQ design input memo: `docs/plans/sq-format-design-input-v0.1.md`
 
 Local raw logs are under `benchmarks/results/2026-07-06/engine/logs/`, but that directory is intentionally ignored by git. The tracked JSONL above contains the comparable metrics, memory summary, correctness summary, and artifact paths.
 
@@ -148,9 +149,54 @@ Condition:
 
 This is not a full logits or generated-token reference check. It is a short hidden-state fixture guard proving that the accepted package still matches the existing golden prefix fixture within the known AQ error envelope on both RDNA4 and RDNA2.
 
+## T6 Decision Pack
+
+Decision:
+
+- Proceed to sq format design input with the current measurements.
+- Do not spend more time on long `256` token decode runs for the current f32-materialized path.
+- Treat current TPS as lower-bound proof-path numbers, not as a product-speed target.
+
+Performance and memory facts:
+
+| item | R9700/RDNA4 | V620/RDNA2 | note |
+| --- | ---: | ---: | --- |
+| accepted package prefill tok/s | 2.912 | 2.520 | `512` prompt tokens |
+| accepted package decode tok/s | 0.141 | 0.139 | `256` generated tokens |
+| accepted package consumed GiB | 26.257 | 26.247 | VRAM consumed over baseline |
+| accepted package KV bytes | 50331648 | 50331648 | about 48 MiB |
+| materialized-AQ baseline decode tok/s | 0.140 | deferred | R9700 long-run anchor only |
+
+Bottleneck classification:
+
+- The run is decode dominated. TPOT is about `7.1 s/token`, so total wall time is dominated by generated token count.
+- R9700 prefill is faster than V620 prefill, but decode is effectively identical.
+- KV cache is not the memory bottleneck for this workload. Resident f32 materialized weights and runtime buffers dominate VRAM.
+- The current runtime path is too slow to use repeated long decode runs as an optimization signal.
+
+Correctness guard:
+
+- R9700 and V620 both passed the short golden prefix fixture guard for layers `0..12`.
+- This is enough to avoid measuring an obviously broken path for pre-sq TPS records.
+- It is not a substitute for final logits or generated-token agreement in a later product-quality benchmark.
+
+Baseline decision:
+
+- materialized-AQ f32 residency is the current lower-bound baseline.
+- True BF16 baseline is deferred because current package artifacts and runtime do not support full decoder BF16 baseline semantics.
+- BF16 should be revisited after either a passthrough-only full decoder package exists or the runtime has a clean BF16 matrix path.
+
+SQ design implications:
+
+- The first sq format should avoid whole-model f32 residency.
+- The format and loader should make resident compact bytes, materialized working-set bytes, and materialization time visible in benchmark records.
+- The first sq candidate should preserve the accepted correctness policy as a reference point, including row-scale override capability.
+- Performance probes should split long prefill pressure from short decode probes until the decode path is no longer pathologically slow.
+
 ## Remaining Plan Items
 
 - T3 is now substantially satisfied for the minimum `512/256` grid, including VRAM.
 - T4 is satisfied for this pre-sq scope by the short golden prefix reference guard on R9700 and V620.
 - T5 is closed for the current pre-sq scope: materialized-AQ has an R9700 long-run anchor, and true BF16 baseline is explicitly deferred because current artifacts/runtime do not support it.
-- T6 decision pack remains. Stretch context runs should be deferred unless a faster path is introduced.
+- T6 is satisfied by the decision pack above and `docs/plans/sq-format-design-input-v0.1.md`.
+- Stretch context runs should be deferred unless a faster path is introduced.
