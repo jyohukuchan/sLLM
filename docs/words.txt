@@ -89,6 +89,7 @@ Qwen3 self attention projection sequence:Qwen3/Qwen3.5系self-attentionのhidden
 Qwen3 self attention q projection split:Qwen3/Qwen3.5系self-attentionのq projection出力をqueryと任意のoutput gateへ分けるlibrary runtime API。通常Qwen3ではgateなしのplain layout、Qwen3.5 gated projectionではheadごとにqueryとgateを分離する
 Qwen3 headwise RMSNorm:Qwen3/Qwen3.5系self-attentionのq/k head単位RMSNormをruntime kernelで順次実行するlibrary runtime API。host期待値比較はsmoke側に残し、runtime実行と検証を分離する
 Qwen3 RoPE:Qwen3/Qwen3.5系self-attentionのq/k head系列へruntime RoPE kernelを適用するlibrary runtime API。host期待値比較はsmoke側に残し、runtime実行と検証を分離する
+Qwen3.5 q/k norm RoPE fusion:Qwen3.5 gated self-attention decodeでq projectionのquery/gate split、q/k head単位RMSNorm、q/k RoPEを1つのruntime kernelにまとめるdecode専用境界。attention output gate用のq_gateも同時に出力する
 Qwen3 causal attention:Qwen3/Qwen3.5系self-attentionのq/k/v系列からGQA対応のcausal softmax attention value mixをruntime kernelで実行するlibrary runtime API。host期待値比較はsmoke側に残し、runtime実行と検証を分離する
 Qwen3 self attention runtime prepared sequence:Qwen3/Qwen3.5系self-attentionのprojected q/k/v sequenceを受け取り、Qwen3 self attention q projection split、Qwen3 headwise RMSNorm、Qwen3 RoPE、Qwen3 causal attentionをruntime APIで連結してhost側中間列を返すlibrary runtime API。host期待値diffと入力系列生成はsmoke側または上位API側に残す
 Qwen3 self attention paged decode prepared sequence:Qwen3/Qwen3.5系self-attentionのhidden入力系列、q/k norm weight、RoPE設定、paged K/V cache layoutを受け取り、Qwen3 self attention projection sequence、Qwen3 self attention runtime prepared sequence、paged K/V cache packを連結してpaged decode step検証へ渡せるhost側中間列と物理paged K/V cacheを返すlibrary runtime API

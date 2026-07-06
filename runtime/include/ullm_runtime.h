@@ -380,6 +380,23 @@ ullm_status ullm_runtime_qwen35_split_q_gate_f32(
     ullm_runtime_buffer *gate_output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_qwen35_qk_norm_rope_f32(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_rope_output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_add_f32(
     const ullm_runtime_buffer *lhs_buffer,
     const ullm_runtime_buffer *rhs_buffer,

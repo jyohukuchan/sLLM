@@ -28868,6 +28868,7 @@ static AQ4_MATVEC_QKV_Z_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false)
 static AQ4_MATVEC_ADD_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_GATE_BETA_PREWARMED: AtomicBool = AtomicBool::new(false);
 static AQ4_MATVEC_SILU_MUL_PREWARMED: AtomicBool = AtomicBool::new(false);
+static QWEN35_QK_NORM_ROPE_PREWARMED: AtomicBool = AtomicBool::new(false);
 static LINEAR_ATTN_QKV_PREPARE_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
 static LINEAR_ATTN_POST_PREWARMED_DEVICES: AtomicU64 = AtomicU64::new(0);
 
@@ -29159,6 +29160,82 @@ fn prewarm_aq4_matvec_silu_mul_once(
     })();
     if result.is_err() {
         AQ4_MATVEC_SILU_MUL_PREWARMED.store(false, Ordering::Release);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prewarm_qwen35_qk_norm_rope_once(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    q_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    k_projected_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    q_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    k_weight_buffer: &ullm_runtime_sys::RuntimeBuffer,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    q_gate_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    q_rope_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    k_rope_output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    label: &str,
+) -> Result<(), String> {
+    if QWEN35_QK_NORM_ROPE_PREWARMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let result = (|| {
+        let q_projected_elements = q_heads
+            .checked_mul(head_dim)
+            .and_then(|value| value.checked_mul(2))
+            .ok_or_else(|| format!("{label} prewarm q projected element count overflows"))?;
+        let k_projected_elements = kv_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| format!("{label} prewarm k projected element count overflows"))?;
+        q_projected_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; q_projected_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm q projected: {err}"))?;
+        k_projected_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; k_projected_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to zero {label} prewarm k projected: {err}"))?;
+        let rotary_dim = if head_dim.is_multiple_of(2) {
+            head_dim
+        } else {
+            head_dim.saturating_sub(1)
+        };
+        ullm_runtime_sys::qwen35_qk_norm_rope_f32(
+            q_projected_buffer,
+            k_projected_buffer,
+            q_weight_buffer,
+            k_weight_buffer,
+            q_heads,
+            kv_heads,
+            head_dim,
+            rotary_dim,
+            0,
+            10000.0_f32,
+            1e-5_f32,
+            q_gate_output_buffer,
+            q_rope_output_buffer,
+            k_rope_output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to prewarm {label}: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} prewarm: {err}"))
+    })();
+    if result.is_err() {
+        QWEN35_QK_NORM_ROPE_PREWARMED.store(false, Ordering::Release);
     }
     result
 }
@@ -29833,7 +29910,6 @@ struct PackageSelfAttnResidentStepLayer {
     input_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     q_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
-    q_query_buffer: ullm_runtime_sys::RuntimeBuffer,
     q_gate_buffer: ullm_runtime_sys::RuntimeBuffer,
     k_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
     v_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -30093,10 +30169,7 @@ impl PackageSelfAttnResidentStepLayer {
         let mut q_projected_buffer = context
             .alloc_buffer(q_projected_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident q projected: {err}"))?;
-        let q_query_buffer = context
-            .alloc_buffer(q_bytes)
-            .map_err(|err| format!("failed to allocate self-attn resident q query: {err}"))?;
-        let q_gate_buffer = context
+        let mut q_gate_buffer = context
             .alloc_buffer(q_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident q gate: {err}"))?;
         let mut k_projected_buffer = context
@@ -30111,10 +30184,10 @@ impl PackageSelfAttnResidentStepLayer {
         let k_normed_buffer = context
             .alloc_buffer(k_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident k normed: {err}"))?;
-        let q_rope_buffer = context
+        let mut q_rope_buffer = context
             .alloc_buffer(q_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident q RoPE: {err}"))?;
-        let k_rope_buffer = context
+        let mut k_rope_buffer = context
             .alloc_buffer(k_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident k RoPE: {err}"))?;
         let mut k_cache_buffer = context
@@ -30213,6 +30286,25 @@ impl PackageSelfAttnResidentStepLayer {
                 "self-attn resident AQ4 q/k pair projection",
             )?;
         }
+        if matches!(
+            q_projection_layout,
+            PackageSelfAttnQProjectionLayout::Qwen35Gated
+        ) {
+            prewarm_qwen35_qk_norm_rope_once(
+                stream,
+                &mut q_projected_buffer,
+                &mut k_projected_buffer,
+                &q_norm_weight_buffer,
+                &k_norm_weight_buffer,
+                q_heads,
+                kv_heads,
+                head_dim,
+                &mut q_gate_buffer,
+                &mut q_rope_buffer,
+                &mut k_rope_buffer,
+                "self-attn resident Qwen3.5 q/k norm RoPE",
+            )?;
+        }
 
         Ok(Self {
             hidden,
@@ -30240,7 +30332,6 @@ impl PackageSelfAttnResidentStepLayer {
             input_buffer,
             input_normed_buffer,
             q_projected_buffer,
-            q_query_buffer,
             q_gate_buffer,
             k_projected_buffer,
             v_projected_buffer,
@@ -30423,27 +30514,9 @@ impl PackageSelfAttnResidentStepLayer {
         }
 
         match self.q_projection_layout {
-            PackageSelfAttnQProjectionLayout::Plain => ullm_runtime_sys::segmented_rmsnorm_f32(
-                &self.q_projected_buffer,
-                &self.q_norm_weight_buffer,
-                self.q_heads,
-                self.head_dim,
-                1e-5_f32,
-                &mut self.q_normed_buffer,
-                Some(stream),
-            ),
-            PackageSelfAttnQProjectionLayout::Qwen35Gated => {
-                ullm_runtime_sys::qwen35_split_q_gate_f32(
-                    &self.q_projected_buffer,
-                    self.q_heads,
-                    self.head_dim,
-                    &mut self.q_query_buffer,
-                    &mut self.q_gate_buffer,
-                    Some(stream),
-                )
-                .map_err(|err| format!("failed to split {label} self-attn q/gate: {err}"))?;
+            PackageSelfAttnQProjectionLayout::Plain => {
                 ullm_runtime_sys::segmented_rmsnorm_f32(
-                    &self.q_query_buffer,
+                    &self.q_projected_buffer,
                     &self.q_norm_weight_buffer,
                     self.q_heads,
                     self.head_dim,
@@ -30451,44 +30524,63 @@ impl PackageSelfAttnResidentStepLayer {
                     &mut self.q_normed_buffer,
                     Some(stream),
                 )
+                .map_err(|err| format!("failed to run {label} self-attn q RMSNorm: {err}"))?;
+                ullm_runtime_sys::segmented_rmsnorm_f32(
+                    &self.k_projected_buffer,
+                    &self.k_norm_weight_buffer,
+                    self.kv_heads,
+                    self.head_dim,
+                    1e-5_f32,
+                    &mut self.k_normed_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} self-attn k RMSNorm: {err}"))?;
+                ullm_runtime_sys::rope_f32(
+                    &self.q_normed_buffer,
+                    1,
+                    self.q_heads,
+                    self.head_dim,
+                    rotary_dim,
+                    rope_position,
+                    rope_base,
+                    &mut self.q_rope_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} self-attn q RoPE: {err}"))?;
+                ullm_runtime_sys::rope_f32(
+                    &self.k_normed_buffer,
+                    1,
+                    self.kv_heads,
+                    self.head_dim,
+                    rotary_dim,
+                    rope_position,
+                    rope_base,
+                    &mut self.k_rope_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} self-attn k RoPE: {err}"))?;
+            }
+            PackageSelfAttnQProjectionLayout::Qwen35Gated => {
+                ullm_runtime_sys::qwen35_qk_norm_rope_f32(
+                    &self.q_projected_buffer,
+                    &self.k_projected_buffer,
+                    &self.q_norm_weight_buffer,
+                    &self.k_norm_weight_buffer,
+                    self.q_heads,
+                    self.kv_heads,
+                    self.head_dim,
+                    rotary_dim,
+                    rope_position,
+                    rope_base,
+                    1e-5_f32,
+                    &mut self.q_gate_buffer,
+                    &mut self.q_rope_buffer,
+                    &mut self.k_rope_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} self-attn q/k norm RoPE: {err}"))?;
             }
         }
-        .map_err(|err| format!("failed to run {label} self-attn q RMSNorm: {err}"))?;
-
-        ullm_runtime_sys::segmented_rmsnorm_f32(
-            &self.k_projected_buffer,
-            &self.k_norm_weight_buffer,
-            self.kv_heads,
-            self.head_dim,
-            1e-5_f32,
-            &mut self.k_normed_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} self-attn k RMSNorm: {err}"))?;
-        ullm_runtime_sys::rope_f32(
-            &self.q_normed_buffer,
-            1,
-            self.q_heads,
-            self.head_dim,
-            rotary_dim,
-            rope_position,
-            rope_base,
-            &mut self.q_rope_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} self-attn q RoPE: {err}"))?;
-        ullm_runtime_sys::rope_f32(
-            &self.k_normed_buffer,
-            1,
-            self.kv_heads,
-            self.head_dim,
-            rotary_dim,
-            rope_position,
-            rope_base,
-            &mut self.k_rope_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} self-attn k RoPE: {err}"))?;
 
         ullm_runtime_sys::paged_kv_write_f32(
             &self.k_rope_buffer,
