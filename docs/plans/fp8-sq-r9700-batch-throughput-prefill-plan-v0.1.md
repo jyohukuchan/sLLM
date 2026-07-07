@@ -419,6 +419,44 @@ R9700 release代表値:
 - `M>=16` のcached prefix chunkでは、tokenごとにdecode kernelをlaunchするdecode loopではなく、`cached_prefix_chunked` を使う。
 - このsplitにより、Phase C4の `L=65536, M=1/16/128` を全て現実的な時間で繰り返し測れる。
 
+### Phase C4 current status: batch width and long-context coverage v1
+
+C4の不足coverageとして、runtime causal attention batchの `B=2`、cached prefix chunkの `M=512`、package self-attention layer partialの最新 `N=16384` を追加測定した。
+
+保存先:
+
+- `benchmarks/results/2026-07-07/phase-c4-coverage/batch-width-and-long-context-v1.md`
+
+Runtime causal attention batch追加行:
+
+| B | N | mean ms | input tok/s | attention pair/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 512 | 13.954804 | 73379.746182 | 18821904.895693 |
+| 2 | 2048 | 230.013736 | 17807.632124 | 18243919.110634 |
+| 8 | 4096 | 3698.347224 | 8860.174022 | 18150066.484942 |
+
+Cached prefix chunk `M=512` 追加行:
+
+| L | M | mean ms | new input tok/s | attention pair/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 4096 | 512 | 129.396385 | 3956.833879 | 17222119.458747 |
+| 16384 | 512 | 676.288522 | 757.073325 | 12598078.664420 |
+| 65536 | 512 | 2607.803969 | 196.333776 | 12917289.949872 |
+
+Package self-attention layer partial latest:
+
+| N | mean ms | token/s | verification ms | layer diff |
+| ---: | ---: | ---: | ---: | ---: |
+| 16384 | 13279.226135 | 1233.806837 | 11677.183403 | 0 |
+
+解釈:
+
+- Phase C4のruntime causal attention batch幅componentは、既存行と合わせて `B=1/2/4/8` at `N=512/2048` が揃った。
+- `B=2` と `B=8,N=4096` は既存行と同じ `18M pair/s` 前後で、batch幅を増やしてもrequest方向の追加効率はまだ出ていない。
+- Cached prefixは `L=65536, M=512` までOOMなしで完走し、`M=1/16/128/512` の長prefix代表境界がcomponentとして揃った。
+- 長prefixのcached prefix pair/sは `L=4096` より低く、次のcached-prefix最適化はK/V read coalescingとrequest/batch方向を優先する。
+- package self-attention layer partialの最新 `N=16384` は `13279.226135 ms`、`1233.806837 tok/s` で、単layer componentとして長尺cold prefill圧力を引き続き測れる。
+
 ### Phase D: sustained decode
 
 | concurrent requests | prompt tokens/request | generated tokens/request | purpose |
