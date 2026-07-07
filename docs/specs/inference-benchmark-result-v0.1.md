@@ -236,6 +236,11 @@ Raw uLLM package reports may also include `prefill.layer_step_summary`. This is 
 prefill optimization, not a top-level comparison key. It records layer-by-layer token-loop timing and
 optional component timing when component synchronization is enabled.
 
+`prefill.executor` identifies the uLLM prefill path used by a raw package report. Current values
+include `layer_major_host_token_loop` for the original host-readback loop and `device_token_loop` for
+the experimental device-to-device token loop. `device_token_loop` reduces host boundaries but is not
+real batch prefill by itself.
+
 ## Memory Semantics
 
 Memory must be recorded for throughput runs. On ROCm, use `rocm-smi --showmeminfo vram --json` or an equivalent runtime API. The preferred values are:

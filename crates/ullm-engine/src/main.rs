@@ -16066,6 +16066,7 @@ fn package_batch_throughput_bench_impl(
     let mut sum_report_total_wall_ms = 0.0_f64;
     let mut kv_cache_bytes_total = 0_u64;
     let mut verified_all = true;
+    let mut prefill_executors = Vec::with_capacity(prompt_token_ids_batch.len());
 
     for (request_index, prompt_token_ids) in prompt_token_ids_batch.iter().enumerate() {
         let requested_generated_tokens = generated_tokens_batch[request_index];
@@ -16099,6 +16100,12 @@ fn package_batch_throughput_bench_impl(
                 .unwrap_or_else(|| request_generated_tokens.saturating_sub(1));
         let request_prefill_wall_ms =
             json_f64_path(&report, &["prefill", "wall_ms"]).unwrap_or(0.0);
+        let request_prefill_executor = report
+            .get("prefill")
+            .and_then(|prefill| prefill.get("executor"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
         let request_decode_wall_ms = json_f64_path(&report, &["decode", "wall_ms"]).unwrap_or(0.0);
         let request_total_wall_ms = json_f64_path(&report, &["timing_ms", "total"])
             .unwrap_or(external_request_wall_ms)
@@ -16135,6 +16142,7 @@ fn package_batch_throughput_bench_impl(
         }
         request_latency_ms.push(request_total_wall_ms);
         time_to_first_token_ms.push(request_prefill_wall_ms);
+        prefill_executors.push(request_prefill_executor);
         prefill_total_input_tokens = prefill_total_input_tokens
             .checked_add(request_prefill_tokens)
             .ok_or_else(|| "prefill total input tokens overflow".to_string())?;
@@ -16195,6 +16203,11 @@ fn package_batch_throughput_bench_impl(
     let end_to_end_total_tokens = prefill_total_input_tokens
         .checked_add(generated_tokens_total)
         .ok_or_else(|| "end-to-end total token count overflows".to_string())?;
+    let prefill_executor = prefill_executors
+        .first()
+        .filter(|first| prefill_executors.iter().all(|value| value == *first))
+        .map(String::as_str)
+        .unwrap_or("mixed");
     let report = serde_json::json!({
         "schema_version": "package-batch-throughput-bench-v0.1",
         "package": path,
@@ -16222,7 +16235,7 @@ fn package_batch_throughput_bench_impl(
         },
         "batching": {
             "mode": "logical",
-            "prefill_executor": "token_loop",
+            "prefill_executor": prefill_executor,
             "decode_executor": "sequential_package_token_ids_generate",
             "scheduler_policy": "fixed_batch",
             "runtime_reused_across_requests": false,
@@ -18635,6 +18648,9 @@ fn package_token_ids_generate_incremental_smoke_impl(
     }
     let sync_linear_attn_components_for_timing =
         env_flag_enabled("ULLM_SYNC_LINEAR_ATTN_COMPONENTS_FOR_TIMING");
+    let use_prefill_device_token_loop = env_flag_enabled("ULLM_PREFILL_DEVICE_TOKEN_LOOP");
+    let sync_prefill_each_layer_for_timing =
+        env_flag_enabled("ULLM_SYNC_PREFILL_EACH_LAYER_FOR_TIMING");
     let use_aq4_matvec_qkv_z_gate_beta_requested =
         !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_QKV_Z_GATE_BETA");
     let use_aq4_matvec_pair_qkv_z = !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_QKV_Z");
@@ -18824,7 +18840,9 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let embedding_runtime_load_ms = embedding_runtime_load_started.elapsed().as_secs_f64() * 1000.0;
 
     let embed_started = Instant::now();
-    let mut residual_sequence = if let Some(runtime) = embedding_runtime.as_mut() {
+    let mut residual_sequence = if use_prefill_device_token_loop && embedding_runtime.is_some() {
+        Vec::new()
+    } else if let Some(runtime) = embedding_runtime.as_mut() {
         let mut values = Vec::with_capacity(prompt_token_ids.len() * hidden);
         for (index, &token_id) in prompt_token_ids.iter().enumerate() {
             let row = runtime.gather_token_values(
@@ -18871,58 +18889,184 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let mut prefill_self_attn_component_sums =
         vec![PackageSelfAttnComponentStepMs::default(); layers.len()];
     let mut prefill_self_attn_component_counts = vec![0_usize; layers.len()];
-    for (layer_position, layer) in layers.iter_mut().enumerate() {
-        let mut next_sequence = Vec::with_capacity(residual_sequence.len());
-        for timestep in 0..prompt_token_ids.len() {
-            let prefill_layer_step_started = Instant::now();
-            let start = timestep * hidden;
-            let end = start + hidden;
+    if use_prefill_device_token_loop {
+        for (timestep, &token_id) in prompt_token_ids.iter().enumerate() {
             let position = position_offset
                 .checked_add(timestep)
                 .ok_or_else(|| "incremental prefill position overflows".to_string())?;
-            let layer_label =
-                format!("incremental prefill layer {layer_position} timestep {timestep}");
-            layer.step_from_host_to_device(
-                &mut stream,
-                &residual_sequence[start..end],
-                rotary_dim_value,
-                rope_base,
-                position,
-                timestep,
-                &layer_label,
-            )?;
-            let output = layer.read_output(&mut stream)?;
-            if output.len() != hidden {
-                return Err(format!(
-                    "incremental prefill layer {layer_position} output length {} does not match hidden {hidden}",
-                    output.len()
-                ));
+            let mut first_residual_host = None;
+            if let Some(runtime) = embedding_runtime.as_mut() {
+                runtime.gather_token(
+                    &mut stream,
+                    token_id,
+                    &format!("incremental device prefill embedding token {timestep}"),
+                )?;
+            } else {
+                let start = timestep * hidden;
+                let end = start + hidden;
+                if end > residual_sequence.len() {
+                    return Err(format!(
+                        "incremental device prefill host embedding slice {start}..{end} exceeds {} values",
+                        residual_sequence.len()
+                    ));
+                }
+                first_residual_host = Some(residual_sequence[start..end].to_vec());
             }
-            prefill_layer_step_ms[layer_position]
-                .push(prefill_layer_step_started.elapsed().as_secs_f64() * 1000.0);
-            if let Some(component_ms) = layer.take_linear_attn_component_step_ms_raw() {
-                prefill_linear_attn_component_sums[layer_position].add_assign(component_ms);
-                prefill_linear_attn_component_counts[layer_position] += 1;
+
+            for layer_position in 0..layers.len() {
+                let prefill_layer_step_started = Instant::now();
+                let layer_label = format!(
+                    "incremental device prefill layer {layer_position} timestep {timestep}"
+                );
+                if layer_position == 0 {
+                    if let Some(runtime) = embedding_runtime.as_ref() {
+                        layers[0].step_from_device_to_device(
+                            &mut stream,
+                            runtime.output_buffer(),
+                            rotary_dim_value,
+                            rope_base,
+                            position,
+                            timestep,
+                            &layer_label,
+                        )?;
+                    } else {
+                        let residual = first_residual_host
+                            .take()
+                            .ok_or_else(|| format!("{layer_label} missing host residual"))?;
+                        layers[0].step_from_host_to_device(
+                            &mut stream,
+                            &residual,
+                            rotary_dim_value,
+                            rope_base,
+                            position,
+                            timestep,
+                            &layer_label,
+                        )?;
+                    }
+                } else {
+                    let (previous_layers, current_layers) = layers.split_at_mut(layer_position);
+                    let previous = previous_layers.get(layer_position - 1).ok_or_else(|| {
+                        format!(
+                            "{layer_label} previous device residual layer {} is missing",
+                            layer_position - 1
+                        )
+                    })?;
+                    current_layers[0].step_from_device_to_device(
+                        &mut stream,
+                        previous.output_buffer(),
+                        rotary_dim_value,
+                        rope_base,
+                        position,
+                        timestep,
+                        &layer_label,
+                    )?;
+                }
+                if sync_prefill_each_layer_for_timing {
+                    stream
+                        .synchronize()
+                        .map_err(|err| format!("failed to synchronize {layer_label}: {err}"))?;
+                }
+                prefill_layer_step_ms[layer_position]
+                    .push(prefill_layer_step_started.elapsed().as_secs_f64() * 1000.0);
+                if let Some(component_ms) =
+                    layers[layer_position].take_linear_attn_component_step_ms_raw()
+                {
+                    prefill_linear_attn_component_sums[layer_position].add_assign(component_ms);
+                    prefill_linear_attn_component_counts[layer_position] += 1;
+                }
+                if let Some(component_ms) =
+                    layers[layer_position].take_self_attn_component_step_ms_raw()
+                {
+                    prefill_self_attn_component_sums[layer_position].add_assign(component_ms);
+                    prefill_self_attn_component_counts[layer_position] += 1;
+                }
             }
-            if let Some(component_ms) = layer.take_self_attn_component_step_ms_raw() {
-                prefill_self_attn_component_sums[layer_position].add_assign(component_ms);
-                prefill_self_attn_component_counts[layer_position] += 1;
-            }
-            next_sequence.extend(output);
         }
-        residual_sequence = next_sequence;
+    } else {
+        for (layer_position, layer) in layers.iter_mut().enumerate() {
+            let mut next_sequence = Vec::with_capacity(residual_sequence.len());
+            for timestep in 0..prompt_token_ids.len() {
+                let prefill_layer_step_started = Instant::now();
+                let start = timestep * hidden;
+                let end = start + hidden;
+                let position = position_offset
+                    .checked_add(timestep)
+                    .ok_or_else(|| "incremental prefill position overflows".to_string())?;
+                let layer_label =
+                    format!("incremental prefill layer {layer_position} timestep {timestep}");
+                layer.step_from_host_to_device(
+                    &mut stream,
+                    &residual_sequence[start..end],
+                    rotary_dim_value,
+                    rope_base,
+                    position,
+                    timestep,
+                    &layer_label,
+                )?;
+                let output = layer.read_output(&mut stream)?;
+                if output.len() != hidden {
+                    return Err(format!(
+                        "incremental prefill layer {layer_position} output length {} does not match hidden {hidden}",
+                        output.len()
+                    ));
+                }
+                prefill_layer_step_ms[layer_position]
+                    .push(prefill_layer_step_started.elapsed().as_secs_f64() * 1000.0);
+                if let Some(component_ms) = layer.take_linear_attn_component_step_ms_raw() {
+                    prefill_linear_attn_component_sums[layer_position].add_assign(component_ms);
+                    prefill_linear_attn_component_counts[layer_position] += 1;
+                }
+                if let Some(component_ms) = layer.take_self_attn_component_step_ms_raw() {
+                    prefill_self_attn_component_sums[layer_position].add_assign(component_ms);
+                    prefill_self_attn_component_counts[layer_position] += 1;
+                }
+                next_sequence.extend(output);
+            }
+            residual_sequence = next_sequence;
+        }
     }
     let prefill_layers_ms = prefill_layers_started.elapsed().as_secs_f64() * 1000.0;
     let prefill_lm_head_started = Instant::now();
-    let final_hidden_start = (prompt_token_ids.len() - 1) * hidden;
-    let (prefill_top_logits, first_generated) = package_token_ids_incremental_final_logits(
-        path,
-        &mut stream,
-        &mut lm_head_runtime,
-        &residual_sequence[final_hidden_start..final_hidden_start + hidden],
-        &final_norm,
-        top_k,
-    )?;
+    let (prefill_top_logits, first_generated) =
+        if use_prefill_device_token_loop && lm_head_runtime.supports_device_input() {
+            let final_norm_runtime = final_norm_runtime.as_mut().ok_or_else(|| {
+                "incremental prefill final RMSNorm runtime is missing".to_string()
+            })?;
+            let final_layer = layers
+                .last()
+                .ok_or_else(|| "incremental device prefill has no final layer".to_string())?;
+            package_token_ids_incremental_final_logits_device(
+                &mut stream,
+                &mut lm_head_runtime,
+                final_norm_runtime,
+                final_layer.output_buffer(),
+                top_k,
+                "incremental device prefill",
+            )?
+        } else if use_prefill_device_token_loop {
+            let final_layer = layers
+                .last()
+                .ok_or_else(|| "incremental device prefill has no final layer".to_string())?;
+            let final_hidden = final_layer.read_output(&mut stream)?;
+            package_token_ids_incremental_final_logits(
+                path,
+                &mut stream,
+                &mut lm_head_runtime,
+                &final_hidden,
+                &final_norm,
+                top_k,
+            )?
+        } else {
+            let final_hidden_start = (prompt_token_ids.len() - 1) * hidden;
+            package_token_ids_incremental_final_logits(
+                path,
+                &mut stream,
+                &mut lm_head_runtime,
+                &residual_sequence[final_hidden_start..final_hidden_start + hidden],
+                &final_norm,
+                top_k,
+            )?
+        };
     let prefill_lm_head_ms = prefill_lm_head_started.elapsed().as_secs_f64() * 1000.0;
     let prefill_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
 
@@ -19209,6 +19353,13 @@ fn package_token_ids_generate_incremental_smoke_impl(
         "decode_mode": "hybrid_incremental_greedy",
         "incremental_decode": true,
         "prefill": {
+            "executor": if use_prefill_device_token_loop {
+                "device_token_loop"
+            } else {
+                "layer_major_host_token_loop"
+            },
+            "device_resident": use_prefill_device_token_loop,
+            "sync_each_layer_for_timing": sync_prefill_each_layer_for_timing,
             "prompt_tokens": prompt_token_count,
             "wall_ms": prefill_ms,
             "layers_wall_ms": prefill_layers_ms,
