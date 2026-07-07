@@ -36,6 +36,14 @@ def fmt(value: Any, digits: int = 2) -> str:
     return str(value)
 
 
+def metric(metrics: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        value = metrics.get(name)
+        if value is not None:
+            return value
+    return None
+
+
 def load_rows(paths: list[Path]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in paths:
@@ -80,13 +88,14 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
         )
     )
     lines = [
-        "| Status | Engine | Model | Family | Quant | Target | Workload | Decode tok/s | Consumed GiB | Decode x GiB | Source |",
-        "| --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |",
+        "| Status | Engine | Model | Family | Quant | Target | Workload | Batching | Prefill total tok/s | Decode total tok/s | End-to-end tok/s | Consumed GiB | Decode x GiB | Source |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in selected:
         metrics = row.get("metrics") or {}
         model = row.get("model") or {}
         workload = row.get("workload") or {}
+        batching = row.get("batching") if isinstance(row.get("batching"), dict) else {}
         consumed_bytes = metrics.get("vram_consumed_bytes")
         consumed_gib = gib(consumed_bytes)
         product = metrics.get("decode_tokens_per_second_times_vram_consumed_gib")
@@ -101,7 +110,28 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
                     model.get("quantization") or "-",
                     target_label(row),
                     f"pp{workload.get('prompt_tokens')}/tg{workload.get('generated_tokens')}/b{workload.get('batch_size')}",
-                    fmt(metrics.get("decode_tokens_per_second")),
+                    batching.get("mode") or "-",
+                    fmt(
+                        metric(
+                            metrics,
+                            "prefill_total_input_tokens_per_second",
+                            "prefill_tokens_per_second",
+                        )
+                    ),
+                    fmt(
+                        metric(
+                            metrics,
+                            "decode_total_generated_tokens_per_second",
+                            "decode_tokens_per_second",
+                        )
+                    ),
+                    fmt(
+                        metric(
+                            metrics,
+                            "end_to_end_total_tokens_per_second",
+                            "total_tokens_per_second",
+                        )
+                    ),
                     fmt(consumed_gib),
                     fmt(product),
                     f"`{Path(row.get('_source_file', '-')).name}`",

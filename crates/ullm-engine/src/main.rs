@@ -16170,6 +16170,10 @@ fn package_batch_throughput_bench_impl(
             "time_to_first_token_ms": request_prefill_wall_ms,
             "time_per_output_token_ms": request_time_per_output_token_ms,
             "decode_tps": request_decode_tps,
+            "prefill": report
+                .get("prefill")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
             "stop": report.get("stop").cloned().unwrap_or(serde_json::Value::Null),
             "correctness": report
                 .get("correctness")
@@ -17982,6 +17986,20 @@ struct PackageLinearAttnComponentStepMs {
 }
 
 impl PackageLinearAttnComponentStepMs {
+    fn add_assign(&mut self, other: Self) {
+        self.input_rmsnorm_ms += other.input_rmsnorm_ms;
+        self.qkv_projection_ms += other.qkv_projection_ms;
+        self.z_projection_ms += other.z_projection_ms;
+        self.qkv_prepare_ms += other.qkv_prepare_ms;
+        self.gate_beta_projection_ms += other.gate_beta_projection_ms;
+        self.recurrent_ms += other.recurrent_ms;
+        self.attention_post_ms += other.attention_post_ms;
+        self.out_projection_residual_ms += other.out_projection_residual_ms;
+        self.post_rmsnorm_ms += other.post_rmsnorm_ms;
+        self.mlp_gate_up_activation_ms += other.mlp_gate_up_activation_ms;
+        self.mlp_down_residual_ms += other.mlp_down_residual_ms;
+    }
+
     fn total_ms(&self) -> f64 {
         self.input_rmsnorm_ms
             + self.qkv_projection_ms
@@ -18012,6 +18030,24 @@ impl PackageLinearAttnComponentStepMs {
             "total_ms": self.total_ms(),
         })
     }
+
+    fn report_summary_json(self, count: usize) -> serde_json::Value {
+        serde_json::json!({
+            "count": count,
+            "input_rmsnorm_ms": component_total_mean_json(self.input_rmsnorm_ms, count),
+            "qkv_projection_ms": component_total_mean_json(self.qkv_projection_ms, count),
+            "z_projection_ms": component_total_mean_json(self.z_projection_ms, count),
+            "qkv_prepare_ms": component_total_mean_json(self.qkv_prepare_ms, count),
+            "gate_beta_projection_ms": component_total_mean_json(self.gate_beta_projection_ms, count),
+            "recurrent_ms": component_total_mean_json(self.recurrent_ms, count),
+            "attention_post_ms": component_total_mean_json(self.attention_post_ms, count),
+            "out_projection_residual_ms": component_total_mean_json(self.out_projection_residual_ms, count),
+            "post_rmsnorm_ms": component_total_mean_json(self.post_rmsnorm_ms, count),
+            "mlp_gate_up_activation_ms": component_total_mean_json(self.mlp_gate_up_activation_ms, count),
+            "mlp_down_residual_ms": component_total_mean_json(self.mlp_down_residual_ms, count),
+            "total_ms": component_total_mean_json(self.total_ms(), count),
+        })
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -18028,6 +18064,18 @@ struct PackageSelfAttnComponentStepMs {
 }
 
 impl PackageSelfAttnComponentStepMs {
+    fn add_assign(&mut self, other: Self) {
+        self.input_rmsnorm_ms += other.input_rmsnorm_ms;
+        self.qkv_projection_ms += other.qkv_projection_ms;
+        self.qk_norm_rope_kv_write_ms += other.qk_norm_rope_kv_write_ms;
+        self.paged_decode_ms += other.paged_decode_ms;
+        self.output_gate_ms += other.output_gate_ms;
+        self.o_projection_residual_ms += other.o_projection_residual_ms;
+        self.post_rmsnorm_ms += other.post_rmsnorm_ms;
+        self.mlp_gate_up_activation_ms += other.mlp_gate_up_activation_ms;
+        self.mlp_down_residual_ms += other.mlp_down_residual_ms;
+    }
+
     fn total_ms(&self) -> f64 {
         self.input_rmsnorm_ms
             + self.qkv_projection_ms
@@ -18054,6 +18102,33 @@ impl PackageSelfAttnComponentStepMs {
             "total_ms": self.total_ms(),
         })
     }
+
+    fn report_summary_json(self, count: usize) -> serde_json::Value {
+        serde_json::json!({
+            "count": count,
+            "input_rmsnorm_ms": component_total_mean_json(self.input_rmsnorm_ms, count),
+            "qkv_projection_ms": component_total_mean_json(self.qkv_projection_ms, count),
+            "qk_norm_rope_kv_write_ms": component_total_mean_json(self.qk_norm_rope_kv_write_ms, count),
+            "paged_decode_ms": component_total_mean_json(self.paged_decode_ms, count),
+            "output_gate_ms": component_total_mean_json(self.output_gate_ms, count),
+            "o_projection_residual_ms": component_total_mean_json(self.o_projection_residual_ms, count),
+            "post_rmsnorm_ms": component_total_mean_json(self.post_rmsnorm_ms, count),
+            "mlp_gate_up_activation_ms": component_total_mean_json(self.mlp_gate_up_activation_ms, count),
+            "mlp_down_residual_ms": component_total_mean_json(self.mlp_down_residual_ms, count),
+            "total_ms": component_total_mean_json(self.total_ms(), count),
+        })
+    }
+}
+
+fn component_total_mean_json(total_ms: f64, count: usize) -> serde_json::Value {
+    serde_json::json!({
+        "total_ms": total_ms,
+        "mean_ms": if count > 0 {
+            Some(total_ms / count as f64)
+        } else {
+            None
+        },
+    })
 }
 
 impl PackageTokenIdsIncrementalLayer {
@@ -18075,22 +18150,34 @@ impl PackageTokenIdsIncrementalLayer {
     }
 
     fn take_linear_attn_component_step_ms(&mut self) -> serde_json::Value {
+        self.take_linear_attn_component_step_ms_raw()
+            .map(PackageLinearAttnComponentStepMs::report_json)
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn take_linear_attn_component_step_ms_raw(
+        &mut self,
+    ) -> Option<PackageLinearAttnComponentStepMs> {
         match self {
-            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => layer
-                .take_last_component_step_ms()
-                .map(PackageLinearAttnComponentStepMs::report_json)
-                .unwrap_or(serde_json::Value::Null),
-            PackageTokenIdsIncrementalLayer::SelfAttention(_) => serde_json::Value::Null,
+            PackageTokenIdsIncrementalLayer::LinearAttention(layer) => {
+                layer.take_last_component_step_ms()
+            }
+            PackageTokenIdsIncrementalLayer::SelfAttention(_) => None,
         }
     }
 
     fn take_self_attn_component_step_ms(&mut self) -> serde_json::Value {
+        self.take_self_attn_component_step_ms_raw()
+            .map(PackageSelfAttnComponentStepMs::report_json)
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn take_self_attn_component_step_ms_raw(&mut self) -> Option<PackageSelfAttnComponentStepMs> {
         match self {
-            PackageTokenIdsIncrementalLayer::LinearAttention(_) => serde_json::Value::Null,
-            PackageTokenIdsIncrementalLayer::SelfAttention(layer) => layer
-                .take_last_component_step_ms()
-                .map(PackageSelfAttnComponentStepMs::report_json)
-                .unwrap_or(serde_json::Value::Null),
+            PackageTokenIdsIncrementalLayer::LinearAttention(_) => None,
+            PackageTokenIdsIncrementalLayer::SelfAttention(layer) => {
+                layer.take_last_component_step_ms()
+            }
         }
     }
 
@@ -18775,9 +18862,19 @@ fn package_token_ids_generate_incremental_smoke_impl(
 
     let prefill_started = Instant::now();
     let prefill_layers_started = Instant::now();
+    let mut prefill_layer_step_ms = (0..layers.len())
+        .map(|_| Vec::with_capacity(prompt_token_ids.len()))
+        .collect::<Vec<_>>();
+    let mut prefill_linear_attn_component_sums =
+        vec![PackageLinearAttnComponentStepMs::default(); layers.len()];
+    let mut prefill_linear_attn_component_counts = vec![0_usize; layers.len()];
+    let mut prefill_self_attn_component_sums =
+        vec![PackageSelfAttnComponentStepMs::default(); layers.len()];
+    let mut prefill_self_attn_component_counts = vec![0_usize; layers.len()];
     for (layer_position, layer) in layers.iter_mut().enumerate() {
         let mut next_sequence = Vec::with_capacity(residual_sequence.len());
         for timestep in 0..prompt_token_ids.len() {
+            let prefill_layer_step_started = Instant::now();
             let start = timestep * hidden;
             let end = start + hidden;
             let position = position_offset
@@ -18800,6 +18897,16 @@ fn package_token_ids_generate_incremental_smoke_impl(
                     "incremental prefill layer {layer_position} output length {} does not match hidden {hidden}",
                     output.len()
                 ));
+            }
+            prefill_layer_step_ms[layer_position]
+                .push(prefill_layer_step_started.elapsed().as_secs_f64() * 1000.0);
+            if let Some(component_ms) = layer.take_linear_attn_component_step_ms_raw() {
+                prefill_linear_attn_component_sums[layer_position].add_assign(component_ms);
+                prefill_linear_attn_component_counts[layer_position] += 1;
+            }
+            if let Some(component_ms) = layer.take_self_attn_component_step_ms_raw() {
+                prefill_self_attn_component_sums[layer_position].add_assign(component_ms);
+                prefill_self_attn_component_counts[layer_position] += 1;
             }
             next_sequence.extend(output);
         }
@@ -19020,6 +19127,37 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let timed_decode_tokens = decode_step_ms.len();
     let decode_step_summary = timed_step_summary_json(&decode_step_ms);
     let prompt_token_count = prompt_token_ids.len();
+    let prefill_layer_step_summary = prefill_layer_step_ms
+        .iter()
+        .enumerate()
+        .map(|(layer_position, step_ms)| {
+            let wall_ms = step_ms.iter().sum::<f64>();
+            let linear_attn_components = if prefill_linear_attn_component_counts[layer_position] > 0
+            {
+                prefill_linear_attn_component_sums[layer_position]
+                    .report_summary_json(prefill_linear_attn_component_counts[layer_position])
+            } else {
+                serde_json::Value::Null
+            };
+            let self_attn_components = if prefill_self_attn_component_counts[layer_position] > 0 {
+                prefill_self_attn_component_sums[layer_position]
+                    .report_summary_json(prefill_self_attn_component_counts[layer_position])
+            } else {
+                serde_json::Value::Null
+            };
+            serde_json::json!({
+                "layer_position": layer_position,
+                "layer_index": layer_indices[layer_position],
+                "kind": layer_kinds[layer_position],
+                "prompt_tokens": prompt_token_count,
+                "wall_ms": wall_ms,
+                "token_tps": tps(prompt_token_count, wall_ms),
+                "step_wall_summary": timed_step_summary_json(step_ms),
+                "linear_attn_component_summary": linear_attn_components,
+                "self_attn_component_summary": self_attn_components,
+            })
+        })
+        .collect::<Vec<_>>();
     let stop_reason = if stopped_on_token_id.is_some() {
         "stop_token"
     } else if stopped_on_token_sequence.is_some() {
@@ -19075,6 +19213,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "wall_ms": prefill_ms,
             "layers_wall_ms": prefill_layers_ms,
             "lm_head_wall_ms": prefill_lm_head_ms,
+            "layer_step_summary": prefill_layer_step_summary,
             "tps": tps(prompt_token_count, prefill_ms),
             "top_logits": prefill_top_logits,
         },

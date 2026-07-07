@@ -232,6 +232,10 @@ as a batch but executed through sequential single-request paths. `real` means pr
 shares kernels, weight residency, or scheduler state across requests. Only `real` rows should be
 used to compare production batch throughput against vLLM.
 
+Raw uLLM package reports may also include `prefill.layer_step_summary`. This is diagnostic data for
+prefill optimization, not a top-level comparison key. It records layer-by-layer token-loop timing and
+optional component timing when component synchronization is enabled.
+
 ## Memory Semantics
 
 Memory must be recorded for throughput runs. On ROCm, use `rocm-smi --showmeminfo vram --json` or an equivalent runtime API. The preferred values are:
