@@ -2402,6 +2402,32 @@ pub fn sigmoid_mul_f32(
     })
 }
 
+pub fn sigmoid_mul_f32_in_place(
+    gate_buffer: &RuntimeBuffer,
+    input_output_buffer: &mut RuntimeBuffer,
+    elements: usize,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if elements == 0 {
+        return Err("f32 Sigmoid-mul elements must be greater than zero".to_string());
+    }
+    let required_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 Sigmoid-mul byte size overflows".to_string())?;
+    check_copy_range(0, required_bytes, gate_buffer.size()?)?;
+    check_copy_range(0, required_bytes, input_output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_sigmoid_mul_f32(
+            gate_buffer.raw.as_ptr(),
+            input_output_buffer.raw.as_ptr(),
+            elements,
+            input_output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 pub fn qwen35_split_q_gate_f32(
     projected_buffer: &RuntimeBuffer,
     q_heads: usize,
@@ -4227,6 +4253,44 @@ mod tests {
 
         let mut output_bytes = vec![0_u8; gate_values.len() * std::mem::size_of::<f32>()];
         output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_sigmoid_mul(&gate_values, &input_values);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_sigmoid_mul_f32_in_place_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let gate_values = [-1.0_f32, 0.0, 1.0, 2.0];
+        let input_values = [3.0_f32, -4.0, 5.0, 6.0];
+        let mut gate = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input_output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream))
+            .unwrap();
+        input_output
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        sigmoid_mul_f32_in_place(
+            &gate,
+            &mut input_output,
+            gate_values.len(),
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; gate_values.len() * std::mem::size_of::<f32>()];
+        input_output
             .copy_to_host(0, &mut output_bytes, Some(&mut stream))
             .unwrap();
         stream.synchronize().unwrap();
@@ -7756,6 +7820,47 @@ mod tests {
 
         let mut output_bytes = vec![0_u8; gate_values.len() * std::mem::size_of::<f32>()];
         output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        let expected = expected_sigmoid_mul(&gate_values, &input_values);
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn first_hip_sigmoid_mul_f32_in_place_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let gate_values = [-1.0_f32, 0.0, 1.0, 2.0];
+        let input_values = [3.0_f32, -4.0, 5.0, 6.0];
+        let mut gate = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input_output = context
+            .alloc_buffer(input_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream))
+            .unwrap();
+        input_output
+            .copy_from_host(0, &f32s_to_le_bytes(&input_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        sigmoid_mul_f32_in_place(
+            &gate,
+            &mut input_output,
+            gate_values.len(),
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; gate_values.len() * std::mem::size_of::<f32>()];
+        input_output
             .copy_to_host(0, &mut output_bytes, Some(&mut stream))
             .unwrap();
         stream.synchronize().unwrap();

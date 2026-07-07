@@ -31232,6 +31232,20 @@ impl PackageSelfAttnResidentStepLayer {
 
         let projection_input_buffer = match self.q_projection_layout {
             PackageSelfAttnQProjectionLayout::Plain => &self.attention_output_buffer,
+            PackageSelfAttnQProjectionLayout::Qwen35Gated
+                if !env_flag_enabled("ULLM_DISABLE_SIGMOID_MUL_IN_PLACE") =>
+            {
+                ullm_runtime_sys::sigmoid_mul_f32_in_place(
+                    &self.q_gate_buffer,
+                    &mut self.attention_output_buffer,
+                    self.attention_elements,
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!("failed to run {label} self-attn output gate in-place: {err}")
+                })?;
+                &self.attention_output_buffer
+            }
             PackageSelfAttnQProjectionLayout::Qwen35Gated => {
                 ullm_runtime_sys::sigmoid_mul_f32(
                     &self.q_gate_buffer,
