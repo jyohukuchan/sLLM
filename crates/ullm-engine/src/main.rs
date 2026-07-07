@@ -319,6 +319,17 @@ fn main() -> ExitCode {
             env::args().nth(6),
             env::args().nth(7),
         ),
+        Some("package-self-attn-qkv-rope-batch-smoke") => package_self_attn_qkv_rope_batch_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+        ),
         Some("package-linear-attn-proj-batch-smoke") => package_linear_attn_proj_batch_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -17438,6 +17449,646 @@ fn package_linear_attn_proj_batch_smoke_impl(
             .map(|value| format!("{value:.6}"))
             .unwrap_or_else(|| "null".to_string()),
         format_f32_preview(&qkv_output[..preview_len]),
+    ))
+}
+
+fn package_self_attn_qkv_rope_batch_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-self-attn-qkv-rope-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 3, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_self_attn_qkv_rope_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        prompt_token_ids,
+        measured_repeats,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_self_attn_qkv_rope_batch_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    prompt_token_ids: Vec<usize>,
+    measured_repeats: usize,
+    rotary_dim_arg: Option<String>,
+    rope_base_arg: Option<String>,
+    position_offset_arg: Option<String>,
+) -> Result<String, String> {
+    if prompt_token_ids.is_empty() {
+        return Err("self-attn qkv RoPE batch smoke requires at least one token".to_string());
+    }
+    if package_decoder_layer_kind(path, layer_index)? != PackageDecoderLayerKind::SelfAttention {
+        return Err(format!(
+            "self-attn qkv RoPE batch smoke requires a self attention layer, got layer {layer_index}"
+        ));
+    }
+
+    let sequence_len = prompt_token_ids.len();
+    let (embedding_vocab, hidden) = package_embedding_shape(path)?;
+    if let Some(token_id) = prompt_token_ids
+        .iter()
+        .copied()
+        .find(|token_id| *token_id >= embedding_vocab)
+    {
+        return Err(format!(
+            "self-attn qkv RoPE batch token id {token_id} is out of embedding range 0..{embedding_vocab}"
+        ));
+    }
+
+    let input_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
+    let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
+    let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
+    let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
+    let q_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
+    let k_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+
+    let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
+    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    if input_norm.values.len() != hidden {
+        return Err(format!(
+            "self-attn qkv RoPE batch input norm length {} does not match hidden {hidden}",
+            input_norm.values.len()
+        ));
+    }
+    let mut q_norm = read_named_passthrough_f32(path, &q_norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read q RMSNorm tensor: {err}"))?;
+    q_norm.values = effective_rmsnorm_weight_values(&q_norm_tensor, &q_norm.values);
+    let mut k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read k RMSNorm tensor: {err}"))?;
+    k_norm.values = effective_rmsnorm_weight_values(&k_norm_tensor, &k_norm.values);
+    let head_dim = q_norm.values.len();
+    if head_dim == 0 || k_norm.values.len() != head_dim {
+        return Err(format!(
+            "self-attn qkv RoPE batch q/k norm head dims must be nonzero and equal: q={} k={}",
+            head_dim,
+            k_norm.values.len()
+        ));
+    }
+    let default_rotary_dim = {
+        let candidate = if head_dim >= 4 {
+            head_dim / 4
+        } else {
+            head_dim
+        };
+        candidate - (candidate % 2)
+    };
+    if default_rotary_dim == 0 {
+        return Err(format!(
+            "self-attn qkv RoPE batch default rotary_dim is zero for head_dim {head_dim}"
+        ));
+    }
+    let rotary_dim = parse_optional_usize(rotary_dim_arg, default_rotary_dim, "rotary dim")
+        .map_err(|code| format!("failed to parse rotary dim, exit_code={code:?}"))?;
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        return Err(format!(
+            "self-attn qkv RoPE batch rotary dim must be even and no greater than head_dim: rotary_dim={rotary_dim} head_dim={head_dim}"
+        ));
+    }
+    let rope_base = parse_optional_f32(rope_base_arg, 10_000_000.0, "rope base")
+        .map_err(|code| format!("failed to parse rope base, exit_code={code:?}"))?;
+    if !rope_base.is_finite() || rope_base <= 1.0 {
+        return Err(
+            "self-attn qkv RoPE batch rope base must be finite and greater than one".into(),
+        );
+    }
+    let position_offset = parse_optional_usize(position_offset_arg, 0, "position offset")
+        .map_err(|code| format!("failed to parse position offset, exit_code={code:?}"))?;
+
+    let embedding_rows =
+        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
+            .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
+    if embedding_rows.columns != hidden || embedding_rows.values.len() != sequence_len * hidden {
+        return Err(format!(
+            "self-attn qkv RoPE batch embedding shape mismatch: columns={} values={} prompt_tokens={} hidden={hidden}",
+            embedding_rows.columns,
+            embedding_rows.values.len(),
+            sequence_len
+        ));
+    }
+    let mut expected_input_normed = Vec::with_capacity(sequence_len * hidden);
+    for token_index in 0..sequence_len {
+        let start = token_index
+            .checked_mul(hidden)
+            .ok_or_else(|| "self-attn qkv RoPE batch norm input start overflows".to_string())?;
+        let end = start
+            .checked_add(hidden)
+            .ok_or_else(|| "self-attn qkv RoPE batch norm input end overflows".to_string())?;
+        expected_input_normed.extend(runtime_host_rmsnorm_f32(
+            &embedding_rows.values[start..end],
+            &input_norm.values,
+            1e-6_f32,
+        ));
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let mut registry = WeightRegistry::new();
+    let q_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &q_tensor,
+        chunk_bytes,
+    )?;
+    let k_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &k_tensor,
+        chunk_bytes,
+    )?;
+    let v_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &v_tensor,
+        chunk_bytes,
+    )?;
+    if q_matrix.cols != hidden || k_matrix.cols != hidden || v_matrix.cols != hidden {
+        return Err(format!(
+            "self-attn qkv RoPE batch q/k/v hidden mismatch: q_cols={} k_cols={} v_cols={} hidden={hidden}",
+            q_matrix.cols, k_matrix.cols, v_matrix.cols
+        ));
+    }
+    let two_hidden = hidden
+        .checked_mul(2)
+        .ok_or_else(|| "self-attn qkv RoPE batch hidden*2 overflows".to_string())?;
+    let two_head_dim = head_dim
+        .checked_mul(2)
+        .ok_or_else(|| "self-attn qkv RoPE batch head_dim*2 overflows".to_string())?;
+    if q_matrix.rows != two_hidden || !q_matrix.rows.is_multiple_of(two_head_dim) {
+        return Err(format!(
+            "self-attn qkv RoPE batch requires Qwen3.5 gated q layout: q_rows={} hidden={} head_dim={head_dim}",
+            q_matrix.rows, hidden
+        ));
+    }
+    if !k_matrix.rows.is_multiple_of(head_dim) {
+        return Err(format!(
+            "self-attn qkv RoPE batch k rows {} are not a multiple of head_dim {head_dim}",
+            k_matrix.rows
+        ));
+    }
+    let q_heads = q_matrix.rows / two_head_dim;
+    let kv_heads = k_matrix.rows / head_dim;
+    if q_heads == 0 || kv_heads == 0 || !q_heads.is_multiple_of(kv_heads) {
+        return Err(format!(
+            "self-attn qkv RoPE batch invalid heads: q_heads={q_heads} kv_heads={kv_heads}"
+        ));
+    }
+    if !v_matrix.rows.is_multiple_of(kv_heads) {
+        return Err(format!(
+            "self-attn qkv RoPE batch v rows {} are not compatible with kv_heads {kv_heads}",
+            v_matrix.rows
+        ));
+    }
+    let value_dim = v_matrix.rows / kv_heads;
+
+    let input_elements = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "self-attn qkv RoPE batch input element count overflows".to_string())?;
+    let q_projected_elements = sequence_len.checked_mul(q_matrix.rows).ok_or_else(|| {
+        "self-attn qkv RoPE batch q projected element count overflows".to_string()
+    })?;
+    let k_projected_elements = sequence_len.checked_mul(k_matrix.rows).ok_or_else(|| {
+        "self-attn qkv RoPE batch k projected element count overflows".to_string()
+    })?;
+    let v_projected_elements = sequence_len.checked_mul(v_matrix.rows).ok_or_else(|| {
+        "self-attn qkv RoPE batch v projected element count overflows".to_string()
+    })?;
+    let q_output_elements = sequence_len
+        .checked_mul(q_heads)
+        .and_then(|value| value.checked_mul(head_dim))
+        .ok_or_else(|| "self-attn qkv RoPE batch q output element count overflows".to_string())?;
+    let k_output_elements = sequence_len
+        .checked_mul(kv_heads)
+        .and_then(|value| value.checked_mul(head_dim))
+        .ok_or_else(|| "self-attn qkv RoPE batch k output element count overflows".to_string())?;
+
+    let mut input_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_elements,
+            "self-attn qkv RoPE batch input",
+        )?)
+        .map_err(|err| format!("failed to allocate self-attn qkv RoPE batch input: {err}"))?;
+    let mut input_norm_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_norm.values.len(),
+            "self-attn qkv RoPE batch input norm weight",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate self-attn qkv RoPE batch input norm weight: {err}")
+        })?;
+    let mut q_norm_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            q_norm.values.len(),
+            "self-attn qkv RoPE batch q norm weight",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate self-attn qkv RoPE batch q norm weight: {err}")
+        })?;
+    let mut k_norm_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            k_norm.values.len(),
+            "self-attn qkv RoPE batch k norm weight",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate self-attn qkv RoPE batch k norm weight: {err}")
+        })?;
+    let mut input_normed_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_elements,
+            "self-attn qkv RoPE batch input normed",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate self-attn qkv RoPE batch input normed: {err}")
+        })?;
+    let mut q_projected_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            q_projected_elements,
+            "self-attn qkv RoPE batch q projected",
+        )?)
+        .map_err(|err| format!("failed to allocate self-attn qkv RoPE batch q projected: {err}"))?;
+    let mut k_projected_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            k_projected_elements,
+            "self-attn qkv RoPE batch k projected",
+        )?)
+        .map_err(|err| format!("failed to allocate self-attn qkv RoPE batch k projected: {err}"))?;
+    let mut v_projected_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            v_projected_elements,
+            "self-attn qkv RoPE batch v projected",
+        )?)
+        .map_err(|err| format!("failed to allocate self-attn qkv RoPE batch v projected: {err}"))?;
+    let mut q_gate_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            q_output_elements,
+            "self-attn qkv RoPE batch q gate",
+        )?)
+        .map_err(|err| format!("failed to allocate self-attn qkv RoPE batch q gate: {err}"))?;
+    let mut q_rope_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            q_output_elements,
+            "self-attn qkv RoPE batch q RoPE",
+        )?)
+        .map_err(|err| format!("failed to allocate self-attn qkv RoPE batch q RoPE: {err}"))?;
+    let mut k_rope_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            k_output_elements,
+            "self-attn qkv RoPE batch k RoPE",
+        )?)
+        .map_err(|err| format!("failed to allocate self-attn qkv RoPE batch k RoPE: {err}"))?;
+
+    input_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&embedding_rows.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy self-attn qkv RoPE batch input: {err}"))?;
+    input_norm_weight_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&input_norm.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy self-attn qkv RoPE batch input norm: {err}"))?;
+    q_norm_weight_buffer
+        .copy_from_host(0, &encode_f32_to_bytes(&q_norm.values), Some(&mut stream))
+        .map_err(|err| format!("failed to copy self-attn qkv RoPE batch q norm: {err}"))?;
+    k_norm_weight_buffer
+        .copy_from_host(0, &encode_f32_to_bytes(&k_norm.values), Some(&mut stream))
+        .map_err(|err| format!("failed to copy self-attn qkv RoPE batch k norm: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize self-attn qkv RoPE batch setup: {err}"))?;
+
+    let mut run_qkv_rope_batch =
+        |stream: &mut ullm_runtime_sys::RuntimeStream| -> Result<(), String> {
+            ullm_runtime_sys::segmented_rmsnorm_f32(
+                &input_buffer,
+                &input_norm_weight_buffer,
+                sequence_len,
+                hidden,
+                1e-6_f32,
+                &mut input_normed_buffer,
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to run self-attn qkv RoPE batch input RMSNorm: {err}")
+            })?;
+            q_matrix.matvec_batch(
+                &input_normed_buffer,
+                sequence_len,
+                &mut q_projected_buffer,
+                stream,
+                "self-attn q projection batch",
+            )?;
+            k_matrix.matvec_batch(
+                &input_normed_buffer,
+                sequence_len,
+                &mut k_projected_buffer,
+                stream,
+                "self-attn k projection batch",
+            )?;
+            v_matrix.matvec_batch(
+                &input_normed_buffer,
+                sequence_len,
+                &mut v_projected_buffer,
+                stream,
+                "self-attn v projection batch",
+            )?;
+            ullm_runtime_sys::qwen35_qk_norm_rope_batch_f32(
+                &q_projected_buffer,
+                &k_projected_buffer,
+                &q_norm_weight_buffer,
+                &k_norm_weight_buffer,
+                q_heads,
+                kv_heads,
+                sequence_len,
+                head_dim,
+                rotary_dim,
+                position_offset,
+                rope_base,
+                1e-5_f32,
+                &mut q_gate_buffer,
+                &mut q_rope_buffer,
+                &mut k_rope_buffer,
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to run self-attn qkv RoPE batch Qwen3.5 QK norm RoPE: {err}")
+            })
+        };
+
+    run_qkv_rope_batch(&mut stream)?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize self-attn qkv RoPE batch warmup: {err}"))?;
+
+    let mut measured_ms = Vec::with_capacity(measured_repeats);
+    for _ in 0..measured_repeats {
+        let started = Instant::now();
+        run_qkv_rope_batch(&mut stream)?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize self-attn qkv RoPE batch measured run: {err}")
+        })?;
+        measured_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    let wall_ms = measured_ms.iter().sum::<f64>() / measured_ms.len() as f64;
+    let wall_ms_min = measured_ms
+        .iter()
+        .copied()
+        .min_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+    let wall_ms_max = measured_ms
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+
+    let input_normed = read_runtime_buffer_f32(
+        &input_normed_buffer,
+        &mut stream,
+        input_elements,
+        "self-attn qkv RoPE batch input normed",
+    )?;
+    let q_projected = read_runtime_buffer_f32(
+        &q_projected_buffer,
+        &mut stream,
+        q_projected_elements,
+        "self-attn qkv RoPE batch q projected",
+    )?;
+    let k_projected = read_runtime_buffer_f32(
+        &k_projected_buffer,
+        &mut stream,
+        k_projected_elements,
+        "self-attn qkv RoPE batch k projected",
+    )?;
+    let v_projected = read_runtime_buffer_f32(
+        &v_projected_buffer,
+        &mut stream,
+        v_projected_elements,
+        "self-attn qkv RoPE batch v projected",
+    )?;
+    let q_gate = read_runtime_buffer_f32(
+        &q_gate_buffer,
+        &mut stream,
+        q_output_elements,
+        "self-attn qkv RoPE batch q gate",
+    )?;
+    let q_rope = read_runtime_buffer_f32(
+        &q_rope_buffer,
+        &mut stream,
+        q_output_elements,
+        "self-attn qkv RoPE batch q RoPE",
+    )?;
+    let k_rope = read_runtime_buffer_f32(
+        &k_rope_buffer,
+        &mut stream,
+        k_output_elements,
+        "self-attn qkv RoPE batch k RoPE",
+    )?;
+
+    let input_norm_max_abs_diff = verify_f32_close(
+        "self-attn qkv RoPE batch input RMSNorm",
+        &input_normed,
+        &expected_input_normed,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+    let q_split = split_qwen3_self_attn_q_projection(
+        &q_projected,
+        sequence_len,
+        q_matrix.rows,
+        hidden,
+        head_dim,
+    )?;
+    if q_split.layout != "qwen3.5-gated" || q_split.q_heads != q_heads {
+        return Err(format!(
+            "self-attn qkv RoPE batch unexpected q split layout={} q_heads={} expected q_heads={q_heads}",
+            q_split.layout, q_split.q_heads
+        ));
+    }
+    let expected_q_gate = q_split
+        .gate
+        .as_ref()
+        .ok_or_else(|| "self-attn qkv RoPE batch expected gated q projection".to_string())?;
+    let expected_q_normed = q_split
+        .query
+        .chunks_exact(head_dim)
+        .flat_map(|segment| runtime_host_rmsnorm_f32(segment, &q_norm.values, 1e-5_f32))
+        .collect::<Vec<_>>();
+    let expected_k_normed = k_projected
+        .chunks_exact(head_dim)
+        .flat_map(|segment| runtime_host_rmsnorm_f32(segment, &k_norm.values, 1e-5_f32))
+        .collect::<Vec<_>>();
+    let expected_q_rope = runtime_host_rope_f32(
+        &expected_q_normed,
+        sequence_len,
+        q_heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    );
+    let expected_k_rope = runtime_host_rope_f32(
+        &expected_k_normed,
+        sequence_len,
+        kv_heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+    );
+    if expected_q_rope.len() != q_output_elements || expected_k_rope.len() != k_output_elements {
+        return Err("self-attn qkv RoPE batch failed to build RoPE references".to_string());
+    }
+    let q_gate_max_abs_diff = verify_f32_close(
+        "self-attn qkv RoPE batch q gate",
+        &q_gate,
+        expected_q_gate,
+        1e-5_f32,
+        1e-5_f32,
+    )?;
+    let q_rope_max_abs_diff = verify_f32_close(
+        "self-attn qkv RoPE batch q RoPE",
+        &q_rope,
+        &expected_q_rope,
+        2e-4_f32,
+        2e-5_f32,
+    )?;
+    let k_rope_max_abs_diff = verify_f32_close(
+        "self-attn qkv RoPE batch k RoPE",
+        &k_rope,
+        &expected_k_rope,
+        2e-4_f32,
+        2e-5_f32,
+    )?;
+
+    let output_elements = input_normed
+        .len()
+        .checked_add(q_projected.len())
+        .and_then(|value| value.checked_add(k_projected.len()))
+        .and_then(|value| value.checked_add(v_projected.len()))
+        .and_then(|value| value.checked_add(q_gate.len()))
+        .and_then(|value| value.checked_add(q_rope.len()))
+        .and_then(|value| value.checked_add(k_rope.len()))
+        .ok_or_else(|| "self-attn qkv RoPE batch output element count overflows".to_string())?;
+    let preview_len = q_rope.len().min(8);
+    Ok(format!(
+        "package-self-attn-qkv-rope-batch-smoke package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} input_elements={} output_elements={} executor=segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32 real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} q_rope_preview={} v_preview={} verified=true",
+        path,
+        layer_index,
+        input_norm_tensor,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        q_norm_tensor,
+        k_norm_tensor,
+        sequence_len,
+        hidden,
+        q_matrix.rows,
+        k_matrix.rows,
+        v_matrix.rows,
+        q_split.layout,
+        expected_q_gate.len(),
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        input_elements,
+        output_elements,
+        sequence_len,
+        info.backend,
+        device_index,
+        info.name,
+        measured_repeats,
+        wall_ms,
+        wall_ms_min,
+        wall_ms_max,
+        tps(sequence_len, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        tps(output_elements, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        format_f32_preview(&q_rope[..preview_len]),
+        format_f32_preview(&v_projected[..v_projected.len().min(8)]),
     ))
 }
 
@@ -34834,6 +35485,9 @@ fn print_help() {
     );
     eprintln!(
         "package-prefill-aq4-matvec-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
+    );
+    eprintln!(
+        "package-self-attn-qkv-rope-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "package-linear-attn-proj-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"

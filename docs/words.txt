@@ -171,6 +171,7 @@ package linear attention post batch smoke:.ullm.d内の実際のlinear_attn z/ou
 package linear attention attention batch smoke:.ullm.d内のlinear_attn qkv/z/a/b/conv/A_log/dt_bias/norm/outを使い、input RMSNormからrecurrent、post-recurrent処理、out projection、residual addまでを同一token batchで接続するprefill向けpartial attention smoke
 package linear attention MLP batch smoke:.ullm.d内のpost_attention_layernorm.weightとMLP gate/up/down projectionを使い、token batchのMLP側RMSNorm、SiLU積、down projection、residual addをdevice-resident実行で検証・計測するsmoke
 package linear attention layer batch smoke:.ullm.d内のlinear_attn attention側とMLP側を同一token batch・同一buffer列で接続し、linear attention decoder layer相当のprefill partial layerをdevice-resident実行で検証・計測するsmoke
+package self attention QKV RoPE batch smoke:.ullm.d内のself_attn q/k/v projection、input RMSNorm、Qwen3.5 QK norm RoPE batchをtoken batchとして接続し、self-attention prefill前半のdevice-resident実行を検証・計測するsmoke
 Qwen3.5 QK norm RoPE batch:Qwen3.5 self-attention prefill向けに、token-majorのq_proj/k_proj出力からQ gate分離、headwise RMSNorm、RoPEを複数token分まとめて実行するruntime primitive
 Radeon fallback backend:vLLM/ROCmでInstinct向け最適backendが使えない場合に、Radeon GPUで使うROCM_ATTNやTriton系のfallback backend。FP8 native比較とは別行で記録する
 throughput_gen:requests x output length / elapsed timeで計算される生成token throughput。elapsed timeがprefill込みの場合はdecode-only throughputと直接比較しない

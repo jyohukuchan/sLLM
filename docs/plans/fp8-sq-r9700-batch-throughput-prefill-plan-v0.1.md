@@ -491,6 +491,33 @@ R9700 release results:
 - CPU testとHIP testを追加し、`cargo test -p ullm-runtime-sys qwen35_qk_norm_rope_batch -- --test-threads=1` で検証した。
 - 次はpackage内self-attn layerで `input RMSNorm -> q/k/v AQ4 batch projection -> q/k norm+RoPE batch` を一続きで測る。
 
+2026-07-07 self-attention prefill front-half batch:
+
+- `package-self-attn-qkv-rope-batch-smoke` を追加した。
+- Qwen3.5-9B packageのself-attention layer 3に対して、`input RMSNorm -> q/k/v AQ4 batch projection -> qwen35_qk_norm_rope_batch_f32` を同一token batchで接続した。
+- このsmokeはcausal attentionやo projectionまでは含まない。self-attention prefill前半のdevice-resident component timingとQ gate/Q RoPE/K RoPEのguardを目的にする。
+
+R9700 release results:
+
+| component | prompt tokens | wall ms mean | token/s mean | note |
+| --- | ---: | ---: | ---: | --- |
+| self-attention qkv+QK RoPE front-half | 4 | 0.315858 | 12663.905232 | warmup 1、measured 3 |
+| self-attention qkv+QK RoPE front-half | 128 | 7.385021 | 17332.381786 | warmup 1、measured 5 |
+| self-attention qkv+QK RoPE front-half | 512 | 24.703001 | 20726.227024 | warmup 1、measured 3 |
+
+Guard:
+
+- `input_norm_max_abs_diff <= 0.000072479`
+- `q_gate_max_abs_diff = 0`
+- `q_rope_max_abs_diff <= 0.000059426`
+- `k_rope_max_abs_diff <= 0.000045419`
+
+解釈:
+
+- self-attention prefillのprojection+QK norm/RoPE前半は、512 tokenで約 `20.7k tok/s` までbatch化できた。
+- linear attentionのattention側front-halfと同程度の粒度では、Qwen3.5 self-attention側もhost境界なしでdevice-residentに接続できることを確認した。
+- 次はこの出力をcausal attention prefillへ接続し、その後o projection/residual、MLP、layer stackへ広げる。
+
 ## Decision gates
 
 ### FP8 candidate can continue if
