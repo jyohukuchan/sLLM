@@ -518,6 +518,44 @@ Guard:
 - linear attentionのattention側front-halfと同程度の粒度では、Qwen3.5 self-attention側もhost境界なしでdevice-residentに接続できることを確認した。
 - 次はこの出力をcausal attention prefillへ接続し、その後o projection/residual、MLP、layer stackへ広げる。
 
+2026-07-07 self-attention prefill causal attention batch:
+
+- `package-self-attn-attention-batch-smoke` を追加した。
+- Qwen3.5-9B packageのself-attention layer 3に対して、`input RMSNorm -> q/k/v AQ4 batch projection -> qwen35_qk_norm_rope_batch_f32 -> causal_attn_f32` を同一token batchで接続した。
+- R9700では `ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL=1`、`ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL=1`、`ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1` を付けて、staging fallbackなしで確認した。
+- このsmokeはo projection、residual add、MLPまでは含まない。self-attention prefill attention側のdevice-resident component timingとattention output guardを目的にする。
+
+R9700 release results:
+
+| component | prompt tokens | wall ms mean | token/s mean | note |
+| --- | ---: | ---: | ---: | --- |
+| self-attention qkv+QK RoPE+causal attention | 4 | 0.484690 | 8252.691925 | warmup 1、measured 3 |
+| self-attention qkv+QK RoPE+causal attention | 128 | 24.605704 | 5202.045750 | warmup 1、measured 5 |
+| self-attention qkv+QK RoPE+causal attention | 512 | 281.601274 | 1818.173590 | warmup 1、measured 3 |
+
+Front-halfとの差分:
+
+| prompt tokens | front-half ms | attention-included ms | delta ms |
+| ---: | ---: | ---: | ---: |
+| 4 | 0.315858 | 0.484690 | 0.168832 |
+| 128 | 7.385021 | 24.605704 | 17.220683 |
+| 512 | 24.703001 | 281.601274 | 256.898273 |
+
+Guard:
+
+- `input_norm_max_abs_diff <= 0.000072479`
+- `q_gate_max_abs_diff = 0`
+- `q_rope_max_abs_diff <= 0.000059426`
+- `k_rope_max_abs_diff <= 0.000045419`
+- `attention_max_abs_diff <= 0.000003248`
+
+解釈:
+
+- causal attention込みのprefill速度は、512 tokenで約 `1.82k tok/s` まで低下した。
+- QKV projection、QK norm、RoPE前半は512 tokenで `24.70 ms` なので、512 token時の追加 `256.90 ms` はほぼcausal attention prefill kernel側で発生している。
+- SQ候補のprefill評価へ進む前に、self-attention prefill attention kernelをtiled/blocked化して、長いpromptでのO(N^2)部分を現実的な速度に近づける必要がある。
+- 次はo projection/residualへ広げる前に、causal attention prefill kernel自体のcomponent benchmarkと最小限のtiling方針を固める。
+
 ## Decision gates
 
 ### FP8 candidate can continue if
