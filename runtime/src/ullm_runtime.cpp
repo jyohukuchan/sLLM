@@ -24,7 +24,7 @@
 
 namespace {
 
-constexpr unsigned int kAq4MatvecTop1RowsPerBlock = 16u;
+constexpr unsigned int kAq4MatvecTop1RowsPerBlock = 8u;
 
 thread_local std::string last_error;
 
@@ -74,6 +74,13 @@ unsigned int aq4_rows_per_block_from_env(
         return value;
     }
     return fallback;
+}
+
+unsigned int aq4_matvec_top1_rows_per_block_from_env() {
+    return aq4_rows_per_block_from_env(
+        "ULLM_AQ4_MATVEC_TOP1_RPB",
+        nullptr,
+        kAq4MatvecTop1RowsPerBlock);
 }
 
 unsigned int block_size_from_env(const char *env_name, unsigned int fallback) {
@@ -916,7 +923,8 @@ extern "C" __global__ void ullm_aq4_row_f32_kernel(
 
     static std::string aq4_matvec_top1_kernel_source_for_arch(const std::string &arch) {
         (void)arch;
-        return aq4_rows_per_block_preamble_for_rows(16u) + aq4_matvec_top1_kernel_source();
+        return aq4_rows_per_block_preamble_for_rows(aq4_matvec_top1_rows_per_block_from_env()) +
+               aq4_matvec_top1_kernel_source();
     }
 
     static std::string aq4_matvec_add_kernel_source_for_arch(const std::string &arch) {
@@ -5473,7 +5481,8 @@ bool aq4_matvec_f32_host(
 }
 
 size_t aq4_matvec_top1_partial_count(size_t rows) {
-    return (rows + kAq4MatvecTop1RowsPerBlock - 1) / kAq4MatvecTop1RowsPerBlock;
+    const unsigned int rows_per_block = aq4_matvec_top1_rows_per_block_from_env();
+    return (rows + rows_per_block - 1) / rows_per_block;
 }
 
 bool aq4_matvec_top1_f32_host(
@@ -6290,8 +6299,8 @@ bool aq4_matvec_top1_f32_hip_kernel(
         return false;
     }
 
-    const size_t grid_size =
-        (rows + kAq4MatvecTop1RowsPerBlock - 1) / kAq4MatvecTop1RowsPerBlock;
+    const unsigned int rows_per_block = aq4_matvec_top1_rows_per_block_from_env();
+    const size_t grid_size = (rows + rows_per_block - 1) / rows_per_block;
     if (grid_size != partial_count) {
         if (error != nullptr) {
             *error = "AQ4 matvec top1 partial count does not match row block count";

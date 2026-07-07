@@ -980,10 +980,19 @@ pub fn aq4_matvec_top1_partial_count(rows: usize) -> Result<usize, String> {
     if rows == 0 {
         return Err("AQ4 matvec top1 rows must be greater than zero".to_string());
     }
-    const ROWS_PER_BLOCK: usize = 16;
-    rows.checked_add(ROWS_PER_BLOCK - 1)
-        .map(|value| value / ROWS_PER_BLOCK)
+    let rows_per_block = aq4_matvec_top1_rows_per_block();
+    rows.checked_add(rows_per_block - 1)
+        .map(|value| value / rows_per_block)
         .ok_or_else(|| "AQ4 matvec top1 partial count overflows".to_string())
+}
+
+fn aq4_matvec_top1_rows_per_block() -> usize {
+    const DEFAULT_ROWS_PER_BLOCK: usize = 8;
+    std::env::var("ULLM_AQ4_MATVEC_TOP1_RPB")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value >= 1 && *value <= 32 && 256 % *value == 0)
+        .unwrap_or(DEFAULT_ROWS_PER_BLOCK)
 }
 
 #[allow(clippy::too_many_arguments)]
