@@ -922,9 +922,13 @@ extern "C" __global__ void ullm_aq4_row_f32_kernel(
     }
 
     static std::string aq4_matvec_top1_kernel_source_for_arch(const std::string &arch) {
-        (void)arch;
-        return aq4_rows_per_block_preamble_for_rows(aq4_matvec_top1_rows_per_block_from_env()) +
-               aq4_matvec_top1_kernel_source();
+        std::string preamble =
+            aq4_rows_per_block_preamble_for_rows(aq4_matvec_top1_rows_per_block_from_env());
+        if (arch.rfind("gfx12", 0) != 0 ||
+            std::getenv("ULLM_DISABLE_AQ4_MATVEC_TOP1_WARP_REDUCE") != nullptr) {
+            preamble += "#define ULLM_AQ4_MATVEC_TOP1_USE_SHARED_REDUCE 1\n";
+        }
+        return preamble + aq4_matvec_top1_kernel_source();
     }
 
     static std::string aq4_matvec_add_kernel_source_for_arch(const std::string &arch) {
@@ -1182,7 +1186,9 @@ extern "C" __global__ void ullm_aq4_matvec_top1_f32_kernel(
             }
         }
     }
-    partial[tid] = sum;
+    float row_sum = sum;
+#if defined(ULLM_AQ4_MATVEC_TOP1_USE_SHARED_REDUCE)
+    partial[tid] = row_sum;
     __syncthreads();
     for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
         if (lane < offset) {
@@ -1190,11 +1196,17 @@ extern "C" __global__ void ullm_aq4_matvec_top1_f32_kernel(
         }
         __syncthreads();
     }
+    row_sum = partial[partial_offset];
+#else
+    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
+        row_sum += __shfl_down(row_sum, offset, threads_per_row);
+    }
+#endif
     if (lane == 0) {
         float value = -3.4028234663852886e38f;
         unsigned int token_index = 0xffffffffu;
         if (row < rows) {
-            value = partial[partial_offset];
+            value = row_sum;
             if (row_scales != nullptr && row < row_scale_count) {
                 value *= row_scales[row];
             }
