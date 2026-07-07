@@ -437,6 +437,24 @@ unsafe extern "C" {
         k_rope_output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_qwen35_qk_norm_rope_batch_f32(
+        q_projected_buffer: *const RawRuntimeBuffer,
+        k_projected_buffer: *const RawRuntimeBuffer,
+        q_weight_buffer: *const RawRuntimeBuffer,
+        k_weight_buffer: *const RawRuntimeBuffer,
+        q_heads: usize,
+        kv_heads: usize,
+        sequence_len: usize,
+        head_dim: usize,
+        rotary_dim: usize,
+        position_offset: usize,
+        rope_base: f32,
+        epsilon: f32,
+        q_gate_output_buffer: *mut RawRuntimeBuffer,
+        q_rope_output_buffer: *mut RawRuntimeBuffer,
+        k_rope_output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_qwen35_qk_norm_rope_paged_kv_write_f32(
         q_projected_buffer: *const RawRuntimeBuffer,
         k_projected_buffer: *const RawRuntimeBuffer,
@@ -2696,6 +2714,95 @@ pub fn qwen35_qk_norm_rope_f32(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn qwen35_qk_norm_rope_batch_f32(
+    q_projected_buffer: &RuntimeBuffer,
+    k_projected_buffer: &RuntimeBuffer,
+    q_weight_buffer: &RuntimeBuffer,
+    k_weight_buffer: &RuntimeBuffer,
+    q_heads: usize,
+    kv_heads: usize,
+    sequence_len: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    position_offset: usize,
+    rope_base: f32,
+    epsilon: f32,
+    q_gate_output_buffer: &mut RuntimeBuffer,
+    q_rope_output_buffer: &mut RuntimeBuffer,
+    k_rope_output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if q_heads == 0 || kv_heads == 0 || sequence_len == 0 || head_dim == 0 {
+        return Err(
+            "Qwen3.5 q/k norm RoPE batch heads, sequence_len, and head_dim must be greater than zero"
+                .into(),
+        );
+    }
+    if rotary_dim == 0 || rotary_dim > head_dim || !rotary_dim.is_multiple_of(2) {
+        return Err(
+            "Qwen3.5 q/k norm RoPE batch rotary_dim must be even and no greater than head_dim"
+                .into(),
+        );
+    }
+    if !rope_base.is_finite() || rope_base <= 1.0 {
+        return Err("Qwen3.5 q/k norm RoPE batch base must be finite and greater than one".into());
+    }
+    if !epsilon.is_finite() || epsilon <= 0.0 {
+        return Err(
+            "Qwen3.5 q/k norm RoPE batch epsilon must be finite and greater than zero".into(),
+        );
+    }
+    let q_output_elements = sequence_len
+        .checked_mul(q_heads)
+        .and_then(|value| value.checked_mul(head_dim))
+        .ok_or_else(|| "Qwen3.5 q/k norm RoPE batch q element count overflows".to_string())?;
+    let k_output_elements = sequence_len
+        .checked_mul(kv_heads)
+        .and_then(|value| value.checked_mul(head_dim))
+        .ok_or_else(|| "Qwen3.5 q/k norm RoPE batch k element count overflows".to_string())?;
+    let q_output_bytes = q_output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Qwen3.5 q/k norm RoPE batch q output byte size overflows".to_string())?;
+    let k_output_bytes = k_output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Qwen3.5 q/k norm RoPE batch k output byte size overflows".to_string())?;
+    let q_projected_bytes = q_output_bytes
+        .checked_mul(2)
+        .ok_or_else(|| "Qwen3.5 q/k norm RoPE batch q projected byte size overflows".to_string())?;
+    let weight_bytes = head_dim
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "Qwen3.5 q/k norm RoPE batch weight byte size overflows".to_string())?;
+    check_copy_range(0, q_projected_bytes, q_projected_buffer.size()?)?;
+    check_copy_range(0, k_output_bytes, k_projected_buffer.size()?)?;
+    check_copy_range(0, weight_bytes, q_weight_buffer.size()?)?;
+    check_copy_range(0, weight_bytes, k_weight_buffer.size()?)?;
+    check_copy_range(0, q_output_bytes, q_gate_output_buffer.size()?)?;
+    check_copy_range(0, q_output_bytes, q_rope_output_buffer.size()?)?;
+    check_copy_range(0, k_output_bytes, k_rope_output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_qwen35_qk_norm_rope_batch_f32(
+            q_projected_buffer.raw.as_ptr(),
+            k_projected_buffer.raw.as_ptr(),
+            q_weight_buffer.raw.as_ptr(),
+            k_weight_buffer.raw.as_ptr(),
+            q_heads,
+            kv_heads,
+            sequence_len,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            q_gate_output_buffer.raw.as_ptr(),
+            q_rope_output_buffer.raw.as_ptr(),
+            k_rope_output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn qwen35_qk_norm_rope_paged_kv_write_f32(
     q_projected_buffer: &RuntimeBuffer,
     k_projected_buffer: &RuntimeBuffer,
@@ -4770,6 +4877,143 @@ mod tests {
         let expected_k_rope = expected_rope(
             &expected_k_normed,
             1,
+            kv_heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        assert_f32s_close(&le_bytes_to_f32s(&q_gate_bytes), &expected_q_gate, 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&q_rope_bytes), &expected_q_rope, 1e-5);
+        assert_f32s_close(&le_bytes_to_f32s(&k_rope_bytes), &expected_k_rope, 1e-5);
+    }
+
+    #[test]
+    fn cpu_qwen35_qk_norm_rope_batch_f32_matches_split_norm_rope() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let q_heads = 2_usize;
+        let kv_heads = 1_usize;
+        let sequence_len = 3_usize;
+        let head_dim = 6_usize;
+        let rotary_dim = 4_usize;
+        let position_offset = 5_usize;
+        let rope_base = 10000.0_f32;
+        let epsilon = 1e-5_f32;
+        let q_projected_values = (0..sequence_len * q_heads * head_dim * 2)
+            .map(|index| (index as f32 - 17.0) / 19.0)
+            .collect::<Vec<_>>();
+        let k_projected_values = (0..sequence_len * kv_heads * head_dim)
+            .map(|index| (index as f32 + 11.0) / -13.0)
+            .collect::<Vec<_>>();
+        let q_weight_values = [0.5_f32, -1.0, 1.25, 0.75, -0.5, 1.5];
+        let k_weight_values = [-0.25_f32, 0.5, 1.0, -1.5, 0.75, 1.25];
+        let q_output_elements = sequence_len * q_heads * head_dim;
+        let k_output_elements = sequence_len * kv_heads * head_dim;
+        let mut q_projected = context
+            .alloc_buffer(q_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_projected = context
+            .alloc_buffer(k_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_weight = context
+            .alloc_buffer(q_weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_weight = context
+            .alloc_buffer(k_weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_gate = context
+            .alloc_buffer(q_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_rope = context
+            .alloc_buffer(q_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_rope = context
+            .alloc_buffer(k_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&q_projected_values), Some(&mut stream))
+            .unwrap();
+        k_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&k_projected_values), Some(&mut stream))
+            .unwrap();
+        q_weight
+            .copy_from_host(0, &f32s_to_le_bytes(&q_weight_values), Some(&mut stream))
+            .unwrap();
+        k_weight
+            .copy_from_host(0, &f32s_to_le_bytes(&k_weight_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        qwen35_qk_norm_rope_batch_f32(
+            &q_projected,
+            &k_projected,
+            &q_weight,
+            &k_weight,
+            q_heads,
+            kv_heads,
+            sequence_len,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            &mut q_gate,
+            &mut q_rope,
+            &mut k_rope,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut q_gate_bytes = vec![0_u8; q_output_elements * std::mem::size_of::<f32>()];
+        let mut q_rope_bytes = vec![0_u8; q_output_elements * std::mem::size_of::<f32>()];
+        let mut k_rope_bytes = vec![0_u8; k_output_elements * std::mem::size_of::<f32>()];
+        q_gate
+            .copy_to_host(0, &mut q_gate_bytes, Some(&mut stream))
+            .unwrap();
+        q_rope
+            .copy_to_host(0, &mut q_rope_bytes, Some(&mut stream))
+            .unwrap();
+        k_rope
+            .copy_to_host(0, &mut k_rope_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let q_projected_stride = q_heads * head_dim * 2;
+        let mut expected_q_gate = Vec::with_capacity(q_output_elements);
+        let mut expected_q_query = Vec::with_capacity(q_output_elements);
+        for token in 0..sequence_len {
+            for head in 0..q_heads {
+                let source_base = token * q_projected_stride + head * 2 * head_dim;
+                expected_q_query
+                    .extend_from_slice(&q_projected_values[source_base..source_base + head_dim]);
+                expected_q_gate.extend_from_slice(
+                    &q_projected_values[source_base + head_dim..source_base + 2 * head_dim],
+                );
+            }
+        }
+        let expected_q_normed = expected_q_query
+            .chunks_exact(head_dim)
+            .flat_map(|segment| expected_rmsnorm(segment, &q_weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected_k_normed = k_projected_values
+            .chunks_exact(head_dim)
+            .flat_map(|segment| expected_rmsnorm(segment, &k_weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected_q_rope = expected_rope(
+            &expected_q_normed,
+            sequence_len,
+            q_heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let expected_k_rope = expected_rope(
+            &expected_k_normed,
+            sequence_len,
             kv_heads,
             head_dim,
             rotary_dim,
@@ -8651,6 +8895,146 @@ mod tests {
         let expected_k_rope = expected_rope(
             &expected_k_normed,
             1,
+            kv_heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        assert_f32s_close(&le_bytes_to_f32s(&q_gate_bytes), &expected_q_gate, 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&q_rope_bytes), &expected_q_rope, 1e-4);
+        assert_f32s_close(&le_bytes_to_f32s(&k_rope_bytes), &expected_k_rope, 1e-4);
+    }
+
+    #[test]
+    fn first_hip_qwen35_qk_norm_rope_batch_f32_matches_split_norm_rope_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let q_heads = 2_usize;
+        let kv_heads = 1_usize;
+        let sequence_len = 3_usize;
+        let head_dim = 6_usize;
+        let rotary_dim = 4_usize;
+        let position_offset = 5_usize;
+        let rope_base = 10000.0_f32;
+        let epsilon = 1e-5_f32;
+        let q_projected_values = (0..sequence_len * q_heads * head_dim * 2)
+            .map(|index| (index as f32 - 17.0) / 19.0)
+            .collect::<Vec<_>>();
+        let k_projected_values = (0..sequence_len * kv_heads * head_dim)
+            .map(|index| (index as f32 + 11.0) / -13.0)
+            .collect::<Vec<_>>();
+        let q_weight_values = [0.5_f32, -1.0, 1.25, 0.75, -0.5, 1.5];
+        let k_weight_values = [-0.25_f32, 0.5, 1.0, -1.5, 0.75, 1.25];
+        let q_output_elements = sequence_len * q_heads * head_dim;
+        let k_output_elements = sequence_len * kv_heads * head_dim;
+        let mut q_projected = context
+            .alloc_buffer(q_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_projected = context
+            .alloc_buffer(k_projected_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_weight = context
+            .alloc_buffer(q_weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_weight = context
+            .alloc_buffer(k_weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_gate = context
+            .alloc_buffer(q_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_rope = context
+            .alloc_buffer(q_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_rope = context
+            .alloc_buffer(k_output_elements * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&q_projected_values), Some(&mut stream))
+            .unwrap();
+        k_projected
+            .copy_from_host(0, &f32s_to_le_bytes(&k_projected_values), Some(&mut stream))
+            .unwrap();
+        q_weight
+            .copy_from_host(0, &f32s_to_le_bytes(&q_weight_values), Some(&mut stream))
+            .unwrap();
+        k_weight
+            .copy_from_host(0, &f32s_to_le_bytes(&k_weight_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        qwen35_qk_norm_rope_batch_f32(
+            &q_projected,
+            &k_projected,
+            &q_weight,
+            &k_weight,
+            q_heads,
+            kv_heads,
+            sequence_len,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            &mut q_gate,
+            &mut q_rope,
+            &mut k_rope,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut q_gate_bytes = vec![0_u8; q_output_elements * std::mem::size_of::<f32>()];
+        let mut q_rope_bytes = vec![0_u8; q_output_elements * std::mem::size_of::<f32>()];
+        let mut k_rope_bytes = vec![0_u8; k_output_elements * std::mem::size_of::<f32>()];
+        q_gate
+            .copy_to_host(0, &mut q_gate_bytes, Some(&mut stream))
+            .unwrap();
+        q_rope
+            .copy_to_host(0, &mut q_rope_bytes, Some(&mut stream))
+            .unwrap();
+        k_rope
+            .copy_to_host(0, &mut k_rope_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let q_projected_stride = q_heads * head_dim * 2;
+        let mut expected_q_gate = Vec::with_capacity(q_output_elements);
+        let mut expected_q_query = Vec::with_capacity(q_output_elements);
+        for token in 0..sequence_len {
+            for head in 0..q_heads {
+                let source_base = token * q_projected_stride + head * 2 * head_dim;
+                expected_q_query
+                    .extend_from_slice(&q_projected_values[source_base..source_base + head_dim]);
+                expected_q_gate.extend_from_slice(
+                    &q_projected_values[source_base + head_dim..source_base + 2 * head_dim],
+                );
+            }
+        }
+        let expected_q_normed = expected_q_query
+            .chunks_exact(head_dim)
+            .flat_map(|segment| expected_rmsnorm(segment, &q_weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected_k_normed = k_projected_values
+            .chunks_exact(head_dim)
+            .flat_map(|segment| expected_rmsnorm(segment, &k_weight_values, epsilon))
+            .collect::<Vec<_>>();
+        let expected_q_rope = expected_rope(
+            &expected_q_normed,
+            sequence_len,
+            q_heads,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+        );
+        let expected_k_rope = expected_rope(
+            &expected_k_normed,
+            sequence_len,
             kv_heads,
             head_dim,
             rotary_dim,

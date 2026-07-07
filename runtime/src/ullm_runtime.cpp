@@ -655,6 +655,18 @@ public:
             error);
     }
 
+    bool compile_qwen35_qk_norm_rope_batch_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            qwen35_qk_norm_rope_batch_kernel_source(),
+            "ullm_qwen35_qk_norm_rope_batch_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_qwen35_qk_norm_rope_paged_kv_write_kernel(
         const std::string &arch,
         std::vector<char> *code,
@@ -3656,6 +3668,118 @@ extern "C" __global__ void ullm_qwen35_qk_norm_rope_f32_kernel(
         const unsigned long long k_segment = segment - q_heads;
         const unsigned long long source_base = k_segment * head_dim;
         const unsigned long long output_base = k_segment * head_dim;
+        for (unsigned long long pair_dim = tid; pair_dim < half; pair_dim += blockDim.x) {
+            const float exponent =
+                (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(rotary_dim);
+            const float theta = position / powf(rope_base, exponent);
+            const float c = cosf(theta);
+            const float s = sinf(theta);
+            const float first = k_projected[source_base + pair_dim] * inv_rms * k_weight[pair_dim];
+            const unsigned long long second_dim = half + pair_dim;
+            const float second =
+                k_projected[source_base + second_dim] * inv_rms * k_weight[second_dim];
+            k_rope_output[output_base + pair_dim] = first * c - second * s;
+            k_rope_output[output_base + second_dim] = second * c + first * s;
+        }
+        for (unsigned long long dim = rotary_dim + tid; dim < head_dim; dim += blockDim.x) {
+            k_rope_output[output_base + dim] =
+                k_projected[source_base + dim] * inv_rms * k_weight[dim];
+        }
+    }
+}
+)";
+    }
+
+    static const char *qwen35_qk_norm_rope_batch_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_qwen35_qk_norm_rope_batch_f32_kernel(
+    const float *q_projected,
+    const float *k_projected,
+    const float *q_weight,
+    const float *k_weight,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long sequence_len,
+    unsigned long long head_dim,
+    unsigned long long rotary_dim,
+    unsigned long long position_offset,
+    float rope_base,
+    float epsilon,
+    float *q_gate_output,
+    float *q_rope_output,
+    float *k_rope_output) {
+    const unsigned long long total_segments_per_token = q_heads + kv_heads;
+    const unsigned long long global_segment = blockIdx.x;
+    const unsigned long long token = global_segment / total_segments_per_token;
+    const unsigned long long segment = global_segment - token * total_segments_per_token;
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[256];
+    float sum_squares = 0.0f;
+    if (token < sequence_len && segment < q_heads) {
+        const unsigned long long q_projected_stride = q_heads * 2ull * head_dim;
+        const unsigned long long source_base =
+            token * q_projected_stride + segment * 2ull * head_dim;
+        const unsigned long long q_output_stride = q_heads * head_dim;
+        const unsigned long long output_base = token * q_output_stride + segment * head_dim;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            const float value = q_projected[source_base + dim];
+            q_gate_output[output_base + dim] = q_projected[source_base + head_dim + dim];
+            sum_squares += value * value;
+        }
+    } else if (token < sequence_len && segment < total_segments_per_token) {
+        const unsigned long long k_segment = segment - q_heads;
+        const unsigned long long k_projected_stride = kv_heads * head_dim;
+        const unsigned long long source_base =
+            token * k_projected_stride + k_segment * head_dim;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            const float value = k_projected[source_base + dim];
+            sum_squares += value * value;
+        }
+    }
+    partial[tid] = sum_squares;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            partial[tid] += partial[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (token >= sequence_len || segment >= total_segments_per_token) {
+        return;
+    }
+    const float inv_rms = rsqrtf(partial[0] / static_cast<float>(head_dim) + epsilon);
+    const unsigned long long half = rotary_dim >> 1;
+    const float position = static_cast<float>(position_offset + token);
+    if (segment < q_heads) {
+        const unsigned long long q_projected_stride = q_heads * 2ull * head_dim;
+        const unsigned long long source_base =
+            token * q_projected_stride + segment * 2ull * head_dim;
+        const unsigned long long q_output_stride = q_heads * head_dim;
+        const unsigned long long output_base = token * q_output_stride + segment * head_dim;
+        for (unsigned long long pair_dim = tid; pair_dim < half; pair_dim += blockDim.x) {
+            const float exponent =
+                (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(rotary_dim);
+            const float theta = position / powf(rope_base, exponent);
+            const float c = cosf(theta);
+            const float s = sinf(theta);
+            const float first = q_projected[source_base + pair_dim] * inv_rms * q_weight[pair_dim];
+            const unsigned long long second_dim = half + pair_dim;
+            const float second =
+                q_projected[source_base + second_dim] * inv_rms * q_weight[second_dim];
+            q_rope_output[output_base + pair_dim] = first * c - second * s;
+            q_rope_output[output_base + second_dim] = second * c + first * s;
+        }
+        for (unsigned long long dim = rotary_dim + tid; dim < head_dim; dim += blockDim.x) {
+            q_rope_output[output_base + dim] =
+                q_projected[source_base + dim] * inv_rms * q_weight[dim];
+        }
+    } else {
+        const unsigned long long k_segment = segment - q_heads;
+        const unsigned long long k_projected_stride = kv_heads * head_dim;
+        const unsigned long long source_base =
+            token * k_projected_stride + k_segment * head_dim;
+        const unsigned long long k_output_stride = kv_heads * head_dim;
+        const unsigned long long output_base = token * k_output_stride + k_segment * head_dim;
         for (unsigned long long pair_dim = tid; pair_dim < half; pair_dim += blockDim.x) {
             const float exponent =
                 (2.0f * static_cast<float>(pair_dim)) / static_cast<float>(rotary_dim);
@@ -10451,6 +10575,44 @@ void qwen35_qk_norm_rope_f32_host(
     }
 }
 
+void qwen35_qk_norm_rope_batch_f32_host(
+    const float *q_projected,
+    const float *k_projected,
+    const float *q_weight,
+    const float *k_weight,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t sequence_len,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    float *q_gate_output,
+    float *q_rope_output,
+    float *k_rope_output) {
+    const size_t q_projected_stride = q_heads * head_dim * 2;
+    const size_t q_output_stride = q_heads * head_dim;
+    const size_t k_stride = kv_heads * head_dim;
+    for (size_t timestep = 0; timestep < sequence_len; ++timestep) {
+        qwen35_qk_norm_rope_f32_host(
+            q_projected + timestep * q_projected_stride,
+            k_projected + timestep * k_stride,
+            q_weight,
+            k_weight,
+            q_heads,
+            kv_heads,
+            head_dim,
+            rotary_dim,
+            position_offset + timestep,
+            rope_base,
+            epsilon,
+            q_gate_output + timestep * q_output_stride,
+            q_rope_output + timestep * q_output_stride,
+            k_rope_output + timestep * k_stride);
+    }
+}
+
 void qwen35_qk_norm_rope_paged_kv_write_f32_host(
     const float *q_projected,
     const float *k_projected,
@@ -11611,6 +11773,293 @@ ullm_status qwen35_qk_norm_rope_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize Qwen3.5 q/k norm RoPE HIP output staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipQwen35QkNormRopeBatchKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_qwen35_qk_norm_rope_batch_kernel(
+                    arch,
+                    &code,
+                    &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_qwen35_qk_norm_rope_batch_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(error, compile_errors.empty()
+                                ? "failed to build Qwen3.5 q/k norm RoPE batch HIP kernel"
+                                : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipQwen35QkNormRopeBatchKernelCache &hip_qwen35_qk_norm_rope_batch_kernel_cache() {
+    static HipQwen35QkNormRopeBatchKernelCache cache;
+    return cache;
+}
+
+bool qwen35_qk_norm_rope_batch_f32_hip_kernel(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t sequence_len,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_rope_output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_projected_buffer->hip_device_id;
+    void *function =
+        hip_qwen35_qk_norm_rope_batch_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    const size_t segments_per_token = q_heads + kv_heads;
+    if (sequence_len > std::numeric_limits<size_t>::max() / segments_per_token) {
+        if (error != nullptr) {
+            *error = "Qwen3.5 q/k norm RoPE batch segment count overflows";
+        }
+        return false;
+    }
+    const size_t segments = sequence_len * segments_per_token;
+    if (segments > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "Qwen3.5 q/k norm RoPE batch segment count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    constexpr unsigned int block_size = 256;
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_sequence_len = static_cast<unsigned long long>(sequence_len);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_rotary_dim = static_cast<unsigned long long>(rotary_dim);
+    unsigned long long kernel_position_offset = static_cast<unsigned long long>(position_offset);
+    void *q_projected_ptr = q_projected_buffer->ptr;
+    void *k_projected_ptr = k_projected_buffer->ptr;
+    void *q_weight_ptr = q_weight_buffer->ptr;
+    void *k_weight_ptr = k_weight_buffer->ptr;
+    void *q_gate_output_ptr = q_gate_output_buffer->ptr;
+    void *q_rope_output_ptr = q_rope_output_buffer->ptr;
+    void *k_rope_output_ptr = k_rope_output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_projected_ptr,
+        &k_projected_ptr,
+        &q_weight_ptr,
+        &k_weight_ptr,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_sequence_len,
+        &kernel_head_dim,
+        &kernel_rotary_dim,
+        &kernel_position_offset,
+        &rope_base,
+        &epsilon,
+        &q_gate_output_ptr,
+        &q_rope_output_ptr,
+        &k_rope_output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(segments),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for Qwen3.5 q/k norm RoPE batch";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status qwen35_qk_norm_rope_batch_f32_hip_staging(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t sequence_len,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    size_t q_projected_bytes,
+    size_t k_projected_bytes,
+    size_t weight_bytes,
+    size_t q_output_bytes,
+    size_t k_output_bytes,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_rope_output_buffer,
+    ullm_runtime_stream *stream) {
+    const size_t q_projected_elements = sequence_len * q_heads * head_dim * 2;
+    const size_t q_output_elements = sequence_len * q_heads * head_dim;
+    const size_t k_output_elements = sequence_len * kv_heads * head_dim;
+    std::vector<float> host_q_projected(q_projected_elements);
+    std::vector<float> host_k_projected(k_output_elements);
+    std::vector<float> host_q_weight(head_dim);
+    std::vector<float> host_k_weight(head_dim);
+    std::vector<float> host_q_gate(q_output_elements);
+    std::vector<float> host_q_rope(q_output_elements);
+    std::vector<float> host_k_rope(k_output_elements);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = q_projected_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_q_projected.data(),
+            q_projected_buffer->ptr,
+            q_projected_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k_projected.data(),
+            k_projected_buffer->ptr,
+            k_projected_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_q_weight.data(),
+            q_weight_buffer->ptr,
+            weight_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k_weight.data(),
+            k_weight_buffer->ptr,
+            weight_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy Qwen3.5 q/k norm RoPE batch HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize Qwen3.5 q/k norm RoPE batch HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    qwen35_qk_norm_rope_batch_f32_host(
+        host_q_projected.data(),
+        host_k_projected.data(),
+        host_q_weight.data(),
+        host_k_weight.data(),
+        q_heads,
+        kv_heads,
+        sequence_len,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        epsilon,
+        host_q_gate.data(),
+        host_q_rope.data(),
+        host_k_rope.data());
+    if (!hip_runtime().copy_async(
+            q_gate_output_buffer->ptr,
+            host_q_gate.data(),
+            q_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            q_rope_output_buffer->ptr,
+            host_q_rope.data(),
+            q_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            k_rope_output_buffer->ptr,
+            host_k_rope.data(),
+            k_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy Qwen3.5 q/k norm RoPE batch HIP outputs");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize Qwen3.5 q/k norm RoPE batch HIP output staging copies");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -19366,6 +19815,200 @@ ullm_status ullm_runtime_qwen35_qk_norm_rope_f32(
         k_weight_buffer,
         q_heads,
         kv_heads,
+        head_dim,
+        rotary_dim,
+        position_offset,
+        rope_base,
+        epsilon,
+        q_projected_bytes,
+        k_projected_bytes,
+        weight_bytes,
+        q_output_bytes,
+        k_output_bytes,
+        q_gate_output_buffer,
+        q_rope_output_buffer,
+        k_rope_output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_qwen35_qk_norm_rope_batch_f32(
+    const ullm_runtime_buffer *q_projected_buffer,
+    const ullm_runtime_buffer *k_projected_buffer,
+    const ullm_runtime_buffer *q_weight_buffer,
+    const ullm_runtime_buffer *k_weight_buffer,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t sequence_len,
+    size_t head_dim,
+    size_t rotary_dim,
+    size_t position_offset,
+    float rope_base,
+    float epsilon,
+    ullm_runtime_buffer *q_gate_output_buffer,
+    ullm_runtime_buffer *q_rope_output_buffer,
+    ullm_runtime_buffer *k_rope_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_projected_buffer == nullptr || k_projected_buffer == nullptr ||
+        q_weight_buffer == nullptr || k_weight_buffer == nullptr ||
+        q_gate_output_buffer == nullptr || q_rope_output_buffer == nullptr ||
+        k_rope_output_buffer == nullptr) {
+        set_error("Qwen3.5 q/k norm RoPE batch received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_heads == 0 || kv_heads == 0 || sequence_len == 0 || head_dim == 0) {
+        set_error("Qwen3.5 q/k norm RoPE batch heads, sequence_len, and head_dim must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rotary_dim == 0 || rotary_dim > head_dim || (rotary_dim % 2) != 0) {
+        set_error(
+            "Qwen3.5 q/k norm RoPE batch rotary_dim must be even and no greater than head_dim");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(rope_base) || rope_base <= 1.0f) {
+        set_error("Qwen3.5 q/k norm RoPE batch base must be finite and greater than one");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(epsilon) || epsilon <= 0.0f) {
+        set_error("Qwen3.5 q/k norm RoPE batch epsilon must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_projected_buffer, k_projected_buffer) ||
+        !buffers_share_backend(q_projected_buffer, q_weight_buffer) ||
+        !buffers_share_backend(q_projected_buffer, k_weight_buffer) ||
+        !buffers_share_backend(q_projected_buffer, q_gate_output_buffer) ||
+        !buffers_share_backend(q_projected_buffer, q_rope_output_buffer) ||
+        !buffers_share_backend(q_projected_buffer, k_rope_output_buffer)) {
+        set_error("Qwen3.5 q/k norm RoPE batch buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(q_gate_output_buffer, stream) ||
+        !stream_matches_buffer(q_rope_output_buffer, stream) ||
+        !stream_matches_buffer(k_rope_output_buffer, stream)) {
+        set_error("Qwen3.5 q/k norm RoPE batch stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (head_dim > max_size / q_heads || head_dim > max_size / kv_heads) {
+        set_error("Qwen3.5 q/k norm RoPE batch per-token element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_output_elements_per_token = q_heads * head_dim;
+    const size_t k_output_elements_per_token = kv_heads * head_dim;
+    if (sequence_len > max_size / q_output_elements_per_token ||
+        sequence_len > max_size / k_output_elements_per_token ||
+        q_output_elements_per_token > max_size / 2 ||
+        head_dim > max_size / sizeof(float)) {
+        set_error("Qwen3.5 q/k norm RoPE batch element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_output_elements = sequence_len * q_output_elements_per_token;
+    const size_t k_output_elements = sequence_len * k_output_elements_per_token;
+    if (q_output_elements > max_size / 2) {
+        set_error("Qwen3.5 q/k norm RoPE batch q projected element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_projected_elements = q_output_elements * 2;
+    if (q_projected_elements > max_size / sizeof(float) ||
+        q_output_elements > max_size / sizeof(float) ||
+        k_output_elements > max_size / sizeof(float)) {
+        set_error("Qwen3.5 q/k norm RoPE batch byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_projected_bytes = q_projected_elements * sizeof(float);
+    const size_t q_output_bytes = q_output_elements * sizeof(float);
+    const size_t k_projected_bytes = k_output_elements * sizeof(float);
+    const size_t k_output_bytes = k_output_elements * sizeof(float);
+    const size_t weight_bytes = head_dim * sizeof(float);
+    if (q_projected_buffer->bytes < q_projected_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE batch q projected buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_projected_buffer->bytes < k_projected_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE batch k projected buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_weight_buffer->bytes < weight_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE batch q weight buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_weight_buffer->bytes < weight_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE batch k weight buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_gate_output_buffer->bytes < q_output_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE batch q gate output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_rope_output_buffer->bytes < q_output_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE batch q RoPE output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_rope_output_buffer->bytes < k_output_bytes) {
+        set_error("Qwen3.5 q/k norm RoPE batch k RoPE output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_projected_buffer->backend == BackendKind::Cpu) {
+        qwen35_qk_norm_rope_batch_f32_host(
+            static_cast<const float *>(q_projected_buffer->ptr),
+            static_cast<const float *>(k_projected_buffer->ptr),
+            static_cast<const float *>(q_weight_buffer->ptr),
+            static_cast<const float *>(k_weight_buffer->ptr),
+            q_heads,
+            kv_heads,
+            sequence_len,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            static_cast<float *>(q_gate_output_buffer->ptr),
+            static_cast<float *>(q_rope_output_buffer->ptr),
+            static_cast<float *>(k_rope_output_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (qwen35_qk_norm_rope_batch_f32_hip_kernel(
+            q_projected_buffer,
+            k_projected_buffer,
+            q_weight_buffer,
+            k_weight_buffer,
+            q_heads,
+            kv_heads,
+            sequence_len,
+            head_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            epsilon,
+            q_gate_output_buffer,
+            q_rope_output_buffer,
+            k_rope_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_QWEN35_QK_NORM_ROPE_BATCH_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(hip_kernel_error.empty()
+                      ? "Qwen3.5 q/k norm RoPE batch HIP kernel is unavailable"
+                      : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return qwen35_qk_norm_rope_batch_f32_hip_staging(
+        q_projected_buffer,
+        k_projected_buffer,
+        q_weight_buffer,
+        k_weight_buffer,
+        q_heads,
+        kv_heads,
+        sequence_len,
         head_dim,
         rotary_dim,
         position_offset,
