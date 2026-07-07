@@ -241,6 +241,14 @@ include `layer_major_host_token_loop` for the original host-readback loop and `d
 the experimental device-to-device token loop. `device_token_loop` reduces host boundaries but is not
 real batch prefill by itself.
 
+uLLM reports may also include executor-granularity fields such as
+`prefill.real_batch`, `prefill.token_parallelism`, `prefill.request_parallelism`,
+`batching.prefill_real_batch`, `batching.prefill_executor_token_parallelism`,
+`batching.prefill_executor_request_parallelism`, `batching.decode_real_batch`, and
+`batching.decode_executor_request_parallelism`. These fields describe the executor's actual kernel
+sharing, not the workload's requested concurrency. A logical batch row can therefore have
+`workload.concurrent_requests > 1` while `batching.prefill_executor_request_parallelism == 1`.
+
 ## Memory Semantics
 
 Memory must be recorded for throughput runs. On ROCm, use `rocm-smi --showmeminfo vram --json` or an equivalent runtime API. The preferred values are:

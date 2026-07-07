@@ -16236,7 +16236,12 @@ fn package_batch_throughput_bench_impl(
         "batching": {
             "mode": "logical",
             "prefill_executor": prefill_executor,
+            "prefill_real_batch": false,
+            "prefill_executor_token_parallelism": 1,
+            "prefill_executor_request_parallelism": 1,
             "decode_executor": "sequential_package_token_ids_generate",
+            "decode_real_batch": false,
+            "decode_executor_request_parallelism": 1,
             "scheduler_policy": "fixed_batch",
             "runtime_reused_across_requests": false,
             "weights_reloaded_per_request": true,
@@ -19358,6 +19363,12 @@ fn package_token_ids_generate_incremental_smoke_impl(
             } else {
                 "layer_major_host_token_loop"
             },
+            "real_batch": false,
+            "token_parallelism": 1,
+            "request_parallelism": 1,
+            "projection_executor": "single_token_matvec",
+            "mlp_executor": "single_token_matvec",
+            "attention_executor": "single_token_decode_step",
             "device_resident": use_prefill_device_token_loop,
             "sync_each_layer_for_timing": sync_prefill_each_layer_for_timing,
             "prompt_tokens": prompt_token_count,
