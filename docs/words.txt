@@ -18,6 +18,7 @@ cached prefix prefill:既存のKV cache長Lに対して新規input chunk M token
 long context upper bound:2^16 token級のcold prefillやcached prefix付きprefillで、常用benchmarkではなく長コンテキスト上限の実行可能性、OOM境界、attention scalingを確認する測定枠
 runtime cached prefix attention smoke:synthetic Q/K/Vを使い、既存KV cache長Lに対して新規chunk M tokenを測るruntime component smoke。executorはcached_prefix_chunkedとdecode_loopを選択でき、cached prefix attentionのbaseline、M方向chunk並列化、長prefix時のOOM/速度境界を確認する
 cached prefix chunked attention runtime:既存KV cache長Lと新規chunk Mを一度のruntime callで扱うcached prefix attention実行経路。現v0は素朴な1 output element 1 thread実装で、tiled/blocked attentionの前段baselineとして扱う
+runtime cached prefix attention sweep:tools/run-runtime-cached-prefix-sweep.pyでruntime-cached-prefix-attn-smokeをL/M/executorのgridとして実行し、Phase C4用のJSONLとMarkdown summaryを保存する探索runner
 prefill RMSNorm batch smoke:package prompt embeddingを[tokens,hidden] device bufferに載せ、segmented RMSNormで複数tokenを一括正規化するsmoke。projection/attention/MLPのreal batch化前にprefill buffer境界を検証する
 AQ4 matvec batch runtime:同じAQ4 resident matrixに対して複数input vectorを[tokens,cols] layoutで受け取り、[tokens,rows] outputを返すruntime API。prefill projectionをtoken batch化するための最初のAQ4 projection境界
 package prefill AQ4 matvec batch smoke:package prompt embedding行を[tokens,hidden] device bufferへ載せ、指定AQ4 projection tensorをAQ4 matvec batch runtimeでまとめて実行し、materialized F32 matvec由来のexpected outputと比較するsmoke。attentionやMLP全体ではなくprojection batch kernelの正しさと速度を測る

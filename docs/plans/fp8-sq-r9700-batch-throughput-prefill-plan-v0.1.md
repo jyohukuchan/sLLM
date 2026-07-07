@@ -717,6 +717,36 @@ Guard:
 - 次は1 output element 1 threadの素朴実装から、head/value内でscore計算を共有するtiled cached-prefix attentionへ進む必要がある。
 - ただし、SQ/FP8候補評価用のworkload gridでは、`M>1` cached prefillの現実的なbaselineとして `cached_prefix_chunked` を使える。
 
+2026-07-07 Phase C4 cached prefix sweep runner:
+
+- `tools/run-runtime-cached-prefix-sweep.py` を追加した。
+- `runtime-cached-prefix-attn-smoke` を `L/M/executor` のgridとして実行し、JSONLとMarkdown summaryを保存する。
+- まずR9700で `cached_prefix_chunked` の代表sweepを実行した。
+- 保存先:
+  - `benchmarks/results/2026-07-07/runtime-cached-prefix-sweep/phase-c4-cached-prefix-sanity.jsonl`
+  - `benchmarks/results/2026-07-07/runtime-cached-prefix-sweep/phase-c4-cached-prefix-sanity.md`
+
+R9700 release results:
+
+| executor | cached prefix L | new input M | repeats | wall ms mean | new input tok/s | attention pair/s | sampled diff |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| cached prefix chunked | 4096 | 1 | 3 | 103.203890 | 9.689557 | 39698.115902 | 0 |
+| cached prefix chunked | 4096 | 16 | 3 | 124.240184 | 128.782810 | 528589.041882 | 0 |
+| cached prefix chunked | 4096 | 128 | 1 | 1019.441962 | 125.558889 | 522387.757078 | 0 |
+| cached prefix chunked | 16384 | 1 | 1 | 524.079953 | 1.908106 | 31264.313596 | 0 |
+| cached prefix chunked | 16384 | 16 | 1 | 578.890933 | 27.639058 | 453073.256202 | 0 |
+| cached prefix chunked | 16384 | 128 | 1 | 4616.811130 | 27.724764 | 456030.784175 | 0 |
+| cached prefix chunked | 65536 | 1 | 1 | 2055.547196 | 0.486488 | 31882.994527 | 0 |
+| cached prefix chunked | 65536 | 16 | 1 | 2356.189138 | 6.790626 | 445088.207516 | 0 |
+| cached prefix chunked | 65536 | 128 | 1 | 18234.605441 | 7.019620 | 460490.578048 | 0 |
+
+解釈:
+
+- `M=16` と `M=128` のnew input tok/sは、同じ `L` ではほぼ同程度になった。chunk sizeを16以上にしても、現v0 kernelでは大きな追加改善は見えていない。
+- `M=1` はdecode-like boundaryであり、attention pair/sが `31k-40k pair/s` 程度まで落ちる。一方、`M=16/128` では `445k-529k pair/s` まで上がるため、decode-like pathとcached prefill pathは分けて評価する。
+- `L` を4倍にすると `M=16/128` のnew input tok/sはおおむね4分の1になる。長prefixではKV readとscore/value計算が支配的で、SQ/FP8 format差を見る前にattention executor側の効率が上限を決めている。
+- 次の最適化対象は、`M` を増やすだけではなく、head/value内でscore計算を共有するtiled cached-prefix attentionと、KV read coalescingである。
+
 ## Decision gates
 
 ### FP8 candidate can continue if
