@@ -3776,6 +3776,9 @@ extern "C" __global__ void ullm_cached_prefix_attn_f32_kernel(
     static std::string cached_prefix_attn_fp8_e4m3_kernel_source() {
         std::string source = R"(
 __device__ float ullm_fp8_e4m3_to_f32(unsigned char value) {
+#if defined(__gfx1200__) || defined(__gfx1201__)
+    return __builtin_amdgcn_cvt_f32_fp8(static_cast<unsigned int>(value), 0);
+#else
     const unsigned int sign = static_cast<unsigned int>(value) >> 7;
     const unsigned int exponent = (static_cast<unsigned int>(value) >> 3) & 0x0fu;
     const unsigned int mantissa = static_cast<unsigned int>(value) & 0x07u;
@@ -3785,6 +3788,7 @@ __device__ float ullm_fp8_e4m3_to_f32(unsigned char value) {
     }
     const unsigned int fp32_bits = (sign << 31) | ((exponent + 120u) << 23) | (mantissa << 20);
     return __uint_as_float(fp32_bits);
+#endif
 }
 )";
         source += cached_prefix_attn_kernel_source();

@@ -52,6 +52,27 @@
 3. cached prefix attentionは、decoded K/V tileの再利用、score再計算削減、FlashAttention系のtilingを次の最適化候補にする。
 4. SQ候補評価では、このv1 FP8 cached-prefix結果を「byte削減は確認済み、速度はkernel構造依存」という基準線として扱う。
 
+## 2026-07-08 FP8 builtin conversion update
+
+前回の要点:
+
+- v1のFP8 K/V cacheはbyte量をF32比 `25%` にできたが、device側のFP8復号を手書きbit復号で行っていた。
+- R9700/gfx1200にはFP8からF32へ変換する専用命令がある可能性があった。
+
+今回の変更点:
+
+- gfx1200向けに `__builtin_amdgcn_cvt_f32_fp8` を使い、HIPRTC生成ISAで `v_cvt_f32_fp8_e32` へ落ちることを確認した。
+- scale込みbuiltinはROCm 7.2のgfx1200 targetでは `fp8-cvt-scale-insts` feature不足で使えないため、scaleは従来通り別のF32 multiplyにした。
+- packed builtin `__builtin_amdgcn_cvt_pk_f32_fp8` も `v_cvt_pk_f32_fp8_e32` へ落ちるが、CKにgfx12 compiler issueの注意があるため今回のruntime kernelでは単体変換だけを使った。
+- R9700再測結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c4-fp8-e4m3-kv-cache-builtin-cvt-v2.md` に保存した。
+- 専用命令化によりFP8 pathはv1比で全条件改善した。`L=4096` はF32比 `0.98x` 付近、`L=16384` は `1.25-1.37x`、`L=65536` はまだ `0.51-0.74x` だった。
+
+次の行動:
+
+1. 長いprefixで残る遅さは、変換命令よりkernel構造の問題として扱う。
+2. K score計算でdecoded Kを再利用するtile設計を検討する。
+3. packed変換はCKのgfx12注意点を踏まえ、単体変換版の正しさと速度を基準にしてから別途検証する。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。
