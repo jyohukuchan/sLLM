@@ -1,0 +1,123 @@
+{
+  "schema_version": "ullm-prototype-direct-package-summary-v0.1",
+  "plan_json": "benchmarks/results/2026-07-07/aq/qwen35-9b-p4p6-plus-lm-head-g16-plan.json",
+  "codebook_json": "benchmarks/results/2026-07-07/aq/qwen35-9b-lm-head-codebook-g16-weighted-lmhead-calib32.json",
+  "aq_policy": {
+    "policy_id": "p4p6",
+    "low_format": "aq4_e4m3_g16_ts_flloyd16",
+    "high_format": "aq4_e4m3_g16_ts_flloyd16",
+    "high_families": [
+      "attn_k",
+      "attn_o",
+      "attn_v",
+      "linear_attn_out"
+    ],
+    "high_tensors": [
+      "lm_head.weight"
+    ]
+  },
+  "output_dir": "/tmp/ullm-lmhead-aq4-g16-weighted-lmhead-calib32-only.ullm.d",
+  "tensor_scale_estimator": "reservoir",
+  "tensor_scale_reservoir_size": 65536,
+  "scale_window": 4,
+  "chunk_bytes": 67108864,
+  "families": [
+    "lm_head"
+  ],
+  "max_tensors": 1,
+  "per_family": 1,
+  "jobs": 1,
+  "include_passthrough": false,
+  "verify": true,
+  "selected_count": 1,
+  "tensor_count": 1,
+  "passthrough_tensor_count": 0,
+  "codebook_count": 1,
+  "total_file_bytes": 572131131,
+  "results": [
+    {
+      "tensor": "lm_head.weight",
+      "family": "lm_head",
+      "candidate": "aq4_e4m3_g16_ts_flloyd16",
+      "status": "ok",
+      "returncode": 0,
+      "output_dir": "/tmp/ullm-lmhead-aq4-g16-weighted-lmhead-calib32-only.ullm.d",
+      "error": null,
+      "manifest": {
+        "name": "lm_head.weight",
+        "source_file": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B/model.safetensors-00001-of-00004.safetensors",
+        "dtype": "BF16",
+        "shape": [
+          248320,
+          4096
+        ],
+        "family": "lm_head",
+        "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+        "scale_format": "e4m3",
+        "group_size": 16,
+        "tensor_scale": 0.021085635,
+        "scale_window": 4,
+        "elements": 1017118720,
+        "groups": 63569920,
+        "index_file": "tensors/000-lm_head_weight.idx4",
+        "index_encoding": "idx4_low_nibble_first",
+        "scale_file": "tensors/000-lm_head_weight.scale_u8",
+        "scale_encoding": "u8_scale_table_index",
+        "codebook_file": "codebooks/lm_head__aq4_e4m3_g16_ts_flloyd16.f32",
+        "metrics": {
+          "mse": 1.2487012667564126e-6,
+          "relative_mse": 0.005213873809798906,
+          "max_abs_error": 0.015288323,
+          "scale_index_min": 31,
+          "scale_index_max": 88,
+          "scale_window_improved_groups": 31241250,
+          "index_counts": [
+            40859699,
+            47476009,
+            60312236,
+            69540734,
+            72627686,
+            73194421,
+            72721702,
+            71769476,
+            71552205,
+            72856060,
+            74154237,
+            73227118,
+            68810163,
+            60159626,
+            47455134,
+            40402214
+          ]
+        }
+      },
+      "verification": {
+        "elements": 1017118720,
+        "groups": 63569920,
+        "relative_mse": 0.005213873810743117,
+        "max_abs_error": 0.015288323,
+        "index_file_bytes": 508559360,
+        "scale_file_bytes": 63569920,
+        "codebook_entries": 16
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "codebooks/lm_head__aq4_e4m3_g16_ts_flloyd16.f32",
+      "bytes": 64
+    },
+    {
+      "path": "tensors/000-lm_head_weight.idx4",
+      "bytes": 508559360
+    },
+    {
+      "path": "tensors/000-lm_head_weight.scale_u8",
+      "bytes": 63569920
+    },
+    {
+      "path": "manifest.json",
+      "bytes": 1787
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+# Package Token Prompt Suite Summary
+
+- Summary JSON: `benchmarks/results/2026-07-07/engine/prompt-suite-aq4-lmhead-g8-weighted-lmhead-calib32-r9700/summary.json`
+
+| case | category | prompt | generated | stop | status | warnings | prefill tok/s | decode tok/s | skip-2 tok/s | last-8 tok/s | p50 ms | verified | preview |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | :---: | --- |
+| warmup_direct_answer | technical | 26 | 65 | stop_token | ok |  | 52.254 | 64.312 | 64.250 | 62.893 | 15.534 | True | GPU warmup inflates token counts because the initial batch often includes padding or unused tokens that do not reflect actual model processing efficiency. This artificial overhead skews the average calculation by mixing high-latency initial |
+| memory_vs_compute_direct | technical | 34 | 73 | stop_token | ok |  | 55.285 | 63.812 | 63.752 | 62.344 | 15.674 | True | Memory-bandwidth-bound inference is limited by the rate at which quantized weights can be fetched from off-chip memory, whereas compute-bound inference is constrained by the arithmetic throughput of the processor. In low-bit LLM decoding, r |
+| throughput_checklist_direct | checklist | 26 | 84 | stop_sequence | ok |  | 54.106 | 63.808 | 63.747 | 61.901 | 15.686 | True | Report total tokens processed per second (TPS) rather than tokens-per-second-per-core to avoid misleading performance claims. - Include the full prompt and response length in the benchmark description to contextualize throughput efficiency. |
+| japanese_direct_answer | japanese | 41 | 29 | stop_token | ok |  | 57.176 | 64.459 | 64.392 | 63.843 | 15.530 | True | GPUのウォームアップにより初期の推論速度が低下します。ウォームアップ完了後は安定した測定値が得られます。 |
+| python_stop_helper | code | 30 | 51 | stop_token | ok |  | 53.586 | 64.469 | 64.405 | 63.410 | 15.527 | True | ```python def should_stop(token_id, stop_ids): return token_id in stop_ids # Example usage: print(should_stop(42, [10, 42])) # Output: True ``` |
+| short_qa_bandwidth | short_qa | 25 | 96 | max_generated_tokens | warn | hit_generation_limit, missing_terminal_punctuation | 53.932 | 63.578 | 63.520 | 61.570 | 15.740 | True | AQ format can still be fast because it reduces the memory bandwidth requirement by packing multiple activations into a single memory transaction, thereby amortizing the overhead of memory access across multiple activations. Question: What i |
+| long_prefill_warmup_timing | timing | 256 | 192 | max_generated_tokens | not_evaluated |  | 57.348 | 51.249 | 51.215 | 47.910 | 19.495 | True | a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, and describe a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, and describe a careful way to report thro |

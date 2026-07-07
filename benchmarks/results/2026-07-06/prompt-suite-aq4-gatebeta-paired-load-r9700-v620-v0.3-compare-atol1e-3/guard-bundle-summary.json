@@ -1,0 +1,27 @@
+{
+  "schema_version": "package-prompt-guard-bundle-v0.1",
+  "reference": {
+    "label": "aq4-gatebeta-paired-load-r9700",
+    "summary": "benchmarks/results/2026-07-06/prompt-suite-aq4-gatebeta-paired-load-r9700-v0.3/summary.json"
+  },
+  "candidate": {
+    "label": "aq4-gatebeta-paired-load-v620",
+    "summary": "benchmarks/results/2026-07-06/prompt-suite-aq4-gatebeta-paired-load-v620-v0.3/summary.json"
+  },
+  "passed": true,
+  "checks": [
+    {
+      "name": "prompt_suite_token_logits",
+      "json": "benchmarks/results/2026-07-06/prompt-suite-aq4-gatebeta-paired-load-r9700-v620-v0.3-compare-atol1e-3/prompt-suite-token-logits-guard.json",
+      "md": "benchmarks/results/2026-07-06/prompt-suite-aq4-gatebeta-paired-load-r9700-v620-v0.3-compare-atol1e-3/prompt-suite-token-logits-guard.md",
+      "passed": true,
+      "metrics": {
+        "compared_case_count": 7,
+        "generated_token_match_count": 7,
+        "top_logits_match_count": 7,
+        "max_prefill_top_logit_abs_diff": 1.9073486328125e-06,
+        "max_decode_last_top_logit_abs_diff": 5.6743621826171875e-05
+      }
+    }
+  ]
+}

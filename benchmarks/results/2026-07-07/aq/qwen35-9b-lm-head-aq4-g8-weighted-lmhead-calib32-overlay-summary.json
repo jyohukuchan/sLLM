@@ -1,0 +1,41 @@
+{
+  "base_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-reservoir65536-jobs4.ullm.d",
+  "codebook_count": 13,
+  "dry_run": false,
+  "linked_files": [
+    {
+      "bytes": 508559360,
+      "path": "tensors/override-000-lm_head_weight.idx4"
+    },
+    {
+      "bytes": 127139840,
+      "path": "tensors/override-000-lm_head_weight.scale_u8"
+    },
+    {
+      "bytes": 64,
+      "path": "codebooks/override-000-lm_head__aq4_e4m3_g8_ts_flloyd16.f32"
+    }
+  ],
+  "output_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-tool.ullm.d",
+  "override_packages": [
+    "/tmp/ullm-lmhead-aq4-g8-weighted-lmhead-calib32-only.ullm.d"
+  ],
+  "passthrough_tensor_count": 519,
+  "removed_base_files": [
+    "passthrough/000-lm_head_weight.raw"
+  ],
+  "replace_tensors": [
+    "lm_head.weight"
+  ],
+  "replaced": [
+    {
+      "candidate_id": "aq4_e4m3_g8_ts_flloyd16",
+      "group_size": 8,
+      "kind": "tensor",
+      "name": "lm_head.weight",
+      "override_package": "/tmp/ullm-lmhead-aq4-g8-weighted-lmhead-calib32-only.ullm.d"
+    }
+  ],
+  "schema_version": "ullm-prototype-package-overlay-v0.1",
+  "tensor_count": 256
+}

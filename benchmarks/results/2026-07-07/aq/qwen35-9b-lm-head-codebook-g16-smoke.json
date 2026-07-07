@@ -1,0 +1,58 @@
+{
+  "activation_stats": null,
+  "activation_weighting_fallbacks": [],
+  "candidate_filter": [
+    "aq4_e4m3_g16_ts_flloyd16"
+  ],
+  "codebooks": [
+    {
+      "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+      "entry_count": 16,
+      "family": "lm_head",
+      "max": 0.9699996709823608,
+      "min": -0.9688187837600708,
+      "source_tensor_count": 1,
+      "source_tensors": [
+        "lm_head.weight"
+      ],
+      "values_f32": [
+        -0.9688187837600708,
+        -0.744978666305542,
+        -0.5688916444778442,
+        -0.4268805980682373,
+        -0.30955442786216736,
+        -0.21029545366764069,
+        -0.12288656830787659,
+        -0.040466923266649246,
+        0.039951976388692856,
+        0.12252450734376907,
+        0.21106579899787903,
+        0.3115677237510681,
+        0.42697498202323914,
+        0.5692119002342224,
+        0.7448674440383911,
+        0.9699996709823608
+      ],
+      "weighting": "unweighted"
+    }
+  ],
+  "family_filter": [
+    "lm_head"
+  ],
+  "max_elements_per_tensor": 262144,
+  "max_tensors": 1,
+  "max_tensors_per_family": 1,
+  "missing_activation_stats": "error",
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "notes": [
+    "lm_head AQ4 prototype codebook smoke"
+  ],
+  "plan_json": null,
+  "schema_version": "aq-family-codebook-export-v0.2",
+  "seed": 0,
+  "tensor_names": [
+    "lm_head.weight"
+  ],
+  "timestamp_utc": "2026-07-06T16:46:20.209470+00:00",
+  "weighted_codebook": false
+}

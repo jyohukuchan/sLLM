@@ -1,0 +1,13 @@
+# Package Token Prompt Suite Summary
+
+- Summary JSON: `benchmarks/results/2026-07-06/prompt-suite-aq4-unroll-all-v620-v0.3/summary.json`
+
+| case | category | prompt | generated | stop | status | warnings | prefill tok/s | decode tok/s | skip-2 tok/s | last-8 tok/s | p50 ms | verified | preview |
+| --- | --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | :---: | --- |
+| warmup_direct_answer | technical | 26 | 53 | stop_token | ok |  | 35.112 | 34.985 | 34.966 | 34.570 | 28.602 | True | GPU warmup causes initial latency spikes that artificially inflate the denominator in token-per-second calculations. This transient inefficiency results in a lower average throughput that does not reflect the model's steady-state performanc |
+| memory_vs_compute_direct | technical | 34 | 73 | stop_token | ok |  | 37.634 | 34.682 | 34.663 | 34.098 | 28.838 | True | Memory-bandwidth-bound inference is limited by the rate at which quantized weights can be fetched from off-chip memory, whereas compute-bound inference is constrained by the arithmetic throughput of the processor. In low-bit LLM decoding, r |
+| throughput_checklist_direct | checklist | 26 | 82 | stop_sequence | warn | low_unique_token_ratio | 33.596 | 34.674 | 34.655 | 34.029 | 28.830 | True | Report total tokens processed per second, not just requests per second. Include the total number of tokens processed per second, not just requests per second. Report the total number of tokens processed per second, not just requests per sec |
+| japanese_direct_answer | japanese | 41 | 48 | stop_token | ok |  | 38.863 | 34.770 | 34.751 | 34.409 | 28.763 | True | GPUのウォームアップにより初期のtoken/sは低下しますが、安定したパフォーマンスに達すると測定値は向上します。 この影響を無視すると、モデルの実際の処理能力を過小評価するリスクがあります。 |
+| python_stop_helper | code | 30 | 68 | stop_token | ok |  | 35.115 | 34.761 | 34.741 | 34.225 | 28.781 | True | ```python def should_stop(token_id, stop_ids): return token_id in stop_ids # Example usage: token_id = 42 stop_ids = {10, 42, 55} print(should_stop(token_id, stop_ids)) # Output: True ``` |
+| short_qa_bandwidth | short_qa | 25 | 38 | stop_sequence | ok |  | 33.250 | 35.087 | 35.067 | 34.826 | 28.480 | True | AQ format can still be fast because it reduces the memory bandwidth requirement by packing multiple vectors into a single memory transaction, thereby amortizing the overhead of memory access across multiple vectors. |
+| long_prefill_warmup_timing | timing | 256 | 192 | max_generated_tokens | not_evaluated |  | 43.531 | 30.031 | 30.017 | 28.810 | 33.291 | True | a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, and describe a careful way to report throughput. Explain why GPU warmup can distort token/s measurements, and describe a careful way to report thro |

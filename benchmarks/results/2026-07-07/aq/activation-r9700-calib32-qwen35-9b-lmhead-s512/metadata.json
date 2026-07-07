@@ -1,0 +1,26 @@
+{
+  "device": "cuda:0",
+  "dtype": "bfloat16",
+  "max_samples": 32,
+  "model_class": "causal_lm",
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "module_count": 1,
+  "module_pattern": "lm_head$",
+  "modules": {
+    "lm_head": {
+      "activation_count": 14061,
+      "input_features": 4096
+    }
+  },
+  "notes": [
+    "lm_head-only-final-hidden-stats"
+  ],
+  "prompt_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/calibration/qwen35-aq-smoke-prompts-v0.1.txt",
+  "repeat_to_length": true,
+  "run_id": "activation-r9700-calib32-qwen35-9b-lmhead-s512",
+  "samples_seen": 32,
+  "schema_version": "aq-activation-stats-v0.1",
+  "sequence_length": 512,
+  "timestamp_utc": "2026-07-06T17:18:51.615937+00:00",
+  "tokens_seen": 14061
+}

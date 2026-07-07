@@ -1,0 +1,59 @@
+{
+  "activation_stats": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-07/aq/activation-r9700-calib32-qwen35-9b-lmhead-s512",
+  "activation_weighting_fallbacks": [],
+  "candidate_filter": [
+    "aq4_e4m3_g8_ts_flloyd16"
+  ],
+  "codebooks": [
+    {
+      "candidate_id": "aq4_e4m3_g8_ts_flloyd16",
+      "entry_count": 16,
+      "family": "lm_head",
+      "max": 0.9917088747024536,
+      "min": -0.9908207654953003,
+      "source_elements": 1017118720,
+      "source_tensor_count": 1,
+      "source_tensors": [
+        "lm_head.weight"
+      ],
+      "values_f32": [
+        -0.9908207654953003,
+        -0.8014389276504517,
+        -0.633924126625061,
+        -0.49272558093070984,
+        -0.365668386220932,
+        -0.2532718777656555,
+        -0.1483037918806076,
+        -0.04926628991961479,
+        0.0486469566822052,
+        0.1458539068698883,
+        0.24870167672634125,
+        0.3634556233882904,
+        0.49654871225357056,
+        0.6440274119377136,
+        0.8083515167236328,
+        0.9917088747024536
+      ],
+      "weighting": "weighted"
+    }
+  ],
+  "family_filter": [
+    "lm_head"
+  ],
+  "max_elements_per_tensor": 262144,
+  "max_tensors": 1,
+  "max_tensors_per_family": 1,
+  "missing_activation_stats": "error",
+  "model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "notes": [
+    "lm_head weighted g8 codebook from final hidden second moments"
+  ],
+  "plan_json": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-07/aq/qwen35-9b-p4p6-plus-lm-head-g8-plan.json",
+  "schema_version": "aq-family-codebook-export-v0.2",
+  "seed": 0,
+  "tensor_names": [
+    "lm_head.weight"
+  ],
+  "timestamp_utc": "2026-07-06T17:29:02.213892+00:00",
+  "weighted_codebook": true
+}
