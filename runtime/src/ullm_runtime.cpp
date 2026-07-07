@@ -76,6 +76,20 @@ unsigned int aq4_rows_per_block_from_env(
     return fallback;
 }
 
+unsigned int block_size_from_env(const char *env_name, unsigned int fallback) {
+    const char *raw = std::getenv(env_name);
+    if (raw == nullptr || raw[0] == '\0') {
+        return fallback;
+    }
+    char *end = nullptr;
+    const unsigned long value = std::strtoul(raw, &end, 10);
+    if (end == raw || *end != '\0' || value < 32ul || value > 256ul ||
+        (value & (value - 1ul)) != 0ul) {
+        return fallback;
+    }
+    return static_cast<unsigned int>(value);
+}
+
 class HipRuntime {
 public:
     int device_count() {
@@ -13507,7 +13521,10 @@ bool linear_attn_recurrent_f32_hip_kernel(
             return false;
         }
         grid_size = static_cast<unsigned int>(value_heads * value_dim);
-        block_size = 256;
+        const unsigned int default_decode_block = key_dim <= 128 ? 128u : 256u;
+        block_size = block_size_from_env(
+            "ULLM_LINEAR_ATTN_RECURRENT_DECODE_BLOCK",
+            default_decode_block);
     }
 
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
