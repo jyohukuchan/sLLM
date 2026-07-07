@@ -17143,6 +17143,27 @@ fn json_array_len_path(value: &serde_json::Value, path: &[&str]) -> Option<usize
     current.as_array().map(Vec::len)
 }
 
+fn cold_prefill_attention_work_tokens_from_lengths(
+    prompt_tokens_per_request: &[usize],
+) -> Result<u64, String> {
+    let mut total = 0_u128;
+    for prompt_tokens in prompt_tokens_per_request {
+        let prompt_tokens = *prompt_tokens as u128;
+        let request_work =
+            prompt_tokens
+                .checked_mul(prompt_tokens.checked_add(1).ok_or_else(|| {
+                    "cold prefill attention work token count overflows".to_string()
+                })?)
+                .map(|value| value / 2)
+                .ok_or_else(|| "cold prefill attention work token count overflows".to_string())?;
+        total = total
+            .checked_add(request_work)
+            .ok_or_else(|| "cold prefill attention work token count overflows".to_string())?;
+    }
+    u64::try_from(total)
+        .map_err(|_| "cold prefill attention work token count exceeds u64".to_string())
+}
+
 fn mean_f64(values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         None
@@ -17353,6 +17374,19 @@ fn package_batch_throughput_bench_impl(
         .filter(|first| prefill_executors.iter().all(|value| value == *first))
         .map(String::as_str)
         .unwrap_or("mixed");
+    let prompt_tokens_per_request = prompt_token_ids_batch
+        .iter()
+        .map(Vec::len)
+        .collect::<Vec<_>>();
+    let cached_prefix_tokens_per_request = vec![0_usize; prompt_tokens_per_request.len()];
+    let new_prefill_tokens_per_request = prompt_tokens_per_request.clone();
+    let total_context_tokens_after_prefill_per_request = prompt_tokens_per_request.clone();
+    let estimated_prefill_attention_work_tokens =
+        cold_prefill_attention_work_tokens_from_lengths(&prompt_tokens_per_request)?;
+    let total_context_tokens_after_prefill = total_context_tokens_after_prefill_per_request
+        .iter()
+        .try_fold(0_usize, |acc, value| acc.checked_add(*value))
+        .ok_or_else(|| "total context tokens after prefill overflows".to_string())?;
     let report = serde_json::json!({
         "schema_version": "package-batch-throughput-bench-v0.1",
         "package": path,
@@ -17371,10 +17405,11 @@ fn package_batch_throughput_bench_impl(
         "workload": {
             "batch_size": prompt_token_ids_batch.len(),
             "concurrent_requests": prompt_token_ids_batch.len(),
-            "prompt_tokens_per_request": prompt_token_ids_batch
-                .iter()
-                .map(Vec::len)
-                .collect::<Vec<_>>(),
+            "prefill_mode": "cold",
+            "prompt_tokens_per_request": prompt_tokens_per_request,
+            "cached_prefix_tokens_per_request": cached_prefix_tokens_per_request,
+            "new_prefill_tokens_per_request": new_prefill_tokens_per_request,
+            "total_context_tokens_after_prefill_per_request": total_context_tokens_after_prefill_per_request,
             "generated_tokens_per_request": generated_tokens_batch,
             "fixed_decode_steps": stop_token_ids.is_empty() && stop_token_sequences.is_empty(),
         },
@@ -17393,6 +17428,9 @@ fn package_batch_throughput_bench_impl(
         },
         "metrics": {
             "prefill_total_input_tokens": prefill_total_input_tokens,
+            "cached_prefix_total_tokens": 0,
+            "total_context_tokens_after_prefill": total_context_tokens_after_prefill,
+            "estimated_prefill_attention_work_tokens": estimated_prefill_attention_work_tokens,
             "decode_total_generated_tokens": decode_total_generated_tokens,
             "generated_tokens_total": generated_tokens_total,
             "end_to_end_total_tokens": end_to_end_total_tokens,
@@ -28262,6 +28300,18 @@ mod package_token_ids_logits_tests {
         );
         assert!(parse_package_generated_tokens_batch(Some("1,2".to_string()), 3).is_err());
         assert!(parse_package_generated_tokens_batch(Some("0".to_string()), 3).is_err());
+    }
+
+    #[test]
+    fn cold_prefill_attention_work_counts_triangular_prompt_pairs() {
+        assert_eq!(
+            cold_prefill_attention_work_tokens_from_lengths(&[3, 5]).unwrap(),
+            21
+        );
+        assert_eq!(
+            cold_prefill_attention_work_tokens_from_lengths(&[512, 512]).unwrap(),
+            262656
+        );
     }
 
     #[test]
