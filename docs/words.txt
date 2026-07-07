@@ -4,6 +4,11 @@ bpp:bit/parameter
 BF16-error:BF16のraw-valueまたは出力を基準にした誤差
 decode-tps:decode token/s
 prefill-tps:prefill token/s
+prefill total input tok/s:測定区間でbatch内の全requestが処理したprompt/input token数の合計をprefill wall timeで割ったthroughput
+decode total generated tok/s:測定区間でbatch内の全requestが生成したtoken数の合計をdecode wall timeで割ったthroughput。single requestの体感tok/sとは分けて扱う
+end-to-end total tok/s:prompt/input token数とgenerated token数の合計をend-to-end wall timeで割ったthroughput。prefill/decodeの内訳なしではSQ候補の主判断に使わない
+logical batch:複数requestを同じbenchmark runで扱うが、内部kernelはrequestごとに順次実行してもよいbatch計測段階。control plane、result schema、latency計測の検証に使う
+real batch:複数tokenまたは複数requestを同じkernel、GEMM/GEMV群、またはbatched executorで実行し、GPU利用率を上げるbatch実行段階。SQ候補の性能判断にはこちらを使う
 fq:推論エンジン上の実測を見て仕様を決める量子化またはformat候補の仮称。意味が確定したらこの定義を更新する
 raw-value:scale・codebookを一切考慮しない各パラメータの値
 codebook:LUTによる変換表
