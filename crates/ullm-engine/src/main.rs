@@ -16224,10 +16224,16 @@ impl PackageLmHeadRuntime {
                     ];
                     let hidden_bytes = checked_f32_byte_len(hidden, "resident AQ4 lm_head input")?;
                     let logits_bytes = checked_f32_byte_len(vocab, "resident AQ4 lm_head logits")?;
-                    let top1_partial_count =
-                        ullm_runtime_sys::top1_partial_count(vocab).map_err(|err| {
+                    let logits_top1_partial_count = ullm_runtime_sys::top1_partial_count(vocab)
+                        .map_err(|err| {
                             format!("failed to size resident AQ4 lm_head top1: {err}")
                         })?;
+                    let aq4_direct_top1_partial_count =
+                        ullm_runtime_sys::aq4_matvec_top1_partial_count(vocab).map_err(|err| {
+                            format!("failed to size resident AQ4 lm_head direct top1: {err}")
+                        })?;
+                    let top1_partial_count =
+                        logits_top1_partial_count.max(aq4_direct_top1_partial_count);
                     let top1_partial_values_bytes = checked_f32_byte_len(
                         top1_partial_count,
                         "resident AQ4 lm_head top1 values",
@@ -17123,6 +17129,72 @@ fn package_gpu_resident_aq4_lm_head_top_logits(
             "resident AQ4 lm_head input buffer is too small: got {input_bytes} bytes expected at least {required_input_bytes}"
         ));
     }
+    if top_k == 1 && env_flag_enabled("ULLM_ENABLE_AQ4_LM_HEAD_DIRECT_TOP1") {
+        let first_stage_partial_count = matrix.matvec_top1(
+            input_buffer,
+            top1_partial_values_buffer,
+            top1_partial_indices_buffer,
+            stream,
+            "resident AQ4 lm_head",
+        )?;
+        let partial_count = if first_stage_partial_count > 1 {
+            ullm_runtime_sys::top1_pairs_f32_in_place(
+                top1_partial_values_buffer,
+                top1_partial_indices_buffer,
+                first_stage_partial_count,
+                Some(stream),
+            )
+            .map_err(|err| format!("resident AQ4 lm_head direct top1 pair reduce failed: {err}"))?
+        } else {
+            first_stage_partial_count
+        };
+        let partial_values_bytes = checked_f32_byte_len(
+            partial_count,
+            "resident AQ4 lm_head direct top1 partial values",
+        )?;
+        let partial_indices_bytes = partial_count
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| {
+                "resident AQ4 lm_head direct top1 partial index byte size overflows".to_string()
+            })?;
+        if top1_partial_values_host.len() < partial_values_bytes {
+            return Err(format!(
+                "resident AQ4 lm_head direct top1 value host buffer is too small: got {} bytes expected at least {partial_values_bytes}",
+                top1_partial_values_host.len()
+            ));
+        }
+        if top1_partial_indices_host.len() < partial_indices_bytes {
+            return Err(format!(
+                "resident AQ4 lm_head direct top1 index host buffer is too small: got {} bytes expected at least {partial_indices_bytes}",
+                top1_partial_indices_host.len()
+            ));
+        }
+        top1_partial_values_buffer
+            .copy_to_host(
+                0,
+                &mut top1_partial_values_host[..partial_values_bytes],
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to copy resident AQ4 lm_head direct top1 partial values: {err}")
+            })?;
+        top1_partial_indices_buffer
+            .copy_to_host(
+                0,
+                &mut top1_partial_indices_host[..partial_indices_bytes],
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to copy resident AQ4 lm_head direct top1 partial indices: {err}")
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize resident AQ4 lm_head direct top1 partials: {err}")
+        })?;
+        return package_top1_from_partial_bytes(
+            &top1_partial_values_host[..partial_values_bytes],
+            &top1_partial_indices_host[..partial_indices_bytes],
+        );
+    }
     matrix.matvec(input_buffer, logits_buffer, stream, "resident AQ4 lm_head")?;
     package_resident_lm_head_top_logits_from_logits(
         stream,
@@ -17150,7 +17222,7 @@ fn package_resident_lm_head_top_logits_from_logits(
     top_k: usize,
 ) -> Result<Vec<PackageTokenLogit>, String> {
     if top_k == 1 {
-        ullm_runtime_sys::top1_f32(
+        let partial_count = ullm_runtime_sys::top1_f32(
             logits_buffer,
             vocab,
             top1_partial_values_buffer,
@@ -17158,11 +17230,36 @@ fn package_resident_lm_head_top_logits_from_logits(
             Some(stream),
         )
         .map_err(|err| format!("resident lm_head top1 failed: {err}"))?;
+        let partial_values_bytes =
+            checked_f32_byte_len(partial_count, "resident lm_head top1 partial values")?;
+        let partial_indices_bytes = partial_count
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| "resident lm_head top1 partial index byte size overflows".to_string())?;
+        if top1_partial_values_host.len() < partial_values_bytes {
+            return Err(format!(
+                "resident lm_head top1 value host buffer is too small: got {} bytes expected at least {partial_values_bytes}",
+                top1_partial_values_host.len()
+            ));
+        }
+        if top1_partial_indices_host.len() < partial_indices_bytes {
+            return Err(format!(
+                "resident lm_head top1 index host buffer is too small: got {} bytes expected at least {partial_indices_bytes}",
+                top1_partial_indices_host.len()
+            ));
+        }
         top1_partial_values_buffer
-            .copy_to_host(0, top1_partial_values_host, Some(stream))
+            .copy_to_host(
+                0,
+                &mut top1_partial_values_host[..partial_values_bytes],
+                Some(stream),
+            )
             .map_err(|err| format!("failed to copy resident lm_head top1 partial values: {err}"))?;
         top1_partial_indices_buffer
-            .copy_to_host(0, top1_partial_indices_host, Some(stream))
+            .copy_to_host(
+                0,
+                &mut top1_partial_indices_host[..partial_indices_bytes],
+                Some(stream),
+            )
             .map_err(|err| {
                 format!("failed to copy resident lm_head top1 partial indices: {err}")
             })?;
@@ -17170,8 +17267,8 @@ fn package_resident_lm_head_top_logits_from_logits(
             format!("failed to synchronize resident lm_head top1 partials: {err}")
         })?;
         return package_top1_from_partial_bytes(
-            top1_partial_values_host,
-            top1_partial_indices_host,
+            &top1_partial_values_host[..partial_values_bytes],
+            &top1_partial_indices_host[..partial_indices_bytes],
         );
     }
     logits_buffer
@@ -29976,6 +30073,34 @@ impl PackageAq4ResidentMatvec {
             Some(stream),
         )
         .map_err(|err| format!("failed to run {label} AQ4 matvec: {err}"))
+    }
+
+    fn matvec_top1(
+        &self,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        partial_values_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        partial_indices_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<usize, String> {
+        ullm_runtime_sys::aq4_matvec_top1_f32(
+            self.index_buffer.as_ref(),
+            self.scale_buffer.as_ref(),
+            self.codebook_buffer.as_ref(),
+            &self.scale_values_buffer,
+            input_buffer,
+            self.row_scale_buffer.as_ref(),
+            self.scale_count,
+            self.group_size,
+            self.tensor_scale,
+            self.row_scale_count,
+            self.rows,
+            self.cols,
+            partial_values_buffer,
+            partial_indices_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} AQ4 matvec top1: {err}"))
     }
 
     fn matvec_add(

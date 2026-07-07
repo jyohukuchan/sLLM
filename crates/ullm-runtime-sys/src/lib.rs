@@ -110,6 +110,24 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_aq4_matvec_top1_f32(
+        index_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        codebook_buffer: *const RawRuntimeBuffer,
+        scale_values_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        row_scale_buffer: *const RawRuntimeBuffer,
+        scale_count: usize,
+        group_size: usize,
+        tensor_scale: f32,
+        row_scale_count: usize,
+        rows: usize,
+        cols: usize,
+        partial_values_buffer: *mut RawRuntimeBuffer,
+        partial_indices_buffer: *mut RawRuntimeBuffer,
+        partial_count: usize,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_aq4_matvec_add_f32(
         index_buffer: *const RawRuntimeBuffer,
         scale_buffer: *const RawRuntimeBuffer,
@@ -321,6 +339,15 @@ unsafe extern "C" {
     ) -> c_int;
     fn ullm_runtime_top1_f32(
         input_buffer: *const RawRuntimeBuffer,
+        elements: usize,
+        partial_values_buffer: *mut RawRuntimeBuffer,
+        partial_indices_buffer: *mut RawRuntimeBuffer,
+        partial_count: usize,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_top1_pairs_f32(
+        values_buffer: *const RawRuntimeBuffer,
+        indices_buffer: *const RawRuntimeBuffer,
         elements: usize,
         partial_values_buffer: *mut RawRuntimeBuffer,
         partial_indices_buffer: *mut RawRuntimeBuffer,
@@ -930,6 +957,106 @@ pub fn aq4_matvec_f32(
             stream,
         )
     })
+}
+
+pub fn aq4_matvec_top1_partial_count(rows: usize) -> Result<usize, String> {
+    if rows == 0 {
+        return Err("AQ4 matvec top1 rows must be greater than zero".to_string());
+    }
+    const ROWS_PER_BLOCK: usize = 16;
+    rows.checked_add(ROWS_PER_BLOCK - 1)
+        .map(|value| value / ROWS_PER_BLOCK)
+        .ok_or_else(|| "AQ4 matvec top1 partial count overflows".to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn aq4_matvec_top1_f32(
+    index_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    codebook_buffer: &RuntimeBuffer,
+    scale_values_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    row_scale_buffer: Option<&RuntimeBuffer>,
+    scale_count: usize,
+    group_size: usize,
+    tensor_scale: f32,
+    row_scale_count: usize,
+    rows: usize,
+    cols: usize,
+    partial_values_buffer: &mut RuntimeBuffer,
+    partial_indices_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<usize, String> {
+    if scale_count == 0 {
+        return Err("AQ4 matvec top1 scale table is empty".to_string());
+    }
+    if group_size == 0 {
+        return Err("AQ4 matvec top1 group size must be greater than zero".to_string());
+    }
+    if rows == 0 || cols == 0 {
+        return Err("AQ4 matvec top1 rows and cols must be greater than zero".to_string());
+    }
+    if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
+        return Err(
+            "AQ4 matvec top1 tensor scale must be finite and greater than zero".to_string(),
+        );
+    }
+    let partial_count = aq4_matvec_top1_partial_count(rows)?;
+    let elements = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "AQ4 matvec top1 matrix element count overflows".to_string())?;
+    let index_bytes = elements / 2 + usize::from(!elements.is_multiple_of(2));
+    let groups = elements / group_size + usize::from(!elements.is_multiple_of(group_size));
+    let scale_value_bytes = scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec top1 scale value byte size overflows".to_string())?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec top1 input byte size overflows".to_string())?;
+    let row_scale_bytes = row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec top1 row scale byte size overflows".to_string())?;
+    let partial_values_bytes = partial_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec top1 partial value byte size overflows".to_string())?;
+    let partial_indices_bytes = partial_count
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "AQ4 matvec top1 partial index byte size overflows".to_string())?;
+    check_copy_range(0, index_bytes, index_buffer.size()?)?;
+    check_copy_range(0, groups, scale_buffer.size()?)?;
+    check_copy_range(0, 16 * std::mem::size_of::<f32>(), codebook_buffer.size()?)?;
+    check_copy_range(0, scale_value_bytes, scale_values_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    if let Some(row_scale_buffer) = row_scale_buffer {
+        check_copy_range(0, row_scale_bytes, row_scale_buffer.size()?)?;
+    }
+    check_copy_range(0, partial_values_bytes, partial_values_buffer.size()?)?;
+    check_copy_range(0, partial_indices_bytes, partial_indices_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    let row_scale_raw = row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    status_to_result(unsafe {
+        ullm_runtime_aq4_matvec_top1_f32(
+            index_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            codebook_buffer.raw.as_ptr(),
+            scale_values_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            row_scale_raw,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            partial_values_buffer.raw.as_ptr(),
+            partial_indices_buffer.raw.as_ptr(),
+            partial_count,
+            stream,
+        )
+    })?;
+    Ok(partial_count)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2044,6 +2171,44 @@ pub fn top1_f32(
             elements,
             partial_values_buffer.raw.as_ptr(),
             partial_indices_buffer.raw.as_ptr(),
+            partial_count,
+            stream,
+        )
+    })?;
+    Ok(partial_count)
+}
+
+pub fn top1_pairs_f32_in_place(
+    values_buffer: &mut RuntimeBuffer,
+    indices_buffer: &mut RuntimeBuffer,
+    elements: usize,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<usize, String> {
+    let partial_count = top1_partial_count(elements)?;
+    let values_bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 top1 pairs value byte size overflows".to_string())?;
+    let indices_bytes = elements
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "f32 top1 pairs index byte size overflows".to_string())?;
+    let partial_values_bytes = partial_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 top1 pairs partial value byte size overflows".to_string())?;
+    let partial_indices_bytes = partial_count
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "f32 top1 pairs partial index byte size overflows".to_string())?;
+    check_copy_range(0, values_bytes, values_buffer.size()?)?;
+    check_copy_range(0, indices_bytes, indices_buffer.size()?)?;
+    check_copy_range(0, partial_values_bytes, values_buffer.size()?)?;
+    check_copy_range(0, partial_indices_bytes, indices_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_top1_pairs_f32(
+            values_buffer.raw.as_ptr(),
+            indices_buffer.raw.as_ptr(),
+            elements,
+            values_buffer.raw.as_ptr(),
+            indices_buffer.raw.as_ptr(),
             partial_count,
             stream,
         )
@@ -3682,6 +3847,123 @@ mod tests {
         stream.synchronize().unwrap();
         assert_eq!(le_bytes_to_f32s(&value_bytes), vec![8.0, 9.0]);
         assert_eq!(le_bytes_to_u32s(&index_bytes), vec![123, 259]);
+    }
+
+    #[test]
+    fn cpu_top1_pairs_f32_in_place_preserves_original_indices() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut values = vec![-1.0_f32; 300];
+        let mut indices = vec![0_u32; 300];
+        values[123] = 8.0;
+        indices[123] = 900;
+        values[259] = 9.0;
+        indices[259] = 800;
+        values[260] = 9.0;
+        indices[260] = 700;
+        let mut values_buffer = context
+            .alloc_buffer(values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut indices_buffer = context
+            .alloc_buffer(indices.len() * std::mem::size_of::<u32>())
+            .unwrap();
+        values_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&values), Some(&mut stream))
+            .unwrap();
+        indices_buffer
+            .copy_from_host(0, &u32s_to_le_bytes(&indices), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let first_stage = top1_pairs_f32_in_place(
+            &mut values_buffer,
+            &mut indices_buffer,
+            values.len(),
+            Some(&mut stream),
+        )
+        .unwrap();
+        assert_eq!(first_stage, 2);
+        let second_stage = top1_pairs_f32_in_place(
+            &mut values_buffer,
+            &mut indices_buffer,
+            first_stage,
+            Some(&mut stream),
+        )
+        .unwrap();
+        assert_eq!(second_stage, 1);
+        stream.synchronize().unwrap();
+
+        let mut value_bytes = vec![0_u8; std::mem::size_of::<f32>()];
+        let mut index_bytes = vec![0_u8; std::mem::size_of::<u32>()];
+        values_buffer
+            .copy_to_host(0, &mut value_bytes, Some(&mut stream))
+            .unwrap();
+        indices_buffer
+            .copy_to_host(0, &mut index_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&value_bytes), vec![9.0]);
+        assert_eq!(le_bytes_to_u32s(&index_bytes), vec![700]);
+    }
+
+    #[test]
+    fn first_hip_top1_pairs_f32_in_place_preserves_original_indices_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut values = vec![-1.0_f32; 300];
+        let mut indices = vec![0_u32; 300];
+        values[123] = 8.0;
+        indices[123] = 900;
+        values[259] = 9.0;
+        indices[259] = 800;
+        values[260] = 9.0;
+        indices[260] = 700;
+        let mut values_buffer = context
+            .alloc_buffer(values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut indices_buffer = context
+            .alloc_buffer(indices.len() * std::mem::size_of::<u32>())
+            .unwrap();
+        values_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&values), Some(&mut stream))
+            .unwrap();
+        indices_buffer
+            .copy_from_host(0, &u32s_to_le_bytes(&indices), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let first_stage = top1_pairs_f32_in_place(
+            &mut values_buffer,
+            &mut indices_buffer,
+            values.len(),
+            Some(&mut stream),
+        )
+        .unwrap();
+        assert_eq!(first_stage, 2);
+        let second_stage = top1_pairs_f32_in_place(
+            &mut values_buffer,
+            &mut indices_buffer,
+            first_stage,
+            Some(&mut stream),
+        )
+        .unwrap();
+        assert_eq!(second_stage, 1);
+        stream.synchronize().unwrap();
+
+        let mut value_bytes = vec![0_u8; std::mem::size_of::<f32>()];
+        let mut index_bytes = vec![0_u8; std::mem::size_of::<u32>()];
+        values_buffer
+            .copy_to_host(0, &mut value_bytes, Some(&mut stream))
+            .unwrap();
+        indices_buffer
+            .copy_to_host(0, &mut index_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&value_bytes), vec![9.0]);
+        assert_eq!(le_bytes_to_u32s(&index_bytes), vec![700]);
     }
 
     #[test]
@@ -5689,6 +5971,81 @@ mod tests {
     }
 
     #[test]
+    fn cpu_aq4_matvec_top1_f32_writes_partial_maximum() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut index = context.alloc_buffer(3).unwrap();
+        let mut scale = context.alloc_buffer(3).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let partial_count = aq4_matvec_top1_partial_count(2).unwrap();
+        let mut partial_values = context
+            .alloc_buffer(partial_count * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut partial_indices = context
+            .alloc_buffer(partial_count * std::mem::size_of::<u32>())
+            .unwrap();
+
+        index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let written = aq4_matvec_top1_f32(
+            &index,
+            &scale,
+            &codebook,
+            &scale_values,
+            &input,
+            None,
+            2,
+            2,
+            10.0,
+            0,
+            2,
+            3,
+            &mut partial_values,
+            &mut partial_indices,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(written, partial_count);
+
+        let mut value_bytes = vec![0_u8; partial_count * std::mem::size_of::<f32>()];
+        let mut index_bytes = vec![0_u8; partial_count * std::mem::size_of::<u32>()];
+        partial_values
+            .copy_to_host(0, &mut value_bytes, Some(&mut stream))
+            .unwrap();
+        partial_indices
+            .copy_to_host(0, &mut index_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&value_bytes), vec![112.5]);
+        assert_eq!(le_bytes_to_u32s(&index_bytes), vec![0]);
+    }
+
+    #[test]
     fn cpu_aq4_matvec_pair_f32_computes_expected_values() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -6504,6 +6861,84 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_eq!(le_bytes_to_f32s(&output_bytes), vec![112.5, 30.0]);
+    }
+
+    #[test]
+    fn first_hip_aq4_matvec_top1_f32_writes_partial_maximum_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut index = context.alloc_buffer(3).unwrap();
+        let mut scale = context.alloc_buffer(3).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let partial_count = aq4_matvec_top1_partial_count(2).unwrap();
+        let mut partial_values = context
+            .alloc_buffer(partial_count * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut partial_indices = context
+            .alloc_buffer(partial_count * std::mem::size_of::<u32>())
+            .unwrap();
+
+        index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let written = aq4_matvec_top1_f32(
+            &index,
+            &scale,
+            &codebook,
+            &scale_values,
+            &input,
+            None,
+            2,
+            2,
+            10.0,
+            0,
+            2,
+            3,
+            &mut partial_values,
+            &mut partial_indices,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(written, partial_count);
+
+        let mut value_bytes = vec![0_u8; partial_count * std::mem::size_of::<f32>()];
+        let mut index_bytes = vec![0_u8; partial_count * std::mem::size_of::<u32>()];
+        partial_values
+            .copy_to_host(0, &mut value_bytes, Some(&mut stream))
+            .unwrap();
+        partial_indices
+            .copy_to_host(0, &mut index_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&value_bytes), vec![112.5]);
+        assert_eq!(le_bytes_to_u32s(&index_bytes), vec![0]);
     }
 
     #[test]
@@ -8685,6 +9120,14 @@ mod tests {
             .chunks_exact(std::mem::size_of::<u32>())
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect()
+    }
+
+    fn u32s_to_le_bytes(values: &[u32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(std::mem::size_of_val(values));
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
     }
 
     fn expected_rmsnorm(input: &[f32], weight: &[f32], epsilon: f32) -> Vec<f32> {
