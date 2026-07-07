@@ -12,6 +12,7 @@ real batch:複数tokenまたは複数requestを同じkernel、GEMM/GEMV群、ま
 package-batch-throughput-bench:.ullm.d packageに対して複数requestのprefill/decode/end-to-end total throughputとlatencyをJSONで出すullm-engine CLI。初期実装はlogical batchとして扱う
 prefill layer step summary:package-token-ids-generate系reportのprefill内で、layerごとのtoken-loop実行時間を合計・平均・分位点として記録する診断情報。real batch prefill化の前後比較に使う
 device token-loop prefill:prompt tokenごとにembeddingから全layerをdevice-to-deviceで順に通し、layer間のhost readbackを避けるprefill実験経路。real batchではないが、batched/tiled prefillへ進む前のhost境界削減に使う
+batch throughput workload manifest:package-batch-throughput-benchをworkload grid、warmup、measured repeat、保存先付きで順次実行するためのJSON入力。結果はinference-benchmark-result-v0.1 JSONLへ変換して保存する
 fq:推論エンジン上の実測を見て仕様を決める量子化またはformat候補の仮称。意味が確定したらこの定義を更新する
 raw-value:scale・codebookを一切考慮しない各パラメータの値
 codebook:LUTによる変換表
