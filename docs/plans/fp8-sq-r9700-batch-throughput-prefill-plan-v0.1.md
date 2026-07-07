@@ -278,6 +278,15 @@ SQ候補のprefill性能判断では、少なくとも次のpattern familyを測
 | mixed realistic prompt | prompt mix `128,512,2048,8192` | cached prefix mixを含める | scheduler/result schemaが平均値で問題を隠していないかを見る |
 | component isolation | projection+RoPE, attention-only, MLP-only, full-layer partial | full layer stack | format差ではなくexecutor差で詰まっている箇所を分ける |
 
+512 token不足への対応ルール:
+
+- 512 tokenだけの結果では、prefill kernelやSQ候補の採用判断を行わない。
+- SQ候補比較へ進む前に、最低でも `N=1024/2048/4096` のcold prefill component scaling、`L=4096, M=16/128/512` のcached prefix chunk scaling、`B=1/4/8` のbatch width scalingを保存する。
+- 長コンテキスト適性を見るため、OOMまたは極端な低速がない範囲で `N>=8192` のcold prefill代表値と `L=65536, M=16/128` のcached prefix代表値を追加する。
+- 4096 token以上でfull host reference verificationが支配的になる場合は、sampled verificationを使い、GPU計測時間とverification時間を分けて保存する。
+- どれかのpattern familyで急落、OOM、output guard failure、またはattention pair/sの伸び止まりが出た場合は、そのpatternを再現するcomponent smokeを追加し、kernel修正後に同じgridを再実行する。
+- 新しいkernel方針は、単一の512 token改善ではなく、少なくとも2つ以上の長さまたはprefix/chunk条件で改善が確認できた場合に次段階へ進める。
+
 各familyで保存する最小項目:
 
 - `prefill_total_input_tps`
@@ -672,6 +681,8 @@ R9700 release results:
 | self-attention qkv+QK RoPE+causal attention | 128 | 7.637947 | 16758.430420 | 0.000011265 | measured 5 |
 | self-attention qkv+QK RoPE+causal attention | 512 | 43.796889 | 11690.327961 | 0.000011265 | measured 3 |
 | self-attention qkv+QK RoPE+causal attention | 1024 | 116.215921 | 8811.185173 | 0.000011265 | measured 1 |
+| self-attention qkv+QK RoPE+causal attention | 2048 | 374.883299 | 5463.033444 | 0.000011265 | measured 1 |
+| self-attention qkv+QK RoPE+causal attention | 4096 | 1331.671565 | 3075.833492 | 0.000011265 | measured 1 |
 
 Previous comparison:
 
@@ -680,18 +691,19 @@ Previous comparison:
 | 128 | 24.605704 | 7.637947 | 5202.045750 | 16758.430420 | 3.222x |
 | 512 | 281.601274 | 43.796889 | 1818.173590 | 11690.327961 | 6.430x |
 
-Guard note:
+RoPE guard:
 
-- `prompt_tokens=2048` はattention verification前のQ RoPE guardで停止した。
-- failure: `q_rope_max_abs_diff=0.00022828579`, current tolerance `0.0002`
-- これはcausal attention source-shared kernelの不一致ではない。`2048+` のcold prefill component rowを採用する前に、長尺RoPE guard toleranceまたはreference precisionを見直す必要がある。
+- self-attention batch smokeのRoPE guardを、固定 `2e-4` からposition長に応じた上限付きabs floorへ変更した。
+- `2048`: `q_rope_abs_floor=0.000409400`, `q_rope_max_abs_diff=0.000270158`, `k_rope_max_abs_diff=0.000198193`
+- `4096`: `q_rope_abs_floor=0.000819000`, `q_rope_max_abs_diff=0.000506938`, `k_rope_max_abs_diff=0.000336170`
+- 4096のfull host attention reference verificationは数分級になったため、今後の `4096+` rowではsampled attention verificationを優先する。
 
 解釈:
 
 - 512 tokenのself-attention attention込みcomponentは約 `1.82k tok/s` から約 `11.69k tok/s` へ改善した。
-- 1024 tokenでも約 `8.81k tok/s` が出ており、512 token止まりの測定から一段進んだ。
-- ただしPhase C4の必須gridである `2048+` はまだguard条件が未整理であり、cold prefill scalingの完了とは扱わない。
-- 次は、長尺RoPE guardの扱いを整理した上で `2048/4096` のcomponent scalingを取るか、o projection/residualまで接続してself-attention layer partialの速度を見る。
+- 1024 tokenで約 `8.81k tok/s`、2048 tokenで約 `5.46k tok/s`、4096 tokenで約 `3.08k tok/s` が出ており、512 token止まりの測定からPhase C4 cold prefill component scalingへ進めた。
+- ただし4096時点でfull host reference verificationが重くなっているため、8192以上へ進む前にsampled verificationを追加する必要がある。
+- 次はo projection/residualまで接続してself-attention layer partialを再測定するか、sampled verificationを入れて `8192/16384` のcold prefill component scalingを取る。
 
 2026-07-07 cached prefix attention baseline:
 

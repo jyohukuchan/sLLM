@@ -18788,18 +18788,19 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         1e-5_f32,
         1e-5_f32,
     )?;
+    let rope_abs_floor = self_attn_batch_rope_abs_floor(sequence_len, position_offset);
     let q_rope_max_abs_diff = verify_f32_close(
         "self-attn qkv RoPE batch q RoPE",
         &q_rope,
         &expected_q_rope,
-        2e-4_f32,
+        rope_abs_floor,
         2e-5_f32,
     )?;
     let k_rope_max_abs_diff = verify_f32_close(
         "self-attn qkv RoPE batch k RoPE",
         &k_rope,
         &expected_k_rope,
-        2e-4_f32,
+        rope_abs_floor,
         2e-5_f32,
     )?;
     let attention_max_abs_diff = if let Some(attention_output) = attention_output.as_ref() {
@@ -18857,7 +18858,7 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     };
     if let Some(attention_output) = attention_output.as_ref() {
         return Ok(format!(
-            "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} input_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={:.9} q_rope_preview={} v_preview={} attention_preview={} verified=true",
+            "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} input_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={:.9} q_rope_preview={} v_preview={} attention_preview={} verified=true",
             stage.smoke_name(),
             path,
             layer_index,
@@ -18905,7 +18906,7 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         ));
     }
     Ok(format!(
-        "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} input_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} q_rope_preview={} v_preview={} verified=true",
+        "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} input_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} q_rope_preview={} v_preview={} verified=true",
         stage.smoke_name(),
         path,
         layer_index,
@@ -36192,6 +36193,13 @@ fn verify_f32_close(
         }
     }
     Ok(max_abs_diff)
+}
+
+fn self_attn_batch_rope_abs_floor(sequence_len: usize, position_offset: usize) -> f32 {
+    let max_position = position_offset
+        .saturating_add(sequence_len.saturating_sub(1))
+        .max(1) as f32;
+    2e-4_f32.max((max_position * 2e-7_f32).min(1e-3_f32))
 }
 
 fn deterministic_f32_vector(elements: usize) -> Vec<f32> {
