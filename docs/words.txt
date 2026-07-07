@@ -15,6 +15,8 @@ device token-loop prefill:prompt tokenごとにembeddingから全layerをdevice-
 batch throughput workload manifest:package-batch-throughput-benchをworkload grid、warmup、measured repeat、保存先付きで順次実行するためのJSON入力。結果はinference-benchmark-result-v0.1 JSONLへ変換して保存する
 executor parallelism fields:workloadのconcurrent_requestsではなく、実際のexecutorが同時に処理するtoken数・request数・real batch可否を表すbenchmark metadata。logical batch誤読を避けるために使う
 prefill RMSNorm batch smoke:package prompt embeddingを[tokens,hidden] device bufferに載せ、segmented RMSNormで複数tokenを一括正規化するsmoke。projection/attention/MLPのreal batch化前にprefill buffer境界を検証する
+AQ4 matvec batch runtime:同じAQ4 resident matrixに対して複数input vectorを[tokens,cols] layoutで受け取り、[tokens,rows] outputを返すruntime API。prefill projectionをtoken batch化するための最初のAQ4 projection境界
+package prefill AQ4 matvec batch smoke:package prompt embedding行を[tokens,hidden] device bufferへ載せ、指定AQ4 projection tensorをAQ4 matvec batch runtimeでまとめて実行し、materialized F32 matvec由来のexpected outputと比較するsmoke。attentionやMLP全体ではなくprojection batch kernelの正しさと速度を測る
 fq:推論エンジン上の実測を見て仕様を決める量子化またはformat候補の仮称。意味が確定したらこの定義を更新する
 raw-value:scale・codebookを一切考慮しない各パラメータの値
 codebook:LUTによる変換表

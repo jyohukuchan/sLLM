@@ -311,6 +311,14 @@ fn main() -> ExitCode {
             env::args().nth(6),
             env::args().nth(7),
         ),
+        Some("package-prefill-aq4-matvec-batch-smoke") => package_prefill_aq4_matvec_batch_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+        ),
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -16553,6 +16561,284 @@ fn package_prefill_rmsnorm_batch_smoke_impl(
     ))
 }
 
+fn package_prefill_aq4_matvec_batch_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    tensor_name: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-prefill-aq4-matvec-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let tensor_name = tensor_name.unwrap_or_else(|| {
+        "model.language_model.layers.0.linear_attn.in_proj_qkv.weight".to_string()
+    });
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_prefill_aq4_matvec_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        &tensor_name,
+        prompt_token_ids,
+        measured_repeats,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn package_prefill_aq4_matvec_batch_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    tensor_name: &str,
+    prompt_token_ids: Vec<usize>,
+    measured_repeats: usize,
+) -> Result<String, String> {
+    if prompt_token_ids.is_empty() {
+        return Err("prefill AQ4 matvec batch smoke requires at least one token".to_string());
+    }
+    let (embedding_vocab, hidden) = package_embedding_shape(path)?;
+    if let Some(token_id) = prompt_token_ids
+        .iter()
+        .copied()
+        .find(|token_id| *token_id >= embedding_vocab)
+    {
+        return Err(format!(
+            "prefill AQ4 matvec batch token id {token_id} is out of embedding range 0..{embedding_vocab}"
+        ));
+    }
+
+    let embedding_rows =
+        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
+            .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
+    if embedding_rows.columns != hidden
+        || embedding_rows.values.len() != prompt_token_ids.len() * hidden
+    {
+        return Err(format!(
+            "prefill AQ4 matvec batch embedding shape mismatch: columns={} values={} prompt_tokens={} hidden={hidden}",
+            embedding_rows.columns,
+            embedding_rows.values.len(),
+            prompt_token_ids.len()
+        ));
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let mut registry = WeightRegistry::new();
+    let matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        tensor_name,
+        chunk_bytes,
+    )?;
+    if matrix.cols != hidden {
+        return Err(format!(
+            "prefill AQ4 matvec batch tensor {tensor_name} has cols={} but embedding hidden={hidden}",
+            matrix.cols
+        ));
+    }
+
+    let (materialized_rows, materialized_cols, materialized_matrix) =
+        materialize_selected_aq4_matrix(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            path,
+            tensor_name,
+            chunk_bytes,
+        )?;
+    if (materialized_rows, materialized_cols) != (matrix.rows, matrix.cols) {
+        return Err(format!(
+            "prefill AQ4 matvec batch materialized shape mismatch: resident=[{},{}] materialized=[{},{}]",
+            matrix.rows, matrix.cols, materialized_rows, materialized_cols
+        ));
+    }
+    let materialized_values = read_runtime_buffer_f32(
+        &materialized_matrix,
+        &mut stream,
+        matrix
+            .rows
+            .checked_mul(matrix.cols)
+            .ok_or_else(|| "prefill AQ4 materialized matrix element count overflows".to_string())?,
+        "prefill AQ4 materialized matrix",
+    )?;
+
+    let mut expected = Vec::with_capacity(
+        prompt_token_ids
+            .len()
+            .checked_mul(matrix.rows)
+            .ok_or_else(|| "prefill AQ4 expected output element count overflows".to_string())?,
+    );
+    for token_index in 0..prompt_token_ids.len() {
+        let start = token_index
+            .checked_mul(hidden)
+            .ok_or_else(|| "prefill AQ4 expected input slice start overflows".to_string())?;
+        let end = start
+            .checked_add(hidden)
+            .ok_or_else(|| "prefill AQ4 expected input slice end overflows".to_string())?;
+        expected.extend(runtime_host_matvec_f32(
+            &materialized_values,
+            &embedding_rows.values[start..end],
+            matrix.rows,
+            matrix.cols,
+        ));
+    }
+
+    let input_elements = prompt_token_ids
+        .len()
+        .checked_mul(hidden)
+        .ok_or_else(|| "prefill AQ4 matvec batch input element count overflows".to_string())?;
+    let output_elements = prompt_token_ids
+        .len()
+        .checked_mul(matrix.rows)
+        .ok_or_else(|| "prefill AQ4 matvec batch output element count overflows".to_string())?;
+    let mut input_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_elements,
+            "prefill AQ4 matvec batch input",
+        )?)
+        .map_err(|err| format!("failed to allocate prefill AQ4 matvec batch input: {err}"))?;
+    let mut output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            output_elements,
+            "prefill AQ4 matvec batch output",
+        )?)
+        .map_err(|err| format!("failed to allocate prefill AQ4 matvec batch output: {err}"))?;
+    input_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&embedding_rows.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy prefill AQ4 matvec batch input: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize prefill AQ4 matvec batch setup: {err}"))?;
+
+    matrix.matvec_batch(
+        &input_buffer,
+        prompt_token_ids.len(),
+        &mut output_buffer,
+        &mut stream,
+        "prefill AQ4 projection warmup",
+    )?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize prefill AQ4 matvec batch warmup: {err}"))?;
+
+    let mut measured_ms = Vec::with_capacity(measured_repeats);
+    for _ in 0..measured_repeats {
+        let started = Instant::now();
+        matrix.matvec_batch(
+            &input_buffer,
+            prompt_token_ids.len(),
+            &mut output_buffer,
+            &mut stream,
+            "prefill AQ4 projection",
+        )?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize prefill AQ4 matvec batch projection: {err}")
+        })?;
+        measured_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    let wall_ms = measured_ms.iter().sum::<f64>() / measured_ms.len() as f64;
+    let wall_ms_min = measured_ms
+        .iter()
+        .copied()
+        .min_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+    let wall_ms_max = measured_ms
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+
+    let output = read_runtime_buffer_f32(
+        &output_buffer,
+        &mut stream,
+        output_elements,
+        "prefill AQ4 matvec batch output",
+    )?;
+    let max_abs_diff = verify_f32_close(
+        "prefill AQ4 matvec batch",
+        &output,
+        &expected,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let preview_len = output.len().min(8);
+    Ok(format!(
+        "package-prefill-aq4-matvec-batch-smoke package={} tensor=\"{}\" prompt_tokens={} hidden={} rows={} cols={} input_elements={} output_elements={} executor=aq4_matvec_batch_f32 real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} element_tps_mean={} max_abs_diff={max_abs_diff:.9} preview={} verified=true",
+        path,
+        tensor_name,
+        prompt_token_ids.len(),
+        hidden,
+        matrix.rows,
+        matrix.cols,
+        input_elements,
+        output_elements,
+        prompt_token_ids.len(),
+        info.backend,
+        device_index,
+        info.name,
+        measured_repeats,
+        wall_ms,
+        wall_ms_min,
+        wall_ms_max,
+        tps(prompt_token_ids.len(), wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        tps(output_elements, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        format_f32_preview(&output[..preview_len]),
+    ))
+}
+
 fn current_git_commit() -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -29743,7 +30029,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
     );
     eprintln!(
         "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
@@ -29759,6 +30045,9 @@ fn print_help() {
     );
     eprintln!(
         "package-prefill-rmsnorm-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
+    );
+    eprintln!(
+        "package-prefill-aq4-matvec-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
     );
     eprintln!(
         "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"
@@ -31274,6 +31563,34 @@ impl PackageAq4ResidentMatvec {
             Some(stream),
         )
         .map_err(|err| format!("failed to run {label} AQ4 matvec: {err}"))
+    }
+
+    fn matvec_batch(
+        &self,
+        input_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        batch_count: usize,
+        output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<(), String> {
+        ullm_runtime_sys::aq4_matvec_batch_f32(
+            self.index_buffer.as_ref(),
+            self.scale_buffer.as_ref(),
+            self.codebook_buffer.as_ref(),
+            &self.scale_values_buffer,
+            input_buffer,
+            self.row_scale_buffer.as_ref(),
+            self.scale_count,
+            self.group_size,
+            self.tensor_scale,
+            self.row_scale_count,
+            self.rows,
+            self.cols,
+            batch_count,
+            output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} AQ4 matvec batch: {err}"))
     }
 
     fn matvec_top1(

@@ -293,6 +293,33 @@ public:
                    nullptr) == 0;
     }
 
+    bool module_launch_kernel_2d(
+        void *function,
+        unsigned int grid_x,
+        unsigned int grid_y,
+        unsigned int block_x,
+        void **kernel_params,
+        void *stream,
+        int device_id) {
+        load_once();
+        if (hip_module_launch_kernel_ == nullptr || function == nullptr || kernel_params == nullptr ||
+            !set_device(device_id)) {
+            return false;
+        }
+        return hip_module_launch_kernel_(
+                   function,
+                   grid_x,
+                   grid_y,
+                   1,
+                   block_x,
+                   1,
+                   1,
+                   0,
+                   stream,
+                   kernel_params,
+                   nullptr) == 0;
+    }
+
     bool module_unload(void *module, int device_id) {
         load_once();
         if (module == nullptr) {
@@ -418,6 +445,19 @@ public:
     bool compile_aq4_matvec_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         const std::string source = aq4_matvec_kernel_source_for_arch(arch);
         return compile_kernel(arch, source.c_str(), "ullm_aq4_matvec_f32.hip", code, error);
+    }
+
+    bool compile_aq4_matvec_batch_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        const std::string source = aq4_matvec_batch_kernel_source_for_arch(arch);
+        return compile_kernel(
+            arch,
+            source.c_str(),
+            "ullm_aq4_matvec_batch_f32.hip",
+            code,
+            error);
     }
 
     bool compile_aq4_matvec_top1_kernel(
@@ -921,6 +961,11 @@ extern "C" __global__ void ullm_aq4_row_f32_kernel(
                aq4_matvec_kernel_source();
     }
 
+    static std::string aq4_matvec_batch_kernel_source_for_arch(const std::string &arch) {
+        return aq4_rows_per_block_preamble(arch, "ULLM_AQ4_MATVEC_BATCH_RPB") +
+               aq4_matvec_batch_kernel_source();
+    }
+
     static std::string aq4_matvec_top1_kernel_source_for_arch(const std::string &arch) {
         std::string preamble =
             aq4_rows_per_block_preamble_for_rows(aq4_matvec_top1_rows_per_block_from_env());
@@ -1087,6 +1132,119 @@ extern "C" __global__ void ullm_aq4_matvec_f32_kernel(
             value *= row_scales[row];
         }
         output[row] = value;
+    }
+}
+)";
+    }
+
+    static const char *aq4_matvec_batch_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_aq4_matvec_batch_f32_kernel(
+    const unsigned char *indices,
+    const unsigned char *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    const float *input,
+    const float *row_scales,
+    unsigned long long scale_count,
+    unsigned long long group_size,
+    float tensor_scale,
+    unsigned long long row_scale_count,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned long long batch_count,
+    float *output) {
+    const unsigned int tid = threadIdx.x;
+    constexpr unsigned int rows_per_block = ULLM_AQ4_ROWS_PER_BLOCK;
+    constexpr unsigned int threads_per_row = 256u / rows_per_block;
+    const unsigned int row_in_block = tid / threads_per_row;
+    const unsigned int lane = tid - row_in_block * threads_per_row;
+    const unsigned long long row =
+        static_cast<unsigned long long>(blockIdx.x) * rows_per_block + row_in_block;
+    const unsigned long long batch = static_cast<unsigned long long>(blockIdx.y);
+    const unsigned int partial_offset = row_in_block * threads_per_row;
+    __shared__ float partial[256];
+    float sum = 0.0f;
+    if (row < rows && batch < batch_count) {
+        const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
+        const float *batch_input = input + batch * cols;
+        if ((cols % group_size) == 0ull) {
+            const unsigned long long groups_per_row = cols / group_size;
+            for (unsigned long long group_in_row = lane; group_in_row < groups_per_row;
+                 group_in_row += threads_per_row) {
+                const unsigned long long group = static_cast<unsigned long long>(row) * groups_per_row +
+                    group_in_row;
+                const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+                if (scale_index >= scale_count) {
+                    continue;
+                }
+                float raw_sum = 0.0f;
+                const unsigned long long col_start = group_in_row * group_size;
+                if (group_size == 16ull) {
+#pragma unroll
+                    for (unsigned int offset = 0; offset < 16u; offset += 2u) {
+                        const unsigned long long col = col_start + offset;
+                        const unsigned char packed = indices[(row_offset + col) >> 1];
+                        raw_sum += codebook[packed & 0x0f] * batch_input[col];
+                        raw_sum += codebook[(packed >> 4) & 0x0f] * batch_input[col + 1ull];
+                    }
+                } else if (group_size == 8ull) {
+#pragma unroll
+                    for (unsigned int offset = 0; offset < 8u; offset += 2u) {
+                        const unsigned long long col = col_start + offset;
+                        const unsigned char packed = indices[(row_offset + col) >> 1];
+                        raw_sum += codebook[packed & 0x0f] * batch_input[col];
+                        raw_sum += codebook[(packed >> 4) & 0x0f] * batch_input[col + 1ull];
+                    }
+                } else if ((group_size & 1ull) == 0ull) {
+                    for (unsigned long long offset = 0; offset < group_size; offset += 2ull) {
+                        const unsigned long long col = col_start + offset;
+                        const unsigned char packed = indices[(row_offset + col) >> 1];
+                        raw_sum += codebook[packed & 0x0f] * batch_input[col];
+                        raw_sum += codebook[(packed >> 4) & 0x0f] * batch_input[col + 1ull];
+                    }
+                } else {
+                    for (unsigned long long offset = 0; offset < group_size; ++offset) {
+                        const unsigned long long col = col_start + offset;
+                        const unsigned long long element = row_offset + col;
+                        const unsigned char packed = indices[element >> 1];
+                        const unsigned char codebook_index =
+                            (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                        raw_sum += codebook[codebook_index] * batch_input[col];
+                    }
+                }
+                sum += raw_sum * scale_values[scale_index] * tensor_scale;
+            }
+        } else {
+            for (unsigned long long col = lane; col < cols; col += threads_per_row) {
+                const unsigned long long element = row_offset + col;
+                const unsigned char packed = indices[element >> 1];
+                const unsigned char codebook_index =
+                    (element & 1ull) == 0ull ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+                const unsigned long long group = element / group_size;
+                const unsigned int scale_index = static_cast<unsigned int>(scale_indices[group]);
+                if (scale_index < scale_count) {
+                    const float value =
+                        codebook[codebook_index] * scale_values[scale_index] * tensor_scale;
+                    sum += value * batch_input[col];
+                }
+            }
+        }
+    }
+    partial[tid] = sum;
+    __syncthreads();
+    for (unsigned int offset = threads_per_row >> 1; offset > 0; offset >>= 1) {
+        if (lane < offset) {
+            partial[partial_offset + lane] += partial[partial_offset + lane + offset];
+        }
+        __syncthreads();
+    }
+    if (lane == 0 && row < rows && batch < batch_count) {
+        float value = partial[partial_offset];
+        if (row_scales != nullptr && row < row_scale_count) {
+            value *= row_scales[row];
+        }
+        output[batch * rows + row] = value;
     }
 }
 )";
@@ -5546,6 +5704,42 @@ bool aq4_matvec_f32_host(
     return true;
 }
 
+bool aq4_matvec_batch_f32_host(
+    const std::uint8_t *indices,
+    const std::uint8_t *scale_indices,
+    const float *codebook,
+    const float *scale_values,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    const float *input,
+    const float *row_scales,
+    size_t row_scale_count,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    float *output) {
+    for (size_t batch = 0; batch < batch_count; ++batch) {
+        if (!aq4_matvec_f32_host(
+                indices,
+                scale_indices,
+                codebook,
+                scale_values,
+                scale_count,
+                group_size,
+                tensor_scale,
+                input + batch * cols,
+                row_scales,
+                row_scale_count,
+                rows,
+                cols,
+                output + batch * rows)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 size_t aq4_matvec_top1_partial_count(size_t rows) {
     const unsigned int rows_per_block = aq4_matvec_top1_rows_per_block_from_env();
     return (rows + rows_per_block - 1) / rows_per_block;
@@ -5853,6 +6047,90 @@ private:
 
 HipAq4MatvecKernelCache &hip_aq4_matvec_kernel_cache() {
     static HipAq4MatvecKernelCache cache;
+    return cache;
+}
+
+class HipAq4MatvecBatchKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_aq4_matvec_batch_kernel(
+                    arch,
+                    &code,
+                    &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_aq4_matvec_batch_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build AQ4 matvec batch HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipAq4MatvecBatchKernelCache &hip_aq4_matvec_batch_kernel_cache() {
+    static HipAq4MatvecBatchKernelCache cache;
     return cache;
 }
 
@@ -6335,6 +6613,85 @@ bool aq4_matvec_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for AQ4 matvec";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool aq4_matvec_batch_f32_hip_kernel(
+    const ullm_runtime_buffer *index_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *codebook_buffer,
+    const ullm_runtime_buffer *scale_values_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *row_scale_buffer,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    size_t row_scale_count,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = index_buffer->hip_device_id;
+    void *function = hip_aq4_matvec_batch_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    const Aq4MatvecLaunchConfig launch_config = aq4_matvec_launch_config_for_device(device_id);
+    const size_t grid_x =
+        (rows + launch_config.rows_per_block - 1) / launch_config.rows_per_block;
+    if (grid_x > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) ||
+        batch_count > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "AQ4 matvec batch dimensions exceed HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_scale_count = static_cast<unsigned long long>(scale_count);
+    unsigned long long kernel_group_size = static_cast<unsigned long long>(group_size);
+    unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    unsigned long long kernel_batch_count = static_cast<unsigned long long>(batch_count);
+    void *index_ptr = index_buffer->ptr;
+    void *scale_ptr = scale_buffer->ptr;
+    void *codebook_ptr = codebook_buffer->ptr;
+    void *scale_values_ptr = scale_values_buffer->ptr;
+    void *input_ptr = input_buffer->ptr;
+    void *row_scale_ptr = row_scale_buffer == nullptr ? nullptr : row_scale_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    unsigned long long kernel_row_scale_count = static_cast<unsigned long long>(row_scale_count);
+    void *kernel_params[] = {
+        &index_ptr,
+        &scale_ptr,
+        &codebook_ptr,
+        &scale_values_ptr,
+        &input_ptr,
+        &row_scale_ptr,
+        &kernel_scale_count,
+        &kernel_group_size,
+        &tensor_scale,
+        &kernel_row_scale_count,
+        &kernel_rows,
+        &kernel_cols,
+        &kernel_batch_count,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel_2d(
+            function,
+            static_cast<unsigned int>(grid_x),
+            static_cast<unsigned int>(batch_count),
+            launch_config.block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for AQ4 matvec batch";
         }
         return false;
     }
@@ -7084,6 +7441,120 @@ ullm_status aq4_matvec_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize AQ4 matvec HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status aq4_matvec_batch_f32_hip_staging(
+    const ullm_runtime_buffer *index_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *codebook_buffer,
+    const ullm_runtime_buffer *scale_values_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *row_scale_buffer,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    size_t row_scale_count,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    size_t required_index_bytes,
+    size_t groups,
+    size_t codebook_entries,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<std::uint8_t> host_indices(required_index_bytes);
+    std::vector<std::uint8_t> host_scale_indices(groups);
+    std::vector<float> host_codebook(codebook_entries);
+    std::vector<float> host_scale_values(scale_count);
+    std::vector<float> host_input(batch_count * cols);
+    std::vector<float> host_row_scales(row_scale_count);
+    std::vector<float> host_output(batch_count * rows);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = index_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_indices.data(),
+            index_buffer->ptr,
+            required_index_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_scale_indices.data(),
+            scale_buffer->ptr,
+            groups,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_codebook.data(),
+            codebook_buffer->ptr,
+            codebook_buffer->bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_scale_values.data(),
+            scale_values_buffer->ptr,
+            scale_count * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            batch_count * cols * sizeof(float),
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        (row_scale_buffer != nullptr && row_scale_count > 0 &&
+         !hip_runtime().copy_async(
+             host_row_scales.data(),
+             row_scale_buffer->ptr,
+             row_scale_count * sizeof(float),
+             HIP_MEMCPY_DEVICE_TO_HOST,
+             hip_stream,
+             device_id))) {
+        set_error("failed to copy AQ4 matvec batch HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize AQ4 matvec batch HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!aq4_matvec_batch_f32_host(
+            host_indices.data(),
+            host_scale_indices.data(),
+            host_codebook.data(),
+            host_scale_values.data(),
+            scale_count,
+            group_size,
+            tensor_scale,
+            host_input.data(),
+            row_scale_buffer == nullptr ? nullptr : host_row_scales.data(),
+            row_scale_count,
+            rows,
+            cols,
+            batch_count,
+            host_output.data())) {
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            batch_count * rows * sizeof(float),
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy AQ4 matvec batch output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize AQ4 matvec batch HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -14673,6 +15144,198 @@ ullm_status ullm_runtime_aq4_matvec_f32(
         row_scale_count,
         rows,
         cols,
+        required_index_bytes,
+        groups,
+        codebook_entries,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_aq4_matvec_batch_f32(
+    const ullm_runtime_buffer *index_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *codebook_buffer,
+    const ullm_runtime_buffer *scale_values_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    const ullm_runtime_buffer *row_scale_buffer,
+    size_t scale_count,
+    size_t group_size,
+    float tensor_scale,
+    size_t row_scale_count,
+    size_t rows,
+    size_t cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (index_buffer == nullptr || scale_buffer == nullptr || codebook_buffer == nullptr ||
+        scale_values_buffer == nullptr || input_buffer == nullptr || output_buffer == nullptr) {
+        set_error("AQ4 matvec batch received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_count == 0) {
+        set_error("AQ4 matvec batch scale table is empty");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (group_size == 0) {
+        set_error("AQ4 matvec batch group size must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rows == 0 || cols == 0 || batch_count == 0) {
+        set_error("AQ4 matvec batch rows, cols, and batch count must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(tensor_scale) || tensor_scale <= 0.0f) {
+        set_error("AQ4 matvec batch tensor scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(index_buffer, scale_buffer) ||
+        !buffers_share_backend(index_buffer, codebook_buffer) ||
+        !buffers_share_backend(index_buffer, scale_values_buffer) ||
+        !buffers_share_backend(index_buffer, input_buffer) ||
+        !buffers_share_backend(index_buffer, output_buffer) ||
+        (row_scale_buffer != nullptr && !buffers_share_backend(index_buffer, row_scale_buffer))) {
+        set_error("AQ4 matvec batch buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("AQ4 matvec batch stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / rows) {
+        set_error("AQ4 matvec batch matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t elements = rows * cols;
+    const size_t required_index_bytes = elements / 2 + (elements % 2);
+    const size_t groups = elements / group_size + (elements % group_size == 0 ? 0 : 1);
+    if (cols > max_size / batch_count ||
+        rows > max_size / batch_count ||
+        scale_count > max_size / sizeof(float) ||
+        row_scale_count > max_size / sizeof(float)) {
+        set_error("AQ4 matvec batch byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t input_elements = cols * batch_count;
+    const size_t output_elements = rows * batch_count;
+    if (input_elements > max_size / sizeof(float) ||
+        output_elements > max_size / sizeof(float)) {
+        set_error("AQ4 matvec batch byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_input_bytes = input_elements * sizeof(float);
+    const size_t required_output_bytes = output_elements * sizeof(float);
+    const size_t required_scale_value_bytes = scale_count * sizeof(float);
+    const size_t required_row_scale_bytes = row_scale_count * sizeof(float);
+    if (index_buffer->bytes < required_index_bytes) {
+        set_error("AQ4 matvec batch index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_buffer->bytes < groups) {
+        set_error("AQ4 matvec batch scale index buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_values_buffer->bytes < required_scale_value_bytes) {
+        set_error("AQ4 matvec batch scale value buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("AQ4 matvec batch input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (row_scale_buffer != nullptr && row_scale_buffer->bytes < required_row_scale_bytes) {
+        set_error("AQ4 matvec batch row scale buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_output_bytes) {
+        set_error("AQ4 matvec batch output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (codebook_buffer->bytes % sizeof(float) != 0) {
+        set_error("AQ4 matvec batch codebook buffer size is not a multiple of f32");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t codebook_entries = codebook_buffer->bytes / sizeof(float);
+    if (codebook_entries < 16) {
+        set_error("AQ4 matvec batch requires at least 16 codebook entries");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (index_buffer->backend == BackendKind::Cpu) {
+        const auto *indices = static_cast<const std::uint8_t *>(index_buffer->ptr);
+        const auto *scale_indices = static_cast<const std::uint8_t *>(scale_buffer->ptr);
+        const auto *codebook = static_cast<const float *>(codebook_buffer->ptr);
+        const auto *scale_values = static_cast<const float *>(scale_values_buffer->ptr);
+        const auto *input = static_cast<const float *>(input_buffer->ptr);
+        const auto *row_scales =
+            row_scale_buffer == nullptr ? nullptr : static_cast<const float *>(row_scale_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        if (!aq4_matvec_batch_f32_host(
+                indices,
+                scale_indices,
+                codebook,
+                scale_values,
+                scale_count,
+                group_size,
+                tensor_scale,
+                input,
+                row_scales,
+                row_scale_count,
+                rows,
+                cols,
+                batch_count,
+                output)) {
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (aq4_matvec_batch_f32_hip_kernel(
+            index_buffer,
+            scale_buffer,
+            codebook_buffer,
+            scale_values_buffer,
+            input_buffer,
+            row_scale_buffer,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            batch_count,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_AQ4_MATVEC_BATCH_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "AQ4 matvec batch HIP kernel is unavailable" :
+                                       hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return aq4_matvec_batch_f32_hip_staging(
+        index_buffer,
+        scale_buffer,
+        codebook_buffer,
+        scale_values_buffer,
+        input_buffer,
+        row_scale_buffer,
+        scale_count,
+        group_size,
+        tensor_scale,
+        row_scale_count,
+        rows,
+        cols,
+        batch_count,
         required_index_bytes,
         groups,
         codebook_entries,

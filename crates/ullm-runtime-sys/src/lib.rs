@@ -110,6 +110,23 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_aq4_matvec_batch_f32(
+        index_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        codebook_buffer: *const RawRuntimeBuffer,
+        scale_values_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        row_scale_buffer: *const RawRuntimeBuffer,
+        scale_count: usize,
+        group_size: usize,
+        tensor_scale: f32,
+        row_scale_count: usize,
+        rows: usize,
+        cols: usize,
+        batch_count: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_aq4_matvec_top1_f32(
         index_buffer: *const RawRuntimeBuffer,
         scale_buffer: *const RawRuntimeBuffer,
@@ -970,6 +987,97 @@ pub fn aq4_matvec_f32(
             row_scale_count,
             rows,
             cols,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn aq4_matvec_batch_f32(
+    index_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    codebook_buffer: &RuntimeBuffer,
+    scale_values_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    row_scale_buffer: Option<&RuntimeBuffer>,
+    scale_count: usize,
+    group_size: usize,
+    tensor_scale: f32,
+    row_scale_count: usize,
+    rows: usize,
+    cols: usize,
+    batch_count: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if scale_count == 0 {
+        return Err("AQ4 matvec batch scale table is empty".to_string());
+    }
+    if group_size == 0 {
+        return Err("AQ4 matvec batch group size must be greater than zero".to_string());
+    }
+    if rows == 0 || cols == 0 || batch_count == 0 {
+        return Err(
+            "AQ4 matvec batch rows, cols, and batch count must be greater than zero".to_string(),
+        );
+    }
+    if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
+        return Err(
+            "AQ4 matvec batch tensor scale must be finite and greater than zero".to_string(),
+        );
+    }
+    let elements = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "AQ4 matvec batch matrix element count overflows".to_string())?;
+    let index_bytes = elements / 2 + usize::from(!elements.is_multiple_of(2));
+    let groups = elements / group_size + usize::from(!elements.is_multiple_of(group_size));
+    let scale_value_bytes = scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec batch scale value byte size overflows".to_string())?;
+    let input_elements = batch_count
+        .checked_mul(cols)
+        .ok_or_else(|| "AQ4 matvec batch input element count overflows".to_string())?;
+    let output_elements = batch_count
+        .checked_mul(rows)
+        .ok_or_else(|| "AQ4 matvec batch output element count overflows".to_string())?;
+    let input_bytes = input_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec batch input byte size overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec batch output byte size overflows".to_string())?;
+    let row_scale_bytes = row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 matvec batch row scale byte size overflows".to_string())?;
+    check_copy_range(0, index_bytes, index_buffer.size()?)?;
+    check_copy_range(0, groups, scale_buffer.size()?)?;
+    check_copy_range(0, 16 * std::mem::size_of::<f32>(), codebook_buffer.size()?)?;
+    check_copy_range(0, scale_value_bytes, scale_values_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    if let Some(row_scale_buffer) = row_scale_buffer {
+        check_copy_range(0, row_scale_bytes, row_scale_buffer.size()?)?;
+    }
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    let row_scale_raw = row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    status_to_result(unsafe {
+        ullm_runtime_aq4_matvec_batch_f32(
+            index_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            codebook_buffer.raw.as_ptr(),
+            scale_values_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            row_scale_raw,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            batch_count,
             output_buffer.raw.as_ptr(),
             stream,
         )
@@ -6219,6 +6327,78 @@ mod tests {
     }
 
     #[test]
+    fn cpu_aq4_matvec_batch_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut index = context.alloc_buffer(3).unwrap();
+        let mut scale = context.alloc_buffer(3).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(2 * 3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(2 * 2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[0.5, -1.0, 2.0, 1.0, 0.0, -0.5]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_matvec_batch_f32(
+            &index,
+            &scale,
+            &codebook,
+            &scale_values,
+            &input,
+            None,
+            2,
+            2,
+            10.0,
+            0,
+            2,
+            3,
+            2,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 4 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(
+            le_bytes_to_f32s(&output_bytes),
+            vec![112.5, 30.0, -25.0, -12.5]
+        );
+    }
+
+    #[test]
     fn cpu_aq4_matvec_top1_f32_writes_partial_maximum() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -7109,6 +7289,81 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_eq!(le_bytes_to_f32s(&output_bytes), vec![112.5, 30.0]);
+    }
+
+    #[test]
+    fn first_hip_aq4_matvec_batch_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut index = context.alloc_buffer(3).unwrap();
+        let mut scale = context.alloc_buffer(3).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut scale_values = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(2 * 3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(2 * 2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        index
+            .copy_from_host(0, &[0x21_u8, 0x03, 0x54], Some(&mut stream))
+            .unwrap();
+        scale
+            .copy_from_host(0, &[0_u8, 1, 0], Some(&mut stream))
+            .unwrap();
+        let codebook_values: Vec<f32> = (0..16).map(|value| value as f32).collect();
+        codebook
+            .copy_from_host(0, &f32s_to_le_bytes(&codebook_values), Some(&mut stream))
+            .unwrap();
+        scale_values
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, 2.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[0.5, -1.0, 2.0, 1.0, 0.0, -0.5]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_matvec_batch_f32(
+            &index,
+            &scale,
+            &codebook,
+            &scale_values,
+            &input,
+            None,
+            2,
+            2,
+            10.0,
+            0,
+            2,
+            3,
+            2,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 4 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(
+            le_bytes_to_f32s(&output_bytes),
+            vec![112.5, 30.0, -25.0, -12.5]
+        );
     }
 
     #[test]
