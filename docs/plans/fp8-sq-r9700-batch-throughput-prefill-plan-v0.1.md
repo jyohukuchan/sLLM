@@ -748,6 +748,42 @@ Attention-only comparison:
 - block/attention wall ratioは128 tokenで約 `1.45x`、512 tokenで約 `1.24x` だが、8192/16384では約 `1.04x` まで下がる。
 - self-attention block単位でもPhase C4のcold prefill length scalingは取れた。次はpost-attention RMSNorm/MLPまで含むself-attention layer partialか、causal attention kernelのtile/blocking再設計へ進む。
 
+2026-07-07 self-attention layer batch v1:
+
+- `package-self-attn-layer-batch-smoke` を追加した。
+- 既存のself-attention block batch pathに、`post RMSNorm -> gate/up AQ4 batch -> SiLU-mul -> down AQ4 batch -> residual add` を接続した。
+- `mlp.gate_proj`、`mlp.up_proj`、`mlp.down_proj` はfull host projection referenceを作らず、AQ4 row dot productのsampled verificationで確認する。
+- 保存先:
+  - `benchmarks/results/2026-07-07/runtime-causal-attn-source-shared/phase-c4-self-attn-layer-batch-v1.md`
+
+R9700 release results:
+
+| component | prompt tokens | wall ms mean | token/s mean | block-only ms | layer-block delta ms | layer/block wall | note |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| self-attention layer batch | 128 | 30.783820 | 4158.028516 | 11.099879 | 19.683941 | 2.773x | measured 3 |
+| self-attention layer batch | 512 | 141.768580 | 3611.519562 | 54.498359 | 87.270221 | 2.601x | measured 3 |
+| self-attention layer batch | 1024 | 318.234144 | 3217.756546 | 141.180790 | 177.053354 | 2.254x | sampled |
+| self-attention layer batch | 2048 | 777.894286 | 2632.748481 | 433.086886 | 344.807400 | 1.796x | sampled |
+| self-attention layer batch | 4096 | 2182.970006 | 1876.342776 | 1450.365419 | 732.604587 | 1.505x | sampled |
+| self-attention layer batch | 8192 | 6892.180390 | 1188.593382 | 5382.886791 | 1509.293599 | 1.280x | sampled |
+| self-attention layer batch | 16384 | 24825.171928 | 659.975288 | 21844.617459 | 2980.554469 | 1.136x | sampled |
+
+Guard:
+
+- `mlp_norm_max_abs_diff <= 0.000008106`
+- `mlp_gate_max_abs_diff <= 0.000003099`
+- `mlp_up_max_abs_diff <= 0.000004172`
+- `mlp_activation_max_abs_diff <= 0.000001907`
+- `mlp_down_max_abs_diff <= 0.000001788`
+- `layer_residual_max_abs_diff = 0`
+
+解釈:
+
+- post RMSNorm/MLPまで含めても、全長でverifiedになり、self-attention layer partialとしてdevice-resident prefill batchを測れる状態になった。
+- 128/512 tokenではMLPの線形コストが支配的に見え、layer/block wall ratioは約 `2.77x` / `2.60x`。
+- 8192/16384 tokenではO(N^2)のcausal attention比率が再び大きくなり、layer/block wall ratioは約 `1.28x` / `1.14x` まで下がる。ただしMLP追加分は16384でも約 `2.98s` あり、全layer stackでは無視できない。
+- SQ候補評価の前に、self-attention layer partialの長尺gridは最低限揃った。次のprefill側の主な不足は、複数layer stack、real batch幅、cached-prefix chunk pathでの同等のcomponent計測である。
+
 2026-07-07 cached prefix attention baseline:
 
 - `runtime-cached-prefix-attn-smoke` を追加した。

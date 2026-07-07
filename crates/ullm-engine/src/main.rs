@@ -363,6 +363,17 @@ fn main() -> ExitCode {
             env::args().nth(9),
             env::args().nth(10),
         ),
+        Some("package-self-attn-layer-batch-smoke") => package_self_attn_layer_batch_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+        ),
         Some("package-linear-attn-proj-batch-smoke") => package_linear_attn_proj_batch_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -18104,6 +18115,7 @@ enum SelfAttnBatchSmokeStage {
     QkvRope,
     Attention,
     Block,
+    Layer,
 }
 
 impl SelfAttnBatchSmokeStage {
@@ -18112,18 +18124,28 @@ impl SelfAttnBatchSmokeStage {
             SelfAttnBatchSmokeStage::QkvRope => "package-self-attn-qkv-rope-batch-smoke",
             SelfAttnBatchSmokeStage::Attention => "package-self-attn-attention-batch-smoke",
             SelfAttnBatchSmokeStage::Block => "package-self-attn-block-batch-smoke",
+            SelfAttnBatchSmokeStage::Layer => "package-self-attn-layer-batch-smoke",
         }
     }
 
     fn include_attention(self) -> bool {
         matches!(
             self,
-            SelfAttnBatchSmokeStage::Attention | SelfAttnBatchSmokeStage::Block
+            SelfAttnBatchSmokeStage::Attention
+                | SelfAttnBatchSmokeStage::Block
+                | SelfAttnBatchSmokeStage::Layer
         )
     }
 
     fn include_block(self) -> bool {
-        self == SelfAttnBatchSmokeStage::Block
+        matches!(
+            self,
+            SelfAttnBatchSmokeStage::Block | SelfAttnBatchSmokeStage::Layer
+        )
+    }
+
+    fn include_layer(self) -> bool {
+        self == SelfAttnBatchSmokeStage::Layer
     }
 }
 
@@ -18334,6 +18356,75 @@ fn package_self_attn_block_batch_smoke(
     }
 }
 
+fn package_self_attn_layer_batch_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-self-attn-layer-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 3, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_self_attn_qkv_rope_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        prompt_token_ids,
+        measured_repeats,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        SelfAttnBatchSmokeStage::Layer,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn package_self_attn_qkv_rope_batch_smoke_impl(
     path: &str,
@@ -18378,6 +18469,11 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
     let k_norm_tensor =
         format!("model.language_model.layers.{layer_index}.self_attn.k_norm.weight");
+    let post_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
 
     let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
         .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
@@ -18394,6 +18490,23 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     let mut k_norm = read_named_passthrough_f32(path, &k_norm_tensor, chunk_bytes)
         .map_err(|err| format!("failed to read k RMSNorm tensor: {err}"))?;
     k_norm.values = effective_rmsnorm_weight_values(&k_norm_tensor, &k_norm.values);
+    let mut post_norm = if stage.include_layer() {
+        Some(
+            read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)
+                .map_err(|err| format!("failed to read post RMSNorm tensor: {err}"))?,
+        )
+    } else {
+        None
+    };
+    if let Some(post_norm) = post_norm.as_mut() {
+        post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+        if post_norm.values.len() != hidden {
+            return Err(format!(
+                "self-attn layer batch post norm length {} does not match hidden {hidden}",
+                post_norm.values.len()
+            ));
+        }
+    }
     let head_dim = q_norm.values.len();
     if head_dim == 0 || k_norm.values.len() != head_dim {
         return Err(format!(
@@ -18503,6 +18616,42 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     } else {
         None
     };
+    let gate_matrix = if stage.include_layer() {
+        Some(PackageAq4ResidentMatvec::load(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            path,
+            &gate_tensor,
+            chunk_bytes,
+        )?)
+    } else {
+        None
+    };
+    let up_matrix = if stage.include_layer() {
+        Some(PackageAq4ResidentMatvec::load(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            path,
+            &up_tensor,
+            chunk_bytes,
+        )?)
+    } else {
+        None
+    };
+    let down_matrix = if stage.include_layer() {
+        Some(PackageAq4ResidentMatvec::load(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            path,
+            &down_tensor,
+            chunk_bytes,
+        )?)
+    } else {
+        None
+    };
     if q_matrix.cols != hidden || k_matrix.cols != hidden || v_matrix.cols != hidden {
         return Err(format!(
             "self-attn qkv RoPE batch q/k/v hidden mismatch: q_cols={} k_cols={} v_cols={} hidden={hidden}",
@@ -18552,6 +18701,31 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
             ));
         }
     }
+    let intermediate = if let (Some(gate_matrix), Some(up_matrix), Some(down_matrix)) = (
+        gate_matrix.as_ref(),
+        up_matrix.as_ref(),
+        down_matrix.as_ref(),
+    ) {
+        if gate_matrix.rows != up_matrix.rows
+            || gate_matrix.cols != up_matrix.cols
+            || gate_matrix.cols != hidden
+        {
+            return Err(format!(
+                "self-attn layer batch gate/up shape mismatch: gate=[{},{}] up=[{},{}] hidden={hidden}",
+                gate_matrix.rows, gate_matrix.cols, up_matrix.rows, up_matrix.cols
+            ));
+        }
+        let intermediate = gate_matrix.rows;
+        if down_matrix.rows != hidden || down_matrix.cols != intermediate {
+            return Err(format!(
+                "self-attn layer batch down shape mismatch: down=[{},{}] expected [{hidden},{intermediate}]",
+                down_matrix.rows, down_matrix.cols
+            ));
+        }
+        intermediate
+    } else {
+        0
+    };
 
     let input_elements = sequence_len
         .checked_mul(hidden)
@@ -18576,6 +18750,13 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     let attention_output_elements = sequence_len
         .checked_mul(attention_width)
         .ok_or_else(|| "self-attn attention batch output element count overflows".to_string())?;
+    let intermediate_elements = if stage.include_layer() {
+        sequence_len.checked_mul(intermediate).ok_or_else(|| {
+            "self-attn layer batch intermediate element count overflows".to_string()
+        })?
+    } else {
+        0
+    };
     let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
 
     let mut input_buffer = context
@@ -18700,6 +18881,105 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     } else {
         None
     };
+    let mut post_norm_weight_buffer = if stage.include_layer() {
+        let post_norm = post_norm
+            .as_ref()
+            .ok_or_else(|| "self-attn layer batch post norm missing".to_string())?;
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    post_norm.values.len(),
+                    "self-attn layer batch post norm weight",
+                )?)
+                .map_err(|err| {
+                    format!("failed to allocate self-attn layer batch post norm weight: {err}")
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut post_normed_buffer = if stage.include_layer() {
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    input_elements,
+                    "self-attn layer batch post normed",
+                )?)
+                .map_err(|err| {
+                    format!("failed to allocate self-attn layer batch post normed: {err}")
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut mlp_gate_output_buffer = if stage.include_layer() {
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    intermediate_elements,
+                    "self-attn layer batch MLP gate output",
+                )?)
+                .map_err(|err| {
+                    format!("failed to allocate self-attn layer batch MLP gate output: {err}")
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut mlp_up_output_buffer = if stage.include_layer() {
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    intermediate_elements,
+                    "self-attn layer batch MLP up output",
+                )?)
+                .map_err(|err| {
+                    format!("failed to allocate self-attn layer batch MLP up output: {err}")
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut mlp_activation_buffer = if stage.include_layer() {
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    intermediate_elements,
+                    "self-attn layer batch MLP activation",
+                )?)
+                .map_err(|err| {
+                    format!("failed to allocate self-attn layer batch MLP activation: {err}")
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut mlp_down_output_buffer = if stage.include_layer() {
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    input_elements,
+                    "self-attn layer batch MLP down output",
+                )?)
+                .map_err(|err| {
+                    format!("failed to allocate self-attn layer batch MLP down output: {err}")
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut layer_output_buffer = if stage.include_layer() {
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    input_elements,
+                    "self-attn layer batch output",
+                )?)
+                .map_err(|err| format!("failed to allocate self-attn layer batch output: {err}"))?,
+        )
+    } else {
+        None
+    };
 
     input_buffer
         .copy_from_host(
@@ -18721,6 +19001,16 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     k_norm_weight_buffer
         .copy_from_host(0, &encode_f32_to_bytes(&k_norm.values), Some(&mut stream))
         .map_err(|err| format!("failed to copy self-attn qkv RoPE batch k norm: {err}"))?;
+    if let (Some(buffer), Some(post_norm)) = (post_norm_weight_buffer.as_mut(), post_norm.as_ref())
+    {
+        buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&post_norm.values),
+                Some(&mut stream),
+            )
+            .map_err(|err| format!("failed to copy self-attn layer batch post norm: {err}"))?;
+    }
     stream
         .synchronize()
         .map_err(|err| format!("failed to synchronize self-attn qkv RoPE batch setup: {err}"))?;
@@ -18839,6 +19129,93 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
                     format!("failed to run self-attn block batch residual add: {err}")
                 })?;
             }
+            if stage.include_layer() {
+                let block_output_buffer = block_output_buffer.as_ref().ok_or_else(|| {
+                    "self-attn layer batch block output buffer missing".to_string()
+                })?;
+                let post_norm_weight_buffer =
+                    post_norm_weight_buffer.as_ref().ok_or_else(|| {
+                        "self-attn layer batch post norm weight buffer missing".to_string()
+                    })?;
+                let post_normed_buffer = post_normed_buffer.as_mut().ok_or_else(|| {
+                    "self-attn layer batch post normed buffer missing".to_string()
+                })?;
+                let mlp_gate_output_buffer = mlp_gate_output_buffer.as_mut().ok_or_else(|| {
+                    "self-attn layer batch MLP gate output buffer missing".to_string()
+                })?;
+                let mlp_up_output_buffer = mlp_up_output_buffer.as_mut().ok_or_else(|| {
+                    "self-attn layer batch MLP up output buffer missing".to_string()
+                })?;
+                let mlp_activation_buffer = mlp_activation_buffer.as_mut().ok_or_else(|| {
+                    "self-attn layer batch MLP activation buffer missing".to_string()
+                })?;
+                let mlp_down_output_buffer = mlp_down_output_buffer.as_mut().ok_or_else(|| {
+                    "self-attn layer batch MLP down output buffer missing".to_string()
+                })?;
+                let layer_output_buffer = layer_output_buffer
+                    .as_mut()
+                    .ok_or_else(|| "self-attn layer batch output buffer missing".to_string())?;
+                let gate_matrix = gate_matrix
+                    .as_ref()
+                    .ok_or_else(|| "self-attn layer batch gate projection missing".to_string())?;
+                let up_matrix = up_matrix
+                    .as_ref()
+                    .ok_or_else(|| "self-attn layer batch up projection missing".to_string())?;
+                let down_matrix = down_matrix
+                    .as_ref()
+                    .ok_or_else(|| "self-attn layer batch down projection missing".to_string())?;
+                ullm_runtime_sys::segmented_rmsnorm_f32(
+                    block_output_buffer,
+                    post_norm_weight_buffer,
+                    sequence_len,
+                    hidden,
+                    1e-5_f32,
+                    post_normed_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!("failed to run self-attn layer batch post RMSNorm: {err}")
+                })?;
+                gate_matrix.matvec_batch(
+                    post_normed_buffer,
+                    sequence_len,
+                    mlp_gate_output_buffer,
+                    stream,
+                    "self-attn layer batch MLP gate projection",
+                )?;
+                up_matrix.matvec_batch(
+                    post_normed_buffer,
+                    sequence_len,
+                    mlp_up_output_buffer,
+                    stream,
+                    "self-attn layer batch MLP up projection",
+                )?;
+                ullm_runtime_sys::silu_mul_f32(
+                    mlp_gate_output_buffer,
+                    mlp_up_output_buffer,
+                    intermediate_elements,
+                    mlp_activation_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run self-attn layer batch SiLU-mul: {err}"))?;
+                down_matrix.matvec_batch(
+                    mlp_activation_buffer,
+                    sequence_len,
+                    mlp_down_output_buffer,
+                    stream,
+                    "self-attn layer batch MLP down projection",
+                )?;
+                ullm_runtime_sys::add_f32(
+                    mlp_down_output_buffer,
+                    block_output_buffer,
+                    input_elements,
+                    layer_output_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!("failed to run self-attn layer batch residual add: {err}")
+                })?;
+            }
             Ok(())
         };
 
@@ -18948,6 +19325,66 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
             &mut stream,
             input_elements,
             "self-attn block batch output",
+        )?)
+    } else {
+        None
+    };
+    let post_normed = if let Some(buffer) = post_normed_buffer.as_ref() {
+        Some(read_runtime_buffer_f32(
+            buffer,
+            &mut stream,
+            input_elements,
+            "self-attn layer batch post normed",
+        )?)
+    } else {
+        None
+    };
+    let mlp_gate_output = if let Some(buffer) = mlp_gate_output_buffer.as_ref() {
+        Some(read_runtime_buffer_f32(
+            buffer,
+            &mut stream,
+            intermediate_elements,
+            "self-attn layer batch MLP gate output",
+        )?)
+    } else {
+        None
+    };
+    let mlp_up_output = if let Some(buffer) = mlp_up_output_buffer.as_ref() {
+        Some(read_runtime_buffer_f32(
+            buffer,
+            &mut stream,
+            intermediate_elements,
+            "self-attn layer batch MLP up output",
+        )?)
+    } else {
+        None
+    };
+    let mlp_activation = if let Some(buffer) = mlp_activation_buffer.as_ref() {
+        Some(read_runtime_buffer_f32(
+            buffer,
+            &mut stream,
+            intermediate_elements,
+            "self-attn layer batch MLP activation",
+        )?)
+    } else {
+        None
+    };
+    let mlp_down_output = if let Some(buffer) = mlp_down_output_buffer.as_ref() {
+        Some(read_runtime_buffer_f32(
+            buffer,
+            &mut stream,
+            input_elements,
+            "self-attn layer batch MLP down output",
+        )?)
+    } else {
+        None
+    };
+    let layer_output = if let Some(buffer) = layer_output_buffer.as_ref() {
+        Some(read_runtime_buffer_f32(
+            buffer,
+            &mut stream,
+            input_elements,
+            "self-attn layer batch output",
         )?)
     } else {
         None
@@ -19141,6 +19578,152 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     } else {
         None
     };
+    let layer_verification = if stage.include_layer() {
+        let block_output = block_output.as_ref().ok_or_else(|| {
+            "self-attn layer batch block output missing for verification".to_string()
+        })?;
+        let post_normed = post_normed.as_ref().ok_or_else(|| {
+            "self-attn layer batch post normed missing for verification".to_string()
+        })?;
+        let mlp_gate_output = mlp_gate_output.as_ref().ok_or_else(|| {
+            "self-attn layer batch MLP gate output missing for verification".to_string()
+        })?;
+        let mlp_up_output = mlp_up_output.as_ref().ok_or_else(|| {
+            "self-attn layer batch MLP up output missing for verification".to_string()
+        })?;
+        let mlp_activation = mlp_activation.as_ref().ok_or_else(|| {
+            "self-attn layer batch MLP activation missing for verification".to_string()
+        })?;
+        let mlp_down_output = mlp_down_output.as_ref().ok_or_else(|| {
+            "self-attn layer batch MLP down output missing for verification".to_string()
+        })?;
+        let layer_output = layer_output
+            .as_ref()
+            .ok_or_else(|| "self-attn layer batch output missing for verification".to_string())?;
+        let post_norm = post_norm.as_ref().ok_or_else(|| {
+            "self-attn layer batch post norm missing for verification".to_string()
+        })?;
+        let gate_matrix = gate_matrix.as_ref().ok_or_else(|| {
+            "self-attn layer batch gate projection missing for verification".to_string()
+        })?;
+        let up_matrix = up_matrix.as_ref().ok_or_else(|| {
+            "self-attn layer batch up projection missing for verification".to_string()
+        })?;
+        let down_matrix = down_matrix.as_ref().ok_or_else(|| {
+            "self-attn layer batch down projection missing for verification".to_string()
+        })?;
+
+        let mut expected_post_normed = Vec::with_capacity(input_elements);
+        for token_index in 0..sequence_len {
+            let start = token_index
+                .checked_mul(hidden)
+                .ok_or_else(|| "self-attn layer batch expected norm start overflows".to_string())?;
+            let end = start
+                .checked_add(hidden)
+                .ok_or_else(|| "self-attn layer batch expected norm end overflows".to_string())?;
+            expected_post_normed.extend(runtime_host_rmsnorm_f32(
+                &block_output[start..end],
+                &post_norm.values,
+                1e-5_f32,
+            ));
+        }
+        if expected_post_normed.len() != input_elements {
+            return Err("failed to build self-attn layer batch post norm reference".to_string());
+        }
+        let post_norm_max_abs_diff = verify_f32_close(
+            "self-attn layer batch post norm",
+            post_normed,
+            &expected_post_normed,
+            1e-4_f32,
+            1e-5_f32,
+        )?;
+        let mut gate_row_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                gate_matrix.cols,
+                "self-attn layer batch sampled gate projection row",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate self-attn layer batch sampled gate row: {err}")
+            })?;
+        let (gate_checked_values, gate_max_abs_diff) = verify_aq4_matvec_batch_output_sampled(
+            "self-attn layer batch MLP gate projection",
+            gate_matrix,
+            post_normed,
+            mlp_gate_output,
+            sequence_len,
+            &mut gate_row_buffer,
+            &mut stream,
+            3e-3_f32,
+            2e-5_f32,
+        )?;
+        let mut up_row_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                up_matrix.cols,
+                "self-attn layer batch sampled up projection row",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate self-attn layer batch sampled up row: {err}")
+            })?;
+        let (up_checked_values, up_max_abs_diff) = verify_aq4_matvec_batch_output_sampled(
+            "self-attn layer batch MLP up projection",
+            up_matrix,
+            post_normed,
+            mlp_up_output,
+            sequence_len,
+            &mut up_row_buffer,
+            &mut stream,
+            3e-3_f32,
+            2e-5_f32,
+        )?;
+        let activation_max_abs_diff = verify_silu_mul_f32_close(
+            "self-attn layer batch MLP activation",
+            mlp_gate_output,
+            mlp_up_output,
+            mlp_activation,
+            1e-4_f32,
+            1e-5_f32,
+        )?;
+        let mut down_row_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                down_matrix.cols,
+                "self-attn layer batch sampled down projection row",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate self-attn layer batch sampled down row: {err}")
+            })?;
+        let (down_checked_values, down_max_abs_diff) = verify_aq4_matvec_batch_output_sampled(
+            "self-attn layer batch MLP down projection",
+            down_matrix,
+            mlp_activation,
+            mlp_down_output,
+            sequence_len,
+            &mut down_row_buffer,
+            &mut stream,
+            3e-3_f32,
+            2e-5_f32,
+        )?;
+        let layer_residual_max_abs_diff = verify_add_f32_close(
+            "self-attn layer batch residual add",
+            mlp_down_output,
+            block_output,
+            layer_output,
+            1e-4_f32,
+            1e-5_f32,
+        )?;
+        Some((
+            post_norm_max_abs_diff,
+            gate_checked_values,
+            gate_max_abs_diff,
+            up_checked_values,
+            up_max_abs_diff,
+            activation_max_abs_diff,
+            down_checked_values,
+            down_max_abs_diff,
+            layer_residual_max_abs_diff,
+        ))
+    } else {
+        None
+    };
     let verification_wall_ms = verification_started.elapsed().as_secs_f64() * 1000.0;
 
     let output_elements = input_normed
@@ -19183,15 +19766,166 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
                     .unwrap_or(0),
             )
         })
+        .and_then(|value| {
+            value.checked_add(post_normed.as_ref().map(|output| output.len()).unwrap_or(0))
+        })
+        .and_then(|value| {
+            value.checked_add(
+                mlp_gate_output
+                    .as_ref()
+                    .map(|output| output.len())
+                    .unwrap_or(0),
+            )
+        })
+        .and_then(|value| {
+            value.checked_add(
+                mlp_up_output
+                    .as_ref()
+                    .map(|output| output.len())
+                    .unwrap_or(0),
+            )
+        })
+        .and_then(|value| {
+            value.checked_add(
+                mlp_activation
+                    .as_ref()
+                    .map(|output| output.len())
+                    .unwrap_or(0),
+            )
+        })
+        .and_then(|value| {
+            value.checked_add(
+                mlp_down_output
+                    .as_ref()
+                    .map(|output| output.len())
+                    .unwrap_or(0),
+            )
+        })
+        .and_then(|value| {
+            value.checked_add(
+                layer_output
+                    .as_ref()
+                    .map(|output| output.len())
+                    .unwrap_or(0),
+            )
+        })
         .ok_or_else(|| "self-attn qkv RoPE batch output element count overflows".to_string())?;
     let preview_len = q_rope.len().min(8);
-    let executor = if stage.include_block() {
+    let executor = if stage.include_layer() {
+        "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32+causal_attn_f32+sigmoid_mul_f32+aq4_matvec_batch_f32+add_f32+segmented_rmsnorm_f32+aq4_matvec_batch_f32+silu_mul_f32+aq4_matvec_batch_f32+add_f32"
+    } else if stage.include_block() {
         "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32+causal_attn_f32+sigmoid_mul_f32+aq4_matvec_batch_f32+add_f32"
     } else if stage.include_attention() {
         "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32+causal_attn_f32"
     } else {
         "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32"
     };
+    if let Some(layer_output) = layer_output.as_ref() {
+        let attention_output = attention_output.as_ref().ok_or_else(|| {
+            "self-attn layer batch attention output missing for report".to_string()
+        })?;
+        let attention_projection_input = attention_projection_input.as_ref().ok_or_else(|| {
+            "self-attn layer batch projection input missing for report".to_string()
+        })?;
+        let attn_projected = attn_projected.as_ref().ok_or_else(|| {
+            "self-attn layer batch projected output missing for report".to_string()
+        })?;
+        let block_output = block_output
+            .as_ref()
+            .ok_or_else(|| "self-attn layer batch block output missing for report".to_string())?;
+        let (attention_verification_mode, attention_checked_values, attention_max_abs_diff) =
+            attention_verification.ok_or_else(|| {
+                "self-attn layer batch attention verification summary missing".to_string()
+            })?;
+        let (
+            output_gate_max_abs_diff,
+            o_proj_checked_values,
+            o_proj_max_abs_diff,
+            block_max_abs_diff,
+        ) = block_verification.ok_or_else(|| {
+            "self-attn layer batch block verification summary missing".to_string()
+        })?;
+        let (
+            post_norm_max_abs_diff,
+            gate_checked_values,
+            gate_max_abs_diff,
+            up_checked_values,
+            up_max_abs_diff,
+            activation_max_abs_diff,
+            down_checked_values,
+            down_max_abs_diff,
+            layer_residual_max_abs_diff,
+        ) = layer_verification
+            .ok_or_else(|| "self-attn layer batch verification summary missing".to_string())?;
+        return Ok(format!(
+            "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} intermediate={} q_rows={} k_rows={} v_rows={} o_rows={} gate_rows={} down_rows={} q_projection_layout={} q_gate_elements={} output_gate_layout=qwen3.5-sigmoid q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} input_elements={} intermediate_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} verification_wall_ms={verification_wall_ms:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_verification={} attention_checked_values={} attention_max_abs_diff={:.9} output_gate_max_abs_diff={output_gate_max_abs_diff:.9} o_proj_verification=sampled o_proj_checked_values={} o_proj_max_abs_diff={o_proj_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} mlp_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_gate_verification=sampled mlp_gate_checked_values={} mlp_gate_max_abs_diff={gate_max_abs_diff:.9} mlp_up_verification=sampled mlp_up_checked_values={} mlp_up_max_abs_diff={up_max_abs_diff:.9} mlp_activation_max_abs_diff={activation_max_abs_diff:.9} mlp_down_verification=sampled mlp_down_checked_values={} mlp_down_max_abs_diff={down_max_abs_diff:.9} layer_residual_max_abs_diff={layer_residual_max_abs_diff:.9} q_rope_preview={} attention_preview={} projection_input_preview={} projected_preview={} block_preview={} layer_preview={} verified=true",
+            stage.smoke_name(),
+            path,
+            layer_index,
+            input_norm_tensor,
+            q_tensor,
+            k_tensor,
+            v_tensor,
+            o_tensor,
+            q_norm_tensor,
+            k_norm_tensor,
+            post_norm_tensor,
+            gate_tensor,
+            up_tensor,
+            down_tensor,
+            sequence_len,
+            hidden,
+            intermediate,
+            q_matrix.rows,
+            k_matrix.rows,
+            v_matrix.rows,
+            o_matrix.as_ref().map(|matrix| matrix.rows).unwrap_or(0),
+            gate_matrix.as_ref().map(|matrix| matrix.rows).unwrap_or(0),
+            down_matrix.as_ref().map(|matrix| matrix.rows).unwrap_or(0),
+            q_split.layout,
+            expected_q_gate.len(),
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            input_elements,
+            intermediate_elements,
+            output_elements,
+            executor,
+            sequence_len,
+            info.backend,
+            device_index,
+            info.name,
+            measured_repeats,
+            wall_ms,
+            wall_ms_min,
+            wall_ms_max,
+            tps(sequence_len, wall_ms)
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "null".to_string()),
+            tps(output_elements, wall_ms)
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "null".to_string()),
+            attention_verification_mode,
+            attention_checked_values,
+            attention_max_abs_diff,
+            o_proj_checked_values,
+            gate_checked_values,
+            up_checked_values,
+            down_checked_values,
+            format_f32_preview(&q_rope[..preview_len]),
+            format_f32_preview(&attention_output[..attention_output.len().min(8)]),
+            format_f32_preview(
+                &attention_projection_input[..attention_projection_input.len().min(8)],
+            ),
+            format_f32_preview(&attn_projected[..attn_projected.len().min(8)]),
+            format_f32_preview(&block_output[..block_output.len().min(8)]),
+            format_f32_preview(&layer_output[..layer_output.len().min(8)]),
+        ));
+    }
     if let Some(block_output) = block_output.as_ref() {
         let attention_output = attention_output.as_ref().ok_or_else(|| {
             "self-attn block batch attention output missing for report".to_string()
@@ -36649,6 +37383,38 @@ fn verify_sigmoid_mul_f32_close(
     Ok(max_abs_diff)
 }
 
+fn verify_silu_mul_f32_close(
+    label: &str,
+    gate: &[f32],
+    up: &[f32],
+    actual: &[f32],
+    abs_floor: f32,
+    rel_scale: f32,
+) -> Result<f32, String> {
+    if gate.len() != up.len() || up.len() != actual.len() {
+        return Err(format!(
+            "{label} size mismatch: gate={} up={} actual={}",
+            gate.len(),
+            up.len(),
+            actual.len()
+        ));
+    }
+    let mut max_abs_diff = 0.0_f32;
+    for ((gate_value, up_value), actual_value) in gate.iter().zip(up.iter()).zip(actual.iter()) {
+        let gate_value = *gate_value;
+        let expected = gate_value * (1.0_f32 / (1.0_f32 + (-gate_value).exp())) * *up_value;
+        let diff = (*actual_value - expected).abs();
+        let tolerance = abs_floor.max(expected.abs() * rel_scale);
+        if diff > tolerance {
+            return Err(format!(
+                "{label} mismatch: max_abs_diff={diff} tolerance={tolerance}"
+            ));
+        }
+        max_abs_diff = max_abs_diff.max(diff);
+    }
+    Ok(max_abs_diff)
+}
+
 fn verify_add_f32_close(
     label: &str,
     lhs: &[f32],
@@ -37100,6 +37866,9 @@ fn print_help() {
     );
     eprintln!(
         "package-self-attn-block-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+    );
+    eprintln!(
+        "package-self-attn-layer-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "package-linear-attn-mlp-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
