@@ -303,6 +303,14 @@ fn main() -> ExitCode {
             env::args().nth(14),
             env::args().nth(15),
         ),
+        Some("package-prefill-rmsnorm-batch-smoke") => package_prefill_rmsnorm_batch_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+        ),
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -16287,6 +16295,264 @@ fn package_batch_throughput_bench_impl(
         .map_err(|err| format!("failed to encode batch throughput report: {err}"))
 }
 
+fn package_prefill_rmsnorm_batch_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-prefill-rmsnorm-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_prefill_rmsnorm_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        prompt_token_ids,
+        measured_repeats,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn package_prefill_rmsnorm_batch_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    prompt_token_ids: Vec<usize>,
+    measured_repeats: usize,
+) -> Result<String, String> {
+    if prompt_token_ids.is_empty() {
+        return Err("prefill RMSNorm batch smoke requires at least one token".to_string());
+    }
+    let (embedding_vocab, hidden) = package_embedding_shape(path)?;
+    if hidden == 0 {
+        return Err("prefill RMSNorm batch smoke hidden size is zero".to_string());
+    }
+    if let Some(token_id) = prompt_token_ids
+        .iter()
+        .copied()
+        .find(|token_id| *token_id >= embedding_vocab)
+    {
+        return Err(format!(
+            "prefill RMSNorm batch token id {token_id} is out of embedding range 0..{embedding_vocab}"
+        ));
+    }
+
+    let input_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
+    let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
+    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    if input_norm.values.len() != hidden {
+        return Err(format!(
+            "prefill RMSNorm batch weight length {} does not match hidden {hidden}",
+            input_norm.values.len()
+        ));
+    }
+
+    let embedding_rows =
+        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
+            .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
+    if embedding_rows.columns != hidden
+        || embedding_rows.values.len() != prompt_token_ids.len() * hidden
+    {
+        return Err(format!(
+            "prefill RMSNorm batch embedding shape mismatch: columns={} values={} prompt_tokens={} hidden={hidden}",
+            embedding_rows.columns,
+            embedding_rows.values.len(),
+            prompt_token_ids.len()
+        ));
+    }
+
+    let mut expected = Vec::with_capacity(embedding_rows.values.len());
+    for token_index in 0..prompt_token_ids.len() {
+        let start = token_index
+            .checked_mul(hidden)
+            .ok_or_else(|| "prefill RMSNorm expected slice start overflows".to_string())?;
+        let end = start
+            .checked_add(hidden)
+            .ok_or_else(|| "prefill RMSNorm expected slice end overflows".to_string())?;
+        expected.extend(runtime_host_rmsnorm_f32(
+            &embedding_rows.values[start..end],
+            &input_norm.values,
+            1e-6_f32,
+        ));
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let input_elements = prompt_token_ids
+        .len()
+        .checked_mul(hidden)
+        .ok_or_else(|| "prefill RMSNorm input element count overflows".to_string())?;
+    let mut input_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_elements,
+            "prefill RMSNorm input",
+        )?)
+        .map_err(|err| format!("failed to allocate prefill RMSNorm input buffer: {err}"))?;
+    let mut weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(hidden, "prefill RMSNorm weight")?)
+        .map_err(|err| format!("failed to allocate prefill RMSNorm weight buffer: {err}"))?;
+    let mut output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_elements,
+            "prefill RMSNorm output",
+        )?)
+        .map_err(|err| format!("failed to allocate prefill RMSNorm output buffer: {err}"))?;
+    input_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&embedding_rows.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy prefill RMSNorm input: {err}"))?;
+    weight_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&input_norm.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy prefill RMSNorm weight: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize prefill RMSNorm setup: {err}"))?;
+
+    ullm_runtime_sys::segmented_rmsnorm_f32(
+        &input_buffer,
+        &weight_buffer,
+        prompt_token_ids.len(),
+        hidden,
+        1e-6_f32,
+        &mut output_buffer,
+        Some(&mut stream),
+    )
+    .map_err(|err| format!("failed to run warmup segmented prefill RMSNorm: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize warmup segmented prefill RMSNorm: {err}"))?;
+
+    let mut measured_ms = Vec::with_capacity(measured_repeats);
+    for _ in 0..measured_repeats {
+        let segmented_started = Instant::now();
+        ullm_runtime_sys::segmented_rmsnorm_f32(
+            &input_buffer,
+            &weight_buffer,
+            prompt_token_ids.len(),
+            hidden,
+            1e-6_f32,
+            &mut output_buffer,
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to run segmented prefill RMSNorm: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize segmented prefill RMSNorm: {err}"))?;
+        measured_ms.push(segmented_started.elapsed().as_secs_f64() * 1000.0);
+    }
+    let wall_ms = measured_ms.iter().sum::<f64>() / measured_ms.len() as f64;
+    let wall_ms_min = measured_ms
+        .iter()
+        .copied()
+        .min_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+    let wall_ms_max = measured_ms
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+
+    let output = read_runtime_buffer_f32(
+        &output_buffer,
+        &mut stream,
+        input_elements,
+        "segmented prefill RMSNorm output",
+    )?;
+    let max_abs_diff = verify_f32_close(
+        "segmented prefill RMSNorm",
+        &output,
+        &expected,
+        1e-4_f32,
+        1e-4_f32,
+    )?;
+    let preview_len = output.len().min(8);
+    Ok(format!(
+        "package-prefill-rmsnorm-batch-smoke package={} layer={} input_norm_tensor=\"{}\" input_norm_dtype={} prompt_tokens={} hidden={} segments={} segment_size={} input_elements={} executor=segmented_rmsnorm_f32 real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} max_abs_diff={max_abs_diff:.9} preview={} verified=true",
+        path,
+        layer_index,
+        input_norm_tensor,
+        input_norm.dtype,
+        prompt_token_ids.len(),
+        hidden,
+        prompt_token_ids.len(),
+        hidden,
+        input_elements,
+        prompt_token_ids.len(),
+        info.backend,
+        device_index,
+        info.name,
+        measured_repeats,
+        wall_ms,
+        wall_ms_min,
+        wall_ms_max,
+        tps(prompt_token_ids.len(), wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        format_f32_preview(&output[..preview_len]),
+    ))
+}
+
 fn current_git_commit() -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -29490,6 +29756,9 @@ fn print_help() {
     );
     eprintln!(
         "package-batch-throughput-bench: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
+    );
+    eprintln!(
+        "package-prefill-rmsnorm-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
     );
     eprintln!(
         "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"
