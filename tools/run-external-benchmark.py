@@ -409,6 +409,55 @@ def parse_ullm_token_ids_metrics(
     }
 
 
+def parse_ullm_batch_throughput_metrics(
+    report: dict[str, Any], memory: dict[str, Any]
+) -> dict[str, Any]:
+    metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
+    prefill_total_tps = parse_float(metrics.get("prefill_total_input_tps"))
+    decode_total_tps = parse_float(metrics.get("decode_total_generated_tps"))
+    end_to_end_total_tps = parse_float(metrics.get("end_to_end_total_tps"))
+    prefill_ms = parse_float(metrics.get("prefill_wall_ms_sum"))
+    decode_ms = parse_float(metrics.get("decode_wall_ms_sum"))
+    batch_ms = parse_float(metrics.get("batch_wall_ms"))
+    consumed_bytes = memory.get("consumed_total_bytes")
+    consumed_gib = consumed_bytes / 1024**3 if isinstance(consumed_bytes, int) else None
+    product = None
+    if decode_total_tps is not None and consumed_gib is not None:
+        product = decode_total_tps * consumed_gib
+
+    return {
+        "prefill_tokens_per_second": prefill_total_tps,
+        "decode_tokens_per_second": decode_total_tps,
+        "total_tokens_per_second": end_to_end_total_tps,
+        "prefill_total_input_tokens": parse_int(metrics.get("prefill_total_input_tokens")),
+        "decode_total_generated_tokens": parse_int(metrics.get("decode_total_generated_tokens")),
+        "generated_tokens_total": parse_int(metrics.get("generated_tokens_total")),
+        "end_to_end_total_tokens": parse_int(metrics.get("end_to_end_total_tokens")),
+        "prefill_total_input_tokens_per_second": prefill_total_tps,
+        "decode_total_generated_tokens_per_second": decode_total_tps,
+        "end_to_end_total_tokens_per_second": end_to_end_total_tps,
+        "prefill_wall_time_seconds": prefill_ms / 1000.0 if prefill_ms is not None else None,
+        "decode_wall_time_seconds": decode_ms / 1000.0 if decode_ms is not None else None,
+        "total_wall_time_seconds": batch_ms / 1000.0 if batch_ms is not None else None,
+        "time_to_first_token_ms": parse_float(metrics.get("time_to_first_token_ms_p50")),
+        "time_per_output_token_ms": parse_float(metrics.get("time_per_output_token_ms_p50")),
+        "latency_p50_ms": parse_float(metrics.get("request_latency_ms_p50")),
+        "latency_p95_ms": parse_float(metrics.get("request_latency_ms_p95")),
+        "time_to_first_token_ms_p50": parse_float(metrics.get("time_to_first_token_ms_p50")),
+        "time_to_first_token_ms_p95": parse_float(metrics.get("time_to_first_token_ms_p95")),
+        "request_latency_ms_p50": parse_float(metrics.get("request_latency_ms_p50")),
+        "request_latency_ms_p95": parse_float(metrics.get("request_latency_ms_p95")),
+        "time_per_output_token_ms_p50": parse_float(metrics.get("time_per_output_token_ms_p50")),
+        "time_per_output_token_ms_p95": parse_float(metrics.get("time_per_output_token_ms_p95")),
+        "per_request_decode_tps_mean": parse_float(metrics.get("per_request_decode_tps_mean")),
+        "vram_baseline_bytes": memory.get("baseline_total_bytes"),
+        "vram_peak_bytes": memory.get("peak_total_bytes"),
+        "vram_consumed_bytes": consumed_bytes,
+        "decode_tokens_per_second_times_vram_consumed_gib": product,
+        "power_watts_avg": None,
+    }
+
+
 def parse_ullm_token_ids_correctness(report: dict[str, Any]) -> dict[str, Any] | None:
     if not report:
         return None
@@ -431,6 +480,52 @@ def parse_ullm_token_ids_correctness(report: dict[str, Any]) -> dict[str, Any] |
         "logit_min": None,
         "logit_max": None,
     }
+
+
+def parse_ullm_batch_throughput_correctness(report: dict[str, Any]) -> dict[str, Any] | None:
+    if not report:
+        return None
+    correctness = report.get("correctness")
+    correctness = correctness if isinstance(correctness, dict) else {}
+    verified_all = report.get("verified")
+    if not isinstance(verified_all, bool):
+        verified_all = correctness.get("verified_all")
+    return {
+        "reference": "none",
+        "reference_artifact": None,
+        "logits_relative_mse": None,
+        "logits_max_abs_diff": None,
+        "top_k": parse_int(report.get("top_k")),
+        "top_k_agreement": None,
+        "generated_prefix_matches_reference": verified_all
+        if isinstance(verified_all, bool)
+        else None,
+        "nan_count": None,
+        "inf_count": None,
+        "logit_min": None,
+        "logit_max": None,
+        "verified_all": verified_all if isinstance(verified_all, bool) else None,
+    }
+
+
+def enrich_ullm_batch_workload(row: dict[str, Any], report: dict[str, Any]) -> None:
+    workload = report.get("workload")
+    if not isinstance(workload, dict):
+        return
+    row_workload = row.get("workload")
+    if not isinstance(row_workload, dict):
+        return
+    for key in (
+        "prompt_tokens_per_request",
+        "generated_tokens_per_request",
+        "fixed_decode_steps",
+    ):
+        if key in workload:
+            row_workload[key] = workload.get(key)
+    for key in ("batch_size", "concurrent_requests"):
+        value = parse_int(workload.get(key))
+        if value is not None:
+            row_workload[key] = value
 
 
 def default_metrics(memory: dict[str, Any]) -> dict[str, Any]:
@@ -494,7 +589,13 @@ def main() -> int:
     parser.add_argument("--kv-cache-dtype", default="auto")
     parser.add_argument(
         "--parse",
-        choices=["none", "vllm-throughput", "sglang-serving", "ullm-token-ids-generate"],
+        choices=[
+            "none",
+            "vllm-throughput",
+            "sglang-serving",
+            "ullm-token-ids-generate",
+            "ullm-package-batch-throughput",
+        ],
         default="none",
     )
     parser.add_argument("--result-json", type=Path)
@@ -552,6 +653,9 @@ def main() -> int:
     if args.parse == "ullm-token-ids-generate" and status == "ok":
         ullm_report = parse_ullm_token_ids_report(stdout_text, args.result_json)
         metrics = parse_ullm_token_ids_metrics(ullm_report, memory)
+    elif args.parse == "ullm-package-batch-throughput" and status == "ok":
+        ullm_report = parse_ullm_token_ids_report(stdout_text, args.result_json)
+        metrics = parse_ullm_batch_throughput_metrics(ullm_report, memory)
     elif args.parse == "vllm-throughput" and status == "ok":
         metrics = parse_vllm_metrics(stdout_text, args.result_json, memory)
     elif args.parse == "sglang-serving" and status == "ok":
@@ -633,6 +737,12 @@ def main() -> int:
         "notes": args.note,
     }
     ullm_correctness = parse_ullm_token_ids_correctness(ullm_report)
+    if args.parse == "ullm-package-batch-throughput":
+        enrich_ullm_batch_workload(row, ullm_report)
+        batching = ullm_report.get("batching")
+        if isinstance(batching, dict):
+            row["batching"] = batching
+        ullm_correctness = parse_ullm_batch_throughput_correctness(ullm_report)
     if ullm_correctness is not None:
         row["correctness"] = ullm_correctness
         raw_memory = ullm_report.get("memory")
@@ -643,6 +753,7 @@ def main() -> int:
                     "kv_cache_allocated_blocks": raw_memory.get("kv_cache_allocated_blocks"),
                     "kv_cache_free_blocks": raw_memory.get("kv_cache_free_blocks"),
                     "kv_cache_block_size": raw_memory.get("kv_cache_block_size"),
+                    "kv_cache_bytes_total": raw_memory.get("kv_cache_bytes_total"),
                 }
             )
     append_jsonl(args.output_jsonl, row)
