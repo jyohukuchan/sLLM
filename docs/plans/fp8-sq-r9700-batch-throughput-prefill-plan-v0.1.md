@@ -521,6 +521,31 @@ Exit criteria:
 - R9700でconcurrent requests `1,2,4` のlogical batch結果が出る。
 - `prefill_total_input_tps`, `decode_total_generated_tps`, `end_to_end_total_tps` が別々に保存される。
 
+### T1 current status: logical batch cold schema v1
+
+`package-batch-throughput-bench` のlogical batch reportに、cold prefill用のprefix/chunk/context accountingを追加した。
+具体的には `workload.prefill_mode="cold"`、`cached_prefix_tokens_per_request=0`、`new_prefill_tokens_per_request`、`total_context_tokens_after_prefill_per_request`、`metrics.cached_prefix_total_tokens=0`、`metrics.total_context_tokens_after_prefill`、`metrics.estimated_prefill_attention_work_tokens` を保存する。
+`estimated_prefill_attention_work_tokens` は既存component smokeと同じく、requestごとの `N * (N + 1) / 2` の合計とする。
+
+保存先:
+
+- `benchmarks/results/2026-07-07/package-batch-throughput/phase-t1-logical-batch-cold-schema-v1.md`
+
+R9700 schema/control-plane smoke:
+
+| B | prompt/request | generated/request | prefill tok/s | decode tok/s | end-to-end tok/s | estimated attention work | verified |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | 4 | 2 | 53.808662 | 231.111649 | 8.270042 | 10 | true |
+| 2 | 4 | 2 | 98.478364 | 233.595603 | 9.792617 | 20 | true |
+| 4 | 4 | 2 | 172.597125 | 233.697961 | 10.443645 | 40 | true |
+
+解釈:
+
+- T1のlogical batch最小exit criteriaである `B=1/2/4` のJSON reportは出せる状態になった。
+- prefill、decode、end-to-endのtotal throughputは別々に保存される。
+- ただしこのsmokeは1 layer、4 token prompt、logical batch、requestごとのweight reloadありのschema確認であり、SQ候補の性能判断には使わない。
+- 次のT1実装課題は、workload runnerからこのreportをJSONLへ集約すること、VRAM samplingを付けること、そしてT4/T5へ向けてreal batch executorへ置き換えることである。
+
 ### T2: FP8 SQ candidate package/runtime prototype, 3-5 days
 
 目的:

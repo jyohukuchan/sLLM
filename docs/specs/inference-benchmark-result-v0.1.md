@@ -223,6 +223,21 @@ For uLLM `package-batch-throughput-bench-v0.1` reports, the raw field names are
 `inference-benchmark-result-v0.1` JSONL rows, map them to the corresponding
 `*_tokens_per_second` fields above.
 
+Raw uLLM package batch reports also preserve prefill workload accounting fields used by the FP8/SQ
+planning grid:
+
+- `workload.prefill_mode`: `cold`, `cached_prefix`, or `decode` when supported by that runner.
+- `workload.cached_prefix_tokens_per_request`
+- `workload.new_prefill_tokens_per_request`
+- `workload.total_context_tokens_after_prefill_per_request`
+- `metrics.cached_prefix_total_tokens`
+- `metrics.total_context_tokens_after_prefill`
+- `metrics.estimated_prefill_attention_work_tokens`
+
+For cold prefill, cached-prefix fields are zero and `estimated_prefill_attention_work_tokens` is the
+sum of `N * (N + 1) / 2` over requests. These fields are diagnostic/context columns; the comparison
+throughput keys remain the explicit total-throughput fields above.
+
 `batch_size` is the number of requests in one scheduling step. `concurrent_requests` is the number
 of live requests in the run. They are equal for fixed prompt/decode benchmark grids, but they may
 diverge once dynamic scheduling is implemented.
