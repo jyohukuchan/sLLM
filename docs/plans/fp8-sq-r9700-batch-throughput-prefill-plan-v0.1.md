@@ -395,6 +395,30 @@ R9700 release代表値:
 - `L=65536, M=128` が `673.121102 ms` まで短縮されたため、SQ候補比較用の長prefix代表runとして繰り返し測りやすくなった。
 - 次のcached prefix最適化は、score再計算ではなく、request/batch方向、`M=1`境界、K/V read coalescingを優先する。
 
+### Phase C4 current status: decode-like M=1 executor split
+
+`ullm_decode_attn_f32_kernel` にhead-parallel online-softmax pathを追加した。
+通常shapeでは `head_dim=256` かつ `value_dim=256` なので、`1 block = 1 q_head` としてhead_dim reductionとvalue lane計算を同じblockで実行する。
+旧element-parallel pathは診断用に残し、`ULLM_DISABLE_DECODE_ATTN_HEAD_PARALLEL=1` で強制できる。
+
+保存先:
+
+- `benchmarks/results/2026-07-07/runtime-cached-prefix-sweep/phase-c4-decode-loop-head-parallel-v1.md`
+
+R9700 release代表値:
+
+| L | old decode-loop ms | head-parallel decode-loop ms | speedup | chunked online ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 4096 | 103.281946 | 3.488255 | 29.608x | 4.039271 |
+| 16384 | 522.266906 | 16.385404 | 31.874x | 18.882177 |
+| 65536 | 2035.323208 | 66.730666 | 30.501x | 76.723657 |
+
+実行方針:
+
+- `M=1` のdecode-like boundaryでは、`decode_attn_f32_loop` を使う。
+- `M>=16` のcached prefix chunkでは、tokenごとにdecode kernelをlaunchするdecode loopではなく、`cached_prefix_chunked` を使う。
+- このsplitにより、Phase C4の `L=65536, M=1/16/128` を全て現実的な時間で繰り返し測れる。
+
 ### Phase D: sustained decode
 
 | concurrent requests | prompt tokens/request | generated tokens/request | purpose |

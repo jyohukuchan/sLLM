@@ -4374,6 +4374,59 @@ extern "C" __global__ void ullm_decode_attn_f32_kernel(
     unsigned long long value_dim,
     float softmax_scale,
     float *output) {
+    __shared__ float reduce[256];
+    __shared__ float shared_score;
+    __shared__ float shared_weight;
+    __shared__ float shared_prev_scale;
+
+    if (gridDim.x == q_heads && blockDim.x == 256u && head_dim <= 256ull &&
+        value_dim <= 256ull) {
+        const unsigned long long q_head = static_cast<unsigned long long>(blockIdx.x);
+        const unsigned int tid = threadIdx.x;
+        const unsigned long long q_per_kv = q_heads / kv_heads;
+        const unsigned long long kv_head = q_head / q_per_kv;
+        const unsigned long long q_base = q_head * head_dim;
+        const unsigned long long value = tid;
+        const bool value_active = value < value_dim;
+
+        float max_score = -3.4028234663852886e38f;
+        float denominator = 0.0f;
+        float weighted = 0.0f;
+        for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+            const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+            const float local = tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
+            reduce[tid] = local;
+            __syncthreads();
+            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                const float score = reduce[0] * softmax_scale;
+                const float new_max_score = score > max_score ? score : max_score;
+                shared_prev_scale =
+                    max_score <= -3.4028234663852886e38f ? 0.0f : expf(max_score - new_max_score);
+                shared_weight = expf(score - new_max_score);
+                shared_score = new_max_score;
+            }
+            __syncthreads();
+            if (value_active) {
+                const unsigned long long v_index =
+                    (source_timestep * kv_heads + kv_head) * value_dim + value;
+                weighted = weighted * shared_prev_scale + shared_weight * v_cache[v_index];
+            }
+            denominator = denominator * shared_prev_scale + shared_weight;
+            max_score = shared_score;
+            __syncthreads();
+        }
+        if (value_active) {
+            output[q_head * value_dim + value] = weighted / denominator;
+        }
+        return;
+    }
+
     const unsigned long long index =
         static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     const unsigned long long elements = q_heads * value_dim;
@@ -13911,7 +13964,21 @@ bool decode_attn_f32_hip_kernel(
 
     constexpr unsigned int block_size = 256;
     const size_t output_elements = q_heads * value_dim;
-    const size_t grid_size = (output_elements + block_size - 1) / block_size;
+    const bool disable_head_parallel =
+        std::getenv("ULLM_DISABLE_DECODE_ATTN_HEAD_PARALLEL") != nullptr;
+    const bool use_head_parallel_kernel =
+        !disable_head_parallel && head_dim <= block_size && value_dim <= block_size;
+    size_t grid_size =
+        use_head_parallel_kernel ? q_heads : (output_elements + block_size - 1) / block_size;
+    if (disable_head_parallel && grid_size == q_heads) {
+        if (grid_size == std::numeric_limits<size_t>::max()) {
+            if (error != nullptr) {
+                *error = "decode attention diagnostic launch grid overflows";
+            }
+            return false;
+        }
+        grid_size += 1;
+    }
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
             *error = "decode attention output element count exceeds HIP grid limit";
