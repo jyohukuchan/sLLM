@@ -649,7 +649,7 @@ public:
     bool compile_paged_decode_attn_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
-            paged_decode_attn_kernel_source(),
+            paged_decode_attn_kernel_source_for_arch(arch).c_str(),
             "ullm_paged_decode_attn_f32.hip",
             code,
             error);
@@ -3785,8 +3785,57 @@ extern "C" __global__ void ullm_decode_attn_f32_kernel(
 )";
     }
 
+    static std::string paged_decode_attn_kernel_source_for_arch(const std::string &arch) {
+        (void)arch;
+        std::string preamble;
+        if (std::getenv("ULLM_DISABLE_PAGED_DECODE_WARP_REDUCE") != nullptr) {
+            preamble += "#define ULLM_PAGED_DECODE_USE_SHARED_REDUCE 1\n";
+        }
+        return preamble + paged_decode_attn_kernel_source();
+    }
+
     static const char *paged_decode_attn_kernel_source() {
         return R"(
+__device__ float ullm_paged_decode_reduce_sum_256(float value, float *partial) {
+#if defined(ULLM_PAGED_DECODE_USE_SHARED_REDUCE)
+    const unsigned int tid = threadIdx.x;
+    partial[tid] = value;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            partial[tid] += partial[tid + offset];
+        }
+        __syncthreads();
+    }
+    return partial[0];
+#else
+    const unsigned int tid = threadIdx.x;
+    const unsigned int lane = tid % warpSize;
+    const unsigned int wave = tid / warpSize;
+    for (int offset = warpSize >> 1; offset > 0; offset >>= 1) {
+        value += __shfl_down(value, offset, warpSize);
+    }
+    if (lane == 0) {
+        partial[wave] = value;
+    }
+    __syncthreads();
+
+    float block_sum = 0.0f;
+    const unsigned int wave_count = (blockDim.x + warpSize - 1u) / warpSize;
+    if (wave == 0) {
+        block_sum = lane < wave_count ? partial[lane] : 0.0f;
+        for (int offset = warpSize >> 1; offset > 0; offset >>= 1) {
+            block_sum += __shfl_down(block_sum, offset, warpSize);
+        }
+        if (lane == 0) {
+            partial[0] = block_sum;
+        }
+    }
+    __syncthreads();
+    return partial[0];
+#endif
+}
+
 extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
     const float *q,
     const float *gate,
@@ -3825,15 +3874,10 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
             }
             const unsigned long long physical_timestep = block_id * block_size + block_offset;
             const unsigned long long k_base = (physical_timestep * kv_heads + kv_head) * head_dim;
-            partial[tid] = tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
-            __syncthreads();
-            for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-                if (tid < offset) {
-                    partial[tid] += partial[tid + offset];
-                }
-                __syncthreads();
-            }
-            const float score = partial[0] * softmax_scale;
+            const float local =
+                tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
+            const float score =
+                ullm_paged_decode_reduce_sum_256(local, partial) * softmax_scale;
             max_score = score > max_score ? score : max_score;
         }
 
@@ -3852,15 +3896,11 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
             }
             const unsigned long long physical_timestep = block_id * block_size + block_offset;
             const unsigned long long k_base = (physical_timestep * kv_heads + kv_head) * head_dim;
-            partial[tid] = tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
-            __syncthreads();
-            for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-                if (tid < offset) {
-                    partial[tid] += partial[tid + offset];
-                }
-                __syncthreads();
-            }
-            const float weight = expf(partial[0] * softmax_scale - max_score);
+            const float local =
+                tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
+            const float score =
+                ullm_paged_decode_reduce_sum_256(local, partial) * softmax_scale;
+            const float weight = expf(score - max_score);
             denominator += weight;
             if (tid < value_dim) {
                 const unsigned long long v_index =
