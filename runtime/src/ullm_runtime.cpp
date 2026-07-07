@@ -3811,6 +3811,9 @@ extern "C" __global__ void ullm_decode_attn_f32_kernel(
         if (std::getenv("ULLM_DISABLE_PAGED_DECODE_WARP_REDUCE") != nullptr) {
             preamble += "#define ULLM_PAGED_DECODE_USE_SHARED_REDUCE 1\n";
         }
+        if (std::getenv("ULLM_DISABLE_PAGED_DECODE_ONLINE_SOFTMAX") != nullptr) {
+            preamble += "#define ULLM_PAGED_DECODE_USE_TWO_PASS_SOFTMAX 1\n";
+        }
         return preamble + paged_decode_attn_kernel_source();
     }
 
@@ -3880,6 +3883,7 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
         const unsigned long long kv_head = q_head / q_per_kv;
         const unsigned long long q_base = q_head * head_dim;
 
+#if defined(ULLM_PAGED_DECODE_USE_TWO_PASS_SOFTMAX)
         float max_score = -3.4028234663852886e38f;
         for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
             const unsigned long long block_index = source_timestep / block_size;
@@ -3928,6 +3932,44 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
                 weighted += weight * v_cache[v_index];
             }
         }
+#else
+        float max_score = -3.4028234663852886e38f;
+        float denominator = 0.0f;
+        float weighted = 0.0f;
+        for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+            const unsigned long long block_index = source_timestep / block_size;
+            const unsigned long long block_offset = source_timestep - block_index * block_size;
+            const unsigned long long block_id =
+                static_cast<unsigned long long>(block_table[block_index]);
+            if (block_id >= cache_blocks) {
+                if (tid < value_dim) {
+                    output[q_head * value_dim + tid] = 0.0f;
+                }
+                return;
+            }
+            const unsigned long long physical_timestep = block_id * block_size + block_offset;
+            const unsigned long long k_base = (physical_timestep * kv_heads + kv_head) * head_dim;
+            const float local =
+                tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
+            const float score =
+                ullm_paged_decode_reduce_sum_256(local, partial) * softmax_scale;
+            if (tid < value_dim) {
+                const unsigned long long v_index =
+                    (physical_timestep * kv_heads + kv_head) * value_dim + tid;
+                const float v = v_cache[v_index];
+                if (score > max_score) {
+                    const float scale = expf(max_score - score);
+                    weighted = weighted * scale + v;
+                    denominator = denominator * scale + 1.0f;
+                    max_score = score;
+                } else {
+                    const float weight = expf(score - max_score);
+                    weighted += weight * v;
+                    denominator += weight;
+                }
+            }
+        }
+#endif
         if (tid < value_dim) {
             const unsigned long long output_index = q_head * value_dim + tid;
             const float decoded = weighted / denominator;
