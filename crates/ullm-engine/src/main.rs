@@ -327,6 +327,16 @@ fn main() -> ExitCode {
             env::args().nth(6),
             env::args().nth(7),
         ),
+        Some("package-linear-attn-qkv-prepare-batch-smoke") => {
+            package_linear_attn_qkv_prepare_batch_smoke(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+            )
+        }
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -17387,6 +17397,571 @@ fn package_linear_attn_proj_batch_smoke_impl(
     ))
 }
 
+fn package_linear_attn_qkv_prepare_batch_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-qkv-prepare-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_linear_attn_qkv_prepare_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        prompt_token_ids,
+        measured_repeats,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn package_linear_attn_qkv_prepare_batch_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    prompt_token_ids: Vec<usize>,
+    measured_repeats: usize,
+) -> Result<String, String> {
+    if prompt_token_ids.is_empty() {
+        return Err("linear-attn qkv prepare batch smoke requires at least one token".to_string());
+    }
+    if package_decoder_layer_kind(path, layer_index)? != PackageDecoderLayerKind::LinearAttention {
+        return Err(format!(
+            "linear-attn qkv prepare batch smoke requires a linear attention layer, got layer {layer_index}"
+        ));
+    }
+
+    let key_heads = 16_usize;
+    let value_heads = 32_usize;
+    let key_dim = 128_usize;
+    let value_dim = 128_usize;
+    let q_elements = key_heads
+        .checked_mul(key_dim)
+        .ok_or_else(|| "linear-attn qkv prepare batch q element count overflows".to_string())?;
+    let v_elements = value_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "linear-attn qkv prepare batch v element count overflows".to_string())?;
+    let channels = q_elements
+        .checked_add(q_elements)
+        .and_then(|value| value.checked_add(v_elements))
+        .ok_or_else(|| "linear-attn qkv prepare batch channel count overflows".to_string())?;
+    let q_scale = 1.0_f32 / (key_dim as f32).sqrt();
+    let qk_l2_norm = true;
+
+    let (embedding_vocab, hidden) = package_embedding_shape(path)?;
+    if let Some(token_id) = prompt_token_ids
+        .iter()
+        .copied()
+        .find(|token_id| *token_id >= embedding_vocab)
+    {
+        return Err(format!(
+            "linear-attn qkv prepare batch token id {token_id} is out of embedding range 0..{embedding_vocab}"
+        ));
+    }
+
+    let input_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
+    let qkv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
+    let conv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.conv1d.weight");
+
+    let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
+    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    if input_norm.values.len() != hidden {
+        return Err(format!(
+            "linear-attn qkv prepare batch input norm length {} does not match hidden {hidden}",
+            input_norm.values.len()
+        ));
+    }
+
+    let conv = read_named_passthrough_f32(path, &conv_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read conv1d tensor: {err}"))?;
+    if conv.shape.len() != 3 || conv.shape[1] != 1 {
+        return Err(format!(
+            "linear-attn qkv prepare batch conv1d tensor shape must be [channels,1,kernel], got {}",
+            format_u64_shape(&conv.shape)
+        ));
+    }
+    let conv_channels = usize::try_from(conv.shape[0])
+        .map_err(|_| "linear-attn qkv prepare batch conv channel count is too large".to_string())?;
+    let kernel_size = usize::try_from(conv.shape[2])
+        .map_err(|_| "linear-attn qkv prepare batch kernel size is too large".to_string())?;
+    if conv_channels != channels {
+        return Err(format!(
+            "linear-attn qkv prepare batch conv channels mismatch: got {conv_channels} expected {channels}"
+        ));
+    }
+    if kernel_size == 0 {
+        return Err(
+            "linear-attn qkv prepare batch kernel size must be greater than zero".to_string(),
+        );
+    }
+    if conv.values.len() != channels * kernel_size {
+        return Err(format!(
+            "linear-attn qkv prepare batch conv weight element count mismatch: got {} expected {}",
+            conv.values.len(),
+            channels * kernel_size
+        ));
+    }
+
+    let embedding_rows =
+        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
+            .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
+    if embedding_rows.columns != hidden
+        || embedding_rows.values.len() != prompt_token_ids.len() * hidden
+    {
+        return Err(format!(
+            "linear-attn qkv prepare batch embedding shape mismatch: columns={} values={} prompt_tokens={} hidden={hidden}",
+            embedding_rows.columns,
+            embedding_rows.values.len(),
+            prompt_token_ids.len()
+        ));
+    }
+    let mut normed_expected = Vec::with_capacity(embedding_rows.values.len());
+    for token_index in 0..prompt_token_ids.len() {
+        let start = token_index.checked_mul(hidden).ok_or_else(|| {
+            "linear-attn qkv prepare batch norm input start overflows".to_string()
+        })?;
+        let end = start
+            .checked_add(hidden)
+            .ok_or_else(|| "linear-attn qkv prepare batch norm input end overflows".to_string())?;
+        normed_expected.extend(runtime_host_rmsnorm_f32(
+            &embedding_rows.values[start..end],
+            &input_norm.values,
+            1e-6_f32,
+        ));
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let mut registry = WeightRegistry::new();
+    let qkv_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &qkv_tensor,
+        chunk_bytes,
+    )?;
+    if qkv_matrix.rows != channels || qkv_matrix.cols != hidden {
+        return Err(format!(
+            "linear-attn qkv prepare batch qkv matrix shape mismatch: rows={} cols={} expected rows={channels} cols={hidden}",
+            qkv_matrix.rows, qkv_matrix.cols
+        ));
+    }
+
+    let history_elements = channels.checked_mul(kernel_size).ok_or_else(|| {
+        "linear-attn qkv prepare batch history element count overflows".to_string()
+    })?;
+
+    let input_elements = prompt_token_ids
+        .len()
+        .checked_mul(hidden)
+        .ok_or_else(|| "linear-attn qkv prepare batch input element count overflows".to_string())?;
+    let qkv_output_elements = prompt_token_ids
+        .len()
+        .checked_mul(channels)
+        .ok_or_else(|| {
+            "linear-attn qkv prepare batch qkv output element count overflows".to_string()
+        })?;
+    let q_output_elements = prompt_token_ids
+        .len()
+        .checked_mul(q_elements)
+        .ok_or_else(|| {
+            "linear-attn qkv prepare batch q output element count overflows".to_string()
+        })?;
+    let v_output_elements = prompt_token_ids
+        .len()
+        .checked_mul(v_elements)
+        .ok_or_else(|| {
+            "linear-attn qkv prepare batch v output element count overflows".to_string()
+        })?;
+    let mut input_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_elements,
+            "linear-attn qkv prepare batch input",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn qkv prepare batch input: {err}"))?;
+    let mut input_norm_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_norm.values.len(),
+            "linear-attn qkv prepare batch input norm weight",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn qkv prepare batch norm weight: {err}")
+        })?;
+    let mut input_normed_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_elements,
+            "linear-attn qkv prepare batch input normed",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn qkv prepare batch normed input: {err}")
+        })?;
+    let mut qkv_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            qkv_output_elements,
+            "linear-attn qkv prepare batch qkv output",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn qkv prepare batch qkv output: {err}")
+        })?;
+    let mut conv_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            conv.values.len(),
+            "linear-attn qkv prepare batch conv weight",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn qkv prepare batch conv weight: {err}")
+        })?;
+    let mut conv_history_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            history_elements,
+            "linear-attn qkv prepare batch conv history",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn qkv prepare batch conv history: {err}")
+        })?;
+    let mut conv_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            qkv_output_elements,
+            "linear-attn qkv prepare batch conv output",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn qkv prepare batch conv output: {err}")
+        })?;
+    let mut q_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            q_output_elements,
+            "linear-attn qkv prepare batch q output",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn qkv prepare batch q output: {err}")
+        })?;
+    let mut k_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            q_output_elements,
+            "linear-attn qkv prepare batch k output",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn qkv prepare batch k output: {err}")
+        })?;
+    let mut v_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            v_output_elements,
+            "linear-attn qkv prepare batch v output",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn qkv prepare batch v output: {err}")
+        })?;
+    input_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&embedding_rows.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy linear-attn qkv prepare batch input: {err}"))?;
+    input_norm_weight_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&input_norm.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| {
+            format!("failed to copy linear-attn qkv prepare batch norm weight: {err}")
+        })?;
+    conv_weight_buffer
+        .copy_from_host(0, &encode_f32_to_bytes(&conv.values), Some(&mut stream))
+        .map_err(|err| {
+            format!("failed to copy linear-attn qkv prepare batch conv weight: {err}")
+        })?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize linear-attn qkv prepare batch setup: {err}")
+    })?;
+
+    let zero_history_bytes = vec![0_u8; checked_f32_byte_len(history_elements, "zero history")?];
+    macro_rules! run_qkv_prepare_batch {
+        ($stream:expr) => {{
+            ullm_runtime_sys::segmented_rmsnorm_f32(
+                &input_buffer,
+                &input_norm_weight_buffer,
+                prompt_token_ids.len(),
+                hidden,
+                1e-6_f32,
+                &mut input_normed_buffer,
+                Some($stream),
+            )
+            .map_err(|err| {
+                format!("failed to run linear-attn qkv prepare batch input RMSNorm: {err}")
+            })?;
+            qkv_matrix.matvec_batch(
+                &input_normed_buffer,
+                prompt_token_ids.len(),
+                &mut qkv_output_buffer,
+                $stream,
+                "linear-attn qkv prepare batch projection",
+            )?;
+            ullm_runtime_sys::linear_attn_qkv_prepare_batch_f32(
+                &qkv_output_buffer,
+                &conv_weight_buffer,
+                &mut conv_history_buffer,
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+                kernel_size,
+                prompt_token_ids.len(),
+                q_scale,
+                qk_l2_norm,
+                &mut conv_output_buffer,
+                &mut q_output_buffer,
+                &mut k_output_buffer,
+                &mut v_output_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn qkv prepare batch: {err}"))
+        }};
+    }
+
+    conv_history_buffer
+        .copy_from_host(0, &zero_history_bytes, Some(&mut stream))
+        .map_err(|err| {
+            format!("failed to reset linear-attn qkv prepare batch warmup history: {err}")
+        })?;
+    run_qkv_prepare_batch!(&mut stream)?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize linear-attn qkv prepare batch warmup: {err}")
+    })?;
+
+    let mut measured_ms = Vec::with_capacity(measured_repeats);
+    for _ in 0..measured_repeats {
+        conv_history_buffer
+            .copy_from_host(0, &zero_history_bytes, Some(&mut stream))
+            .map_err(|err| {
+                format!("failed to reset linear-attn qkv prepare batch history: {err}")
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn qkv prepare batch history reset: {err}")
+        })?;
+        let started = Instant::now();
+        run_qkv_prepare_batch!(&mut stream)?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn qkv prepare batch measured run: {err}")
+        })?;
+        measured_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    let wall_ms = measured_ms.iter().sum::<f64>() / measured_ms.len() as f64;
+    let wall_ms_min = measured_ms
+        .iter()
+        .copied()
+        .min_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+    let wall_ms_max = measured_ms
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+
+    let qkv_output = read_runtime_buffer_f32(
+        &qkv_output_buffer,
+        &mut stream,
+        qkv_output_elements,
+        "linear-attn qkv prepare batch qkv output",
+    )?;
+    let conv_output = read_runtime_buffer_f32(
+        &conv_output_buffer,
+        &mut stream,
+        qkv_output_elements,
+        "linear-attn qkv prepare batch conv output",
+    )?;
+    let q_output = read_runtime_buffer_f32(
+        &q_output_buffer,
+        &mut stream,
+        q_output_elements,
+        "linear-attn qkv prepare batch q output",
+    )?;
+    let k_output = read_runtime_buffer_f32(
+        &k_output_buffer,
+        &mut stream,
+        q_output_elements,
+        "linear-attn qkv prepare batch k output",
+    )?;
+    let v_output = read_runtime_buffer_f32(
+        &v_output_buffer,
+        &mut stream,
+        v_output_elements,
+        "linear-attn qkv prepare batch v output",
+    )?;
+    let history_output = read_runtime_buffer_f32(
+        &conv_history_buffer,
+        &mut stream,
+        history_elements,
+        "linear-attn qkv prepare batch conv history",
+    )?;
+    let conv_sum_expected = runtime_host_depthwise_conv1d_f32(
+        &qkv_output,
+        &conv.values,
+        channels,
+        prompt_token_ids.len(),
+        kernel_size,
+    );
+    if conv_sum_expected.len() != qkv_output.len() {
+        return Err("failed to build linear-attn qkv prepare batch conv reference".to_string());
+    }
+    let conv_expected = runtime_host_silu_f32(&conv_sum_expected);
+    let qkv_split = split_linear_attn_qkv_for_recurrent(
+        &conv_expected,
+        prompt_token_ids.len(),
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        qk_l2_norm,
+        q_scale,
+    )?;
+    let mut expected_history = vec![0.0_f32; history_elements];
+    for token_qkv in qkv_output.chunks_exact(channels) {
+        for channel in 0..channels {
+            for kernel in 0..kernel_size - 1 {
+                expected_history[kernel * channels + channel] =
+                    expected_history[(kernel + 1) * channels + channel];
+            }
+            expected_history[(kernel_size - 1) * channels + channel] = token_qkv[channel];
+        }
+    }
+    let conv_max_abs_diff = verify_f32_close(
+        "linear-attn qkv prepare batch conv output",
+        &conv_output,
+        &conv_expected,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let q_max_abs_diff = verify_f32_close(
+        "linear-attn qkv prepare batch q output",
+        &q_output,
+        &qkv_split.q,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let k_max_abs_diff = verify_f32_close(
+        "linear-attn qkv prepare batch k output",
+        &k_output,
+        &qkv_split.k,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let v_max_abs_diff = verify_f32_close(
+        "linear-attn qkv prepare batch v output",
+        &v_output,
+        &qkv_split.v,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let history_max_abs_diff = verify_f32_close(
+        "linear-attn qkv prepare batch history output",
+        &history_output,
+        &expected_history,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let output_elements = conv_output
+        .len()
+        .checked_add(q_output.len())
+        .and_then(|value| value.checked_add(k_output.len()))
+        .and_then(|value| value.checked_add(v_output.len()))
+        .ok_or_else(|| {
+            "linear-attn qkv prepare batch output element count overflows".to_string()
+        })?;
+    let preview_len = q_output.len().min(8);
+    Ok(format!(
+        "package-linear-attn-qkv-prepare-batch-smoke package={} layer={} tensors=[\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} key_heads={} value_heads={} key_dim={} value_dim={} channels={} kernel_size={} q_scale={q_scale:.9} qk_l2_norm={} input_elements={} output_elements={} qkv_source=runtime_aq4_batch_projection executor=segmented_rmsnorm_f32+aq4_matvec_batch_f32+linear_attn_qkv_prepare_batch_f32 real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} conv_max_abs_diff={conv_max_abs_diff:.9} q_max_abs_diff={q_max_abs_diff:.9} k_max_abs_diff={k_max_abs_diff:.9} v_max_abs_diff={v_max_abs_diff:.9} history_max_abs_diff={history_max_abs_diff:.9} q_preview={} verified=true",
+        path,
+        layer_index,
+        input_norm_tensor,
+        qkv_tensor,
+        conv_tensor,
+        prompt_token_ids.len(),
+        hidden,
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        channels,
+        kernel_size,
+        qk_l2_norm,
+        input_elements,
+        output_elements,
+        prompt_token_ids.len(),
+        info.backend,
+        device_index,
+        info.name,
+        measured_repeats,
+        wall_ms,
+        wall_ms_min,
+        wall_ms_max,
+        tps(prompt_token_ids.len(), wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        tps(output_elements, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        format_f32_preview(&q_output[..preview_len]),
+    ))
+}
+
 fn current_git_commit() -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -30599,6 +31174,9 @@ fn print_help() {
     );
     eprintln!(
         "package-linear-attn-proj-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
+    );
+    eprintln!(
+        "package-linear-attn-qkv-prepare-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
     );
     eprintln!(
         "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"

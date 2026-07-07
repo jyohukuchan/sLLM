@@ -732,6 +732,18 @@ public:
             error);
     }
 
+    bool compile_linear_attn_qkv_prepare_batch_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            linear_attn_qkv_prepare_batch_kernel_source(),
+            "ullm_linear_attn_qkv_prepare_batch_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_linear_attn_gate_beta_kernel(
         const std::string &arch,
         std::vector<char> *code,
@@ -4524,6 +4536,201 @@ extern "C" __global__ void ullm_linear_attn_qkv_split_l2norm_f32_kernel(
     const unsigned long long v_index = v_block * blockDim.x + tid;
     if (v_index < v_elements) {
         v_output[v_index] = conv_output[v_base + v_index];
+    }
+}
+)";
+    }
+
+    static const char *linear_attn_qkv_prepare_batch_kernel_source() {
+        return R"(
+__device__ float ullm_linear_attn_qkv_conv_batch_value(
+    const float *qkv,
+    const float *conv_weight,
+    const float *conv_history,
+    unsigned long long sequence_len,
+    unsigned long long channels,
+    unsigned long long kernel_size,
+    unsigned long long token,
+    unsigned long long channel) {
+    float sum = 0.0f;
+    for (unsigned long long kernel = 0; kernel < kernel_size; ++kernel) {
+        const long long source_token = static_cast<long long>(token) -
+            static_cast<long long>(kernel_size - 1ull - kernel);
+        float source = 0.0f;
+        if (source_token >= 0) {
+            source = qkv[static_cast<unsigned long long>(source_token) * channels + channel];
+        } else {
+            const unsigned long long history_index = kernel + token + 1ull;
+            source = history_index < kernel_size ? conv_history[history_index * channels + channel] : 0.0f;
+        }
+        sum += source * conv_weight[channel * kernel_size + kernel];
+    }
+    const float sigmoid = 1.0f / (1.0f + expf(-sum));
+    return sum * sigmoid;
+}
+
+__device__ void ullm_linear_attn_qkv_conv_batch_update_history(
+    const float *qkv,
+    float *conv_history,
+    unsigned long long sequence_len,
+    unsigned long long channels,
+    unsigned long long kernel_size,
+    unsigned long long channel) {
+    if (sequence_len >= kernel_size) {
+        const unsigned long long first_token = sequence_len - kernel_size;
+        for (unsigned long long kernel = 0; kernel < kernel_size; ++kernel) {
+            conv_history[kernel * channels + channel] =
+                qkv[(first_token + kernel) * channels + channel];
+        }
+        return;
+    }
+    const unsigned long long preserved = kernel_size - sequence_len;
+    for (unsigned long long kernel = 0; kernel < preserved; ++kernel) {
+        conv_history[kernel * channels + channel] =
+            conv_history[(kernel + sequence_len) * channels + channel];
+    }
+    for (unsigned long long token = 0; token < sequence_len; ++token) {
+        conv_history[(preserved + token) * channels + channel] =
+            qkv[token * channels + channel];
+    }
+}
+
+extern "C" __global__ void ullm_linear_attn_qkv_prepare_batch_update_history_f32_kernel(
+    const float *qkv,
+    float *conv_history,
+    unsigned long long sequence_len,
+    unsigned long long channels,
+    unsigned long long kernel_size) {
+    const unsigned long long channel =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (channel >= channels) {
+        return;
+    }
+    ullm_linear_attn_qkv_conv_batch_update_history(
+        qkv,
+        conv_history,
+        sequence_len,
+        channels,
+        kernel_size,
+        channel);
+}
+
+extern "C" __global__ void ullm_linear_attn_qkv_prepare_batch_f32_kernel(
+    const float *qkv,
+    const float *conv_weight,
+    float *conv_history,
+    unsigned long long key_heads,
+    unsigned long long value_heads,
+    unsigned long long key_dim,
+    unsigned long long value_dim,
+    unsigned long long kernel_size,
+    unsigned long long sequence_len,
+    float q_scale,
+    int qk_l2_norm,
+    float *conv_output,
+    float *q_output,
+    float *k_output,
+    float *v_output) {
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[256];
+    const unsigned long long q_elements = key_heads * key_dim;
+    const unsigned long long k_base = q_elements;
+    const unsigned long long v_base = q_elements * 2ull;
+    const unsigned long long v_elements = value_heads * value_dim;
+    const unsigned long long channels = q_elements + q_elements + v_elements;
+    const unsigned long long block = blockIdx.x;
+    const unsigned long long token = blockIdx.y;
+    if (token >= sequence_len) {
+        return;
+    }
+
+    if (block < key_heads) {
+        const unsigned long long head = block;
+        const unsigned long long source_base = head * key_dim;
+        float sum_squares = 0.0f;
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const unsigned long long channel = source_base + dim;
+            const float value = ullm_linear_attn_qkv_conv_batch_value(
+                qkv,
+                conv_weight,
+                conv_history,
+                sequence_len,
+                channels,
+                kernel_size,
+                token,
+                channel);
+            conv_output[token * channels + channel] = value;
+            sum_squares += value * value;
+        }
+        partial[tid] = sum_squares;
+        __syncthreads();
+        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+            if (tid < offset) {
+                partial[tid] += partial[tid + offset];
+            }
+            __syncthreads();
+        }
+        const float norm = sqrtf(partial[0] + 1.0e-6f);
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const unsigned long long channel = source_base + dim;
+            const float value = conv_output[token * channels + channel];
+            q_output[token * q_elements + head * key_dim + dim] =
+                qk_l2_norm != 0 ? (value / norm) * q_scale : value * q_scale;
+        }
+        return;
+    }
+
+    if (block < key_heads * 2ull) {
+        const unsigned long long head = block - key_heads;
+        const unsigned long long source_base = k_base + head * key_dim;
+        float sum_squares = 0.0f;
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const unsigned long long channel = source_base + dim;
+            const float value = ullm_linear_attn_qkv_conv_batch_value(
+                qkv,
+                conv_weight,
+                conv_history,
+                sequence_len,
+                channels,
+                kernel_size,
+                token,
+                channel);
+            conv_output[token * channels + channel] = value;
+            sum_squares += value * value;
+        }
+        partial[tid] = sum_squares;
+        __syncthreads();
+        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+            if (tid < offset) {
+                partial[tid] += partial[tid + offset];
+            }
+            __syncthreads();
+        }
+        const float norm = sqrtf(partial[0] + 1.0e-6f);
+        for (unsigned long long dim = tid; dim < key_dim; dim += blockDim.x) {
+            const unsigned long long channel = source_base + dim;
+            const float value = conv_output[token * channels + channel];
+            k_output[token * q_elements + head * key_dim + dim] =
+                qk_l2_norm != 0 ? value / norm : value;
+        }
+        return;
+    }
+
+    const unsigned long long v_block = block - key_heads * 2ull;
+    const unsigned long long v_index = v_block * blockDim.x + tid;
+    if (v_index < v_elements) {
+        const unsigned long long channel = v_base + v_index;
+        const float value = ullm_linear_attn_qkv_conv_batch_value(
+            qkv,
+            conv_weight,
+            conv_history,
+            sequence_len,
+            channels,
+            kernel_size,
+            token,
+            channel);
+        conv_output[token * channels + channel] = value;
+        v_output[token * v_elements + v_index] = value;
     }
 }
 )";
@@ -13410,6 +13617,44 @@ void linear_attn_qkv_prepare_f32_host(
     std::memcpy(v_output, conv_output + v_source, v_elements * sizeof(float));
 }
 
+void linear_attn_qkv_prepare_batch_f32_host(
+    const float *qkv,
+    const float *conv_weight,
+    float *conv_history,
+    size_t key_heads,
+    size_t value_heads,
+    size_t key_dim,
+    size_t value_dim,
+    size_t kernel_size,
+    size_t sequence_len,
+    float q_scale,
+    bool qk_l2_norm,
+    float *conv_output,
+    float *q_output,
+    float *k_output,
+    float *v_output) {
+    const size_t q_elements = key_heads * key_dim;
+    const size_t v_elements = value_heads * value_dim;
+    const size_t channels = q_elements * 2 + v_elements;
+    for (size_t token = 0; token < sequence_len; ++token) {
+        linear_attn_qkv_prepare_f32_host(
+            qkv + token * channels,
+            conv_weight,
+            conv_history,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            q_scale,
+            qk_l2_norm,
+            conv_output + token * channels,
+            q_output + token * q_elements,
+            k_output + token * q_elements,
+            v_output + token * v_elements);
+    }
+}
+
 class HipLinearAttnQkvPrepareKernelCache {
 public:
     void *function_for_device(int device_id, std::string *error) {
@@ -13491,6 +13736,114 @@ HipLinearAttnQkvPrepareKernelCache &hip_linear_attn_qkv_prepare_kernel_cache() {
     return cache;
 }
 
+class HipLinearAttnQkvPrepareBatchKernelCache {
+public:
+    bool functions_for_device(
+        int device_id,
+        void **prepare_function,
+        void **update_history_function,
+        std::string *error) {
+        if (prepare_function == nullptr || update_history_function == nullptr) {
+            append_error(error, "linear attention qkv prepare batch received null function output");
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            *prepare_function = found->second->prepare_function;
+            *update_history_function = found->second->update_history_function;
+            return true;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return false;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_linear_attn_qkv_prepare_batch_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *prepare = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &prepare,
+                    module,
+                    "ullm_linear_attn_qkv_prepare_batch_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(
+                    &compile_errors,
+                    "hipModuleGetFunction qkv prepare batch failed for " + arch);
+                continue;
+            }
+            void *update_history = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &update_history,
+                    module,
+                    "ullm_linear_attn_qkv_prepare_batch_update_history_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(
+                    &compile_errors,
+                    "hipModuleGetFunction qkv prepare batch history update failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->prepare_function = prepare;
+            loaded->update_history_function = update_history;
+            loaded->arch = arch;
+            *prepare_function = loaded->prepare_function;
+            *update_history_function = loaded->update_history_function;
+            modules_.emplace(device_id, std::move(loaded));
+            return true;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build linear attention qkv prepare batch HIP kernel"
+                                   : compile_errors);
+        return false;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *prepare_function = nullptr;
+        void *update_history_function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipLinearAttnQkvPrepareBatchKernelCache &hip_linear_attn_qkv_prepare_batch_kernel_cache() {
+    static HipLinearAttnQkvPrepareBatchKernelCache cache;
+    return cache;
+}
+
 bool linear_attn_qkv_prepare_f32_hip_kernel(
     const ullm_runtime_buffer *qkv_buffer,
     const ullm_runtime_buffer *conv_weight_buffer,
@@ -13564,6 +13917,120 @@ bool linear_attn_qkv_prepare_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for linear attention qkv prepare";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool linear_attn_qkv_prepare_batch_f32_hip_kernel(
+    const ullm_runtime_buffer *qkv_buffer,
+    const ullm_runtime_buffer *conv_weight_buffer,
+    ullm_runtime_buffer *conv_history_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t key_dim,
+    size_t value_dim,
+    size_t kernel_size,
+    size_t sequence_len,
+    float q_scale,
+    bool qk_l2_norm,
+    ullm_runtime_buffer *conv_output_buffer,
+    ullm_runtime_buffer *q_output_buffer,
+    ullm_runtime_buffer *k_output_buffer,
+    ullm_runtime_buffer *v_output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = qkv_buffer->hip_device_id;
+    void *prepare_function = nullptr;
+    void *update_history_function = nullptr;
+    if (!hip_linear_attn_qkv_prepare_batch_kernel_cache().functions_for_device(
+            device_id,
+            &prepare_function,
+            &update_history_function,
+            error)) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    const size_t q_elements = key_heads * key_dim;
+    const size_t v_elements = value_heads * value_dim;
+    const size_t channels = q_elements * 2 + v_elements;
+    const size_t v_grid_size = (v_elements + block_size - 1) / block_size;
+    const size_t prepare_grid_x = key_heads * 2 + v_grid_size;
+    const size_t update_grid_x = (channels + block_size - 1) / block_size;
+    if (prepare_grid_x > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) ||
+        update_grid_x > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) ||
+        sequence_len > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "linear attention qkv prepare batch grid size exceeds HIP limit";
+        }
+        return false;
+    }
+
+    void *qkv_ptr = qkv_buffer->ptr;
+    void *conv_weight_ptr = conv_weight_buffer->ptr;
+    void *conv_history_ptr = conv_history_buffer->ptr;
+    unsigned long long kernel_key_heads = static_cast<unsigned long long>(key_heads);
+    unsigned long long kernel_value_heads = static_cast<unsigned long long>(value_heads);
+    unsigned long long kernel_key_dim = static_cast<unsigned long long>(key_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    unsigned long long kernel_size_arg = static_cast<unsigned long long>(kernel_size);
+    unsigned long long kernel_sequence_len = static_cast<unsigned long long>(sequence_len);
+    int kernel_qk_l2_norm = qk_l2_norm ? 1 : 0;
+    void *conv_output_ptr = conv_output_buffer->ptr;
+    void *q_output_ptr = q_output_buffer->ptr;
+    void *k_output_ptr = k_output_buffer->ptr;
+    void *v_output_ptr = v_output_buffer->ptr;
+    void *prepare_params[] = {
+        &qkv_ptr,
+        &conv_weight_ptr,
+        &conv_history_ptr,
+        &kernel_key_heads,
+        &kernel_value_heads,
+        &kernel_key_dim,
+        &kernel_value_dim,
+        &kernel_size_arg,
+        &kernel_sequence_len,
+        &q_scale,
+        &kernel_qk_l2_norm,
+        &conv_output_ptr,
+        &q_output_ptr,
+        &k_output_ptr,
+        &v_output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel_2d(
+            prepare_function,
+            static_cast<unsigned int>(prepare_grid_x),
+            static_cast<unsigned int>(sequence_len),
+            block_size,
+            prepare_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for linear attention qkv prepare batch";
+        }
+        return false;
+    }
+
+    unsigned long long kernel_channels = static_cast<unsigned long long>(channels);
+    void *update_params[] = {
+        &qkv_ptr,
+        &conv_history_ptr,
+        &kernel_sequence_len,
+        &kernel_channels,
+        &kernel_size_arg,
+    };
+    if (!hip_runtime().module_launch_kernel(
+            update_history_function,
+            static_cast<unsigned int>(update_grid_x),
+            block_size,
+            update_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for linear attention qkv prepare batch history update";
         }
         return false;
     }
@@ -13686,6 +14153,130 @@ ullm_status linear_attn_qkv_prepare_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize linear attention qkv prepare HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status linear_attn_qkv_prepare_batch_f32_hip_staging(
+    const ullm_runtime_buffer *qkv_buffer,
+    const ullm_runtime_buffer *conv_weight_buffer,
+    ullm_runtime_buffer *conv_history_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t key_dim,
+    size_t value_dim,
+    size_t kernel_size,
+    size_t sequence_len,
+    float q_scale,
+    bool qk_l2_norm,
+    size_t qkv_bytes,
+    size_t conv_history_bytes,
+    size_t q_bytes,
+    size_t k_bytes,
+    size_t v_bytes,
+    ullm_runtime_buffer *conv_output_buffer,
+    ullm_runtime_buffer *q_output_buffer,
+    ullm_runtime_buffer *k_output_buffer,
+    ullm_runtime_buffer *v_output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_qkv(qkv_bytes / sizeof(float));
+    std::vector<float> host_conv_weight(conv_history_bytes / sizeof(float));
+    std::vector<float> host_conv_history(conv_history_bytes / sizeof(float));
+    std::vector<float> host_conv_output(qkv_bytes / sizeof(float));
+    std::vector<float> host_q(q_bytes / sizeof(float));
+    std::vector<float> host_k(k_bytes / sizeof(float));
+    std::vector<float> host_v(v_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = qkv_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_qkv.data(),
+            qkv_buffer->ptr,
+            qkv_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_conv_weight.data(),
+            conv_weight_buffer->ptr,
+            conv_history_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_conv_history.data(),
+            conv_history_buffer->ptr,
+            conv_history_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy linear attention qkv prepare batch HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize linear attention qkv prepare batch HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+
+    linear_attn_qkv_prepare_batch_f32_host(
+        host_qkv.data(),
+        host_conv_weight.data(),
+        host_conv_history.data(),
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        kernel_size,
+        sequence_len,
+        q_scale,
+        qk_l2_norm,
+        host_conv_output.data(),
+        host_q.data(),
+        host_k.data(),
+        host_v.data());
+
+    if (!hip_runtime().copy_async(
+            conv_history_buffer->ptr,
+            host_conv_history.data(),
+            conv_history_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            conv_output_buffer->ptr,
+            host_conv_output.data(),
+            qkv_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            q_output_buffer->ptr,
+            host_q.data(),
+            q_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            k_output_buffer->ptr,
+            host_k.data(),
+            k_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            v_output_buffer->ptr,
+            host_v.data(),
+            v_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy linear attention qkv prepare batch outputs to HIP buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize linear attention qkv prepare batch HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -17341,6 +17932,193 @@ ullm_status ullm_runtime_linear_attn_qkv_prepare_f32(
         key_dim,
         value_dim,
         kernel_size,
+        q_scale,
+        qk_l2_norm != 0,
+        qkv_bytes,
+        conv_history_bytes,
+        q_bytes,
+        k_bytes,
+        v_bytes,
+        conv_output_buffer,
+        q_output_buffer,
+        k_output_buffer,
+        v_output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_linear_attn_qkv_prepare_batch_f32(
+    const ullm_runtime_buffer *qkv_buffer,
+    const ullm_runtime_buffer *conv_weight_buffer,
+    ullm_runtime_buffer *conv_history_buffer,
+    size_t key_heads,
+    size_t value_heads,
+    size_t key_dim,
+    size_t value_dim,
+    size_t kernel_size,
+    size_t sequence_len,
+    float q_scale,
+    int qk_l2_norm,
+    ullm_runtime_buffer *conv_output_buffer,
+    ullm_runtime_buffer *q_output_buffer,
+    ullm_runtime_buffer *k_output_buffer,
+    ullm_runtime_buffer *v_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (qkv_buffer == nullptr || conv_weight_buffer == nullptr ||
+        conv_history_buffer == nullptr || conv_output_buffer == nullptr ||
+        q_output_buffer == nullptr || k_output_buffer == nullptr || v_output_buffer == nullptr) {
+        set_error("linear attention qkv prepare batch received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (key_heads == 0 || value_heads == 0 || key_dim == 0 || value_dim == 0 ||
+        kernel_size == 0 || sequence_len == 0) {
+        set_error("linear attention qkv prepare batch dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(q_scale)) {
+        set_error("linear attention qkv prepare batch q_scale must be finite");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(qkv_buffer, conv_weight_buffer) ||
+        !buffers_share_backend(qkv_buffer, conv_history_buffer) ||
+        !buffers_share_backend(qkv_buffer, conv_output_buffer) ||
+        !buffers_share_backend(qkv_buffer, q_output_buffer) ||
+        !buffers_share_backend(qkv_buffer, k_output_buffer) ||
+        !buffers_share_backend(qkv_buffer, v_output_buffer)) {
+        set_error("linear attention qkv prepare batch buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(conv_output_buffer, stream) ||
+        !stream_matches_buffer(q_output_buffer, stream) ||
+        !stream_matches_buffer(k_output_buffer, stream) ||
+        !stream_matches_buffer(v_output_buffer, stream)) {
+        set_error("linear attention qkv prepare batch stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (key_heads > max_size / key_dim || value_heads > max_size / value_dim) {
+        set_error("linear attention qkv prepare batch element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = key_heads * key_dim;
+    const size_t k_elements = q_elements;
+    const size_t v_elements = value_heads * value_dim;
+    if (q_elements > max_size - k_elements || q_elements + k_elements > max_size - v_elements) {
+        set_error("linear attention qkv prepare batch channel count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t channels = q_elements + k_elements + v_elements;
+    if (channels > max_size / kernel_size ||
+        channels > max_size / sequence_len ||
+        q_elements > max_size / sequence_len ||
+        k_elements > max_size / sequence_len ||
+        v_elements > max_size / sequence_len) {
+        set_error("linear attention qkv prepare batch element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t qkv_elements = channels * sequence_len;
+    const size_t q_output_elements = q_elements * sequence_len;
+    const size_t k_output_elements = k_elements * sequence_len;
+    const size_t v_output_elements = v_elements * sequence_len;
+    if (qkv_elements > max_size / sizeof(float) ||
+        channels > max_size / kernel_size ||
+        channels * kernel_size > max_size / sizeof(float) ||
+        q_output_elements > max_size / sizeof(float) ||
+        k_output_elements > max_size / sizeof(float) ||
+        v_output_elements > max_size / sizeof(float)) {
+        set_error("linear attention qkv prepare batch byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t qkv_bytes = qkv_elements * sizeof(float);
+    const size_t conv_history_bytes = channels * kernel_size * sizeof(float);
+    const size_t q_bytes = q_output_elements * sizeof(float);
+    const size_t k_bytes = k_output_elements * sizeof(float);
+    const size_t v_bytes = v_output_elements * sizeof(float);
+    if (qkv_buffer->bytes < qkv_bytes) {
+        set_error("linear attention qkv prepare batch qkv buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (conv_weight_buffer->bytes < conv_history_bytes) {
+        set_error("linear attention qkv prepare batch conv weight buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (conv_history_buffer->bytes < conv_history_bytes) {
+        set_error("linear attention qkv prepare batch conv history buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (conv_output_buffer->bytes < qkv_bytes) {
+        set_error("linear attention qkv prepare batch conv output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_output_buffer->bytes < q_bytes || k_output_buffer->bytes < k_bytes ||
+        v_output_buffer->bytes < v_bytes) {
+        set_error("linear attention qkv prepare batch output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (qkv_buffer->backend == BackendKind::Cpu) {
+        linear_attn_qkv_prepare_batch_f32_host(
+            static_cast<const float *>(qkv_buffer->ptr),
+            static_cast<const float *>(conv_weight_buffer->ptr),
+            static_cast<float *>(conv_history_buffer->ptr),
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            sequence_len,
+            q_scale,
+            qk_l2_norm != 0,
+            static_cast<float *>(conv_output_buffer->ptr),
+            static_cast<float *>(q_output_buffer->ptr),
+            static_cast<float *>(k_output_buffer->ptr),
+            static_cast<float *>(v_output_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (linear_attn_qkv_prepare_batch_f32_hip_kernel(
+            qkv_buffer,
+            conv_weight_buffer,
+            conv_history_buffer,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            sequence_len,
+            q_scale,
+            qk_l2_norm != 0,
+            conv_output_buffer,
+            q_output_buffer,
+            k_output_buffer,
+            v_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_LINEAR_ATTN_QKV_PREPARE_BATCH_KERNEL") != nullptr ||
+        std::getenv("ULLM_REQUIRE_HIP_LINEAR_ATTN_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "linear attention qkv prepare batch HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return linear_attn_qkv_prepare_batch_f32_hip_staging(
+        qkv_buffer,
+        conv_weight_buffer,
+        conv_history_buffer,
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        kernel_size,
+        sequence_len,
         q_scale,
         qk_l2_norm != 0,
         qkv_bytes,

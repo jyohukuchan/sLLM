@@ -569,6 +569,24 @@ unsafe extern "C" {
         v_output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_linear_attn_qkv_prepare_batch_f32(
+        qkv_buffer: *const RawRuntimeBuffer,
+        conv_weight_buffer: *const RawRuntimeBuffer,
+        conv_history_buffer: *mut RawRuntimeBuffer,
+        key_heads: usize,
+        value_heads: usize,
+        key_dim: usize,
+        value_dim: usize,
+        kernel_size: usize,
+        sequence_len: usize,
+        q_scale: f32,
+        qk_l2_norm: c_int,
+        conv_output_buffer: *mut RawRuntimeBuffer,
+        q_output_buffer: *mut RawRuntimeBuffer,
+        k_output_buffer: *mut RawRuntimeBuffer,
+        v_output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_linear_attn_gate_beta_f32(
         a_buffer: *const RawRuntimeBuffer,
         b_buffer: *const RawRuntimeBuffer,
@@ -3445,6 +3463,99 @@ pub fn linear_attn_qkv_prepare_f32(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn linear_attn_qkv_prepare_batch_f32(
+    qkv: &RuntimeBuffer,
+    conv_weight: &RuntimeBuffer,
+    conv_history: &mut RuntimeBuffer,
+    key_heads: usize,
+    value_heads: usize,
+    key_dim: usize,
+    value_dim: usize,
+    kernel_size: usize,
+    sequence_len: usize,
+    q_scale: f32,
+    qk_l2_norm: bool,
+    conv_output: &mut RuntimeBuffer,
+    q_output: &mut RuntimeBuffer,
+    k_output: &mut RuntimeBuffer,
+    v_output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if key_heads == 0
+        || value_heads == 0
+        || key_dim == 0
+        || value_dim == 0
+        || kernel_size == 0
+        || sequence_len == 0
+    {
+        return Err(
+            "linear attention qkv prepare batch dimensions must be greater than zero".to_string(),
+        );
+    }
+    if !q_scale.is_finite() {
+        return Err("linear attention qkv prepare batch q_scale must be finite".to_string());
+    }
+    let q_elements = key_heads.checked_mul(key_dim).ok_or_else(|| {
+        "linear attention qkv prepare batch q element count overflows".to_string()
+    })?;
+    let v_elements = value_heads.checked_mul(value_dim).ok_or_else(|| {
+        "linear attention qkv prepare batch v element count overflows".to_string()
+    })?;
+    let channels = q_elements
+        .checked_add(q_elements)
+        .and_then(|value| value.checked_add(v_elements))
+        .ok_or_else(|| "linear attention qkv prepare batch channel count overflows".to_string())?;
+    let qkv_bytes = channels
+        .checked_mul(sequence_len)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "linear attention qkv prepare batch qkv byte size overflows".to_string())?;
+    let history_bytes = channels
+        .checked_mul(kernel_size)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| {
+            "linear attention qkv prepare batch history byte size overflows".to_string()
+        })?;
+    let q_bytes = q_elements
+        .checked_mul(sequence_len)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "linear attention qkv prepare batch q byte size overflows".to_string())?;
+    let v_bytes = v_elements
+        .checked_mul(sequence_len)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "linear attention qkv prepare batch v byte size overflows".to_string())?;
+
+    check_copy_range(0, qkv_bytes, qkv.size()?)?;
+    check_copy_range(0, history_bytes, conv_weight.size()?)?;
+    check_copy_range(0, history_bytes, conv_history.size()?)?;
+    check_copy_range(0, qkv_bytes, conv_output.size()?)?;
+    check_copy_range(0, q_bytes, q_output.size()?)?;
+    check_copy_range(0, q_bytes, k_output.size()?)?;
+    check_copy_range(0, v_bytes, v_output.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_linear_attn_qkv_prepare_batch_f32(
+            qkv.raw.as_ptr(),
+            conv_weight.raw.as_ptr(),
+            conv_history.raw.as_ptr(),
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            sequence_len,
+            q_scale,
+            if qk_l2_norm { 1 } else { 0 },
+            conv_output.raw.as_ptr(),
+            q_output.raw.as_ptr(),
+            k_output.raw.as_ptr(),
+            v_output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 pub fn linear_attn_gate_beta_f32(
     a: &RuntimeBuffer,
     b: &RuntimeBuffer,
@@ -6180,6 +6291,12 @@ mod tests {
         assert_f32s_close(&le_bytes_to_f32s(&k_bytes), &expected_k, 1e-6);
         assert_f32s_close(&le_bytes_to_f32s(&v_bytes), &expected_v, 1e-6);
         assert_f32s_close(&le_bytes_to_f32s(&history_bytes), &expected_history, 1e-6);
+    }
+
+    #[test]
+    fn cpu_linear_attn_qkv_prepare_batch_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        assert_linear_attn_qkv_prepare_batch_matches_expected(&mut context, 1e-6);
     }
 
     #[test]
@@ -9593,6 +9710,15 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_linear_attn_qkv_prepare_batch_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        assert_linear_attn_qkv_prepare_batch_matches_expected(&mut context, 1e-5);
+    }
+
+    #[test]
     fn first_hip_context_allocates_runtime_buffer_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -9984,6 +10110,177 @@ mod tests {
         let v_base = q_elements * 2;
         v.copy_from_slice(&conv_output[v_base..v_base + v_elements]);
         (conv_output, q, k, v)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn expected_linear_attn_qkv_prepare_batch(
+        qkv: &[f32],
+        conv_weight: &[f32],
+        conv_history: &mut [f32],
+        key_heads: usize,
+        value_heads: usize,
+        key_dim: usize,
+        value_dim: usize,
+        kernel_size: usize,
+        sequence_len: usize,
+        q_scale: f32,
+        qk_l2_norm: bool,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let q_elements = key_heads * key_dim;
+        let v_elements = value_heads * value_dim;
+        let channels = q_elements * 2 + v_elements;
+        assert_eq!(qkv.len(), channels * sequence_len);
+        let mut conv = Vec::with_capacity(channels * sequence_len);
+        let mut q = Vec::with_capacity(q_elements * sequence_len);
+        let mut k = Vec::with_capacity(q_elements * sequence_len);
+        let mut v = Vec::with_capacity(v_elements * sequence_len);
+        for token in 0..sequence_len {
+            let token_base = token * channels;
+            let (token_conv, token_q, token_k, token_v) = expected_linear_attn_qkv_prepare(
+                &qkv[token_base..token_base + channels],
+                conv_weight,
+                conv_history,
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+                kernel_size,
+                q_scale,
+                qk_l2_norm,
+            );
+            conv.extend(token_conv);
+            q.extend(token_q);
+            k.extend(token_k);
+            v.extend(token_v);
+        }
+        (conv, q, k, v)
+    }
+
+    fn assert_linear_attn_qkv_prepare_batch_matches_expected(
+        context: &mut RuntimeContext,
+        tolerance: f32,
+    ) {
+        let mut stream = context.create_stream().unwrap();
+        let key_heads = 2;
+        let value_heads = 2;
+        let key_dim = 2;
+        let value_dim = 2;
+        let kernel_size = 3;
+        let sequence_len = 4;
+        let q_scale = 0.5;
+        let channels = key_heads * key_dim * 2 + value_heads * value_dim;
+        let qkv_values: Vec<f32> = (0..sequence_len * channels)
+            .map(|index| index as f32 * 0.07 - 0.35)
+            .collect();
+        let conv_weight_values: Vec<f32> = (0..channels)
+            .flat_map(|channel| {
+                let offset = channel as f32 * 0.001;
+                [0.25_f32 + offset, -0.5 + offset, 1.0 - offset]
+            })
+            .collect();
+        let history_values: Vec<f32> = (0..channels * kernel_size)
+            .map(|index| index as f32 * 0.03 - 0.4)
+            .collect();
+        let mut expected_history = history_values.clone();
+        let (expected_conv, expected_q, expected_k, expected_v) =
+            expected_linear_attn_qkv_prepare_batch(
+                &qkv_values,
+                &conv_weight_values,
+                &mut expected_history,
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+                kernel_size,
+                sequence_len,
+                q_scale,
+                true,
+            );
+
+        let mut qkv = context
+            .alloc_buffer(qkv_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut conv_weight = context
+            .alloc_buffer(conv_weight_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut conv_history = context
+            .alloc_buffer(history_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut conv_output = context
+            .alloc_buffer(expected_conv.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut q_output = context
+            .alloc_buffer(expected_q.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_output = context
+            .alloc_buffer(expected_k.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_output = context
+            .alloc_buffer(expected_v.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        qkv.copy_from_host(0, &f32s_to_le_bytes(&qkv_values), Some(&mut stream))
+            .unwrap();
+        conv_weight
+            .copy_from_host(0, &f32s_to_le_bytes(&conv_weight_values), Some(&mut stream))
+            .unwrap();
+        conv_history
+            .copy_from_host(0, &f32s_to_le_bytes(&history_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        linear_attn_qkv_prepare_batch_f32(
+            &qkv,
+            &conv_weight,
+            &mut conv_history,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            kernel_size,
+            sequence_len,
+            q_scale,
+            true,
+            &mut conv_output,
+            &mut q_output,
+            &mut k_output,
+            &mut v_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut conv_bytes = vec![0_u8; expected_conv.len() * std::mem::size_of::<f32>()];
+        let mut q_bytes = vec![0_u8; expected_q.len() * std::mem::size_of::<f32>()];
+        let mut k_bytes = vec![0_u8; expected_k.len() * std::mem::size_of::<f32>()];
+        let mut v_bytes = vec![0_u8; expected_v.len() * std::mem::size_of::<f32>()];
+        let mut history_bytes = vec![0_u8; expected_history.len() * std::mem::size_of::<f32>()];
+        conv_output
+            .copy_to_host(0, &mut conv_bytes, Some(&mut stream))
+            .unwrap();
+        q_output
+            .copy_to_host(0, &mut q_bytes, Some(&mut stream))
+            .unwrap();
+        k_output
+            .copy_to_host(0, &mut k_bytes, Some(&mut stream))
+            .unwrap();
+        v_output
+            .copy_to_host(0, &mut v_bytes, Some(&mut stream))
+            .unwrap();
+        conv_history
+            .copy_to_host(0, &mut history_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        assert_f32s_close(&le_bytes_to_f32s(&conv_bytes), &expected_conv, tolerance);
+        assert_f32s_close(&le_bytes_to_f32s(&q_bytes), &expected_q, tolerance);
+        assert_f32s_close(&le_bytes_to_f32s(&k_bytes), &expected_k, tolerance);
+        assert_f32s_close(&le_bytes_to_f32s(&v_bytes), &expected_v, tolerance);
+        assert_f32s_close(
+            &le_bytes_to_f32s(&history_bytes),
+            &expected_history,
+            tolerance,
+        );
     }
 
     fn expected_linear_attn_gate_beta(
