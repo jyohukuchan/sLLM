@@ -1,0 +1,57 @@
+{
+  "schema_version": "ullm-batch-throughput-workload-v0.1",
+  "run_id": "r9700-aq4-phase-a-logical",
+  "package_dir": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+  "engine": "target/release/ullm-engine",
+  "engine_name": "uLLM",
+  "model_name": "Qwen3.5-9B",
+  "model_format": "ullm-package",
+  "model_quantization": "AQ4",
+  "gpu_card": "card2",
+  "device_index": 2,
+  "chunk_bytes": 1048576,
+  "layers": "all",
+  "top_k": 4,
+  "lm_head_chunk_rows": 4096,
+  "rotary_dim": 32,
+  "rope_base": 10000000,
+  "position_offset": 0,
+  "lm_head_mode": "gpu_resident_f32",
+  "kv_cache_dtype": "f32",
+  "require_hip_kernels": true,
+  "env": {
+    "ULLM_PREFILL_DEVICE_TOKEN_LOOP": "1"
+  },
+  "warmup_runs": 1,
+  "measured_runs": 1,
+  "timeout_seconds": 240,
+  "memory_sample_interval": 1.0,
+  "notes": [
+    "Phase A logical batch control-plane validation",
+    "device-token-loop prefill is still logical batch, not real batch",
+    "measured_runs is 1 to avoid over-reading logical batch throughput as final SQ performance"
+  ],
+  "cases": [
+    {
+      "case_id": "aq4-r9700-phase-a-logical-b1-pp128-tg32",
+      "concurrent_requests": 1,
+      "prompt_tokens": 128,
+      "generated_tokens": 32,
+      "context_length": 192
+    },
+    {
+      "case_id": "aq4-r9700-phase-a-logical-b2-pp128-tg32",
+      "concurrent_requests": 2,
+      "prompt_tokens": 128,
+      "generated_tokens": 32,
+      "context_length": 192
+    },
+    {
+      "case_id": "aq4-r9700-phase-a-logical-b4-pp128-tg32",
+      "concurrent_requests": 4,
+      "prompt_tokens": 128,
+      "generated_tokens": 32,
+      "context_length": 192
+    }
+  ]
+}
