@@ -870,7 +870,7 @@ extern "C" __global__ void ullm_aq4_row_f32_kernel(
     static unsigned int aq4_rows_per_block_for_arch(
         const std::string &arch,
         const char *env_name = nullptr) {
-        const unsigned int fallback = arch.rfind("gfx12", 0) == 0 ? 16u : 1u;
+        const unsigned int fallback = arch.rfind("gfx12", 0) == 0 ? 32u : 1u;
         return aq4_rows_per_block_from_env(env_name, nullptr, fallback);
     }
 
@@ -4875,7 +4875,7 @@ Aq4MatvecLaunchConfig aq4_matvec_launch_config_for_device(int device_id) {
     int major = 0;
     int minor = 0;
     hip_runtime().device_compute_capability(device_id, &major, &minor);
-    const unsigned int fallback = major >= 12 ? 16u : 1u;
+    const unsigned int fallback = major >= 12 ? 32u : 1u;
     return Aq4MatvecLaunchConfig{
         256u,
         aq4_rows_per_block_from_env("ULLM_AQ4_MATVEC_RPB", nullptr, fallback)};
