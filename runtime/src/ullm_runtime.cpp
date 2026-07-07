@@ -705,6 +705,18 @@ public:
             error);
     }
 
+    bool compile_cached_prefix_attn_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            cached_prefix_attn_kernel_source(),
+            "ullm_cached_prefix_attn_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_paged_decode_attn_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -4068,6 +4080,65 @@ extern "C" __global__ void ullm_decode_attn_f32_kernel(
     const unsigned long long q_per_kv = q_heads / kv_heads;
     const unsigned long long kv_head = q_head / q_per_kv;
     const unsigned long long q_base = q_head * head_dim;
+
+    float max_score = -3.4028234663852886e38f;
+    for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+        const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+        float score = 0.0f;
+        for (unsigned long long dim = 0; dim < head_dim; ++dim) {
+            score += q[q_base + dim] * k_cache[k_base + dim];
+        }
+        score *= softmax_scale;
+        max_score = score > max_score ? score : max_score;
+    }
+
+    float denominator = 0.0f;
+    float weighted = 0.0f;
+    for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+        const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+        float score = 0.0f;
+        for (unsigned long long dim = 0; dim < head_dim; ++dim) {
+            score += q[q_base + dim] * k_cache[k_base + dim];
+        }
+        const float weight = expf(score * softmax_scale - max_score);
+        denominator += weight;
+        const unsigned long long v_index =
+            (source_timestep * kv_heads + kv_head) * value_dim + value;
+        weighted += weight * v_cache[v_index];
+    }
+    output[index] = weighted / denominator;
+}
+)";
+    }
+
+    static const char *cached_prefix_attn_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_cached_prefix_attn_f32_kernel(
+    const float *q,
+    const float *k_cache,
+    const float *v_cache,
+    unsigned long long cached_prefix_len,
+    unsigned long long new_tokens,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output) {
+    const unsigned long long index =
+        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned long long elements = new_tokens * q_heads * value_dim;
+    if (index >= elements) {
+        return;
+    }
+    const unsigned long long value = index % value_dim;
+    const unsigned long long q_head_index = index / value_dim;
+    const unsigned long long q_head = q_head_index % q_heads;
+    const unsigned long long token_index = q_head_index / q_heads;
+    const unsigned long long cache_len = cached_prefix_len + token_index + 1;
+    const unsigned long long q_per_kv = q_heads / kv_heads;
+    const unsigned long long kv_head = q_head / q_per_kv;
+    const unsigned long long q_base = (token_index * q_heads + q_head) * head_dim;
 
     float max_score = -3.4028234663852886e38f;
     for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
@@ -10862,6 +10933,65 @@ void decode_attn_f32_host(
     }
 }
 
+void cached_prefix_attn_f32_host(
+    const float *q,
+    const float *k_cache,
+    const float *v_cache,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    float *output) {
+    const size_t q_per_kv = q_heads / kv_heads;
+    for (size_t token_index = 0; token_index < new_tokens; ++token_index) {
+        const size_t cache_len = cached_prefix_len + token_index + 1;
+        for (size_t q_head = 0; q_head < q_heads; ++q_head) {
+            const size_t kv_head = q_head / q_per_kv;
+            const size_t q_base = (token_index * q_heads + q_head) * head_dim;
+            float max_score = -std::numeric_limits<float>::infinity();
+            for (size_t source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+                const size_t k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                float score = 0.0f;
+                for (size_t dim = 0; dim < head_dim; ++dim) {
+                    score += q[q_base + dim] * k_cache[k_base + dim];
+                }
+                score *= softmax_scale;
+                max_score = std::max(max_score, score);
+            }
+
+            float denominator = 0.0f;
+            for (size_t source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+                const size_t k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                float score = 0.0f;
+                for (size_t dim = 0; dim < head_dim; ++dim) {
+                    score += q[q_base + dim] * k_cache[k_base + dim];
+                }
+                denominator += std::exp(score * softmax_scale - max_score);
+            }
+
+            const size_t output_base = (token_index * q_heads + q_head) * value_dim;
+            for (size_t value = 0; value < value_dim; ++value) {
+                float weighted = 0.0f;
+                for (size_t source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+                    const size_t k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                    float score = 0.0f;
+                    for (size_t dim = 0; dim < head_dim; ++dim) {
+                        score += q[q_base + dim] * k_cache[k_base + dim];
+                    }
+                    const float weight = std::exp(score * softmax_scale - max_score);
+                    const size_t v_index =
+                        (source_timestep * kv_heads + kv_head) * value_dim + value;
+                    weighted += weight * v_cache[v_index];
+                }
+                output[output_base + value] = weighted / denominator;
+            }
+        }
+    }
+}
+
 void paged_decode_attn_f32_host(
     const float *q,
     const float *k_cache,
@@ -13240,6 +13370,239 @@ ullm_status decode_attn_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 decode attention HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+class HipCachedPrefixAttnKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_cached_prefix_attn_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_cached_prefix_attn_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build cached prefix attention HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipCachedPrefixAttnKernelCache &hip_cached_prefix_attn_kernel_cache() {
+    static HipCachedPrefixAttnKernelCache cache;
+    return cache;
+}
+
+bool cached_prefix_attn_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_cached_prefix_attn_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    const size_t output_elements = new_tokens * q_heads * value_dim;
+    const size_t grid_size = (output_elements + block_size - 1) / block_size;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "cached prefix attention output element count exceeds HIP grid limit";
+        }
+        return false;
+    }
+
+    unsigned long long kernel_cached_prefix_len =
+        static_cast<unsigned long long>(cached_prefix_len);
+    unsigned long long kernel_new_tokens = static_cast<unsigned long long>(new_tokens);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr,
+        &k_ptr,
+        &v_ptr,
+        &kernel_cached_prefix_len,
+        &kernel_new_tokens,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &softmax_scale,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 cached prefix attention";
+        }
+        return false;
+    }
+    return true;
+}
+
+ullm_status cached_prefix_attn_f32_hip_staging(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t q_bytes,
+    size_t k_bytes,
+    size_t v_bytes,
+    size_t output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_q(q_bytes / sizeof(float));
+    std::vector<float> host_k(k_bytes / sizeof(float));
+    std::vector<float> host_v(v_bytes / sizeof(float));
+    std::vector<float> host_output(output_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = q_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_q.data(),
+            q_buffer->ptr,
+            q_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k.data(),
+            k_cache_buffer->ptr,
+            k_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_v.data(),
+            v_cache_buffer->ptr,
+            v_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 cached prefix attention HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 cached prefix attention HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    cached_prefix_attn_f32_host(
+        host_q.data(),
+        host_k.data(),
+        host_v.data(),
+        cached_prefix_len,
+        new_tokens,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        host_output.data());
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 cached prefix attention output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 cached prefix attention HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -20888,6 +21251,175 @@ ullm_status ullm_runtime_decode_attn_f32(
         k_cache_buffer,
         v_cache_buffer,
         cache_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_bytes,
+        k_bytes,
+        v_bytes,
+        output_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_cached_prefix_attn_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        output_buffer == nullptr) {
+        set_error("f32 cached prefix attention received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (new_tokens == 0 || q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0) {
+        set_error("f32 cached prefix attention dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((q_heads % kv_heads) != 0) {
+        set_error("f32 cached prefix attention q_heads must be a multiple of kv_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error("f32 cached prefix attention softmax scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error("f32 cached prefix attention buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 cached prefix attention stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (new_tokens > max_size - cached_prefix_len) {
+        set_error("f32 cached prefix attention total context overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t total_context = cached_prefix_len + new_tokens;
+
+    if (q_heads > max_size / new_tokens) {
+        set_error("f32 cached prefix attention q head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_head_sequence = new_tokens * q_heads;
+    if (head_dim > max_size / q_head_sequence ||
+        value_dim > max_size / q_head_sequence) {
+        set_error("f32 cached prefix attention q/output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = q_head_sequence * head_dim;
+    const size_t output_elements = q_head_sequence * value_dim;
+
+    if (kv_heads > max_size / total_context) {
+        set_error("f32 cached prefix attention kv head-context element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_context = total_context * kv_heads;
+    if (head_dim > max_size / kv_head_context ||
+        value_dim > max_size / kv_head_context) {
+        set_error("f32 cached prefix attention kv element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements = kv_head_context * head_dim;
+    const size_t v_elements = kv_head_context * value_dim;
+
+    if (q_elements > max_size / sizeof(float) ||
+        k_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float) ||
+        output_elements > max_size / sizeof(float)) {
+        set_error("f32 cached prefix attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    if (q_buffer->bytes < q_bytes) {
+        set_error("f32 cached prefix attention q buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_cache_buffer->bytes < k_bytes) {
+        set_error("f32 cached prefix attention k cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_cache_buffer->bytes < v_bytes) {
+        set_error("f32 cached prefix attention v cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < output_bytes) {
+        set_error("f32 cached prefix attention output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k_cache = static_cast<const float *>(k_cache_buffer->ptr);
+        const auto *v_cache = static_cast<const float *>(v_cache_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        cached_prefix_attn_f32_host(
+            q,
+            k_cache,
+            v_cache,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (cached_prefix_attn_f32_hip_kernel(
+            q_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "f32 cached prefix attention HIP kernel is unavailable" :
+                                       hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return cached_prefix_attn_f32_hip_staging(
+        q_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
+        cached_prefix_len,
+        new_tokens,
         q_heads,
         kv_heads,
         head_dim,

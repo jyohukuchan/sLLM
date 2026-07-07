@@ -16,6 +16,7 @@
 - vLLMのFP8対応は環境依存が強いため、R9700でunsupportedの場合も比較結果として明示的に記録する。
 - vLLM比較では、R9700でFP8が動くことを前提にせず、backend、dtype、quantization、failure reasonを結果schemaへ残す。
 - 512 tokenまでのcomponent timingだけでは長コンテキストprefillの評価として不足するため、cold prefillとcached prefix付きprefillのworkload gridを追加する。
+- 512 tokenの結果はshort sanityとlocal bottleneck検出には使えるが、SQ候補のprefill性能判断には使わない。prompt長、cached prefix長、新規chunk長、batch幅を変えた探索gridを追加し、結果に合わせてprefill kernelのtiling/blocking方針を更新する。
 
 ## 次の行動
 
@@ -24,7 +25,8 @@
 3. FP8 SQ候補1のpackage/runtime prototypeを作る。
 4. prefillをtoken-by-token実行からbatched/tiled実行へ移す。
 5. long context向けに、`2^16` token級のcold prefillと、cached prefix `L` に対して新規chunk `M` を追加するcached prefillを測れるようにする。
-6. uLLM側でR9700のprefill/decodeが比較可能な速度になった後、vLLM baselineを同じworkload gridで測る。
+6. 512 tokenを超える複数patternの結果から、causal attention、cached prefix attention、projection/MLP batchのどこを次に直すべきかを決める。
+7. uLLM側でR9700のprefill/decodeが比較可能な速度になった後、vLLM baselineを同じworkload gridで測る。
 
 ## Goal
 
@@ -263,6 +265,37 @@ OOMや極端に低速なrunを避けるため、component smoke、single layer s
 Phase C3では、速度表に必ず `cached_prefix_tokens`, `new_prefill_tokens`, `total_context_tokens_after_prefill`, `estimated_prefill_attention_work_tokens` を併記する。
 `prefill_total_input_tps` は新規input token `M` だけで割るため、`L` が異なるcaseを単純比較しない。
 
+### Phase C4: prefill pattern exploration and adaptation
+
+Phase Bの512 token結果は、short sanity、warmup確認、局所的なcomponent regression検出に限定する。
+SQ候補のprefill性能判断では、少なくとも次のpattern familyを測り、prompt長、prefix長、chunk長、batch幅に対するscalingを見る。
+
+| family | required sweep | optional extension | optimization decision |
+| --- | --- | --- | --- |
+| cold prefill length scaling | `N=1024/2048/4096/8192/16384` | `N=32768/65536` | causal attentionのtiling/blocking、streamed prefillの必要性を決める |
+| cached prefix chunk scaling | `L=4096/16384/65536`, `M=1/16/128/512` | `M=4/64/1024` | `M` 方向の並列化、score共有、KV read patternを決める |
+| batch width scaling | `B=1/2/4/8` at `N=512/2048` | `B=16` if VRAM allows | real batch化の効果とoccupancy不足を分ける |
+| mixed realistic prompt | prompt mix `128,512,2048,8192` | cached prefix mixを含める | scheduler/result schemaが平均値で問題を隠していないかを見る |
+| component isolation | projection+RoPE, attention-only, MLP-only, full-layer partial | full layer stack | format差ではなくexecutor差で詰まっている箇所を分ける |
+
+各familyで保存する最小項目:
+
+- `prefill_total_input_tps`
+- `wall_ms_mean`, `wall_ms_min`, `wall_ms_max`
+- `estimated_prefill_attention_work_tokens`
+- `attention_pair_tps` when attention work is isolated
+- `resident_bytes`, `materialized_working_set_bytes`, `vram_peak_bytes`
+- warmup回数、measured repeat数、長時間runを短縮した理由
+- output guardまたはreference diff
+
+適応ルール:
+
+- `N` を増やした時にtoken/sが急落し、projection/MLP単体が維持される場合は、causal attention prefill kernelを先にtiled/blocked化する。
+- `M=1` は遅いが `M=16/128/512` が伸びる場合は、decode-like pathとcached prefill pathを分けて扱う。
+- `L=65536` で `M>1` でもattention pair/sが低い場合は、cached prefix attentionのscore計算共有とKV read coalescingを優先する。
+- `B` を増やしてもtotal throughputが伸びない場合は、schedulerではなくruntime kernel側のbatch入力形状を疑う。
+- あるpatternだけoutput guardが崩れる場合は、速度比較に進まず、そのpatternを再現する最小component smokeを追加する。
+
 ### Phase D: sustained decode
 
 | concurrent requests | prompt tokens/request | generated tokens/request | purpose |
@@ -371,9 +404,11 @@ Exit criteria:
 6. cached prefix `L` と新規input chunk `M` を分け、`M x L` と `M x M` のattentionを同じrunnerから測れるようにする。
 7. `N=2^16` cold prefillはstreamed/chunked pathで扱い、full `[N,N]` attention matrixや過大な中間bufferを確保しない。
 8. `cached_prefix_tokens`, `new_prefill_tokens`, `total_context_tokens_after_prefill`, `estimated_prefill_attention_work_tokens` をresultへ保存する。
-9. linear attentionは、recurrent state更新を壊さない範囲でprojection/MLPをbatched化し、state scanは段階的に最適化する。
-10. KV writeをprompt token列に対してまとめる。
-11. prefill resultをdecode stateへ接続する。
+9. Phase C4の探索gridを使い、512 tokenだけではなく `N=1024/2048/4096/8192/16384`、`L=4096/16384/65536`、`M=1/16/128/512`、`B=1/2/4/8` のscalingから次のkernel修正を決める。
+10. 512 token結果はshort sanityとして扱い、SQ候補のprefill採用判断には長さ別・chunk別・batch別の結果を必須にする。
+11. linear attentionは、recurrent state更新を壊さない範囲でprojection/MLPをbatched化し、state scanは段階的に最適化する。
+12. KV writeをprompt token列に対してまとめる。
+13. prefill resultをdecode stateへ接続する。
 
 成果物:
 
@@ -387,6 +422,7 @@ Exit criteria:
 - `prompt_tokens=2048` のprefillがOOMせず完走する。
 - `prompt_tokens=8192` 以上のcold prefill scalingが代表測定として取れる。
 - cached prefix `L=65536, M=1/16/128/512` の少なくとも1系統がOOMせず完走し、prefix長と新規input長を分けた結果として保存される。
+- 512 tokenより長い複数patternを測り、次に最適化する対象がcausal attention、cached prefix attention、projection/MLP batch、scheduler/batch入力のどれかに分類されている。
 - output guardが維持される。
 
 ### T4: Real batch decode v0.1, 3-5 days
@@ -650,6 +686,36 @@ Guard:
 - `attention_pair_tps` は `32k-42k pair/s` 程度で、prefix長方向にはおおむね線形に悪化している。
 - SQ/FP8候補のprefill評価へ進む前に、`M x L` と `M x M` をまとめて扱うchunked cached-prefix attention kernelが必要である。
 - 次の実装対象は、`decode_attn_f32` loopではなく、`cached_prefix_chunked` executorである。
+
+2026-07-07 cached prefix chunked attention v0:
+
+- `ullm_runtime_cached_prefix_attn_f32` を追加した。
+- 入力shapeは `q=[M,q_heads,head_dim]`、`k/v=[L+M,kv_heads,head_dim|value_dim]`、`output=[M,q_heads,value_dim]`。
+- `runtime-cached-prefix-attn-smoke` の既定executorを `cached_prefix_chunked` にし、末尾引数で `decode_loop` baselineも選べるようにした。
+- kernelはまだ1 output element 1 threadの素朴な実装で、score計算をvalue次元ごとに繰り返す。FlashAttention系のtiling実装ではない。
+
+R9700 release results:
+
+| executor | cached prefix L | new input M | wall ms mean | new input tok/s | attention pair/s | note |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| decode loop | 4096 | 16 | 1575.284095 | 10.156898 | 41688.988169 | measured 1、現行binaryで再測 |
+| cached prefix chunked | 4096 | 1 | 103.192291 | 9.690646 | 39702.578299 | measured 3 |
+| cached prefix chunked | 4096 | 16 | 124.760442 | 128.245778 | 526384.796108 | measured 3 |
+| cached prefix chunked | 65536 | 1 | 2027.916899 | 0.493117 | 32317.399215 | measured 1 |
+| cached prefix chunked | 65536 | 16 | 2326.898321 | 6.876106 | 450690.943620 | measured 1 |
+
+Guard:
+
+- `verification=sampled`
+- `sampled_max_abs_diff = 0` in all measured rows
+
+解釈:
+
+- `L=4096, M=16` では、`decode_loop` の約 `10.16 tok/s` から `cached_prefix_chunked` の約 `128.25 tok/s` へ改善した。M方向のchunk並列化は効いている。
+- `L=4096, M=1` と `L=65536, M=1` は単発decode相当なので、chunked化だけでは改善しない。
+- `L=65536, M=16` でも約 `6.88 tok/s` に留まり、長prefixではL方向のscore/value計算が支配している。
+- 次は1 output element 1 threadの素朴実装から、head/value内でscore計算を共有するtiled cached-prefix attentionへ進む必要がある。
+- ただし、SQ/FP8候補評価用のworkload gridでは、`M>1` cached prefillの現実的なbaselineとして `cached_prefix_chunked` を使える。
 
 ## Decision gates
 
