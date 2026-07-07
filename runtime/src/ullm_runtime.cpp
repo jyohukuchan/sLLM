@@ -3936,18 +3936,29 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
         float max_score = -3.4028234663852886e38f;
         float denominator = 0.0f;
         float weighted = 0.0f;
-        for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
-            const unsigned long long block_index = source_timestep / block_size;
-            const unsigned long long block_offset = source_timestep - block_index * block_size;
-            const unsigned long long block_id =
-                static_cast<unsigned long long>(block_table[block_index]);
-            if (block_id >= cache_blocks) {
-                if (tid < value_dim) {
-                    output[q_head * value_dim + tid] = 0.0f;
-                }
-                return;
+        unsigned long long block_index = 0ull;
+        unsigned long long block_end = block_size;
+        unsigned long long block_id = static_cast<unsigned long long>(block_table[0]);
+        if (block_id >= cache_blocks) {
+            if (tid < value_dim) {
+                output[q_head * value_dim + tid] = 0.0f;
             }
-            const unsigned long long physical_timestep = block_id * block_size + block_offset;
+            return;
+        }
+        unsigned long long physical_timestep = block_id * block_size;
+        for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+            if (source_timestep == block_end) {
+                ++block_index;
+                block_end += block_size;
+                block_id = static_cast<unsigned long long>(block_table[block_index]);
+                if (block_id >= cache_blocks) {
+                    if (tid < value_dim) {
+                        output[q_head * value_dim + tid] = 0.0f;
+                    }
+                    return;
+                }
+                physical_timestep = block_id * block_size;
+            }
             const unsigned long long k_base = (physical_timestep * kv_heads + kv_head) * head_dim;
             const float local =
                 tid < head_dim ? q[q_base + tid] * k_cache[k_base + tid] : 0.0f;
@@ -3968,6 +3979,7 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
                     denominator += weight;
                 }
             }
+            ++physical_timestep;
         }
 #endif
         if (tid < value_dim) {
