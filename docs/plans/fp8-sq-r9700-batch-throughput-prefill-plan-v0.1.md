@@ -338,6 +338,34 @@ R9700 release代表値:
 - これはscheduler/control planeではなく、runtime causal attention kernel自体がまだ十分にbatched efficiencyを出せていないことを示す。
 - 次のprefill最適化は、full modelへ広げる前に、causal attention prefill kernelのscore reuse、tiled/block化、K/V read pattern改善を優先する。
 
+### Phase C4 current status: causal attention online softmax v1
+
+`ullm_causal_attn_f32_kernel` と `ullm_causal_attn_batch_f32_kernel` にonline softmax pathを追加した。
+通常のQwen3.5 shapeでは `value_dim=256` かつ `blockDim.x=256` なので、このpathに入り、q/k score dot-productを従来の3passから1passへ減らす。
+`value_dim > blockDim.x` の場合は既存の3pass pathをfallbackとして残す。
+
+保存先:
+
+- `benchmarks/results/2026-07-07/runtime-causal-attn-batch/phase-c4-cold-prefill-online-softmax-v1.md`
+
+R9700 release代表値:
+
+| component | condition | old mean ms | new mean ms | speedup |
+| --- | --- | ---: | ---: | ---: |
+| runtime causal attention batch | `B=1, N=512` | 18.603645 | 7.239056 | 2.570x |
+| runtime causal attention batch | `B=8, N=2048` | 2208.166702 | 908.260240 | 2.431x |
+| runtime causal attention batch | `B=4, N=4096` | 4649.452562 | 1860.373915 | 2.499x |
+| package self-attention attention batch | `N=512` | 281.601274 | 33.528531 | 8.399x |
+| package self-attention layer batch | `N=4096` | 2182.970006 | 1518.104339 | 1.438x |
+| package self-attention layer batch | `N=8192` | 6892.180390 | 4162.250951 | 1.656x |
+
+解釈:
+
+- runtime attention pair/sはおおむね `7.2-7.7M pair/s` から `17.8-18.9M pair/s` へ改善した。
+- self-attention attention componentでは大きく効くが、layer全体ではprojection/MLPの比率が残るため改善幅はcontext長に依存する。
+- `B` を増やしてもsuperlinearなthroughput増加は出ていない。今回の改善はbatch幅の効率化ではなく、query/headごとの重複score計算削減である。
+- 次のkernel最適化は、neighboring timestep/head間でK/Vを再利用するtiled/block causal attention、またはprojection/MLP側の残コスト削減を比較して選ぶ。
+
 ### Phase D: sustained decode
 
 | concurrent requests | prompt tokens/request | generated tokens/request | purpose |
