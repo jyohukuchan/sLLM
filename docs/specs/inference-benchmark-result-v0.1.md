@@ -57,14 +57,26 @@ Each line is one benchmark case. A case may be successful, failed, unsupported, 
     "generated_tokens": 128,
     "batch_size": 1,
     "concurrent_requests": 1,
+    "prompt_tokens_per_request": [512],
+    "generated_tokens_per_request": [128],
     "kv_cache_dtype": "f16"
   },
   "metrics": {
     "prefill_tokens_per_second": 0.0,
     "decode_tokens_per_second": 0.0,
     "total_tokens_per_second": 0.0,
+    "prefill_total_input_tokens": 512,
+    "decode_total_generated_tokens": 128,
+    "end_to_end_total_tokens": 640,
+    "prefill_total_input_tokens_per_second": 0.0,
+    "decode_total_generated_tokens_per_second": 0.0,
+    "end_to_end_total_tokens_per_second": 0.0,
     "latency_p50_ms": null,
     "latency_p95_ms": null,
+    "time_to_first_token_ms_p50": null,
+    "time_to_first_token_ms_p95": null,
+    "time_per_output_token_ms_p50": null,
+    "time_per_output_token_ms_p95": null,
     "vram_baseline_bytes": null,
     "vram_peak_bytes": null,
     "vram_consumed_bytes": null,
@@ -154,6 +166,9 @@ At minimum:
 - prefill tokens/s
 - decode tokens/s
 - total tokens/s
+- prefill total input tokens/s for batch throughput runs
+- decode total generated tokens/s for batch throughput runs
+- end-to-end total tokens/s for batch throughput runs
 - prefill wall time in seconds
 - decode wall time in seconds
 - total wall time in seconds
@@ -173,9 +188,49 @@ For uLLM pre-sq runtime runs, extend `metrics` with these optional fields:
   "decode_wall_time_seconds": 0.0,
   "total_wall_time_seconds": 0.0,
   "time_to_first_token_ms": null,
-  "time_per_output_token_ms": null
+  "time_per_output_token_ms": null,
+  "prefill_total_input_tokens": 0,
+  "decode_total_generated_tokens": 0,
+  "generated_tokens_total": 0,
+  "end_to_end_total_tokens": 0,
+  "prefill_total_input_tokens_per_second": null,
+  "decode_total_generated_tokens_per_second": null,
+  "end_to_end_total_tokens_per_second": null,
+  "time_to_first_token_ms_p50": null,
+  "time_to_first_token_ms_p95": null,
+  "request_latency_ms_p50": null,
+  "request_latency_ms_p95": null,
+  "time_per_output_token_ms_p50": null,
+  "time_per_output_token_ms_p95": null
 }
 ```
+
+## Batch Throughput Semantics
+
+For batch throughput rows, `total_tokens_per_second` is a compatibility field. The comparison key
+is the explicit total-throughput field that matches the phase:
+
+- `prefill_total_input_tokens_per_second`: total prompt/input tokens processed during prefill divided
+  by prefill wall time.
+- `decode_total_generated_tokens_per_second`: total timed generated tokens produced during decode
+  divided by decode wall time.
+- `end_to_end_total_tokens_per_second`: prompt/input plus generated tokens divided by command wall
+  time.
+
+For uLLM `package-batch-throughput-bench-v0.1` reports, the raw field names are
+`metrics.prefill_total_input_tps`, `metrics.decode_total_generated_tps`, and
+`metrics.end_to_end_total_tps`. When these reports are converted into
+`inference-benchmark-result-v0.1` JSONL rows, map them to the corresponding
+`*_tokens_per_second` fields above.
+
+`batch_size` is the number of requests in one scheduling step. `concurrent_requests` is the number
+of live requests in the run. They are equal for fixed prompt/decode benchmark grids, but they may
+diverge once dynamic scheduling is implemented.
+
+uLLM may record `batching.mode` outside this generic schema. `logical` means requests are accounted
+as a batch but executed through sequential single-request paths. `real` means prefill and/or decode
+shares kernels, weight residency, or scheduler state across requests. Only `real` rows should be
+used to compare production batch throughput against vLLM.
 
 ## Memory Semantics
 

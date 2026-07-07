@@ -287,6 +287,22 @@ fn main() -> ExitCode {
                 env::args().nth(15),
             )
         }
+        Some("package-batch-throughput-bench") => package_batch_throughput_bench(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+            env::args().nth(11),
+            env::args().nth(12),
+            env::args().nth(13),
+            env::args().nth(14),
+            env::args().nth(15),
+        ),
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -15763,6 +15779,492 @@ fn package_token_ids_generate_smoke(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn package_batch_throughput_bench(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    prompt_token_ids_batch: Option<String>,
+    generated_tokens_batch: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+    lm_head_mode: Option<String>,
+    stop_token_ids: Option<String>,
+    stop_token_sequences: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-batch-throughput-bench requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_layer_indices(layer_indices) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids_batch = match parse_package_prompt_token_ids_batch(prompt_token_ids_batch)
+    {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let generated_tokens_batch = match parse_package_generated_tokens_batch(
+        generated_tokens_batch,
+        prompt_token_ids_batch.len(),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 8, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let lm_head_mode = match parse_package_lm_head_mode(lm_head_mode) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let stop_token_ids = match parse_package_stop_token_ids(stop_token_ids) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let stop_token_sequences = match parse_package_stop_token_sequences(stop_token_sequences) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    match package_batch_throughput_bench_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        lm_head_mode,
+        stop_token_ids,
+        stop_token_sequences,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn parse_package_prompt_token_ids_batch(
+    value: Option<String>,
+) -> Result<Vec<Vec<usize>>, ExitCode> {
+    let Some(raw) = value else {
+        return Ok(vec![vec![1, 2, 3, 4]]);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        eprintln!("prompt token batch must not be empty");
+        return Err(ExitCode::from(2));
+    }
+    if let Some(rest) = raw
+        .strip_prefix("len:")
+        .or_else(|| raw.strip_prefix("len="))
+    {
+        if let Some((len_raw, count_raw)) = rest.split_once('x') {
+            let len = parse_usize_value(len_raw.trim(), "prompt token length")?;
+            let count = parse_usize_value(count_raw.trim(), "request count")?;
+            if len == 0 || count == 0 {
+                eprintln!("prompt token batch len:NxM requires N and M greater than zero");
+                return Err(ExitCode::from(2));
+            }
+            return Ok((0..count)
+                .map(|_| package_token_ids_from_len(len))
+                .collect());
+        }
+    }
+    if raw.contains(';') {
+        let mut requests = Vec::new();
+        for request in raw.split(';') {
+            let request = request.trim();
+            if request.is_empty() {
+                eprintln!("invalid prompt token batch {raw:?}: empty request");
+                return Err(ExitCode::from(2));
+            }
+            requests.push(parse_package_prompt_token_ids(Some(request.to_string()))?);
+        }
+        if requests.is_empty() {
+            eprintln!("invalid prompt token batch {raw:?}: expected at least one request");
+            return Err(ExitCode::from(2));
+        }
+        return Ok(requests);
+    }
+    Ok(vec![parse_package_prompt_token_ids(Some(raw.to_string()))?])
+}
+
+fn parse_package_generated_tokens_batch(
+    value: Option<String>,
+    request_count: usize,
+) -> Result<Vec<usize>, ExitCode> {
+    if request_count == 0 {
+        eprintln!("request count must be greater than zero");
+        return Err(ExitCode::from(2));
+    }
+    let Some(raw) = value else {
+        return Ok(vec![1; request_count]);
+    };
+    if raw.contains(',') {
+        let parsed = parse_usize_csv(&raw, "generated token counts")?;
+        if parsed.len() != request_count {
+            eprintln!(
+                "generated token count list length {} does not match request count {request_count}",
+                parsed.len()
+            );
+            return Err(ExitCode::from(2));
+        }
+        if parsed.contains(&0) {
+            eprintln!("generated token counts must be greater than zero");
+            return Err(ExitCode::from(2));
+        }
+        return Ok(parsed);
+    }
+    let value = parse_usize_value(raw.trim(), "generated tokens")?;
+    if value == 0 {
+        eprintln!("generated tokens must be greater than zero");
+        return Err(ExitCode::from(2));
+    }
+    Ok(vec![value; request_count])
+}
+
+fn json_f64_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<f64> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_f64()
+}
+
+fn json_usize_path(value: &serde_json::Value, path: &[&str]) -> Option<usize> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    let value = current.as_u64()?;
+    usize::try_from(value).ok()
+}
+
+fn json_array_len_path(value: &serde_json::Value, path: &[&str]) -> Option<usize> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_array().map(Vec::len)
+}
+
+fn mean_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
+}
+
+fn percentile_f64(values: &[f64], percentile: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let rank = ((sorted.len() as f64) * percentile).ceil() as usize;
+    let index = rank.saturating_sub(1).min(sorted.len() - 1);
+    Some(sorted[index])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_batch_throughput_bench_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    prompt_token_ids_batch: Vec<Vec<usize>>,
+    generated_tokens_batch: Vec<usize>,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+    lm_head_mode: PackageLmHeadMode,
+    stop_token_ids: Vec<usize>,
+    stop_token_sequences: Vec<Vec<usize>>,
+) -> Result<String, String> {
+    if prompt_token_ids_batch.is_empty() {
+        return Err("package batch throughput bench requires at least one request".to_string());
+    }
+    if prompt_token_ids_batch.len() != generated_tokens_batch.len() {
+        return Err(format!(
+            "prompt request count {} does not match generated token count {}",
+            prompt_token_ids_batch.len(),
+            generated_tokens_batch.len()
+        ));
+    }
+
+    let context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    drop(context);
+
+    let batch_started = Instant::now();
+    let mut request_reports = Vec::with_capacity(prompt_token_ids_batch.len());
+    let mut request_latency_ms = Vec::with_capacity(prompt_token_ids_batch.len());
+    let mut time_to_first_token_ms = Vec::with_capacity(prompt_token_ids_batch.len());
+    let mut time_per_output_token_ms = Vec::new();
+    let mut per_request_decode_tps = Vec::new();
+    let mut prefill_total_input_tokens = 0_usize;
+    let mut generated_tokens_total = 0_usize;
+    let mut decode_total_generated_tokens = 0_usize;
+    let mut prefill_wall_ms = 0.0_f64;
+    let mut decode_wall_ms = 0.0_f64;
+    let mut sum_report_total_wall_ms = 0.0_f64;
+    let mut kv_cache_bytes_total = 0_u64;
+    let mut verified_all = true;
+
+    for (request_index, prompt_token_ids) in prompt_token_ids_batch.iter().enumerate() {
+        let requested_generated_tokens = generated_tokens_batch[request_index];
+        let request_started = Instant::now();
+        let report_text = package_token_ids_generate_smoke_impl(
+            path,
+            device_index,
+            chunk_bytes,
+            layer_indices.clone(),
+            prompt_token_ids.clone(),
+            requested_generated_tokens,
+            top_k,
+            lm_head_chunk_rows,
+            rotary_dim.clone(),
+            rope_base,
+            position_offset,
+            lm_head_mode,
+            stop_token_ids.clone(),
+            stop_token_sequences.clone(),
+        )?;
+        let external_request_wall_ms = request_started.elapsed().as_secs_f64() * 1000.0;
+        let report = serde_json::from_str::<serde_json::Value>(&report_text)
+            .map_err(|err| format!("failed to decode request {request_index} report: {err}"))?;
+        let request_prefill_tokens = json_usize_path(&report, &["prefill", "prompt_tokens"])
+            .unwrap_or(prompt_token_ids.len());
+        let request_generated_tokens =
+            json_array_len_path(&report, &["generated_token_ids"]).unwrap_or(0);
+        let request_decode_tokens =
+            json_usize_path(&report, &["decode", "timed_incremental_steps"])
+                .or_else(|| json_usize_path(&report, &["decode", "timed_recompute_steps"]))
+                .unwrap_or_else(|| request_generated_tokens.saturating_sub(1));
+        let request_prefill_wall_ms =
+            json_f64_path(&report, &["prefill", "wall_ms"]).unwrap_or(0.0);
+        let request_decode_wall_ms = json_f64_path(&report, &["decode", "wall_ms"]).unwrap_or(0.0);
+        let request_total_wall_ms = json_f64_path(&report, &["timing_ms", "total"])
+            .unwrap_or(external_request_wall_ms)
+            .max(external_request_wall_ms);
+        let request_decode_tps =
+            json_f64_path(&report, &["decode", "timed_step_tps"]).or_else(|| {
+                if request_decode_tokens > 0 {
+                    tps(request_decode_tokens, request_decode_wall_ms)
+                } else {
+                    None
+                }
+            });
+        let request_time_per_output_token_ms = if request_decode_tokens > 0 {
+            Some(request_decode_wall_ms / request_decode_tokens as f64)
+        } else {
+            None
+        };
+        let request_verified = report
+            .get("correctness")
+            .and_then(|correctness| correctness.get("verified"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+            && report
+                .get("verified")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        verified_all &= request_verified;
+
+        if let Some(value) = request_decode_tps {
+            per_request_decode_tps.push(value);
+        }
+        if let Some(value) = request_time_per_output_token_ms {
+            time_per_output_token_ms.push(value);
+        }
+        request_latency_ms.push(request_total_wall_ms);
+        time_to_first_token_ms.push(request_prefill_wall_ms);
+        prefill_total_input_tokens = prefill_total_input_tokens
+            .checked_add(request_prefill_tokens)
+            .ok_or_else(|| "prefill total input tokens overflow".to_string())?;
+        generated_tokens_total = generated_tokens_total
+            .checked_add(request_generated_tokens)
+            .ok_or_else(|| "generated token total overflow".to_string())?;
+        decode_total_generated_tokens = decode_total_generated_tokens
+            .checked_add(request_decode_tokens)
+            .ok_or_else(|| "decode generated token total overflow".to_string())?;
+        prefill_wall_ms += request_prefill_wall_ms;
+        decode_wall_ms += request_decode_wall_ms;
+        sum_report_total_wall_ms += request_total_wall_ms;
+        kv_cache_bytes_total = kv_cache_bytes_total
+            .checked_add(
+                report
+                    .get("memory")
+                    .and_then(|memory| memory.get("kv_cache_bytes"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            )
+            .ok_or_else(|| "KV cache byte total overflow".to_string())?;
+
+        request_reports.push(serde_json::json!({
+            "request_index": request_index,
+            "prompt_tokens": request_prefill_tokens,
+            "requested_generated_tokens": requested_generated_tokens,
+            "generated_tokens": request_generated_tokens,
+            "decode_timed_generated_tokens": request_decode_tokens,
+            "prefill_wall_ms": request_prefill_wall_ms,
+            "decode_wall_ms": request_decode_wall_ms,
+            "request_wall_ms": request_total_wall_ms,
+            "external_request_wall_ms": external_request_wall_ms,
+            "time_to_first_token_ms": request_prefill_wall_ms,
+            "time_per_output_token_ms": request_time_per_output_token_ms,
+            "decode_tps": request_decode_tps,
+            "stop": report.get("stop").cloned().unwrap_or(serde_json::Value::Null),
+            "correctness": report
+                .get("correctness")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "generated_token_ids": report
+                .get("generated_token_ids")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "last_top_logits": report
+                .get("decode")
+                .and_then(|decode| decode.get("last_top_logits"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        }));
+    }
+
+    let batch_wall_ms = batch_started.elapsed().as_secs_f64() * 1000.0;
+    let end_to_end_total_tokens = prefill_total_input_tokens
+        .checked_add(generated_tokens_total)
+        .ok_or_else(|| "end-to-end total token count overflows".to_string())?;
+    let report = serde_json::json!({
+        "schema_version": "package-batch-throughput-bench-v0.1",
+        "package": path,
+        "git_commit": current_git_commit(),
+        "backend": info.backend.to_string(),
+        "device_index": device_index,
+        "device_name": info.name,
+        "device_total_global_mem": info.total_global_mem,
+        "layers": layer_indices,
+        "top_k": top_k,
+        "lm_head_chunk_rows": lm_head_chunk_rows,
+        "lm_head_mode": lm_head_mode.as_str(),
+        "rotary_dim": rotary_dim,
+        "rope_base": rope_base,
+        "position_offset": position_offset,
+        "workload": {
+            "batch_size": prompt_token_ids_batch.len(),
+            "concurrent_requests": prompt_token_ids_batch.len(),
+            "prompt_tokens_per_request": prompt_token_ids_batch
+                .iter()
+                .map(Vec::len)
+                .collect::<Vec<_>>(),
+            "generated_tokens_per_request": generated_tokens_batch,
+            "fixed_decode_steps": stop_token_ids.is_empty() && stop_token_sequences.is_empty(),
+        },
+        "batching": {
+            "mode": "logical",
+            "prefill_executor": "token_loop",
+            "decode_executor": "sequential_package_token_ids_generate",
+            "scheduler_policy": "fixed_batch",
+            "runtime_reused_across_requests": false,
+            "weights_reloaded_per_request": true,
+        },
+        "metrics": {
+            "prefill_total_input_tokens": prefill_total_input_tokens,
+            "decode_total_generated_tokens": decode_total_generated_tokens,
+            "generated_tokens_total": generated_tokens_total,
+            "end_to_end_total_tokens": end_to_end_total_tokens,
+            "prefill_wall_ms_sum": prefill_wall_ms,
+            "decode_wall_ms_sum": decode_wall_ms,
+            "request_wall_ms_sum": sum_report_total_wall_ms,
+            "batch_wall_ms": batch_wall_ms,
+            "prefill_total_input_tps": tps(prefill_total_input_tokens, prefill_wall_ms),
+            "decode_total_generated_tps": tps(decode_total_generated_tokens, decode_wall_ms),
+            "end_to_end_total_tps": tps(end_to_end_total_tokens, batch_wall_ms),
+            "per_request_decode_tps_mean": mean_f64(&per_request_decode_tps),
+            "time_to_first_token_ms_p50": percentile_f64(&time_to_first_token_ms, 0.50),
+            "time_to_first_token_ms_p95": percentile_f64(&time_to_first_token_ms, 0.95),
+            "request_latency_ms_p50": percentile_f64(&request_latency_ms, 0.50),
+            "request_latency_ms_p95": percentile_f64(&request_latency_ms, 0.95),
+            "time_per_output_token_ms_p50": percentile_f64(&time_per_output_token_ms, 0.50),
+            "time_per_output_token_ms_p95": percentile_f64(&time_per_output_token_ms, 0.95),
+        },
+        "memory": {
+            "vram_baseline_bytes": serde_json::Value::Null,
+            "vram_peak_bytes": serde_json::Value::Null,
+            "vram_consumed_bytes": serde_json::Value::Null,
+            "kv_cache_bytes_total": kv_cache_bytes_total,
+        },
+        "requests": request_reports,
+        "correctness": {
+            "verified_all": verified_all,
+        },
+        "notes": [
+            "This is a logical batch benchmark. It sequentially invokes the existing single-request package-token-ids generate path and does not prove real batch kernel throughput.",
+            "Use this output for result schema, control-plane, latency, and accounting validation before real batch prefill/decode executors are added.",
+            "decode_total_generated_tokens counts timed decode-loop tokens, excluding the first token produced by prefill/top-logits."
+        ],
+        "verified": verified_all,
+    });
+    serde_json::to_string_pretty(&report)
+        .map_err(|err| format!("failed to encode batch throughput report: {err}"))
+}
+
 fn current_git_commit() -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -19031,6 +19533,33 @@ mod package_token_ids_logits_tests {
         assert_eq!(tokens, vec![1, 2, 3]);
 
         assert!(parse_package_prompt_token_ids(Some("len:0".to_string())).is_err());
+    }
+
+    #[test]
+    fn package_prompt_token_ids_batch_accepts_len_count_or_semicolon_lists() {
+        let batch = parse_package_prompt_token_ids_batch(Some("len:3x2".to_string())).unwrap();
+        assert_eq!(batch, vec![vec![1, 2, 3], vec![1, 2, 3]]);
+
+        let batch =
+            parse_package_prompt_token_ids_batch(Some("1,2,3; len:2; 7,8".to_string())).unwrap();
+        assert_eq!(batch, vec![vec![1, 2, 3], vec![1, 2], vec![7, 8]]);
+
+        assert!(parse_package_prompt_token_ids_batch(Some("len:0x2".to_string())).is_err());
+        assert!(parse_package_prompt_token_ids_batch(Some("1,2;;3,4".to_string())).is_err());
+    }
+
+    #[test]
+    fn package_generated_tokens_batch_accepts_scalar_or_csv() {
+        assert_eq!(
+            parse_package_generated_tokens_batch(Some("8".to_string()), 3).unwrap(),
+            vec![8, 8, 8]
+        );
+        assert_eq!(
+            parse_package_generated_tokens_batch(Some("1,2,3".to_string()), 3).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert!(parse_package_generated_tokens_batch(Some("1,2".to_string()), 3).is_err());
+        assert!(parse_package_generated_tokens_batch(Some("0".to_string()), 3).is_err());
     }
 
     #[test]
@@ -28657,6 +29186,9 @@ fn print_help() {
     );
     eprintln!(
         "package-token-ids-bench: same arguments as package-token-ids-generate-smoke; writes the same measured JSON report"
+    );
+    eprintln!(
+        "package-batch-throughput-bench: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
     );
     eprintln!(
         "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"

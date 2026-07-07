@@ -45,6 +45,9 @@ R9700/RDNA4 row and, if RDNA2 support is claimed, one V620/RDNA2 row.
   "workload": {
     "suite": "benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.3.json",
     "batch_size": 1,
+    "concurrent_requests": 1,
+    "prompt_tokens_per_request": [512],
+    "generated_tokens_per_request": [128],
     "tensor_parallel": 1,
     "sampling": "greedy",
     "kv_cache_dtype": "f32"
@@ -62,7 +65,19 @@ R9700/RDNA4 row and, if RDNA2 support is claimed, one V620/RDNA2 row.
     "decode_tps_mean": 0.0,
     "decode_tps_min": 0.0,
     "decode_tps_max": 0.0,
-    "decode_p50_ms_mean": null
+    "decode_p50_ms_mean": null,
+    "prefill_total_input_tokens": 512,
+    "decode_total_generated_tokens": 128,
+    "end_to_end_total_tokens": 640,
+    "prefill_total_input_tps": 0.0,
+    "decode_total_generated_tps": 0.0,
+    "end_to_end_total_tps": 0.0,
+    "time_to_first_token_ms_p50": null,
+    "time_to_first_token_ms_p95": null,
+    "request_latency_ms_p50": null,
+    "request_latency_ms_p95": null,
+    "time_per_output_token_ms_p50": null,
+    "time_per_output_token_ms_p95": null
   },
   "quality": {
     "output_ok_count": 0,
@@ -150,6 +165,27 @@ For these rows:
 
 This exception applies only to AQ4 baseline anchor rows. An actual `sq` candidate must still satisfy
 the required gate semantics above to be comparable.
+
+## Batch Throughput Semantics
+
+SQ candidate rows should carry both single-request compatibility metrics and explicit total
+throughput metrics once batch evaluation begins.
+
+- `timing.prefill_tps_mean`, `timing.decode_tps_mean`, `timing.decode_tps_min`, and
+  `timing.decode_tps_max` remain per-case summary fields for compatibility with earlier AQ4 reports.
+- `timing.prefill_total_input_tps` is the total prompt/input token throughput for prefill.
+- `timing.decode_total_generated_tps` is the total timed generated-token throughput for decode.
+- `timing.end_to_end_total_tps` is prompt/input plus generated tokens divided by command wall time.
+
+`workload.batch_size`, `workload.concurrent_requests`, `workload.prompt_tokens_per_request`, and
+`workload.generated_tokens_per_request` must be recorded for every batch row. For fixed benchmark
+grids, `batch_size` and `concurrent_requests` are normally equal. Dynamic schedulers may make them
+different later.
+
+If a row is derived from `package-batch-throughput-bench-v0.1`, record whether the source report used
+logical or real batching in `notes` or a candidate-specific artifact. Logical batch rows are useful
+for validating accounting and result conversion, but only real batch rows should be used to judge an
+SQ format against vLLM batch throughput.
 
 ## Memory Semantics
 
