@@ -940,7 +940,7 @@ extern "C" __global__ void ullm_aq4_row_f32_kernel(
     static std::string aq4_matvec_triple_kernel_source_for_arch(const std::string &arch) {
         return aq4_fused_rows_per_block_preamble(
                    arch,
-                   16u,
+                   8u,
                    4u,
                    "ULLM_AQ4_MATVEC_TRIPLE_RPB") +
                aq4_matvec_triple_kernel_source();
@@ -6542,7 +6542,7 @@ bool aq4_matvec_triple_f32_hip_kernel(
     const Aq4MatvecLaunchConfig launch_config =
         aq4_matvec_launch_config_for_fused_kernel(
             device_id,
-            16u,
+            8u,
             4u,
             "ULLM_AQ4_MATVEC_TRIPLE_RPB");
     const size_t work_rows = std::max(first_rows, std::max(second_rows, third_rows));
