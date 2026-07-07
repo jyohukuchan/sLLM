@@ -4778,7 +4778,7 @@ extern "C" __global__ void ullm_linear_attn_recurrent_f32_kernel(
     unsigned long long value_dim,
     float *state,
     float *output) {
-    if (sequence_len == 1ull && blockDim.x > 1u) {
+    if (blockDim.x > 1u) {
         const unsigned long long block = blockIdx.x;
         const unsigned long long value_head = block / value_dim;
         const unsigned long long value = block - value_head * value_dim;
@@ -4790,26 +4790,71 @@ extern "C" __global__ void ullm_linear_attn_recurrent_f32_kernel(
         }
         const unsigned long long key_head_group = value_heads / key_heads;
         const unsigned long long key_head = value_head / key_head_group;
-        const unsigned long long qk_base = key_head * key_dim;
-        const unsigned long long v_base = value_head * value_dim;
         const unsigned long long state_head_offset = value_head * key_dim * value_dim;
-        const float decay = expf(gate[value_head]);
-        const float beta_value = beta[value_head];
 
-        if (key_dim <= static_cast<unsigned long long>(blockDim.x)) {
+        for (unsigned long long timestep = 0; timestep < sequence_len; ++timestep) {
+            const unsigned long long value_head_index = timestep * value_heads + value_head;
+            const unsigned long long key_head_index = timestep * key_heads + key_head;
+            const unsigned long long qk_base = key_head_index * key_dim;
+            const unsigned long long v_base = value_head_index * value_dim;
+            const float decay = expf(gate[value_head_index]);
+            const float beta_value = beta[value_head_index];
+
+            if (key_dim <= static_cast<unsigned long long>(blockDim.x)) {
+                float current = 0.0f;
+                float decayed = 0.0f;
+                float key_value = 0.0f;
+                float query_value = 0.0f;
+                unsigned long long state_index = 0ull;
+                const bool active = static_cast<unsigned long long>(tid) < key_dim;
+                if (active) {
+                    const unsigned long long key = tid;
+                    state_index = state_head_offset + key * value_dim + value;
+                    key_value = k[qk_base + key];
+                    query_value = q[qk_base + key];
+                    decayed = state[state_index] * decay;
+                    current = decayed * key_value;
+                }
+                partial[tid] = current;
+                __syncthreads();
+                for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+                    if (tid < offset) {
+                        partial[tid] += partial[tid + offset];
+                    }
+                    __syncthreads();
+                }
+                if (tid == 0) {
+                    v_prime_shared = (v[v_base + value] - partial[0]) * beta_value;
+                }
+                __syncthreads();
+
+                float sum = 0.0f;
+                if (active) {
+                    const float updated = decayed + key_value * v_prime_shared;
+                    state[state_index] = updated;
+                    sum = updated * query_value;
+                }
+                partial[tid] = sum;
+                __syncthreads();
+                for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+                    if (tid < offset) {
+                        partial[tid] += partial[tid + offset];
+                    }
+                    __syncthreads();
+                }
+                if (tid == 0) {
+                    output[v_base + value] = partial[0];
+                }
+                __syncthreads();
+                continue;
+            }
+
             float current = 0.0f;
-            float decayed = 0.0f;
-            float key_value = 0.0f;
-            float query_value = 0.0f;
-            unsigned long long state_index = 0ull;
-            const bool active = static_cast<unsigned long long>(tid) < key_dim;
-            if (active) {
-                const unsigned long long key = tid;
-                state_index = state_head_offset + key * value_dim + value;
-                key_value = k[qk_base + key];
-                query_value = q[qk_base + key];
-                decayed = state[state_index] * decay;
-                current = decayed * key_value;
+            for (unsigned long long key = tid; key < key_dim; key += blockDim.x) {
+                const unsigned long long state_index = state_head_offset + key * value_dim + value;
+                const float decayed = state[state_index] * decay;
+                state[state_index] = decayed;
+                current += decayed * k[qk_base + key];
             }
             partial[tid] = current;
             __syncthreads();
@@ -4825,10 +4870,11 @@ extern "C" __global__ void ullm_linear_attn_recurrent_f32_kernel(
             __syncthreads();
 
             float sum = 0.0f;
-            if (active) {
-                const float updated = decayed + key_value * v_prime_shared;
+            for (unsigned long long key = tid; key < key_dim; key += blockDim.x) {
+                const unsigned long long state_index = state_head_offset + key * value_dim + value;
+                const float updated = state[state_index] + k[qk_base + key] * v_prime_shared;
                 state[state_index] = updated;
-                sum = updated * query_value;
+                sum += updated * q[qk_base + key];
             }
             partial[tid] = sum;
             __syncthreads();
@@ -4841,46 +4887,7 @@ extern "C" __global__ void ullm_linear_attn_recurrent_f32_kernel(
             if (tid == 0) {
                 output[v_base + value] = partial[0];
             }
-            return;
-        }
-
-        float current = 0.0f;
-        for (unsigned long long key = tid; key < key_dim; key += blockDim.x) {
-            const unsigned long long state_index = state_head_offset + key * value_dim + value;
-            const float decayed = state[state_index] * decay;
-            state[state_index] = decayed;
-            current += decayed * k[qk_base + key];
-        }
-        partial[tid] = current;
-        __syncthreads();
-        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-            if (tid < offset) {
-                partial[tid] += partial[tid + offset];
-            }
             __syncthreads();
-        }
-        if (tid == 0) {
-            v_prime_shared = (v[v_base + value] - partial[0]) * beta_value;
-        }
-        __syncthreads();
-
-        float sum = 0.0f;
-        for (unsigned long long key = tid; key < key_dim; key += blockDim.x) {
-            const unsigned long long state_index = state_head_offset + key * value_dim + value;
-            const float updated = state[state_index] + k[qk_base + key] * v_prime_shared;
-            state[state_index] = updated;
-            sum += updated * q[qk_base + key];
-        }
-        partial[tid] = sum;
-        __syncthreads();
-        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-            if (tid < offset) {
-                partial[tid] += partial[tid + offset];
-            }
-            __syncthreads();
-        }
-        if (tid == 0) {
-            output[v_base + value] = partial[0];
         }
         return;
     }
@@ -14726,22 +14733,18 @@ bool linear_attn_recurrent_f32_hip_kernel(
         &state_ptr,
         &output_ptr,
     };
-    unsigned int grid_size = static_cast<unsigned int>(value_heads);
-    unsigned int block_size = 1;
-    if (sequence_len == 1) {
-        if (value_dim != 0 &&
-            value_heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) / value_dim) {
-            if (error != nullptr) {
-                *error = "linear attention recurrent fast decode grid exceeds HIP grid limit";
-            }
-            return false;
+    if (value_dim != 0 &&
+        value_heads > static_cast<size_t>(std::numeric_limits<unsigned int>::max()) / value_dim) {
+        if (error != nullptr) {
+            *error = "linear attention recurrent grid exceeds HIP grid limit";
         }
-        grid_size = static_cast<unsigned int>(value_heads * value_dim);
-        const unsigned int default_decode_block = key_dim <= 128 ? 128u : 256u;
-        block_size = block_size_from_env(
-            "ULLM_LINEAR_ATTN_RECURRENT_DECODE_BLOCK",
-            default_decode_block);
+        return false;
     }
+    unsigned int grid_size = static_cast<unsigned int>(value_heads * value_dim);
+    const unsigned int default_block = key_dim <= 128 ? 128u : 256u;
+    unsigned int block_size = block_size_from_env(
+        "ULLM_LINEAR_ATTN_RECURRENT_BLOCK",
+        block_size_from_env("ULLM_LINEAR_ATTN_RECURRENT_DECODE_BLOCK", default_block));
 
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
     if (!hip_runtime().module_launch_kernel(
