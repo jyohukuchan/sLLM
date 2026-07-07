@@ -305,6 +305,39 @@ SQ候補のprefill性能判断では、少なくとも次のpattern familyを測
 - `B` を増やしてもtotal throughputが伸びない場合は、schedulerではなくruntime kernel側のbatch入力形状を疑う。
 - あるpatternだけoutput guardが崩れる場合は、速度比較に進まず、そのpatternを再現する最小component smokeを追加する。
 
+### Phase C4 current status: cold causal attention real batch primitive
+
+`runtime-causal-attn-batch-smoke` を追加し、cold causal self-attention componentでreal batch入力を測れるようにした。
+
+- q/k/v/output layoutは `[batch, sequence, head, dim]` とする。
+- `ULLM_REQUIRE_HIP_CAUSAL_ATTN_BATCH_KERNEL=1` でstaging fallbackを禁止し、R9700上のHIP kernel経路を確認する。
+- 指標は `prefill_total_input_tps` と `attention_pair_tps_mean` を同時に保存する。
+- verificationは長いsequenceでもfull output readbackを避けるためsampled guardを使う。
+
+R9700 release代表値:
+
+| B | N | mean ms | total input tok/s | attention pair/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 512 | 18.603645 | 27521.487903 | 7059261.647216 |
+| 4 | 512 | 68.139151 | 30056.141879 | 7709400.392004 |
+| 8 | 512 | 135.607344 | 30204.853802 | 7747545.000218 |
+| 1 | 2048 | 274.000056 | 7474.451027 | 7657575.077284 |
+| 4 | 2048 | 1095.987421 | 7474.538339 | 7657664.528476 |
+| 8 | 2048 | 2208.166702 | 7419.729673 | 7601513.050319 |
+| 1 | 4096 | 1127.648016 | 3632.339117 | 7440846.681293 |
+| 4 | 4096 | 4649.452562 | 3523.855719 | 7218618.439491 |
+
+保存先:
+
+- `benchmarks/results/2026-07-07/runtime-causal-attn-batch/phase-c4-cold-prefill-batch-v1.md`
+
+解釈:
+
+- `N=512/2048` の `B=1/4/8` は保存済みで、Phase C4のbatch width component gapは一部埋まった。
+- ただしbatch幅を増やしてもattention pair/sはほぼ横ばいで、wall timeはbatch数に近く比例して伸びる。
+- これはscheduler/control planeではなく、runtime causal attention kernel自体がまだ十分にbatched efficiencyを出せていないことを示す。
+- 次のprefill最適化は、full modelへ広げる前に、causal attention prefill kernelのscore reuse、tiled/block化、K/V read pattern改善を優先する。
+
 ### Phase D: sustained decode
 
 | concurrent requests | prompt tokens/request | generated tokens/request | purpose |

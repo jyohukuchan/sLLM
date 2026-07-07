@@ -696,6 +696,15 @@ public:
             error);
     }
 
+    bool compile_causal_attn_batch_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
+        return compile_kernel(
+            arch,
+            causal_attn_batch_kernel_source(),
+            "ullm_causal_attn_batch_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_decode_attn_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -4112,6 +4121,142 @@ extern "C" __global__ void ullm_causal_attn_f32_kernel(
             if (value_active) {
                 const unsigned long long v_index =
                     (source_timestep * kv_heads + kv_head) * value_dim + value;
+                weighted += weight * v[v_index];
+            }
+        }
+        if (value_active) {
+            output[output_base + value] = weighted / denominator;
+        }
+    }
+}
+)";
+    }
+
+    static const char *causal_attn_batch_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_causal_attn_batch_f32_kernel(
+    const float *q,
+    const float *k,
+    const float *v,
+    unsigned long long batch_count,
+    unsigned long long sequence_len,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output) {
+    const unsigned long long global_q_head_index = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned long long q_head_elements_per_batch = sequence_len * q_heads;
+    const unsigned long long q_head_elements = batch_count * q_head_elements_per_batch;
+    if (global_q_head_index >= q_head_elements) {
+        return;
+    }
+    const unsigned long long batch = global_q_head_index / q_head_elements_per_batch;
+    const unsigned long long q_head_index =
+        global_q_head_index - batch * q_head_elements_per_batch;
+    const unsigned long long q_head = q_head_index % q_heads;
+    const unsigned long long timestep = q_head_index / q_heads;
+    const unsigned long long q_per_kv = q_heads / kv_heads;
+    const unsigned long long kv_head = q_head / q_per_kv;
+    const unsigned long long q_batch_base = batch * q_head_elements_per_batch * head_dim;
+    const unsigned long long k_batch_base = batch * sequence_len * kv_heads * head_dim;
+    const unsigned long long v_batch_base = batch * sequence_len * kv_heads * value_dim;
+    const unsigned long long output_batch_base = batch * q_head_elements_per_batch * value_dim;
+    const unsigned long long q_base = q_batch_base + (timestep * q_heads + q_head) * head_dim;
+    const unsigned int tid = threadIdx.x;
+
+    __shared__ float reduce[256];
+    __shared__ float shared_score;
+    __shared__ float shared_weight;
+    __shared__ float shared_max_score;
+    __shared__ float shared_denominator;
+
+    float max_score = -3.4028234663852886e38f;
+    for (unsigned long long source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
+        const unsigned long long k_base =
+            k_batch_base + (source_timestep * kv_heads + kv_head) * head_dim;
+        float partial = 0.0f;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            partial += q[q_base + dim] * k[k_base + dim];
+        }
+        reduce[tid] = partial;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] += reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            shared_score = reduce[0] * softmax_scale;
+        }
+        __syncthreads();
+        const float score = shared_score;
+        max_score = score > max_score ? score : max_score;
+    }
+    if (tid == 0) {
+        shared_max_score = max_score;
+    }
+    __syncthreads();
+    max_score = shared_max_score;
+
+    float denominator = 0.0f;
+    for (unsigned long long source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
+        const unsigned long long k_base =
+            k_batch_base + (source_timestep * kv_heads + kv_head) * head_dim;
+        float partial = 0.0f;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            partial += q[q_base + dim] * k[k_base + dim];
+        }
+        reduce[tid] = partial;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] += reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            shared_weight = expf(reduce[0] * softmax_scale - max_score);
+        }
+        __syncthreads();
+        denominator += shared_weight;
+    }
+    if (tid == 0) {
+        shared_denominator = denominator;
+    }
+    __syncthreads();
+    denominator = shared_denominator;
+
+    const unsigned long long output_base = output_batch_base + q_head_index * value_dim;
+    for (unsigned long long value_base = 0; value_base < value_dim; value_base += blockDim.x) {
+        const unsigned long long value = value_base + tid;
+        const bool value_active = value < value_dim;
+        float weighted = 0.0f;
+        for (unsigned long long source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
+            const unsigned long long k_base =
+                k_batch_base + (source_timestep * kv_heads + kv_head) * head_dim;
+            float partial = 0.0f;
+            for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+                partial += q[q_base + dim] * k[k_base + dim];
+            }
+            reduce[tid] = partial;
+            __syncthreads();
+            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                shared_weight = expf(reduce[0] * softmax_scale - max_score);
+            }
+            __syncthreads();
+            const float weight = shared_weight;
+            if (value_active) {
+                const unsigned long long v_index =
+                    v_batch_base + (source_timestep * kv_heads + kv_head) * value_dim + value;
                 weighted += weight * v[v_index];
             }
         }
@@ -13138,6 +13283,86 @@ HipCausalAttnKernelCache &hip_causal_attn_kernel_cache() {
     return cache;
 }
 
+class HipCausalAttnBatchKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_causal_attn_batch_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_causal_attn_batch_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build batched causal attention HIP kernel" : compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipCausalAttnBatchKernelCache &hip_causal_attn_batch_kernel_cache() {
+    static HipCausalAttnBatchKernelCache cache;
+    return cache;
+}
+
 bool causal_attn_f32_hip_kernel(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_buffer,
@@ -13197,6 +13422,81 @@ bool causal_attn_f32_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for f32 causal attention";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool causal_attn_batch_f32_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t batch_count,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    void *function = hip_causal_attn_batch_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    if (sequence_len > std::numeric_limits<size_t>::max() / q_heads ||
+        batch_count > std::numeric_limits<size_t>::max() / (sequence_len * q_heads)) {
+        if (error != nullptr) {
+            *error = "batched causal attention q head-sequence count overflows";
+        }
+        return false;
+    }
+    const size_t grid_size = batch_count * sequence_len * q_heads;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "batched causal attention q head-sequence count exceeds HIP grid limit";
+        }
+        return false;
+    }
+
+    unsigned long long kernel_batch_count = static_cast<unsigned long long>(batch_count);
+    unsigned long long kernel_sequence_len = static_cast<unsigned long long>(sequence_len);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ptr = k_buffer->ptr;
+    void *v_ptr = v_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr,
+        &k_ptr,
+        &v_ptr,
+        &kernel_batch_count,
+        &kernel_sequence_len,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_head_dim,
+        &kernel_value_dim,
+        &softmax_scale,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for f32 batched causal attention";
         }
         return false;
     }
@@ -13277,6 +13577,94 @@ ullm_status causal_attn_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 causal attention HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status causal_attn_batch_f32_hip_staging(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t batch_count,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    size_t q_bytes,
+    size_t k_bytes,
+    size_t v_bytes,
+    size_t output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<float> host_q(q_bytes / sizeof(float));
+    std::vector<float> host_k(k_bytes / sizeof(float));
+    std::vector<float> host_v(v_bytes / sizeof(float));
+    std::vector<float> host_output(output_bytes / sizeof(float));
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = q_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_q.data(),
+            q_buffer->ptr,
+            q_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_k.data(),
+            k_buffer->ptr,
+            k_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_v.data(),
+            v_buffer->ptr,
+            v_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 batched causal attention HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 batched causal attention HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+
+    const size_t q_elements_per_batch = sequence_len * q_heads * head_dim;
+    const size_t k_elements_per_batch = sequence_len * kv_heads * head_dim;
+    const size_t v_elements_per_batch = sequence_len * kv_heads * value_dim;
+    const size_t output_elements_per_batch = sequence_len * q_heads * value_dim;
+    for (size_t batch = 0; batch < batch_count; ++batch) {
+        causal_attn_f32_host(
+            host_q.data() + batch * q_elements_per_batch,
+            host_k.data() + batch * k_elements_per_batch,
+            host_v.data() + batch * v_elements_per_batch,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            host_output.data() + batch * output_elements_per_batch);
+    }
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy f32 batched causal attention output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize f32 batched causal attention HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");
@@ -21227,6 +21615,182 @@ ullm_status ullm_runtime_causal_attn_f32(
         q_buffer,
         k_buffer,
         v_buffer,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_bytes,
+        k_bytes,
+        v_bytes,
+        output_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_causal_attn_batch_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t batch_count,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_buffer == nullptr || v_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 batched causal attention received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (batch_count == 0 || sequence_len == 0 || q_heads == 0 || kv_heads == 0 ||
+        head_dim == 0 || value_dim == 0) {
+        set_error("f32 batched causal attention dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((q_heads % kv_heads) != 0) {
+        set_error("f32 batched causal attention q_heads must be a multiple of kv_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error("f32 batched causal attention softmax scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_buffer, k_buffer) ||
+        !buffers_share_backend(q_buffer, v_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error("f32 batched causal attention buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 batched causal attention stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (q_heads > max_size / sequence_len) {
+        set_error("f32 batched causal attention q head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_head_sequence_per_batch = sequence_len * q_heads;
+    if (kv_heads > max_size / sequence_len) {
+        set_error("f32 batched causal attention kv head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_sequence_per_batch = sequence_len * kv_heads;
+
+    if (head_dim > max_size / q_head_sequence_per_batch ||
+        value_dim > max_size / q_head_sequence_per_batch) {
+        set_error("f32 batched causal attention q/output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements_per_batch = q_head_sequence_per_batch * head_dim;
+    const size_t output_elements_per_batch = q_head_sequence_per_batch * value_dim;
+    if (head_dim > max_size / kv_head_sequence_per_batch ||
+        value_dim > max_size / kv_head_sequence_per_batch) {
+        set_error("f32 batched causal attention kv element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements_per_batch = kv_head_sequence_per_batch * head_dim;
+    const size_t v_elements_per_batch = kv_head_sequence_per_batch * value_dim;
+
+    if (batch_count > max_size / q_elements_per_batch ||
+        batch_count > max_size / k_elements_per_batch ||
+        batch_count > max_size / v_elements_per_batch ||
+        batch_count > max_size / output_elements_per_batch) {
+        set_error("f32 batched causal attention batch element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = batch_count * q_elements_per_batch;
+    const size_t k_elements = batch_count * k_elements_per_batch;
+    const size_t v_elements = batch_count * v_elements_per_batch;
+    const size_t output_elements = batch_count * output_elements_per_batch;
+    if (q_elements > max_size / sizeof(float) ||
+        k_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float) ||
+        output_elements > max_size / sizeof(float)) {
+        set_error("f32 batched causal attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    if (q_buffer->bytes < q_bytes) {
+        set_error("f32 batched causal attention q buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_buffer->bytes < k_bytes) {
+        set_error("f32 batched causal attention k buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_buffer->bytes < v_bytes) {
+        set_error("f32 batched causal attention v buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < output_bytes) {
+        set_error("f32 batched causal attention output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k = static_cast<const float *>(k_buffer->ptr);
+        const auto *v = static_cast<const float *>(v_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        for (size_t batch = 0; batch < batch_count; ++batch) {
+            causal_attn_f32_host(
+                q + batch * q_elements_per_batch,
+                k + batch * k_elements_per_batch,
+                v + batch * v_elements_per_batch,
+                sequence_len,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                output + batch * output_elements_per_batch);
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (causal_attn_batch_f32_hip_kernel(
+            q_buffer,
+            k_buffer,
+            v_buffer,
+            batch_count,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_CAUSAL_ATTN_BATCH_KERNEL") != nullptr ||
+        std::getenv("ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "f32 batched causal attention HIP kernel is unavailable" :
+                                       hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return causal_attn_batch_f32_hip_staging(
+        q_buffer,
+        k_buffer,
+        v_buffer,
+        batch_count,
         sequence_len,
         q_heads,
         kv_heads,
