@@ -4139,76 +4139,99 @@ extern "C" __global__ void ullm_cached_prefix_attn_f32_kernel(
     const unsigned int tid = threadIdx.x;
 
     __shared__ float reduce[256];
+    __shared__ float shared_score;
+    __shared__ float shared_weight;
     __shared__ float shared_max_score;
     __shared__ float shared_denominator;
 
-    float local_max = -3.4028234663852886e38f;
-    for (unsigned long long source_timestep = tid; source_timestep < cache_len;
-         source_timestep += blockDim.x) {
+    float max_score = -3.4028234663852886e38f;
+    for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
         const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
-        float score = 0.0f;
-        for (unsigned long long dim = 0; dim < head_dim; ++dim) {
-            score += q[q_base + dim] * k_cache[k_base + dim];
+        float partial = 0.0f;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            partial += q[q_base + dim] * k_cache[k_base + dim];
         }
-        score *= softmax_scale;
-        local_max = score > local_max ? score : local_max;
-    }
-
-    reduce[tid] = local_max;
-    __syncthreads();
-    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            const float other = reduce[tid + stride];
-            reduce[tid] = other > reduce[tid] ? other : reduce[tid];
+        reduce[tid] = partial;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] += reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            shared_score = reduce[0] * softmax_scale;
         }
         __syncthreads();
+        const float score = shared_score;
+        max_score = score > max_score ? score : max_score;
     }
     if (tid == 0) {
-        shared_max_score = reduce[0];
+        shared_max_score = max_score;
     }
     __syncthreads();
-    const float max_score = shared_max_score;
+    max_score = shared_max_score;
 
-    float local_denominator = 0.0f;
-    for (unsigned long long source_timestep = tid; source_timestep < cache_len;
-         source_timestep += blockDim.x) {
+    float denominator = 0.0f;
+    for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
         const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
-        float score = 0.0f;
-        for (unsigned long long dim = 0; dim < head_dim; ++dim) {
-            score += q[q_base + dim] * k_cache[k_base + dim];
+        float partial = 0.0f;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            partial += q[q_base + dim] * k_cache[k_base + dim];
         }
-        const float weight = expf(score * softmax_scale - max_score);
-        local_denominator += weight;
-    }
-    reduce[tid] = local_denominator;
-    __syncthreads();
-    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            reduce[tid] += reduce[tid + stride];
+        reduce[tid] = partial;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] += reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            shared_weight = expf(reduce[0] * softmax_scale - max_score);
         }
         __syncthreads();
+        denominator += shared_weight;
     }
     if (tid == 0) {
-        shared_denominator = reduce[0];
+        shared_denominator = denominator;
     }
     __syncthreads();
-    const float denominator = shared_denominator;
+    denominator = shared_denominator;
 
     const unsigned long long output_base = q_head_index * value_dim;
-    for (unsigned long long value = tid; value < value_dim; value += blockDim.x) {
+    for (unsigned long long value_base = 0; value_base < value_dim; value_base += blockDim.x) {
+        const unsigned long long value = value_base + tid;
+        const bool value_active = value < value_dim;
         float weighted = 0.0f;
         for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
             const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
-            float score = 0.0f;
-            for (unsigned long long dim = 0; dim < head_dim; ++dim) {
-                score += q[q_base + dim] * k_cache[k_base + dim];
+            float partial = 0.0f;
+            for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+                partial += q[q_base + dim] * k_cache[k_base + dim];
             }
-            const float weight = expf(score * softmax_scale - max_score);
-            const unsigned long long v_index =
-                (source_timestep * kv_heads + kv_head) * value_dim + value;
-            weighted += weight * v_cache[v_index];
+            reduce[tid] = partial;
+            __syncthreads();
+            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                shared_weight = expf(reduce[0] * softmax_scale - max_score);
+            }
+            __syncthreads();
+            const float weight = shared_weight;
+            if (value_active) {
+                const unsigned long long v_index =
+                    (source_timestep * kv_heads + kv_head) * value_dim + value;
+                weighted += weight * v_cache[v_index];
+            }
         }
-        output[output_base + value] = weighted / denominator;
+        if (value_active) {
+            output[output_base + value] = weighted / denominator;
+        }
     }
 }
 )";

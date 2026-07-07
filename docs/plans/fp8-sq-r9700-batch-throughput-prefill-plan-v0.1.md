@@ -778,6 +778,37 @@ R9700 release results:
 - `M=16/128` のpair/sは最大で約 `1.22M pair/s` まで上がったが、R9700のメモリ帯域や演算性能から見ればまだ低効率である。
 - 次はweighted value側のscore再計算削減、source tile単位のQ/K/V read共有、KV read coalescingを検討する。
 
+2026-07-07 cached prefix source-shared kernel v2:
+
+- `ullm_cached_prefix_attn_f32_kernel` を、shared-score v1からsource-shared v2へ変更した。
+- 各source timestepのQK dotをblock内reduceで1回だけ計算し、そのsoftmax weightをvalue次元のthreadへ共有する。
+- value_dimがblock size以下の現Qwen条件では、weighted value側のscore再計算を避けられる。
+- 保存先:
+  - `benchmarks/results/2026-07-07/runtime-cached-prefix-sweep/phase-c4-cached-prefix-source-shared-v2.jsonl`
+  - `benchmarks/results/2026-07-07/runtime-cached-prefix-sweep/phase-c4-cached-prefix-source-shared-v2.md`
+
+R9700 release comparison:
+
+| cached prefix L | new input M | v0 tok/s | shared-score v1 tok/s | source-shared v2 tok/s | v2/v1 | v2/v0 | v2 pair/s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 | 1 | 9.689557 | 20.892045 | 115.478659 | 5.527x | 11.918x | 473116.067678 |
+| 4096 | 16 | 128.782810 | 286.536642 | 1778.792810 | 6.208x | 13.812x | 7301055.087249 |
+| 4096 | 128 | 125.558889 | 293.886309 | 1802.792780 | 6.134x | 14.358x | 7500519.359248 |
+| 16384 | 1 | 1.908106 | 4.977861 | 24.836776 | 4.989x | 13.016x | 406950.571712 |
+| 16384 | 16 | 27.639058 | 52.762509 | 387.795099 | 7.350x | 14.031x | 6356931.166031 |
+| 16384 | 128 | 27.724764 | 73.211619 | 362.477959 | 4.951x | 13.074x | 5962218.712750 |
+| 65536 | 1 | 0.486488 | 1.097658 | 5.205099 | 4.742x | 10.699x | 341126.543957 |
+| 65536 | 16 | 6.790626 | 9.203588 | 81.479575 | 8.853x | 11.999x | 5340537.974595 |
+| 65536 | 128 | 7.019620 | 16.081822 | 86.497650 | 5.379x | 12.322x | 5674289.115783 |
+
+解釈:
+
+- v2は代表gridでv1比 `4.74x-8.85x`、v0比 `10.70x-14.36x` の改善になった。
+- `L=4096, M=16/128` は約 `1.78k-1.80k new tok/s` まで上がり、短中prefixのcached prefill componentとしては次の段階へ進める速度になった。
+- `L=65536, M=16/128` は約 `81-86 new tok/s` まで上がった。まだR9700の理論帯域から見ると低いが、以前の約 `7 tok/s` とは別物になった。
+- `M=1` はv2でもdecode-like boundaryとして残り、`L=65536` では約 `5.2 tok/s` である。decode pathは別kernelまたはpaged decode attention側の最適化として扱う。
+- 次はcold prefill側のcausal attentionにも同じsource-shared方針を反映できるかを検討する。SQ候補評価では、cached prefillについてはv2を現baselineとして使う。
+
 ## Decision gates
 
 ### FP8 candidate can continue if
