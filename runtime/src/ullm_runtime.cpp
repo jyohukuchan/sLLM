@@ -4125,47 +4125,91 @@ extern "C" __global__ void ullm_cached_prefix_attn_f32_kernel(
     unsigned long long value_dim,
     float softmax_scale,
     float *output) {
-    const unsigned long long index =
-        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const unsigned long long elements = new_tokens * q_heads * value_dim;
-    if (index >= elements) {
+    const unsigned long long q_head_index = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned long long q_head_elements = new_tokens * q_heads;
+    if (q_head_index >= q_head_elements) {
         return;
     }
-    const unsigned long long value = index % value_dim;
-    const unsigned long long q_head_index = index / value_dim;
     const unsigned long long q_head = q_head_index % q_heads;
     const unsigned long long token_index = q_head_index / q_heads;
     const unsigned long long cache_len = cached_prefix_len + token_index + 1;
     const unsigned long long q_per_kv = q_heads / kv_heads;
     const unsigned long long kv_head = q_head / q_per_kv;
     const unsigned long long q_base = (token_index * q_heads + q_head) * head_dim;
+    const unsigned int tid = threadIdx.x;
 
-    float max_score = -3.4028234663852886e38f;
-    for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+    __shared__ float reduce[256];
+    __shared__ float shared_max_score;
+    __shared__ float shared_denominator;
+
+    float local_max = -3.4028234663852886e38f;
+    for (unsigned long long source_timestep = tid; source_timestep < cache_len;
+         source_timestep += blockDim.x) {
         const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
         float score = 0.0f;
         for (unsigned long long dim = 0; dim < head_dim; ++dim) {
             score += q[q_base + dim] * k_cache[k_base + dim];
         }
         score *= softmax_scale;
-        max_score = score > max_score ? score : max_score;
+        local_max = score > local_max ? score : local_max;
     }
 
-    float denominator = 0.0f;
-    float weighted = 0.0f;
-    for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+    reduce[tid] = local_max;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const float other = reduce[tid + stride];
+            reduce[tid] = other > reduce[tid] ? other : reduce[tid];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        shared_max_score = reduce[0];
+    }
+    __syncthreads();
+    const float max_score = shared_max_score;
+
+    float local_denominator = 0.0f;
+    for (unsigned long long source_timestep = tid; source_timestep < cache_len;
+         source_timestep += blockDim.x) {
         const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
         float score = 0.0f;
         for (unsigned long long dim = 0; dim < head_dim; ++dim) {
             score += q[q_base + dim] * k_cache[k_base + dim];
         }
         const float weight = expf(score * softmax_scale - max_score);
-        denominator += weight;
-        const unsigned long long v_index =
-            (source_timestep * kv_heads + kv_head) * value_dim + value;
-        weighted += weight * v_cache[v_index];
+        local_denominator += weight;
     }
-    output[index] = weighted / denominator;
+    reduce[tid] = local_denominator;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            reduce[tid] += reduce[tid + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        shared_denominator = reduce[0];
+    }
+    __syncthreads();
+    const float denominator = shared_denominator;
+
+    const unsigned long long output_base = q_head_index * value_dim;
+    for (unsigned long long value = tid; value < value_dim; value += blockDim.x) {
+        float weighted = 0.0f;
+        for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+            const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+            float score = 0.0f;
+            for (unsigned long long dim = 0; dim < head_dim; ++dim) {
+                score += q[q_base + dim] * k_cache[k_base + dim];
+            }
+            const float weight = expf(score * softmax_scale - max_score);
+            const unsigned long long v_index =
+                (source_timestep * kv_heads + kv_head) * value_dim + value;
+            weighted += weight * v_cache[v_index];
+        }
+        output[output_base + value] = weighted / denominator;
+    }
 }
 )";
     }
@@ -13478,11 +13522,10 @@ bool cached_prefix_attn_f32_hip_kernel(
     }
 
     constexpr unsigned int block_size = 256;
-    const size_t output_elements = new_tokens * q_heads * value_dim;
-    const size_t grid_size = (output_elements + block_size - 1) / block_size;
+    const size_t grid_size = new_tokens * q_heads;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
-            *error = "cached prefix attention output element count exceeds HIP grid limit";
+            *error = "cached prefix attention q head-sequence count exceeds HIP grid limit";
         }
         return false;
     }

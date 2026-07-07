@@ -747,6 +747,37 @@ R9700 release results:
 - `L` を4倍にすると `M=16/128` のnew input tok/sはおおむね4分の1になる。長prefixではKV readとscore/value計算が支配的で、SQ/FP8 format差を見る前にattention executor側の効率が上限を決めている。
 - 次の最適化対象は、`M` を増やすだけではなく、head/value内でscore計算を共有するtiled cached-prefix attentionと、KV read coalescingである。
 
+2026-07-07 cached prefix shared-score kernel v1:
+
+- `ullm_cached_prefix_attn_f32_kernel` を、1 output element 1 threadの実装から、1 block = 1 token/headのshared-score実装へ変更した。
+- max scoreとsoftmax denominatorはblock内reduceで求め、value次元間で共有する。
+- weighted value計算ではまだvalueごとにscoreを再計算するため、完全なtiled/blocked attentionではない。
+- 保存先:
+  - `benchmarks/results/2026-07-07/runtime-cached-prefix-sweep/phase-c4-cached-prefix-shared-score-v1.jsonl`
+  - `benchmarks/results/2026-07-07/runtime-cached-prefix-sweep/phase-c4-cached-prefix-shared-score-v1.md`
+
+R9700 release results:
+
+| cached prefix L | new input M | old tok/s | shared-score tok/s | speedup | shared-score pair/s | sampled diff |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 | 1 | 9.689557 | 20.892045 | 2.156x | 85594.708602 | 0 |
+| 4096 | 16 | 128.782810 | 286.536642 | 2.225x | 1176089.649006 | 0 |
+| 4096 | 128 | 125.558889 | 293.886309 | 2.341x | 1222713.987897 | 0 |
+| 16384 | 1 | 1.908106 | 4.977861 | 2.609x | 81562.254321 | 0 |
+| 16384 | 16 | 27.639058 | 52.762509 | 1.909x | 864909.422090 | 0 |
+| 16384 | 128 | 27.724764 | 73.211619 | 2.641x | 1204221.322034 | 0 |
+| 65536 | 1 | 0.486488 | 1.097658 | 2.256x | 71937.242905 | 0 |
+| 65536 | 16 | 6.790626 | 9.203588 | 1.355x | 603244.548450 | 0 |
+| 65536 | 128 | 7.019620 | 16.081822 | 2.291x | 1054975.580718 | 0 |
+
+解釈:
+
+- shared-score化だけでも、代表gridで `1.35x-2.64x` の改善が出た。
+- `L=4096, M=16` は約 `128.78 tok/s` から約 `286.54 tok/s` へ改善し、Phase C4のcached prefill baselineとしては前進した。
+- `L=65536, M=128` は約 `7.02 tok/s` から約 `16.08 tok/s` へ改善したが、長prefixではまだ低い。
+- `M=16/128` のpair/sは最大で約 `1.22M pair/s` まで上がったが、R9700のメモリ帯域や演算性能から見ればまだ低効率である。
+- 次はweighted value側のscore再計算削減、source tile単位のQ/K/V read共有、KV read coalescingを検討する。
+
 ## Decision gates
 
 ### FP8 candidate can continue if
