@@ -365,6 +365,14 @@ fn main() -> ExitCode {
                 env::args().nth(7),
             )
         }
+        Some("package-linear-attn-mlp-batch-smoke") => package_linear_attn_mlp_batch_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+        ),
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -20028,6 +20036,451 @@ fn package_linear_attn_attention_batch_smoke_impl(
     ))
 }
 
+fn package_linear_attn_mlp_batch_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-mlp-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_linear_attn_mlp_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        prompt_token_ids,
+        measured_repeats,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn package_linear_attn_mlp_batch_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    prompt_token_ids: Vec<usize>,
+    measured_repeats: usize,
+) -> Result<String, String> {
+    if prompt_token_ids.is_empty() {
+        return Err("linear-attn MLP batch smoke requires at least one token".to_string());
+    }
+    if package_decoder_layer_kind(path, layer_index)? != PackageDecoderLayerKind::LinearAttention {
+        return Err(format!(
+            "linear-attn MLP batch smoke requires a linear attention layer, got layer {layer_index}"
+        ));
+    }
+
+    let sequence_len = prompt_token_ids.len();
+    let (embedding_vocab, hidden) = package_embedding_shape(path)?;
+    if let Some(token_id) = prompt_token_ids
+        .iter()
+        .copied()
+        .find(|token_id| *token_id >= embedding_vocab)
+    {
+        return Err(format!(
+            "linear-attn MLP batch token id {token_id} is out of embedding range 0..{embedding_vocab}"
+        ));
+    }
+
+    let post_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+    let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read post RMSNorm tensor: {err}"))?;
+    post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+    if post_norm.values.len() != hidden {
+        return Err(format!(
+            "linear-attn MLP batch post norm length {} does not match hidden {hidden}",
+            post_norm.values.len()
+        ));
+    }
+    let embedding_rows =
+        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
+            .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
+    if embedding_rows.columns != hidden || embedding_rows.values.len() != sequence_len * hidden {
+        return Err(format!(
+            "linear-attn MLP batch embedding shape mismatch: columns={} values={} prompt_tokens={} hidden={hidden}",
+            embedding_rows.columns,
+            embedding_rows.values.len(),
+            sequence_len
+        ));
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let mut registry = WeightRegistry::new();
+    let gate_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &gate_tensor,
+        chunk_bytes,
+    )?;
+    let up_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &up_tensor,
+        chunk_bytes,
+    )?;
+    let down_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &down_tensor,
+        chunk_bytes,
+    )?;
+    if gate_matrix.rows != up_matrix.rows
+        || gate_matrix.cols != up_matrix.cols
+        || gate_matrix.cols != hidden
+    {
+        return Err(format!(
+            "linear-attn MLP batch gate/up shape mismatch: gate=[{},{}] up=[{},{}] hidden={hidden}",
+            gate_matrix.rows, gate_matrix.cols, up_matrix.rows, up_matrix.cols
+        ));
+    }
+    let intermediate = gate_matrix.rows;
+    if down_matrix.rows != hidden || down_matrix.cols != intermediate {
+        return Err(format!(
+            "linear-attn MLP batch down shape mismatch: down=[{},{}] expected [{hidden},{intermediate}]",
+            down_matrix.rows, down_matrix.cols
+        ));
+    }
+
+    let sequence_elements = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "linear-attn MLP batch sequence element count overflows".to_string())?;
+    let intermediate_elements = sequence_len
+        .checked_mul(intermediate)
+        .ok_or_else(|| "linear-attn MLP batch intermediate element count overflows".to_string())?;
+
+    let mut input_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn MLP batch input",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn MLP batch input: {err}"))?;
+    let mut post_norm_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            post_norm.values.len(),
+            "linear-attn MLP batch post norm weight",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn MLP batch post norm weight: {err}")
+        })?;
+    let mut post_normed_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn MLP batch post normed",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn MLP batch normed: {err}"))?;
+    let mut gate_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            intermediate_elements,
+            "linear-attn MLP batch gate output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn MLP batch gate: {err}"))?;
+    let mut up_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            intermediate_elements,
+            "linear-attn MLP batch up output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn MLP batch up: {err}"))?;
+    let mut activation_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            intermediate_elements,
+            "linear-attn MLP batch activation",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn MLP batch activation: {err}"))?;
+    let mut down_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn MLP batch down output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn MLP batch down output: {err}"))?;
+    let mut layer_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn MLP batch layer output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn MLP batch layer output: {err}"))?;
+
+    input_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&embedding_rows.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy linear-attn MLP batch input: {err}"))?;
+    post_norm_weight_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&post_norm.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy linear-attn MLP batch post norm: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize linear-attn MLP batch setup: {err}"))?;
+
+    macro_rules! run_mlp_batch {
+        ($stream:expr) => {{
+            ullm_runtime_sys::segmented_rmsnorm_f32(
+                &input_buffer,
+                &post_norm_weight_buffer,
+                sequence_len,
+                hidden,
+                1e-5_f32,
+                &mut post_normed_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn MLP batch post RMSNorm: {err}"))?;
+            gate_matrix.matvec_batch(
+                &post_normed_buffer,
+                sequence_len,
+                &mut gate_output_buffer,
+                $stream,
+                "linear-attn MLP batch gate projection",
+            )?;
+            up_matrix.matvec_batch(
+                &post_normed_buffer,
+                sequence_len,
+                &mut up_output_buffer,
+                $stream,
+                "linear-attn MLP batch up projection",
+            )?;
+            ullm_runtime_sys::silu_mul_f32(
+                &gate_output_buffer,
+                &up_output_buffer,
+                intermediate_elements,
+                &mut activation_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn MLP batch SiLU-mul: {err}"))?;
+            down_matrix.matvec_batch(
+                &activation_buffer,
+                sequence_len,
+                &mut down_output_buffer,
+                $stream,
+                "linear-attn MLP batch down projection",
+            )?;
+            ullm_runtime_sys::add_f32(
+                &down_output_buffer,
+                &input_buffer,
+                sequence_elements,
+                &mut layer_output_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn MLP batch residual add: {err}"))
+        }};
+    }
+
+    run_mlp_batch!(&mut stream)?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize linear-attn MLP batch warmup: {err}"))?;
+
+    let mut measured_ms = Vec::with_capacity(measured_repeats);
+    for _ in 0..measured_repeats {
+        let started = Instant::now();
+        run_mlp_batch!(&mut stream)?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn MLP batch measured run: {err}")
+        })?;
+        measured_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    let wall_ms = measured_ms.iter().sum::<f64>() / measured_ms.len() as f64;
+    let wall_ms_min = measured_ms
+        .iter()
+        .copied()
+        .min_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+    let wall_ms_max = measured_ms
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+
+    let post_normed = read_runtime_buffer_f32(
+        &post_normed_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn MLP batch post normed",
+    )?;
+    let gate_output = read_runtime_buffer_f32(
+        &gate_output_buffer,
+        &mut stream,
+        intermediate_elements,
+        "linear-attn MLP batch gate output",
+    )?;
+    let up_output = read_runtime_buffer_f32(
+        &up_output_buffer,
+        &mut stream,
+        intermediate_elements,
+        "linear-attn MLP batch up output",
+    )?;
+    let activation = read_runtime_buffer_f32(
+        &activation_buffer,
+        &mut stream,
+        intermediate_elements,
+        "linear-attn MLP batch activation",
+    )?;
+    let down_output = read_runtime_buffer_f32(
+        &down_output_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn MLP batch down output",
+    )?;
+    let layer_output = read_runtime_buffer_f32(
+        &layer_output_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn MLP batch layer output",
+    )?;
+
+    let mut expected_normed = Vec::with_capacity(sequence_elements);
+    for token_index in 0..sequence_len {
+        let start = token_index
+            .checked_mul(hidden)
+            .ok_or_else(|| "linear-attn MLP batch expected norm start overflows".to_string())?;
+        let end = start
+            .checked_add(hidden)
+            .ok_or_else(|| "linear-attn MLP batch expected norm end overflows".to_string())?;
+        expected_normed.extend(runtime_host_rmsnorm_f32(
+            &embedding_rows.values[start..end],
+            &post_norm.values,
+            1e-5_f32,
+        ));
+    }
+    if expected_normed.len() != sequence_elements {
+        return Err("failed to build linear-attn MLP batch norm reference".to_string());
+    }
+    let norm_max_abs_diff = verify_f32_close(
+        "linear-attn MLP batch post norm",
+        &post_normed,
+        &expected_normed,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+    let expected_activation = runtime_host_silu_mul_f32(&gate_output, &up_output);
+    if expected_activation.len() != intermediate_elements {
+        return Err("failed to build linear-attn MLP batch activation reference".to_string());
+    }
+    let activation_max_abs_diff = verify_f32_close(
+        "linear-attn MLP batch activation",
+        &activation,
+        &expected_activation,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+    let expected_layer_output = down_output
+        .iter()
+        .zip(embedding_rows.values.iter())
+        .map(|(lhs, rhs)| lhs + rhs)
+        .collect::<Vec<_>>();
+    let residual_max_abs_diff = verify_f32_close(
+        "linear-attn MLP batch residual output",
+        &layer_output,
+        &expected_layer_output,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+    let output_elements = sequence_elements
+        .checked_add(intermediate_elements)
+        .and_then(|value| value.checked_add(intermediate_elements))
+        .and_then(|value| value.checked_add(intermediate_elements))
+        .and_then(|value| value.checked_add(sequence_elements))
+        .and_then(|value| value.checked_add(sequence_elements))
+        .ok_or_else(|| "linear-attn MLP batch output element count overflows".to_string())?;
+    let preview_len = layer_output.len().min(8);
+    Ok(format!(
+        "package-linear-attn-mlp-batch-smoke package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} intermediate={} input_elements={} output_elements={} executor=segmented_rmsnorm_f32+aq4_matvec_batch_f32+silu_mul_f32+aq4_matvec_batch_f32+add_f32 real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} norm_max_abs_diff={norm_max_abs_diff:.9} activation_max_abs_diff={activation_max_abs_diff:.9} residual_max_abs_diff={residual_max_abs_diff:.9} layer_preview={} verified=true",
+        path,
+        layer_index,
+        post_norm_tensor,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        sequence_len,
+        hidden,
+        intermediate,
+        sequence_elements,
+        output_elements,
+        sequence_len,
+        info.backend,
+        device_index,
+        info.name,
+        measured_repeats,
+        wall_ms,
+        wall_ms_min,
+        wall_ms_max,
+        tps(sequence_len, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        tps(output_elements, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        format_f32_preview(&layer_output[..preview_len]),
+    ))
+}
+
 fn current_git_commit() -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -33218,7 +33671,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
     );
     eprintln!(
         "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
@@ -33252,6 +33705,9 @@ fn print_help() {
     );
     eprintln!(
         "package-linear-attn-attention-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
+    );
+    eprintln!(
+        "package-linear-attn-mlp-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
     );
     eprintln!(
         "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"

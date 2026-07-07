@@ -435,6 +435,33 @@ Exit criteria:
 8. AQ4 baselineとFP8 candidateの比較表がある。
 9. vLLM比較が成功またはunsupported reason付きで記録されている。
 
+## Progress 2026-07-07
+
+T3の前提作業として、Qwen3.5-9B packageのlinear attention layer 0に対して、R9700上のtoken batch prefill component smokeを追加した。
+
+追加済み:
+
+- `package-linear-attn-recurrent-batch-smoke`
+- `package-linear-attn-post-batch-smoke`
+- `package-linear-attn-attention-batch-smoke`
+- `package-linear-attn-mlp-batch-smoke`
+
+R9700 release results:
+
+| component | prompt tokens | wall ms mean | token/s mean | note |
+| --- | ---: | ---: | ---: | --- |
+| linear attention recurrent-side | 512 | 27.790506 | 18423.558252 | qkv/a/b projection、qkv prepare、gate/beta、recurrent |
+| linear attention post-side | 512 | 22.089981 | 23177.928492 | z projection、post RMSNorm/SiLU、out projection、residual |
+| linear attention attention integrated | 512 | 49.605634 | 10321.408180 | attention側を同一stream・同一bufferで接続 |
+| linear attention MLP-side | 512 | 83.995376 | 6095.573666 | post RMSNorm、gate/up/down projection、SiLU積、residual |
+
+解釈:
+
+- linear attention attention側は、分割smoke単純合算と統合smokeの差が小さく、host境界やbuffer接続による大きな追加損失は見えていない。
+- MLP側はgate/up/downの3本の大きいAQ4 batch projectionが支配的で、attention側より重い。
+- 次は `attention batch -> MLP batch` を同じlayer input/outputで接続し、linear attention layer単位のpartial prefill timingへ進める。
+- その後、self-attention layerのprefill batch化、layer stack接続、decode state接続へ進む。
+
 ## Decision gates
 
 ### FP8 candidate can continue if

@@ -169,6 +169,7 @@ runtime linear attention recurrent smoke:runtime上で小型f32 q/k/v/gate/beta/
 package linear attention recurrent batch smoke:.ullm.d内の実際のinput RMSNorm、linear_attn qkv/a/b projection、conv1d、gate/beta、recurrentをtoken batchで接続し、prefill向けlinear attention前半のdevice-resident実行を検証・計測するsmoke
 package linear attention post batch smoke:.ullm.d内の実際のlinear_attn z/out projectionとnormを使い、token batchのpost-recurrent RMSNorm/SiLU、out projection、residual addをdevice-resident実行で検証・計測するsmoke
 package linear attention attention batch smoke:.ullm.d内のlinear_attn qkv/z/a/b/conv/A_log/dt_bias/norm/outを使い、input RMSNormからrecurrent、post-recurrent処理、out projection、residual addまでを同一token batchで接続するprefill向けpartial attention smoke
+package linear attention MLP batch smoke:.ullm.d内のpost_attention_layernorm.weightとMLP gate/up/down projectionを使い、token batchのMLP側RMSNorm、SiLU積、down projection、residual addをdevice-resident実行で検証・計測するsmoke
 HIPRTC:HIP runtime compilation。通常C++でbuildしたruntimeからHIP kernel sourceを実行時compileしてmodule launchする仕組み
 JIT kernel:実行時にcompileしてloadするkernel。uLLMではHIPRTC経由のAQ4 materialize kernelなどを指す
 kernel-required smoke:staging fallbackを禁止し、実kernel経路だけで成功することを確認するsmoke
