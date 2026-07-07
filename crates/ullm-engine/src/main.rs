@@ -319,6 +319,14 @@ fn main() -> ExitCode {
             env::args().nth(6),
             env::args().nth(7),
         ),
+        Some("package-linear-attn-proj-batch-smoke") => package_linear_attn_proj_batch_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+        ),
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -16839,6 +16847,546 @@ fn package_prefill_aq4_matvec_batch_smoke_impl(
     ))
 }
 
+fn package_linear_attn_proj_batch_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-proj-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_linear_attn_proj_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        prompt_token_ids,
+        measured_repeats,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn package_linear_attn_proj_batch_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    prompt_token_ids: Vec<usize>,
+    measured_repeats: usize,
+) -> Result<String, String> {
+    if prompt_token_ids.is_empty() {
+        return Err("linear-attn projection batch smoke requires at least one token".to_string());
+    }
+    if package_decoder_layer_kind(path, layer_index)? != PackageDecoderLayerKind::LinearAttention {
+        return Err(format!(
+            "linear-attn projection batch smoke requires a linear attention layer, got layer {layer_index}"
+        ));
+    }
+    let (embedding_vocab, hidden) = package_embedding_shape(path)?;
+    if let Some(token_id) = prompt_token_ids
+        .iter()
+        .copied()
+        .find(|token_id| *token_id >= embedding_vocab)
+    {
+        return Err(format!(
+            "linear-attn projection batch token id {token_id} is out of embedding range 0..{embedding_vocab}"
+        ));
+    }
+
+    let input_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
+    let qkv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
+    let z_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_z.weight");
+    let a_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_a.weight");
+    let b_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_b.weight");
+
+    let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
+    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    if input_norm.values.len() != hidden {
+        return Err(format!(
+            "linear-attn projection batch input norm length {} does not match hidden {hidden}",
+            input_norm.values.len()
+        ));
+    }
+    let embedding_rows =
+        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
+            .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
+    if embedding_rows.columns != hidden
+        || embedding_rows.values.len() != prompt_token_ids.len() * hidden
+    {
+        return Err(format!(
+            "linear-attn projection batch embedding shape mismatch: columns={} values={} prompt_tokens={} hidden={hidden}",
+            embedding_rows.columns,
+            embedding_rows.values.len(),
+            prompt_token_ids.len()
+        ));
+    }
+    let mut normed_expected = Vec::with_capacity(embedding_rows.values.len());
+    for token_index in 0..prompt_token_ids.len() {
+        let start = token_index
+            .checked_mul(hidden)
+            .ok_or_else(|| "linear-attn projection batch norm input start overflows".to_string())?;
+        let end = start
+            .checked_add(hidden)
+            .ok_or_else(|| "linear-attn projection batch norm input end overflows".to_string())?;
+        normed_expected.extend(runtime_host_rmsnorm_f32(
+            &embedding_rows.values[start..end],
+            &input_norm.values,
+            1e-6_f32,
+        ));
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let mut registry = WeightRegistry::new();
+    let qkv_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &qkv_tensor,
+        chunk_bytes,
+    )?;
+    let z_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &z_tensor,
+        chunk_bytes,
+    )?;
+    let a_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &a_tensor,
+        chunk_bytes,
+    )?;
+    let b_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &b_tensor,
+        chunk_bytes,
+    )?;
+    if qkv_matrix.cols != hidden
+        || z_matrix.cols != hidden
+        || a_matrix.cols != hidden
+        || b_matrix.cols != hidden
+    {
+        return Err(format!(
+            "linear-attn projection batch matrix cols mismatch: qkv={} z={} a={} b={} hidden={hidden}",
+            qkv_matrix.cols, z_matrix.cols, a_matrix.cols, b_matrix.cols
+        ));
+    }
+    if z_matrix.rows != hidden || a_matrix.rows != b_matrix.rows {
+        return Err(format!(
+            "linear-attn projection batch matrix rows mismatch: z_rows={} hidden={hidden} a_rows={} b_rows={}",
+            z_matrix.rows, a_matrix.rows, b_matrix.rows
+        ));
+    }
+
+    let (qkv_rows, qkv_cols, qkv_materialized) = materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &qkv_tensor,
+        chunk_bytes,
+    )?;
+    let (z_rows, z_cols, z_materialized) = materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &z_tensor,
+        chunk_bytes,
+    )?;
+    let (a_rows, a_cols, a_materialized) = materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &a_tensor,
+        chunk_bytes,
+    )?;
+    let (b_rows, b_cols, b_materialized) = materialize_selected_aq4_matrix(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &b_tensor,
+        chunk_bytes,
+    )?;
+    if (qkv_rows, qkv_cols) != (qkv_matrix.rows, qkv_matrix.cols)
+        || (z_rows, z_cols) != (z_matrix.rows, z_matrix.cols)
+        || (a_rows, a_cols) != (a_matrix.rows, a_matrix.cols)
+        || (b_rows, b_cols) != (b_matrix.rows, b_matrix.cols)
+    {
+        return Err(
+            "linear-attn projection batch resident/materialized shape mismatch".to_string(),
+        );
+    }
+    let qkv_materialized_values = read_runtime_buffer_f32(
+        &qkv_materialized,
+        &mut stream,
+        qkv_matrix
+            .rows
+            .checked_mul(qkv_matrix.cols)
+            .ok_or_else(|| "linear-attn qkv materialized element count overflows".to_string())?,
+        "linear-attn qkv materialized matrix",
+    )?;
+    let z_materialized_values = read_runtime_buffer_f32(
+        &z_materialized,
+        &mut stream,
+        z_matrix
+            .rows
+            .checked_mul(z_matrix.cols)
+            .ok_or_else(|| "linear-attn z materialized element count overflows".to_string())?,
+        "linear-attn z materialized matrix",
+    )?;
+    let a_materialized_values = read_runtime_buffer_f32(
+        &a_materialized,
+        &mut stream,
+        a_matrix
+            .rows
+            .checked_mul(a_matrix.cols)
+            .ok_or_else(|| "linear-attn a materialized element count overflows".to_string())?,
+        "linear-attn a materialized matrix",
+    )?;
+    let b_materialized_values = read_runtime_buffer_f32(
+        &b_materialized,
+        &mut stream,
+        b_matrix
+            .rows
+            .checked_mul(b_matrix.cols)
+            .ok_or_else(|| "linear-attn b materialized element count overflows".to_string())?,
+        "linear-attn b materialized matrix",
+    )?;
+
+    let expected_projection = |matrix: &[f32], rows: usize| -> Result<Vec<f32>, String> {
+        let mut expected =
+            Vec::with_capacity(prompt_token_ids.len().checked_mul(rows).ok_or_else(|| {
+                "linear-attn expected projection element count overflows".to_string()
+            })?);
+        for token_index in 0..prompt_token_ids.len() {
+            let start = token_index.checked_mul(hidden).ok_or_else(|| {
+                "linear-attn expected projection input start overflows".to_string()
+            })?;
+            let end = start
+                .checked_add(hidden)
+                .ok_or_else(|| "linear-attn expected projection input end overflows".to_string())?;
+            expected.extend(runtime_host_matvec_f32(
+                matrix,
+                &normed_expected[start..end],
+                rows,
+                hidden,
+            ));
+        }
+        Ok(expected)
+    };
+    let qkv_expected = expected_projection(&qkv_materialized_values, qkv_matrix.rows)?;
+    let z_expected = expected_projection(&z_materialized_values, z_matrix.rows)?;
+    let a_expected = expected_projection(&a_materialized_values, a_matrix.rows)?;
+    let b_expected = expected_projection(&b_materialized_values, b_matrix.rows)?;
+
+    let input_elements = prompt_token_ids
+        .len()
+        .checked_mul(hidden)
+        .ok_or_else(|| "linear-attn projection batch input element count overflows".to_string())?;
+    let mut input_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_elements,
+            "linear-attn projection batch input",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn projection batch input: {err}"))?;
+    let mut input_norm_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_norm.values.len(),
+            "linear-attn projection batch input norm weight",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn input norm weight: {err}"))?;
+    let mut input_normed_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_elements,
+            "linear-attn projection batch input normed",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn projection batch input normed: {err}")
+        })?;
+    let mut qkv_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            prompt_token_ids
+                .len()
+                .checked_mul(qkv_matrix.rows)
+                .ok_or_else(|| "linear-attn qkv output element count overflows".to_string())?,
+            "linear-attn qkv batch output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn qkv batch output: {err}"))?;
+    let mut z_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            prompt_token_ids
+                .len()
+                .checked_mul(z_matrix.rows)
+                .ok_or_else(|| "linear-attn z output element count overflows".to_string())?,
+            "linear-attn z batch output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn z batch output: {err}"))?;
+    let mut a_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            prompt_token_ids
+                .len()
+                .checked_mul(a_matrix.rows)
+                .ok_or_else(|| "linear-attn a output element count overflows".to_string())?,
+            "linear-attn a batch output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn a batch output: {err}"))?;
+    let mut b_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            prompt_token_ids
+                .len()
+                .checked_mul(b_matrix.rows)
+                .ok_or_else(|| "linear-attn b output element count overflows".to_string())?,
+            "linear-attn b batch output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn b batch output: {err}"))?;
+    input_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&embedding_rows.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy linear-attn projection batch input: {err}"))?;
+    input_norm_weight_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&input_norm.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy linear-attn projection input norm: {err}"))?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize linear-attn projection batch setup: {err}")
+    })?;
+
+    let mut run_projection_batch =
+        |stream: &mut ullm_runtime_sys::RuntimeStream| -> Result<(), String> {
+            ullm_runtime_sys::segmented_rmsnorm_f32(
+                &input_buffer,
+                &input_norm_weight_buffer,
+                prompt_token_ids.len(),
+                hidden,
+                1e-6_f32,
+                &mut input_normed_buffer,
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to run linear-attn projection batch input RMSNorm: {err}")
+            })?;
+            qkv_matrix.matvec_batch(
+                &input_normed_buffer,
+                prompt_token_ids.len(),
+                &mut qkv_output_buffer,
+                stream,
+                "linear-attn qkv projection batch",
+            )?;
+            z_matrix.matvec_batch(
+                &input_normed_buffer,
+                prompt_token_ids.len(),
+                &mut z_output_buffer,
+                stream,
+                "linear-attn z projection batch",
+            )?;
+            a_matrix.matvec_batch(
+                &input_normed_buffer,
+                prompt_token_ids.len(),
+                &mut a_output_buffer,
+                stream,
+                "linear-attn a projection batch",
+            )?;
+            b_matrix.matvec_batch(
+                &input_normed_buffer,
+                prompt_token_ids.len(),
+                &mut b_output_buffer,
+                stream,
+                "linear-attn b projection batch",
+            )
+        };
+
+    run_projection_batch(&mut stream)?;
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize linear-attn projection batch warmup: {err}")
+    })?;
+
+    let mut measured_ms = Vec::with_capacity(measured_repeats);
+    for _ in 0..measured_repeats {
+        let started = Instant::now();
+        run_projection_batch(&mut stream)?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn projection batch measured run: {err}")
+        })?;
+        measured_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    let wall_ms = measured_ms.iter().sum::<f64>() / measured_ms.len() as f64;
+    let wall_ms_min = measured_ms
+        .iter()
+        .copied()
+        .min_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+    let wall_ms_max = measured_ms
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+
+    let qkv_output = read_runtime_buffer_f32(
+        &qkv_output_buffer,
+        &mut stream,
+        qkv_expected.len(),
+        "linear-attn qkv batch output",
+    )?;
+    let z_output = read_runtime_buffer_f32(
+        &z_output_buffer,
+        &mut stream,
+        z_expected.len(),
+        "linear-attn z batch output",
+    )?;
+    let a_output = read_runtime_buffer_f32(
+        &a_output_buffer,
+        &mut stream,
+        a_expected.len(),
+        "linear-attn a batch output",
+    )?;
+    let b_output = read_runtime_buffer_f32(
+        &b_output_buffer,
+        &mut stream,
+        b_expected.len(),
+        "linear-attn b batch output",
+    )?;
+    let qkv_max_abs_diff = verify_f32_close(
+        "linear-attn qkv projection batch",
+        &qkv_output,
+        &qkv_expected,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let z_max_abs_diff = verify_f32_close(
+        "linear-attn z projection batch",
+        &z_output,
+        &z_expected,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let a_max_abs_diff = verify_f32_close(
+        "linear-attn a projection batch",
+        &a_output,
+        &a_expected,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let b_max_abs_diff = verify_f32_close(
+        "linear-attn b projection batch",
+        &b_output,
+        &b_expected,
+        1e-3_f32,
+        1e-5_f32,
+    )?;
+    let output_elements = qkv_output
+        .len()
+        .checked_add(z_output.len())
+        .and_then(|value| value.checked_add(a_output.len()))
+        .and_then(|value| value.checked_add(b_output.len()))
+        .ok_or_else(|| "linear-attn projection batch output element count overflows".to_string())?;
+    let preview_len = qkv_output.len().min(8);
+    Ok(format!(
+        "package-linear-attn-proj-batch-smoke package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} qkv_rows={} z_rows={} a_rows={} b_rows={} input_elements={} output_elements={} executor=segmented_rmsnorm_f32+aq4_matvec_batch_f32 real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} qkv_max_abs_diff={qkv_max_abs_diff:.9} z_max_abs_diff={z_max_abs_diff:.9} a_max_abs_diff={a_max_abs_diff:.9} b_max_abs_diff={b_max_abs_diff:.9} qkv_preview={} verified=true",
+        path,
+        layer_index,
+        qkv_tensor,
+        z_tensor,
+        a_tensor,
+        b_tensor,
+        prompt_token_ids.len(),
+        hidden,
+        qkv_matrix.rows,
+        z_matrix.rows,
+        a_matrix.rows,
+        b_matrix.rows,
+        input_elements,
+        output_elements,
+        prompt_token_ids.len(),
+        info.backend,
+        device_index,
+        info.name,
+        measured_repeats,
+        wall_ms,
+        wall_ms_min,
+        wall_ms_max,
+        tps(prompt_token_ids.len(), wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        tps(output_elements, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        format_f32_preview(&qkv_output[..preview_len]),
+    ))
+}
+
 fn current_git_commit() -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -30048,6 +30596,9 @@ fn print_help() {
     );
     eprintln!(
         "package-prefill-aq4-matvec-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
+    );
+    eprintln!(
+        "package-linear-attn-proj-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
     );
     eprintln!(
         "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"
