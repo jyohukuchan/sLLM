@@ -950,7 +950,7 @@ extern "C" __global__ void ullm_aq4_row_f32_kernel(
         const std::string &arch) {
         return aq4_fused_rows_per_block_preamble(
                    arch,
-                   8u,
+                   4u,
                    2u,
                    "ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB") +
                aq4_matvec_qkv_z_gate_beta_kernel_source();
@@ -6711,7 +6711,7 @@ bool aq4_matvec_qkv_z_gate_beta_f32_hip_kernel(
     const Aq4MatvecLaunchConfig launch_config =
         aq4_matvec_launch_config_for_fused_kernel(
             device_id,
-            8u,
+            4u,
             2u,
             "ULLM_AQ4_MATVEC_QKV_Z_GATE_BETA_RPB");
     const size_t max_size = std::numeric_limits<size_t>::max();
