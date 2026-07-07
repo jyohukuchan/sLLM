@@ -28,6 +28,30 @@
 6. 512 tokenを超える複数patternの結果から、causal attention、cached prefix attention、projection/MLP batchのどこを次に直すべきかを決める。
 7. uLLM側でR9700のprefill/decodeが比較可能な速度になった後、vLLM baselineを同じworkload gridで測る。
 
+## 2026-07-08 cached prefix FP8 KV cache note
+
+前回の要点:
+
+- cached prefix prefillは、既存KV cache長 `L` と新規chunk長 `M` を分けて測る必要がある。
+- 現行のcached-prefix componentはF32 K/V cacheで速度を測っていた。
+- SQ候補評価ではKV cache byte量とprefill tok/sを同時に見る必要がある。
+
+今回の変更点:
+
+- `runtime-cached-prefix-attn-smoke` に `kv_cache_dtype=fp8_e4m3|f32` を追加し、既定値を `fp8_e4m3` にした。
+- runtime C APIとして `ullm_runtime_cached_prefix_attn_fp8_e4m3` を追加した。
+- FP8 K/V cacheはper-tensor scale付きE4M3 byte列として保持し、QとoutputはF32のままにした。
+- R9700で `L={4096,16384,65536}`、`M={16,128,512}` のcached prefix prefillをFP8/F32同一buildで比較した。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c4-fp8-e4m3-kv-cache-v1.md` に保存した。
+- FP8はK/V cache byteをF32比 `25%` にできたが、現kernelでは速度が一様には改善しない。`L=16384` では `1.10-1.29x`、`L=4096` では `0.90-0.93x`、`L=65536` では `0.49-0.58x` だった。
+
+次の行動:
+
+1. package decode state / paged decodeのK/V cacheはまだF32なので、必要なら別タスクでFP8化する。
+2. 長いprefixでFP8が遅い原因は、FP8復号がscore/value accumulation内で繰り返されることだと考える。
+3. cached prefix attentionは、decoded K/V tileの再利用、score再計算削減、FlashAttention系のtilingを次の最適化候補にする。
+4. SQ候補評価では、このv1 FP8 cached-prefix結果を「byte削減は確認済み、速度はkernel構造依存」という基準線として扱う。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。

@@ -551,6 +551,22 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_cached_prefix_attn_fp8_e4m3(
+        q_buffer: *const RawRuntimeBuffer,
+        k_buffer: *const RawRuntimeBuffer,
+        v_buffer: *const RawRuntimeBuffer,
+        cached_prefix_len: usize,
+        new_tokens: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        k_scale: f32,
+        v_scale: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_paged_decode_attn_f32(
         q: *const RawRuntimeBuffer,
         k_cache: *const RawRuntimeBuffer,
@@ -3475,6 +3491,121 @@ pub fn cached_prefix_attn_f32(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn cached_prefix_attn_fp8_e4m3(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    cached_prefix_len: usize,
+    new_tokens: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    k_scale: f32,
+    v_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if new_tokens == 0 {
+        return Err(
+            "fp8 e4m3 cached prefix attention new_tokens must be greater than zero".to_string(),
+        );
+    }
+    if q_heads == 0 {
+        return Err(
+            "fp8 e4m3 cached prefix attention q_heads must be greater than zero".to_string(),
+        );
+    }
+    if kv_heads == 0 {
+        return Err(
+            "fp8 e4m3 cached prefix attention kv_heads must be greater than zero".to_string(),
+        );
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err(
+            "fp8 e4m3 cached prefix attention q_heads must be a multiple of kv_heads".to_string(),
+        );
+    }
+    if head_dim == 0 {
+        return Err(
+            "fp8 e4m3 cached prefix attention head_dim must be greater than zero".to_string(),
+        );
+    }
+    if value_dim == 0 {
+        return Err(
+            "fp8 e4m3 cached prefix attention value_dim must be greater than zero".to_string(),
+        );
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "fp8 e4m3 cached prefix attention softmax scale must be finite and greater than zero"
+                .to_string(),
+        );
+    }
+    if !k_scale.is_finite() || k_scale <= 0.0 || !v_scale.is_finite() || v_scale <= 0.0 {
+        return Err(
+            "fp8 e4m3 cached prefix attention scales must be finite and greater than zero"
+                .to_string(),
+        );
+    }
+
+    let total_context = cached_prefix_len
+        .checked_add(new_tokens)
+        .ok_or_else(|| "fp8 e4m3 cached prefix attention total context overflows".to_string())?;
+    let q_head_sequence = new_tokens.checked_mul(q_heads).ok_or_else(|| {
+        "fp8 e4m3 cached prefix attention q head-sequence count overflows".to_string()
+    })?;
+    let q_elements = q_head_sequence
+        .checked_mul(head_dim)
+        .ok_or_else(|| "fp8 e4m3 cached prefix attention q element count overflows".to_string())?;
+    let kv_head_context = total_context.checked_mul(kv_heads).ok_or_else(|| {
+        "fp8 e4m3 cached prefix attention kv head-context count overflows".to_string()
+    })?;
+    let k_elements = kv_head_context
+        .checked_mul(head_dim)
+        .ok_or_else(|| "fp8 e4m3 cached prefix attention k element count overflows".to_string())?;
+    let v_elements = kv_head_context
+        .checked_mul(value_dim)
+        .ok_or_else(|| "fp8 e4m3 cached prefix attention v element count overflows".to_string())?;
+    let output_elements = q_head_sequence.checked_mul(value_dim).ok_or_else(|| {
+        "fp8 e4m3 cached prefix attention output element count overflows".to_string()
+    })?;
+
+    let q_bytes = q_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "fp8 e4m3 cached prefix attention q byte size overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "fp8 e4m3 cached prefix attention output byte size overflows".to_string())?;
+
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, k_elements, k_cache.size()?)?;
+    check_copy_range(0, v_elements, v_cache.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_cached_prefix_attn_fp8_e4m3(
+            q.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            k_scale,
+            v_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 pub fn paged_decode_attn_f32(
     q: &RuntimeBuffer,
     k_cache: &RuntimeBuffer,
@@ -5969,6 +6100,84 @@ mod tests {
             head_dim,
             value_dim,
             softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_cached_prefix_attn_fp8_e4m3_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cached_prefix_len = 2_usize;
+        let new_tokens = 3_usize;
+        let total_context = cached_prefix_len + new_tokens;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..new_tokens * q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..total_context * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..total_context * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let (k_fp8, k_scale, k_expected) = fp8_e4m3_quantize(&k_values);
+        let (v_fp8, v_scale, v_expected) = fp8_e4m3_quantize(&v_values);
+        let expected = expected_cached_prefix_attn(
+            &q_values,
+            &k_expected,
+            &v_expected,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k = context.alloc_buffer(k_fp8.len()).unwrap();
+        let mut v = context.alloc_buffer(v_fp8.len()).unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k.copy_from_host(0, &k_fp8, Some(&mut stream)).unwrap();
+        v.copy_from_host(0, &v_fp8, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        cached_prefix_attn_fp8_e4m3(
+            &q,
+            &k,
+            &v,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            k_scale,
+            v_scale,
             &mut output,
             Some(&mut stream),
         )
@@ -10027,6 +10236,87 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_cached_prefix_attn_fp8_e4m3_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cached_prefix_len = 2_usize;
+        let new_tokens = 3_usize;
+        let total_context = cached_prefix_len + new_tokens;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..new_tokens * q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..total_context * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..total_context * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let (k_fp8, k_scale, k_expected) = fp8_e4m3_quantize(&k_values);
+        let (v_fp8, v_scale, v_expected) = fp8_e4m3_quantize(&v_values);
+        let expected = expected_cached_prefix_attn(
+            &q_values,
+            &k_expected,
+            &v_expected,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k = context.alloc_buffer(k_fp8.len()).unwrap();
+        let mut v = context.alloc_buffer(v_fp8.len()).unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k.copy_from_host(0, &k_fp8, Some(&mut stream)).unwrap();
+        v.copy_from_host(0, &v_fp8, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        cached_prefix_attn_fp8_e4m3(
+            &q,
+            &k,
+            &v,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            k_scale,
+            v_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-4);
+    }
+
+    #[test]
     fn first_hip_paged_decode_attn_f32_computes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -10775,6 +11065,63 @@ mod tests {
             bytes.extend_from_slice(&bf16.to_le_bytes());
         }
         bytes
+    }
+
+    fn fp8_e4m3_to_f32_unscaled(value: u8) -> f32 {
+        let sign = value >> 7;
+        let exponent = (value >> 3) & 0x0f;
+        let mantissa = value & 0x07;
+        let magnitude = if exponent == 0 {
+            f32::from(mantissa) * 0.001953125
+        } else {
+            (1.0 + f32::from(mantissa) * 0.125) * 2.0_f32.powi(i32::from(exponent) - 7)
+        };
+        if sign == 0 { magnitude } else { -magnitude }
+    }
+
+    fn fp8_e4m3_encode_scaled(value: f32, scale: f32) -> u8 {
+        if value == 0.0 || !value.is_finite() {
+            return 0;
+        }
+        let sign: u8 = if value.is_sign_negative() { 0x80 } else { 0x00 };
+        let magnitude = (value.abs() / scale).min(240.0);
+        if magnitude < 0.001953125 {
+            return 0;
+        }
+        if magnitude < 0.015625 {
+            let mantissa = (magnitude / 0.001953125).round().clamp(0.0, 7.0) as u8;
+            if mantissa == 0 {
+                return 0;
+            }
+            return sign | mantissa;
+        }
+        let mut exponent = magnitude.log2().floor() as i32;
+        let mut mantissa = ((magnitude / 2.0_f32.powi(exponent) - 1.0) * 8.0).round() as i32;
+        if mantissa == 8 {
+            exponent += 1;
+            mantissa = 0;
+        }
+        if exponent > 7 {
+            return sign | 0x77;
+        }
+        let biased_exponent = (exponent + 7).clamp(1, 14) as u8;
+        sign | (biased_exponent << 3) | (mantissa.clamp(0, 7) as u8)
+    }
+
+    fn fp8_e4m3_quantize(values: &[f32]) -> (Vec<u8>, f32, Vec<f32>) {
+        let max_abs = values.iter().copied().map(f32::abs).fold(0.0_f32, f32::max);
+        let scale = if max_abs == 0.0 { 1.0 } else { max_abs / 240.0 };
+        let encoded = values
+            .iter()
+            .copied()
+            .map(|value| fp8_e4m3_encode_scaled(value, scale))
+            .collect::<Vec<_>>();
+        let decoded = encoded
+            .iter()
+            .copied()
+            .map(|value| fp8_e4m3_to_f32_unscaled(value) * scale)
+            .collect::<Vec<_>>();
+        (encoded, scale, decoded)
     }
 
     fn le_bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {

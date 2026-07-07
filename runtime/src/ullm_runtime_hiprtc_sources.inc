@@ -3759,6 +3759,64 @@ extern "C" __global__ void ullm_cached_prefix_attn_f32_kernel(
 )";
     }
 
+    static void replace_all_source_text(
+        std::string *source,
+        const std::string &from,
+        const std::string &to) {
+        if (source == nullptr || from.empty()) {
+            return;
+        }
+        size_t pos = 0;
+        while ((pos = source->find(from, pos)) != std::string::npos) {
+            source->replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    }
+
+    static std::string cached_prefix_attn_fp8_e4m3_kernel_source() {
+        std::string source = R"(
+__device__ float ullm_fp8_e4m3_to_f32(unsigned char value) {
+    const unsigned int sign = static_cast<unsigned int>(value) >> 7;
+    const unsigned int exponent = (static_cast<unsigned int>(value) >> 3) & 0x0fu;
+    const unsigned int mantissa = static_cast<unsigned int>(value) & 0x07u;
+    if (exponent == 0u) {
+        const float magnitude = static_cast<float>(mantissa) * 0.001953125f;
+        return sign == 0u ? magnitude : -magnitude;
+    }
+    const unsigned int fp32_bits = (sign << 31) | ((exponent + 120u) << 23) | (mantissa << 20);
+    return __uint_as_float(fp32_bits);
+}
+)";
+        source += cached_prefix_attn_kernel_source();
+        replace_all_source_text(
+            &source,
+            "ullm_cached_prefix_attn_f32_kernel",
+            "ullm_cached_prefix_attn_fp8_e4m3_kernel");
+        replace_all_source_text(
+            &source,
+            "    const float *k_cache,\n"
+            "    const float *v_cache,",
+            "    const unsigned char *k_cache,\n"
+            "    const unsigned char *v_cache,");
+        replace_all_source_text(
+            &source,
+            "    float softmax_scale,\n"
+            "    float *output)",
+            "    float softmax_scale,\n"
+            "    float k_scale,\n"
+            "    float v_scale,\n"
+            "    float *output)");
+        replace_all_source_text(
+            &source,
+            "k_cache[k_base + dim]",
+            "(ullm_fp8_e4m3_to_f32(k_cache[k_base + dim]) * k_scale)");
+        replace_all_source_text(
+            &source,
+            "v_cache[v_index]",
+            "(ullm_fp8_e4m3_to_f32(v_cache[v_index]) * v_scale)");
+        return source;
+    }
+
     static std::string paged_decode_attn_kernel_source_for_arch(const std::string &arch) {
         (void)arch;
         std::string preamble;
