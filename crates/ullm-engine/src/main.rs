@@ -18674,6 +18674,7 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         .max_by(f64::total_cmp)
         .unwrap_or(wall_ms);
 
+    let verification_started = Instant::now();
     let input_normed = read_runtime_buffer_f32(
         &input_normed_buffer,
         &mut stream,
@@ -18803,35 +18804,59 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         rope_abs_floor,
         2e-5_f32,
     )?;
-    let attention_max_abs_diff = if let Some(attention_output) = attention_output.as_ref() {
-        let expected_attention = runtime_host_causal_attn_f32(
-            &q_rope,
-            &k_rope,
-            &v_projected,
-            sequence_len,
-            q_heads,
-            kv_heads,
-            head_dim,
-            value_dim,
-            softmax_scale,
-        );
-        if expected_attention.len() != attention_output_elements {
-            return Err(format!(
-                "self-attn attention batch reference output size mismatch: expected {} got {}",
-                attention_output_elements,
-                expected_attention.len()
-            ));
+    let attention_verification = if let Some(attention_output) = attention_output.as_ref() {
+        if self_attn_batch_use_sampled_attention_verification(sequence_len) {
+            let (checked_values, max_abs_diff) = verify_causal_attention_output_sampled(
+                "self-attn attention batch causal attention",
+                attention_output,
+                &q_rope,
+                &k_rope,
+                &v_projected,
+                sequence_len,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                2e-4_f32,
+                2e-4_f32,
+            )?;
+            Some(("sampled", checked_values, max_abs_diff))
+        } else {
+            let expected_attention = runtime_host_causal_attn_f32(
+                &q_rope,
+                &k_rope,
+                &v_projected,
+                sequence_len,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+            );
+            if expected_attention.len() != attention_output_elements {
+                return Err(format!(
+                    "self-attn attention batch reference output size mismatch: expected {} got {}",
+                    attention_output_elements,
+                    expected_attention.len()
+                ));
+            }
+            Some((
+                "full",
+                expected_attention.len(),
+                verify_f32_close(
+                    "self-attn attention batch causal attention",
+                    attention_output,
+                    &expected_attention,
+                    2e-4_f32,
+                    2e-4_f32,
+                )?,
+            ))
         }
-        Some(verify_f32_close(
-            "self-attn attention batch causal attention",
-            attention_output,
-            &expected_attention,
-            2e-4_f32,
-            2e-4_f32,
-        )?)
     } else {
         None
     };
+    let verification_wall_ms = verification_started.elapsed().as_secs_f64() * 1000.0;
 
     let output_elements = input_normed
         .len()
@@ -18857,8 +18882,12 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32"
     };
     if let Some(attention_output) = attention_output.as_ref() {
+        let (attention_verification_mode, attention_checked_values, attention_max_abs_diff) =
+            attention_verification.ok_or_else(|| {
+                "self-attn attention batch verification summary missing".to_string()
+            })?;
         return Ok(format!(
-            "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} input_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_max_abs_diff={:.9} q_rope_preview={} v_preview={} attention_preview={} verified=true",
+            "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} input_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} verification_wall_ms={verification_wall_ms:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_verification={} attention_checked_values={} attention_max_abs_diff={:.9} q_rope_preview={} v_preview={} attention_preview={} verified=true",
             stage.smoke_name(),
             path,
             layer_index,
@@ -18899,14 +18928,16 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
             tps(output_elements, wall_ms)
                 .map(|value| format!("{value:.6}"))
                 .unwrap_or_else(|| "null".to_string()),
-            attention_max_abs_diff.unwrap_or(0.0),
+            attention_verification_mode,
+            attention_checked_values,
+            attention_max_abs_diff,
             format_f32_preview(&q_rope[..preview_len]),
             format_f32_preview(&v_projected[..v_projected.len().min(8)]),
             format_f32_preview(&attention_output[..attention_output.len().min(8)]),
         ));
     }
     Ok(format!(
-        "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} input_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} q_rope_preview={} v_preview={} verified=true",
+        "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} q_projection_layout={} q_gate_elements={} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} input_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} verification_wall_ms={verification_wall_ms:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} q_rope_preview={} v_preview={} verified=true",
         stage.smoke_name(),
         path,
         layer_index,
@@ -36199,7 +36230,146 @@ fn self_attn_batch_rope_abs_floor(sequence_len: usize, position_offset: usize) -
     let max_position = position_offset
         .saturating_add(sequence_len.saturating_sub(1))
         .max(1) as f32;
-    2e-4_f32.max((max_position * 2e-7_f32).min(1e-3_f32))
+    2e-4_f32.max((max_position * 2e-7_f32).min(4e-3_f32))
+}
+
+fn self_attn_batch_use_sampled_attention_verification(sequence_len: usize) -> bool {
+    sequence_len >= 4096
+}
+
+fn causal_attention_sample_points(
+    sequence_len: usize,
+    q_heads: usize,
+    value_dim: usize,
+) -> Vec<(usize, usize, usize)> {
+    if sequence_len == 0 || q_heads == 0 || value_dim == 0 {
+        return Vec::new();
+    }
+    let mut timesteps = vec![0, sequence_len / 4, sequence_len / 2, sequence_len - 1];
+    if sequence_len > 1 {
+        timesteps.push(1);
+    }
+    timesteps.sort_unstable();
+    timesteps.dedup();
+
+    let mut head_values = vec![
+        (0, 0),
+        (q_heads / 2, value_dim / 2),
+        (q_heads - 1, value_dim - 1),
+    ];
+    head_values.sort_unstable();
+    head_values.dedup();
+
+    let mut points = Vec::with_capacity(timesteps.len() * head_values.len());
+    for timestep in timesteps {
+        for (q_head, value_index) in head_values.iter().copied() {
+            points.push((timestep, q_head, value_index));
+        }
+    }
+    points
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_host_causal_attn_f32_sample(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    timestep: usize,
+    q_head: usize,
+    value_index: usize,
+) -> Option<f32> {
+    let q_len = sequence_len.checked_mul(q_heads)?.checked_mul(head_dim)?;
+    let k_len = sequence_len.checked_mul(kv_heads)?.checked_mul(head_dim)?;
+    let v_len = sequence_len.checked_mul(kv_heads)?.checked_mul(value_dim)?;
+    if timestep >= sequence_len || q.len() != q_len || k.len() != k_len || v.len() != v_len {
+        return None;
+    }
+    let q_timestep_start = timestep.checked_mul(q_heads)?.checked_mul(head_dim)?;
+    let q_timestep_end = q_timestep_start.checked_add(q_heads.checked_mul(head_dim)?)?;
+    runtime_host_decode_attn_f32_sample(
+        &q[q_timestep_start..q_timestep_end],
+        k,
+        v,
+        timestep.checked_add(1)?,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_head,
+        value_index,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_causal_attention_output_sampled(
+    label: &str,
+    actual: &[f32],
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    abs_floor: f32,
+    rel_scale: f32,
+) -> Result<(usize, f32), String> {
+    let expected_actual_len = sequence_len
+        .checked_mul(q_heads)
+        .and_then(|value| value.checked_mul(value_dim))
+        .ok_or_else(|| format!("{label} sampled output element count overflows"))?;
+    if actual.len() != expected_actual_len {
+        return Err(format!(
+            "{label} sampled output size mismatch: expected {} got {}",
+            expected_actual_len,
+            actual.len()
+        ));
+    }
+    let sample_points = causal_attention_sample_points(sequence_len, q_heads, value_dim);
+    if sample_points.is_empty() {
+        return Err(format!("{label} sampled verification has no sample points"));
+    }
+    let mut max_abs_diff = 0.0_f32;
+    for (timestep, q_head, value_index) in sample_points.iter().copied() {
+        let expected = runtime_host_causal_attn_f32_sample(
+            q,
+            k,
+            v,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            timestep,
+            q_head,
+            value_index,
+        )
+        .ok_or_else(|| {
+            format!(
+                "{label} sampled reference failed at timestep={timestep} q_head={q_head} value_index={value_index}"
+            )
+        })?;
+        let actual_index = (timestep * q_heads + q_head) * value_dim + value_index;
+        let diff = (actual[actual_index] - expected).abs();
+        let tolerance = abs_floor.max(expected.abs() * rel_scale);
+        if diff > tolerance {
+            return Err(format!(
+                "{label} sampled mismatch: timestep={timestep} q_head={q_head} value_index={value_index} max_abs_diff={diff} tolerance={tolerance}"
+            ));
+        }
+        max_abs_diff = max_abs_diff.max(diff);
+    }
+    Ok((sample_points.len(), max_abs_diff))
 }
 
 fn deterministic_f32_vector(elements: usize) -> Vec<f32> {

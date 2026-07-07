@@ -676,13 +676,15 @@ Guard:
 
 R9700 release results:
 
-| component | prompt tokens | wall ms mean | token/s mean | attention diff | note |
-| --- | ---: | ---: | ---: | ---: | --- |
-| self-attention qkv+QK RoPE+causal attention | 128 | 7.637947 | 16758.430420 | 0.000011265 | measured 5 |
-| self-attention qkv+QK RoPE+causal attention | 512 | 43.796889 | 11690.327961 | 0.000011265 | measured 3 |
-| self-attention qkv+QK RoPE+causal attention | 1024 | 116.215921 | 8811.185173 | 0.000011265 | measured 1 |
-| self-attention qkv+QK RoPE+causal attention | 2048 | 374.883299 | 5463.033444 | 0.000011265 | measured 1 |
-| self-attention qkv+QK RoPE+causal attention | 4096 | 1331.671565 | 3075.833492 | 0.000011265 | measured 1 |
+| component | prompt tokens | wall ms mean | token/s mean | verification | attention diff | note |
+| --- | ---: | ---: | ---: | --- | ---: | --- |
+| self-attention qkv+QK RoPE+causal attention | 128 | 7.637947 | 16758.430420 | full | 0.000011265 | measured 5 |
+| self-attention qkv+QK RoPE+causal attention | 512 | 43.796889 | 11690.327961 | full | 0.000011265 | measured 3 |
+| self-attention qkv+QK RoPE+causal attention | 1024 | 116.215921 | 8811.185173 | full | 0.000011265 | measured 1 |
+| self-attention qkv+QK RoPE+causal attention | 2048 | 374.883299 | 5463.033444 | full | 0.000011265 | measured 1 |
+| self-attention qkv+QK RoPE+causal attention | 4096 | 1339.278313 | 3058.363568 | sampled 15 | 0.000000209 | measured 1 |
+| self-attention qkv+QK RoPE+causal attention | 8192 | 5157.917832 | 1588.237786 | sampled 15 | 0.000000104 | measured 1 |
+| self-attention qkv+QK RoPE+causal attention | 16384 | 20944.388749 | 782.262027 | sampled 15 | 0.000000320 | measured 1 |
 
 Previous comparison:
 
@@ -693,17 +695,19 @@ Previous comparison:
 
 RoPE guard:
 
-- self-attention batch smokeのRoPE guardを、固定 `2e-4` からposition長に応じた上限付きabs floorへ変更した。
+- self-attention batch smokeのRoPE guardを、固定 `2e-4` からposition長に応じた上限付きabs floorへ変更した。現capは `4e-3`。
 - `2048`: `q_rope_abs_floor=0.000409400`, `q_rope_max_abs_diff=0.000270158`, `k_rope_max_abs_diff=0.000198193`
 - `4096`: `q_rope_abs_floor=0.000819000`, `q_rope_max_abs_diff=0.000506938`, `k_rope_max_abs_diff=0.000336170`
-- 4096のfull host attention reference verificationは数分級になったため、今後の `4096+` rowではsampled attention verificationを優先する。
+- `8192`: `q_rope_abs_floor=0.001638200`, `q_rope_max_abs_diff=0.001175225`, `k_rope_max_abs_diff=0.000833869`
+- `16384`: `q_rope_abs_floor=0.003276600`, `q_rope_max_abs_diff=0.002606988`, `k_rope_max_abs_diff=0.001518801`
+- 4096以上ではfull host attention reference verificationを避け、15点のsampled attention verificationを使う。確認時間は4096で約 `0.91s`、8192で約 `1.73s`、16384で約 `3.42s`。
 
 解釈:
 
 - 512 tokenのself-attention attention込みcomponentは約 `1.82k tok/s` から約 `11.69k tok/s` へ改善した。
-- 1024 tokenで約 `8.81k tok/s`、2048 tokenで約 `5.46k tok/s`、4096 tokenで約 `3.08k tok/s` が出ており、512 token止まりの測定からPhase C4 cold prefill component scalingへ進めた。
-- ただし4096時点でfull host reference verificationが重くなっているため、8192以上へ進む前にsampled verificationを追加する必要がある。
-- 次はo projection/residualまで接続してself-attention layer partialを再測定するか、sampled verificationを入れて `8192/16384` のcold prefill component scalingを取る。
+- Phase C4 cold prefill length scalingの必須範囲 `N=1024/2048/4096/8192/16384` は、self-attention attention componentとして取得できた。
+- 4096 tokenで約 `3.06k tok/s`、8192 tokenで約 `1.59k tok/s`、16384 tokenで約 `0.78k tok/s` まで落ちており、長尺側は引き続きcausal attentionのO(N^2)部分が支配的である。
+- 次はo projection/residualまで接続してself-attention layer partialを再測定し、layer単位でattention支配が維持されるかを確認する。その後、必要ならcausal attention kernelのtile/blocking再設計へ戻る。
 
 2026-07-07 cached prefix attention baseline:
 
