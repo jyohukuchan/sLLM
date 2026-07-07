@@ -657,6 +657,42 @@ Guard:
 - SQ候補のprefill評価へ進む前に、self-attention prefill attention kernelをtiled/blocked化して、長いpromptでのO(N^2)部分を現実的な速度に近づける必要がある。
 - 次はo projection/residualへ広げる前に、causal attention prefill kernel自体のcomponent benchmarkと最小限のtiling方針を固める。
 
+2026-07-07 causal attention source-shared v1:
+
+- cached prefix source-shared v2と同じ方針を `ullm_causal_attn_f32_kernel` に反映した。
+- 1 block = 1 token/headとし、各source timestepのQK dotとsoftmax weightをblock内で1回計算してvalue次元のthreadへ共有する。
+- `package-self-attn-attention-batch-smoke` で、Qwen3.5-9B package layer 3の `input RMSNorm -> q/k/v AQ4 batch projection -> qwen35_qk_norm_rope_batch_f32 -> causal_attn_f32` を再測定した。
+- 保存先:
+  - `benchmarks/results/2026-07-07/runtime-causal-attn-source-shared/phase-c4-self-attn-attention-source-shared-v1.md`
+
+R9700 release results:
+
+| component | prompt tokens | wall ms mean | token/s mean | attention diff | note |
+| --- | ---: | ---: | ---: | ---: | --- |
+| self-attention qkv+QK RoPE+causal attention | 128 | 7.637947 | 16758.430420 | 0.000011265 | measured 5 |
+| self-attention qkv+QK RoPE+causal attention | 512 | 43.796889 | 11690.327961 | 0.000011265 | measured 3 |
+| self-attention qkv+QK RoPE+causal attention | 1024 | 116.215921 | 8811.185173 | 0.000011265 | measured 1 |
+
+Previous comparison:
+
+| prompt tokens | old wall ms | new wall ms | old token/s | new token/s | speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 24.605704 | 7.637947 | 5202.045750 | 16758.430420 | 3.222x |
+| 512 | 281.601274 | 43.796889 | 1818.173590 | 11690.327961 | 6.430x |
+
+Guard note:
+
+- `prompt_tokens=2048` はattention verification前のQ RoPE guardで停止した。
+- failure: `q_rope_max_abs_diff=0.00022828579`, current tolerance `0.0002`
+- これはcausal attention source-shared kernelの不一致ではない。`2048+` のcold prefill component rowを採用する前に、長尺RoPE guard toleranceまたはreference precisionを見直す必要がある。
+
+解釈:
+
+- 512 tokenのself-attention attention込みcomponentは約 `1.82k tok/s` から約 `11.69k tok/s` へ改善した。
+- 1024 tokenでも約 `8.81k tok/s` が出ており、512 token止まりの測定から一段進んだ。
+- ただしPhase C4の必須gridである `2048+` はまだguard条件が未整理であり、cold prefill scalingの完了とは扱わない。
+- 次は、長尺RoPE guardの扱いを整理した上で `2048/4096` のcomponent scalingを取るか、o projection/residualまで接続してself-attention layer partialの速度を見る。
+
 2026-07-07 cached prefix attention baseline:
 
 - `runtime-cached-prefix-attn-smoke` を追加した。

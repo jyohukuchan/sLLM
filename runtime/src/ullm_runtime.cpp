@@ -4012,46 +4012,113 @@ extern "C" __global__ void ullm_causal_attn_f32_kernel(
     unsigned long long value_dim,
     float softmax_scale,
     float *output) {
-    const unsigned long long index =
-        static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
-    const unsigned long long elements = sequence_len * q_heads * value_dim;
-    if (index >= elements) {
+    const unsigned long long q_head_index = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned long long q_head_elements = sequence_len * q_heads;
+    if (q_head_index >= q_head_elements) {
         return;
     }
-    const unsigned long long value = index % value_dim;
-    const unsigned long long q_head_index = index / value_dim;
     const unsigned long long q_head = q_head_index % q_heads;
     const unsigned long long timestep = q_head_index / q_heads;
     const unsigned long long q_per_kv = q_heads / kv_heads;
     const unsigned long long kv_head = q_head / q_per_kv;
     const unsigned long long q_base = (timestep * q_heads + q_head) * head_dim;
+    const unsigned int tid = threadIdx.x;
+
+    __shared__ float reduce[256];
+    __shared__ float shared_score;
+    __shared__ float shared_weight;
+    __shared__ float shared_max_score;
+    __shared__ float shared_denominator;
 
     float max_score = -3.4028234663852886e38f;
     for (unsigned long long source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
         const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
-        float score = 0.0f;
-        for (unsigned long long dim = 0; dim < head_dim; ++dim) {
-            score += q[q_base + dim] * k[k_base + dim];
+        float partial = 0.0f;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            partial += q[q_base + dim] * k[k_base + dim];
         }
-        score *= softmax_scale;
+        reduce[tid] = partial;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] += reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            shared_score = reduce[0] * softmax_scale;
+        }
+        __syncthreads();
+        const float score = shared_score;
         max_score = score > max_score ? score : max_score;
     }
+    if (tid == 0) {
+        shared_max_score = max_score;
+    }
+    __syncthreads();
+    max_score = shared_max_score;
 
     float denominator = 0.0f;
-    float weighted = 0.0f;
     for (unsigned long long source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
         const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
-        float score = 0.0f;
-        for (unsigned long long dim = 0; dim < head_dim; ++dim) {
-            score += q[q_base + dim] * k[k_base + dim];
+        float partial = 0.0f;
+        for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+            partial += q[q_base + dim] * k[k_base + dim];
         }
-        const float weight = expf(score * softmax_scale - max_score);
-        denominator += weight;
-        const unsigned long long v_index =
-            (source_timestep * kv_heads + kv_head) * value_dim + value;
-        weighted += weight * v[v_index];
+        reduce[tid] = partial;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] += reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            shared_weight = expf(reduce[0] * softmax_scale - max_score);
+        }
+        __syncthreads();
+        denominator += shared_weight;
     }
-    output[index] = weighted / denominator;
+    if (tid == 0) {
+        shared_denominator = denominator;
+    }
+    __syncthreads();
+    denominator = shared_denominator;
+
+    const unsigned long long output_base = q_head_index * value_dim;
+    for (unsigned long long value_base = 0; value_base < value_dim; value_base += blockDim.x) {
+        const unsigned long long value = value_base + tid;
+        const bool value_active = value < value_dim;
+        float weighted = 0.0f;
+        for (unsigned long long source_timestep = 0; source_timestep <= timestep; ++source_timestep) {
+            const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+            float partial = 0.0f;
+            for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+                partial += q[q_base + dim] * k[k_base + dim];
+            }
+            reduce[tid] = partial;
+            __syncthreads();
+            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                shared_weight = expf(reduce[0] * softmax_scale - max_score);
+            }
+            __syncthreads();
+            const float weight = shared_weight;
+            if (value_active) {
+                const unsigned long long v_index =
+                    (source_timestep * kv_heads + kv_head) * value_dim + value;
+                weighted += weight * v[v_index];
+            }
+        }
+        if (value_active) {
+            output[output_base + value] = weighted / denominator;
+        }
+    }
 }
 )";
     }
@@ -13091,11 +13158,10 @@ bool causal_attn_f32_hip_kernel(
     }
 
     constexpr unsigned int block_size = 256;
-    const size_t output_elements = sequence_len * q_heads * value_dim;
-    const size_t grid_size = (output_elements + block_size - 1) / block_size;
+    const size_t grid_size = sequence_len * q_heads;
     if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
         if (error != nullptr) {
-            *error = "causal attention output element count exceeds HIP grid limit";
+            *error = "causal attention q head-sequence count exceeds HIP grid limit";
         }
         return false;
     }
