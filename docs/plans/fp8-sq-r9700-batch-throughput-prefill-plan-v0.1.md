@@ -366,6 +366,35 @@ R9700 release代表値:
 - `B` を増やしてもsuperlinearなthroughput増加は出ていない。今回の改善はbatch幅の効率化ではなく、query/headごとの重複score計算削減である。
 - 次のkernel最適化は、neighboring timestep/head間でK/Vを再利用するtiled/block causal attention、またはprojection/MLP側の残コスト削減を比較して選ぶ。
 
+### Phase C4 current status: cached prefix online softmax v1
+
+`ullm_cached_prefix_attn_f32_kernel` にonline softmax pathを追加した。
+通常shapeでは `value_dim=256` かつ `blockDim.x=256` なので、このpathに入り、cached prefix attentionでもq/k score dot-productを3passから1passへ減らす。
+`value_dim > blockDim.x` の場合は既存の3pass pathをfallbackとして残す。
+
+保存先:
+
+- `benchmarks/results/2026-07-07/runtime-cached-prefix-sweep/phase-c4-cached-prefix-online-softmax-v1.md`
+
+R9700 release代表値:
+
+| L | M | old mean ms | new mean ms | speedup | new input tok/s |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 4096 | 16 | 55.839281 | 4.193457 | 13.316x | 3815.467763 |
+| 4096 | 128 | 435.542576 | 30.812317 | 14.135x | 4154.182887 |
+| 16384 | 16 | 303.245627 | 19.256383 | 15.748x | 830.893320 |
+| 16384 | 128 | 1748.356354 | 170.666624 | 10.244x | 750.000188 |
+| 65536 | 16 | 1738.452511 | 78.523667 | 22.139x | 203.760224 |
+| 65536 | 128 | 7959.297024 | 673.121102 | 11.824x | 190.158947 |
+
+解釈:
+
+- cached prefix componentは前回のshared-score kernel比で `10.2-22.1x` 改善した。
+- `M=16/128` では `12.3-17.3M pair/s` 程度になり、cold causal attention online-softmax componentに近い範囲へ入った。
+- `M=1` はdecode-like boundaryで並列性が少なく、pair/sはまだ低い。
+- `L=65536, M=128` が `673.121102 ms` まで短縮されたため、SQ候補比較用の長prefix代表runとして繰り返し測りやすくなった。
+- 次のcached prefix最適化は、score再計算ではなく、request/batch方向、`M=1`境界、K/V read coalescingを優先する。
+
 ### Phase D: sustained decode
 
 | concurrent requests | prompt tokens/request | generated tokens/request | purpose |

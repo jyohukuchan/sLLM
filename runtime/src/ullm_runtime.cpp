@@ -4448,6 +4448,52 @@ extern "C" __global__ void ullm_cached_prefix_attn_f32_kernel(
     __shared__ float shared_weight;
     __shared__ float shared_max_score;
     __shared__ float shared_denominator;
+    __shared__ float shared_prev_scale;
+
+    if (value_dim <= static_cast<unsigned long long>(blockDim.x)) {
+        const unsigned long long value = tid;
+        const bool value_active = value < value_dim;
+        float max_score = -3.4028234663852886e38f;
+        float denominator = 0.0f;
+        float weighted = 0.0f;
+        for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+            const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+            float partial = 0.0f;
+            for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+                partial += q[q_base + dim] * k_cache[k_base + dim];
+            }
+            reduce[tid] = partial;
+            __syncthreads();
+            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                const float score = reduce[0] * softmax_scale;
+                const float new_max_score = score > max_score ? score : max_score;
+                shared_prev_scale =
+                    max_score <= -3.4028234663852886e38f ? 0.0f : expf(max_score - new_max_score);
+                shared_weight = expf(score - new_max_score);
+                shared_score = new_max_score;
+            }
+            __syncthreads();
+            if (value_active) {
+                const unsigned long long v_index =
+                    (source_timestep * kv_heads + kv_head) * value_dim + value;
+                weighted = weighted * shared_prev_scale + shared_weight * v_cache[v_index];
+            }
+            denominator = denominator * shared_prev_scale + shared_weight;
+            max_score = shared_score;
+            __syncthreads();
+        }
+        if (value_active) {
+            const unsigned long long output_base = q_head_index * value_dim;
+            output[output_base + value] = weighted / denominator;
+        }
+        return;
+    }
 
     float max_score = -3.4028234663852886e38f;
     for (unsigned long long source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
