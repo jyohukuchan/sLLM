@@ -373,6 +373,14 @@ fn main() -> ExitCode {
             env::args().nth(6),
             env::args().nth(7),
         ),
+        Some("package-linear-attn-layer-batch-smoke") => package_linear_attn_layer_batch_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+        ),
         Some("package-layer-golden-smoke") => package_layer_golden_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -20481,6 +20489,1142 @@ fn package_linear_attn_mlp_batch_smoke_impl(
     ))
 }
 
+fn package_linear_attn_layer_batch_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-layer-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_linear_attn_layer_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        prompt_token_ids,
+        measured_repeats,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn package_linear_attn_layer_batch_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    prompt_token_ids: Vec<usize>,
+    measured_repeats: usize,
+) -> Result<String, String> {
+    if prompt_token_ids.is_empty() {
+        return Err("linear-attn layer batch smoke requires at least one token".to_string());
+    }
+    if package_decoder_layer_kind(path, layer_index)? != PackageDecoderLayerKind::LinearAttention {
+        return Err(format!(
+            "linear-attn layer batch smoke requires a linear attention layer, got layer {layer_index}"
+        ));
+    }
+
+    let sequence_len = prompt_token_ids.len();
+    let key_heads = 16_usize;
+    let value_heads = 32_usize;
+    let key_dim = 128_usize;
+    let value_dim = 128_usize;
+    let hidden = value_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "linear-attn layer batch hidden size overflows".to_string())?;
+    let q_elements = key_heads
+        .checked_mul(key_dim)
+        .ok_or_else(|| "linear-attn layer batch q element count overflows".to_string())?;
+    let channels = q_elements
+        .checked_add(q_elements)
+        .and_then(|value| value.checked_add(hidden))
+        .ok_or_else(|| "linear-attn layer batch qkv channel count overflows".to_string())?;
+    let q_scale = 1.0_f32 / (key_dim as f32).sqrt();
+    let qk_l2_norm = true;
+    let input_epsilon = 1e-6_f32;
+    let attention_post_epsilon = 1e-6_f32;
+    let mlp_epsilon = 1e-5_f32;
+
+    let (embedding_vocab, package_hidden) = package_embedding_shape(path)?;
+    if package_hidden != hidden {
+        return Err(format!(
+            "linear-attn layer batch hidden mismatch: package hidden={package_hidden} expected {hidden}"
+        ));
+    }
+    if let Some(token_id) = prompt_token_ids
+        .iter()
+        .copied()
+        .find(|token_id| *token_id >= embedding_vocab)
+    {
+        return Err(format!(
+            "linear-attn layer batch token id {token_id} is out of embedding range 0..{embedding_vocab}"
+        ));
+    }
+
+    let input_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
+    let qkv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
+    let z_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_z.weight");
+    let a_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_a.weight");
+    let b_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_b.weight");
+    let conv_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.conv1d.weight");
+    let a_log_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.A_log");
+    let dt_bias_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.dt_bias");
+    let norm_tensor = format!("model.language_model.layers.{layer_index}.linear_attn.norm.weight");
+    let out_tensor =
+        format!("model.language_model.layers.{layer_index}.linear_attn.out_proj.weight");
+    let post_norm_tensor =
+        format!("model.language_model.layers.{layer_index}.post_attention_layernorm.weight");
+    let gate_tensor = format!("model.language_model.layers.{layer_index}.mlp.gate_proj.weight");
+    let up_tensor = format!("model.language_model.layers.{layer_index}.mlp.up_proj.weight");
+    let down_tensor = format!("model.language_model.layers.{layer_index}.mlp.down_proj.weight");
+
+    let mut input_norm = read_named_passthrough_f32(path, &input_norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read input RMSNorm tensor: {err}"))?;
+    input_norm.values = effective_rmsnorm_weight_values(&input_norm_tensor, &input_norm.values);
+    if input_norm.values.len() != hidden {
+        return Err(format!(
+            "linear-attn layer batch input norm length {} does not match hidden {hidden}",
+            input_norm.values.len()
+        ));
+    }
+    let conv = read_named_passthrough_f32(path, &conv_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read conv1d tensor: {err}"))?;
+    if conv.shape.len() != 3 || conv.shape[1] != 1 {
+        return Err(format!(
+            "linear-attn layer batch conv1d tensor shape must be [channels,1,kernel], got {}",
+            format_u64_shape(&conv.shape)
+        ));
+    }
+    let conv_channels = usize::try_from(conv.shape[0])
+        .map_err(|_| "linear-attn layer batch conv channel count is too large".to_string())?;
+    let kernel_size = usize::try_from(conv.shape[2])
+        .map_err(|_| "linear-attn layer batch kernel size is too large".to_string())?;
+    if conv_channels != channels {
+        return Err(format!(
+            "linear-attn layer batch conv channels mismatch: got {conv_channels} expected {channels}"
+        ));
+    }
+    if kernel_size == 0 {
+        return Err("linear-attn layer batch kernel size must be greater than zero".to_string());
+    }
+    if conv.values.len() != channels * kernel_size {
+        return Err(format!(
+            "linear-attn layer batch conv weight element count mismatch: got {} expected {}",
+            conv.values.len(),
+            channels * kernel_size
+        ));
+    }
+    let a_log = read_named_passthrough_f32(path, &a_log_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read A_log tensor: {err}"))?;
+    let dt_bias = read_named_passthrough_f32(path, &dt_bias_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read dt_bias tensor: {err}"))?;
+    if a_log.values.len() != value_heads || dt_bias.values.len() != value_heads {
+        return Err(format!(
+            "linear-attn layer batch a_log/dt_bias length mismatch: a_log={} dt_bias={} expected {value_heads}",
+            a_log.values.len(),
+            dt_bias.values.len()
+        ));
+    }
+    let norm = read_named_passthrough_f32(path, &norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read linear attention norm tensor: {err}"))?;
+    if norm.values.len() != value_dim {
+        return Err(format!(
+            "linear-attn layer batch norm length {} does not match value_dim {value_dim}",
+            norm.values.len()
+        ));
+    }
+    let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)
+        .map_err(|err| format!("failed to read post RMSNorm tensor: {err}"))?;
+    post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
+    if post_norm.values.len() != hidden {
+        return Err(format!(
+            "linear-attn layer batch post norm length {} does not match hidden {hidden}",
+            post_norm.values.len()
+        ));
+    }
+
+    let embedding_rows =
+        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
+            .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
+    if embedding_rows.columns != hidden || embedding_rows.values.len() != sequence_len * hidden {
+        return Err(format!(
+            "linear-attn layer batch embedding shape mismatch: columns={} values={} prompt_tokens={} hidden={hidden}",
+            embedding_rows.columns,
+            embedding_rows.values.len(),
+            sequence_len
+        ));
+    }
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let mut registry = WeightRegistry::new();
+    let qkv_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &qkv_tensor,
+        chunk_bytes,
+    )?;
+    let z_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &z_tensor,
+        chunk_bytes,
+    )?;
+    let a_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &a_tensor,
+        chunk_bytes,
+    )?;
+    let b_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &b_tensor,
+        chunk_bytes,
+    )?;
+    let out_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &out_tensor,
+        chunk_bytes,
+    )?;
+    let gate_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &gate_tensor,
+        chunk_bytes,
+    )?;
+    let up_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &up_tensor,
+        chunk_bytes,
+    )?;
+    let down_matrix = PackageAq4ResidentMatvec::load(
+        &mut context,
+        &mut stream,
+        &mut registry,
+        path,
+        &down_tensor,
+        chunk_bytes,
+    )?;
+    if qkv_matrix.rows != channels || qkv_matrix.cols != hidden {
+        return Err(format!(
+            "linear-attn layer batch qkv matrix shape mismatch: rows={} cols={} expected rows={channels} cols={hidden}",
+            qkv_matrix.rows, qkv_matrix.cols
+        ));
+    }
+    if z_matrix.rows != hidden
+        || z_matrix.cols != hidden
+        || out_matrix.rows != hidden
+        || out_matrix.cols != hidden
+    {
+        return Err(format!(
+            "linear-attn layer batch z/out matrix shape mismatch: z=[{},{}] out=[{},{}] expected [{hidden},{hidden}]",
+            z_matrix.rows, z_matrix.cols, out_matrix.rows, out_matrix.cols
+        ));
+    }
+    if a_matrix.rows != value_heads
+        || b_matrix.rows != value_heads
+        || a_matrix.cols != hidden
+        || b_matrix.cols != hidden
+    {
+        return Err(format!(
+            "linear-attn layer batch a/b matrix shape mismatch: a=[{},{}] b=[{},{}] expected [{value_heads},{hidden}]",
+            a_matrix.rows, a_matrix.cols, b_matrix.rows, b_matrix.cols
+        ));
+    }
+    if gate_matrix.rows != up_matrix.rows
+        || gate_matrix.cols != up_matrix.cols
+        || gate_matrix.cols != hidden
+    {
+        return Err(format!(
+            "linear-attn layer batch gate/up shape mismatch: gate=[{},{}] up=[{},{}] hidden={hidden}",
+            gate_matrix.rows, gate_matrix.cols, up_matrix.rows, up_matrix.cols
+        ));
+    }
+    let intermediate = gate_matrix.rows;
+    if down_matrix.rows != hidden || down_matrix.cols != intermediate {
+        return Err(format!(
+            "linear-attn layer batch down shape mismatch: down=[{},{}] expected [{hidden},{intermediate}]",
+            down_matrix.rows, down_matrix.cols
+        ));
+    }
+
+    let sequence_elements = sequence_len
+        .checked_mul(hidden)
+        .ok_or_else(|| "linear-attn layer batch sequence element count overflows".to_string())?;
+    let qkv_output_elements = sequence_len
+        .checked_mul(channels)
+        .ok_or_else(|| "linear-attn layer batch qkv output element count overflows".to_string())?;
+    let q_output_elements = sequence_len
+        .checked_mul(q_elements)
+        .ok_or_else(|| "linear-attn layer batch q output element count overflows".to_string())?;
+    let gate_beta_elements = sequence_len
+        .checked_mul(value_heads)
+        .ok_or_else(|| "linear-attn layer batch gate/beta element count overflows".to_string())?;
+    let intermediate_elements = sequence_len.checked_mul(intermediate).ok_or_else(|| {
+        "linear-attn layer batch intermediate element count overflows".to_string()
+    })?;
+    let history_elements = channels.checked_mul(kernel_size).ok_or_else(|| {
+        "linear-attn layer batch conv history element count overflows".to_string()
+    })?;
+    let state_elements = value_heads
+        .checked_mul(key_dim)
+        .and_then(|value| value.checked_mul(value_dim))
+        .ok_or_else(|| "linear-attn layer batch state element count overflows".to_string())?;
+    let attention_post_segments = sequence_len
+        .checked_mul(value_heads)
+        .ok_or_else(|| "linear-attn layer batch post segment count overflows".to_string())?;
+
+    let mut input_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch input",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch input: {err}"))?;
+    let mut input_norm_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            input_norm.values.len(),
+            "linear-attn layer batch input norm weight",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn layer batch input norm weight: {err}")
+        })?;
+    let mut input_normed_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch input normed",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch input normed: {err}"))?;
+    let mut qkv_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            qkv_output_elements,
+            "linear-attn layer batch qkv output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch qkv: {err}"))?;
+    let mut z_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch z output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch z: {err}"))?;
+    let mut a_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            gate_beta_elements,
+            "linear-attn layer batch a output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch a: {err}"))?;
+    let mut b_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            gate_beta_elements,
+            "linear-attn layer batch b output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch b: {err}"))?;
+    let mut conv_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            conv.values.len(),
+            "linear-attn layer batch conv weight",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch conv weight: {err}"))?;
+    let mut conv_history_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            history_elements,
+            "linear-attn layer batch conv history",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch conv history: {err}"))?;
+    let mut conv_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            qkv_output_elements,
+            "linear-attn layer batch conv output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch conv output: {err}"))?;
+    let mut q_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            q_output_elements,
+            "linear-attn layer batch q output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch q: {err}"))?;
+    let mut k_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            q_output_elements,
+            "linear-attn layer batch k output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch k: {err}"))?;
+    let mut v_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch v output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch v: {err}"))?;
+    let mut a_log_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            a_log.values.len(),
+            "linear-attn layer batch A_log",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch A_log: {err}"))?;
+    let mut dt_bias_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            dt_bias.values.len(),
+            "linear-attn layer batch dt_bias",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch dt_bias: {err}"))?;
+    let mut gate_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            gate_beta_elements,
+            "linear-attn layer batch gate output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch gate: {err}"))?;
+    let mut beta_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            gate_beta_elements,
+            "linear-attn layer batch beta output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch beta: {err}"))?;
+    let mut recurrent_state_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            state_elements,
+            "linear-attn layer batch state",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch state: {err}"))?;
+    let mut recurrent_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch recurrent output",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn layer batch recurrent output: {err}")
+        })?;
+    let mut attn_norm_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            norm.values.len(),
+            "linear-attn layer batch norm weight",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch norm: {err}"))?;
+    let mut attn_projection_input_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch projection input",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn layer batch projection input: {err}")
+        })?;
+    let mut attn_projected_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch projected output",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn layer batch projected output: {err}")
+        })?;
+    let mut attention_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch attention output",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn layer batch attention output: {err}")
+        })?;
+    let mut post_norm_weight_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            post_norm.values.len(),
+            "linear-attn layer batch post norm weight",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn layer batch post norm weight: {err}")
+        })?;
+    let mut post_normed_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch post normed",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch post normed: {err}"))?;
+    let mut mlp_gate_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            intermediate_elements,
+            "linear-attn layer batch MLP gate output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch MLP gate: {err}"))?;
+    let mut mlp_up_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            intermediate_elements,
+            "linear-attn layer batch MLP up output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch MLP up: {err}"))?;
+    let mut mlp_activation_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            intermediate_elements,
+            "linear-attn layer batch MLP activation",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn layer batch MLP activation: {err}")
+        })?;
+    let mut mlp_down_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch MLP down output",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate linear-attn layer batch MLP down output: {err}")
+        })?;
+    let mut layer_output_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            sequence_elements,
+            "linear-attn layer batch layer output",
+        )?)
+        .map_err(|err| format!("failed to allocate linear-attn layer batch layer output: {err}"))?;
+
+    input_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&embedding_rows.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy linear-attn layer batch input: {err}"))?;
+    input_norm_weight_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&input_norm.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy linear-attn layer batch input norm: {err}"))?;
+    conv_weight_buffer
+        .copy_from_host(0, &encode_f32_to_bytes(&conv.values), Some(&mut stream))
+        .map_err(|err| format!("failed to copy linear-attn layer batch conv weight: {err}"))?;
+    a_log_buffer
+        .copy_from_host(0, &encode_f32_to_bytes(&a_log.values), Some(&mut stream))
+        .map_err(|err| format!("failed to copy linear-attn layer batch A_log: {err}"))?;
+    dt_bias_buffer
+        .copy_from_host(0, &encode_f32_to_bytes(&dt_bias.values), Some(&mut stream))
+        .map_err(|err| format!("failed to copy linear-attn layer batch dt_bias: {err}"))?;
+    attn_norm_weight_buffer
+        .copy_from_host(0, &encode_f32_to_bytes(&norm.values), Some(&mut stream))
+        .map_err(|err| format!("failed to copy linear-attn layer batch norm weight: {err}"))?;
+    post_norm_weight_buffer
+        .copy_from_host(
+            0,
+            &encode_f32_to_bytes(&post_norm.values),
+            Some(&mut stream),
+        )
+        .map_err(|err| format!("failed to copy linear-attn layer batch post norm: {err}"))?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize linear-attn layer batch setup: {err}"))?;
+
+    let zero_history_bytes =
+        vec![0_u8; checked_f32_byte_len(history_elements, "zero conv history")?];
+    let zero_state_bytes =
+        vec![0_u8; checked_f32_byte_len(state_elements, "zero recurrent state")?];
+    macro_rules! reset_layer_batch_state {
+        ($stream:expr) => {{
+            conv_history_buffer
+                .copy_from_host(0, &zero_history_bytes, Some($stream))
+                .map_err(|err| {
+                    format!("failed to reset linear-attn layer batch conv history: {err}")
+                })?;
+            recurrent_state_buffer
+                .copy_from_host(0, &zero_state_bytes, Some($stream))
+                .map_err(|err| format!("failed to reset linear-attn layer batch state: {err}"))?;
+            Ok::<(), String>(())
+        }};
+    }
+    macro_rules! run_layer_batch {
+        ($stream:expr) => {{
+            ullm_runtime_sys::segmented_rmsnorm_f32(
+                &input_buffer,
+                &input_norm_weight_buffer,
+                sequence_len,
+                hidden,
+                input_epsilon,
+                &mut input_normed_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn layer batch input RMSNorm: {err}"))?;
+            qkv_matrix.matvec_batch(
+                &input_normed_buffer,
+                sequence_len,
+                &mut qkv_output_buffer,
+                $stream,
+                "linear-attn layer batch qkv projection",
+            )?;
+            z_matrix.matvec_batch(
+                &input_normed_buffer,
+                sequence_len,
+                &mut z_output_buffer,
+                $stream,
+                "linear-attn layer batch z projection",
+            )?;
+            a_matrix.matvec_batch(
+                &input_normed_buffer,
+                sequence_len,
+                &mut a_output_buffer,
+                $stream,
+                "linear-attn layer batch a projection",
+            )?;
+            b_matrix.matvec_batch(
+                &input_normed_buffer,
+                sequence_len,
+                &mut b_output_buffer,
+                $stream,
+                "linear-attn layer batch b projection",
+            )?;
+            ullm_runtime_sys::linear_attn_qkv_prepare_batch_f32(
+                &qkv_output_buffer,
+                &conv_weight_buffer,
+                &mut conv_history_buffer,
+                key_heads,
+                value_heads,
+                key_dim,
+                value_dim,
+                kernel_size,
+                sequence_len,
+                q_scale,
+                qk_l2_norm,
+                &mut conv_output_buffer,
+                &mut q_output_buffer,
+                &mut k_output_buffer,
+                &mut v_output_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn layer batch qkv prepare: {err}"))?;
+            ullm_runtime_sys::linear_attn_gate_beta_f32(
+                &a_output_buffer,
+                &b_output_buffer,
+                &a_log_buffer,
+                &dt_bias_buffer,
+                value_heads,
+                sequence_len,
+                &mut gate_output_buffer,
+                &mut beta_output_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn layer batch gate/beta: {err}"))?;
+            ullm_runtime_sys::linear_attn_recurrent_f32(
+                &q_output_buffer,
+                &k_output_buffer,
+                &v_output_buffer,
+                &gate_output_buffer,
+                &beta_output_buffer,
+                key_heads,
+                value_heads,
+                sequence_len,
+                key_dim,
+                value_dim,
+                &mut recurrent_state_buffer,
+                &mut recurrent_output_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn layer batch recurrent: {err}"))?;
+            ullm_runtime_sys::segmented_rmsnorm_silu_mul_f32(
+                &recurrent_output_buffer,
+                &attn_norm_weight_buffer,
+                &z_output_buffer,
+                attention_post_segments,
+                value_dim,
+                attention_post_epsilon,
+                &mut attn_projection_input_buffer,
+                Some($stream),
+            )
+            .map_err(|err| {
+                format!("failed to run linear-attn layer batch attention RMSNorm SiLU-mul: {err}")
+            })?;
+            out_matrix.matvec_batch(
+                &attn_projection_input_buffer,
+                sequence_len,
+                &mut attn_projected_buffer,
+                $stream,
+                "linear-attn layer batch out projection",
+            )?;
+            ullm_runtime_sys::add_f32(
+                &attn_projected_buffer,
+                &input_buffer,
+                sequence_elements,
+                &mut attention_output_buffer,
+                Some($stream),
+            )
+            .map_err(|err| {
+                format!("failed to run linear-attn layer batch attention residual: {err}")
+            })?;
+            ullm_runtime_sys::segmented_rmsnorm_f32(
+                &attention_output_buffer,
+                &post_norm_weight_buffer,
+                sequence_len,
+                hidden,
+                mlp_epsilon,
+                &mut post_normed_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn layer batch post RMSNorm: {err}"))?;
+            gate_matrix.matvec_batch(
+                &post_normed_buffer,
+                sequence_len,
+                &mut mlp_gate_output_buffer,
+                $stream,
+                "linear-attn layer batch MLP gate projection",
+            )?;
+            up_matrix.matvec_batch(
+                &post_normed_buffer,
+                sequence_len,
+                &mut mlp_up_output_buffer,
+                $stream,
+                "linear-attn layer batch MLP up projection",
+            )?;
+            ullm_runtime_sys::silu_mul_f32(
+                &mlp_gate_output_buffer,
+                &mlp_up_output_buffer,
+                intermediate_elements,
+                &mut mlp_activation_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn layer batch MLP SiLU-mul: {err}"))?;
+            down_matrix.matvec_batch(
+                &mlp_activation_buffer,
+                sequence_len,
+                &mut mlp_down_output_buffer,
+                $stream,
+                "linear-attn layer batch MLP down projection",
+            )?;
+            ullm_runtime_sys::add_f32(
+                &mlp_down_output_buffer,
+                &attention_output_buffer,
+                sequence_elements,
+                &mut layer_output_buffer,
+                Some($stream),
+            )
+            .map_err(|err| format!("failed to run linear-attn layer batch MLP residual: {err}"))
+        }};
+    }
+
+    reset_layer_batch_state!(&mut stream)?;
+    run_layer_batch!(&mut stream)?;
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize linear-attn layer batch warmup: {err}"))?;
+
+    let mut measured_ms = Vec::with_capacity(measured_repeats);
+    for _ in 0..measured_repeats {
+        reset_layer_batch_state!(&mut stream)?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize linear-attn layer batch reset: {err}"))?;
+        let started = Instant::now();
+        run_layer_batch!(&mut stream)?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn layer batch measured run: {err}")
+        })?;
+        measured_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    let wall_ms = measured_ms.iter().sum::<f64>() / measured_ms.len() as f64;
+    let wall_ms_min = measured_ms
+        .iter()
+        .copied()
+        .min_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+    let wall_ms_max = measured_ms
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+
+    let a_output = read_runtime_buffer_f32(
+        &a_output_buffer,
+        &mut stream,
+        gate_beta_elements,
+        "linear-attn layer batch a output",
+    )?;
+    let b_output = read_runtime_buffer_f32(
+        &b_output_buffer,
+        &mut stream,
+        gate_beta_elements,
+        "linear-attn layer batch b output",
+    )?;
+    let gate_output = read_runtime_buffer_f32(
+        &gate_output_buffer,
+        &mut stream,
+        gate_beta_elements,
+        "linear-attn layer batch gate output",
+    )?;
+    let beta_output = read_runtime_buffer_f32(
+        &beta_output_buffer,
+        &mut stream,
+        gate_beta_elements,
+        "linear-attn layer batch beta output",
+    )?;
+    let q_output = read_runtime_buffer_f32(
+        &q_output_buffer,
+        &mut stream,
+        q_output_elements,
+        "linear-attn layer batch q output",
+    )?;
+    let k_output = read_runtime_buffer_f32(
+        &k_output_buffer,
+        &mut stream,
+        q_output_elements,
+        "linear-attn layer batch k output",
+    )?;
+    let v_output = read_runtime_buffer_f32(
+        &v_output_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn layer batch v output",
+    )?;
+    let z_output = read_runtime_buffer_f32(
+        &z_output_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn layer batch z output",
+    )?;
+    let recurrent_output = read_runtime_buffer_f32(
+        &recurrent_output_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn layer batch recurrent output",
+    )?;
+    let final_state = read_runtime_buffer_f32(
+        &recurrent_state_buffer,
+        &mut stream,
+        state_elements,
+        "linear-attn layer batch state",
+    )?;
+    let attn_projection_input = read_runtime_buffer_f32(
+        &attn_projection_input_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn layer batch attention projection input",
+    )?;
+    let attn_projected = read_runtime_buffer_f32(
+        &attn_projected_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn layer batch attention projected output",
+    )?;
+    let attention_output = read_runtime_buffer_f32(
+        &attention_output_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn layer batch attention output",
+    )?;
+    let post_normed = read_runtime_buffer_f32(
+        &post_normed_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn layer batch post normed",
+    )?;
+    let mlp_gate_output = read_runtime_buffer_f32(
+        &mlp_gate_output_buffer,
+        &mut stream,
+        intermediate_elements,
+        "linear-attn layer batch MLP gate output",
+    )?;
+    let mlp_up_output = read_runtime_buffer_f32(
+        &mlp_up_output_buffer,
+        &mut stream,
+        intermediate_elements,
+        "linear-attn layer batch MLP up output",
+    )?;
+    let mlp_activation = read_runtime_buffer_f32(
+        &mlp_activation_buffer,
+        &mut stream,
+        intermediate_elements,
+        "linear-attn layer batch MLP activation",
+    )?;
+    let mlp_down_output = read_runtime_buffer_f32(
+        &mlp_down_output_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn layer batch MLP down output",
+    )?;
+    let layer_output = read_runtime_buffer_f32(
+        &layer_output_buffer,
+        &mut stream,
+        sequence_elements,
+        "linear-attn layer batch layer output",
+    )?;
+
+    let (expected_gate, expected_beta) = runtime_host_linear_attn_gate_beta_f32(
+        &a_output,
+        &b_output,
+        &a_log.values,
+        &dt_bias.values,
+        value_heads,
+        sequence_len,
+    );
+    if expected_gate.len() != gate_beta_elements || expected_beta.len() != gate_beta_elements {
+        return Err("failed to build linear-attn layer batch gate/beta reference".to_string());
+    }
+    let gate_max_abs_diff = verify_f32_close(
+        "linear-attn layer batch gate output",
+        &gate_output,
+        &expected_gate,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+    let beta_max_abs_diff = verify_f32_close(
+        "linear-attn layer batch beta output",
+        &beta_output,
+        &expected_beta,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+
+    let mut expected_state = vec![0.0_f32; state_elements];
+    let expected_recurrent = runtime_host_linear_attn_recurrent_f32(
+        &q_output,
+        &k_output,
+        &v_output,
+        &gate_output,
+        &beta_output,
+        key_heads,
+        value_heads,
+        sequence_len,
+        key_dim,
+        value_dim,
+        &mut expected_state,
+    );
+    if expected_recurrent.len() != sequence_elements {
+        return Err("failed to build linear-attn layer batch recurrent reference".to_string());
+    }
+    let recurrent_output_max_abs_diff = verify_f32_close(
+        "linear-attn layer batch recurrent output",
+        &recurrent_output,
+        &expected_recurrent,
+        2e-3_f32,
+        2e-5_f32,
+    )?;
+    let recurrent_state_max_abs_diff = verify_f32_close(
+        "linear-attn layer batch recurrent state",
+        &final_state,
+        &expected_state,
+        2e-3_f32,
+        2e-5_f32,
+    )?;
+
+    let mut expected_attention_normed = vec![0.0_f32; sequence_elements];
+    for row in 0..attention_post_segments {
+        let start = row.checked_mul(value_dim).ok_or_else(|| {
+            "linear-attn layer batch expected attention norm start overflows".to_string()
+        })?;
+        let end = start.checked_add(value_dim).ok_or_else(|| {
+            "linear-attn layer batch expected attention norm end overflows".to_string()
+        })?;
+        let normed = runtime_host_rmsnorm_f32(
+            &recurrent_output[start..end],
+            &norm.values,
+            attention_post_epsilon,
+        );
+        if normed.len() != value_dim {
+            return Err(
+                "failed to build linear-attn layer batch attention post reference".to_string(),
+            );
+        }
+        expected_attention_normed[start..end].copy_from_slice(&normed);
+    }
+    let expected_attention_post = runtime_host_silu_mul_f32(&z_output, &expected_attention_normed);
+    if expected_attention_post.len() != sequence_elements {
+        return Err(
+            "failed to build linear-attn layer batch attention activation reference".to_string(),
+        );
+    }
+    let attention_post_max_abs_diff = verify_f32_close(
+        "linear-attn layer batch attention post output",
+        &attn_projection_input,
+        &expected_attention_post,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+    let expected_attention_output = attn_projected
+        .iter()
+        .zip(embedding_rows.values.iter())
+        .map(|(lhs, rhs)| lhs + rhs)
+        .collect::<Vec<_>>();
+    let attention_residual_max_abs_diff = verify_f32_close(
+        "linear-attn layer batch attention residual output",
+        &attention_output,
+        &expected_attention_output,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+
+    let mut expected_post_normed = Vec::with_capacity(sequence_elements);
+    for token_index in 0..sequence_len {
+        let start = token_index.checked_mul(hidden).ok_or_else(|| {
+            "linear-attn layer batch expected post norm start overflows".to_string()
+        })?;
+        let end = start.checked_add(hidden).ok_or_else(|| {
+            "linear-attn layer batch expected post norm end overflows".to_string()
+        })?;
+        expected_post_normed.extend(runtime_host_rmsnorm_f32(
+            &attention_output[start..end],
+            &post_norm.values,
+            mlp_epsilon,
+        ));
+    }
+    if expected_post_normed.len() != sequence_elements {
+        return Err("failed to build linear-attn layer batch MLP norm reference".to_string());
+    }
+    let mlp_norm_max_abs_diff = verify_f32_close(
+        "linear-attn layer batch MLP post norm",
+        &post_normed,
+        &expected_post_normed,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+    let expected_mlp_activation = runtime_host_silu_mul_f32(&mlp_gate_output, &mlp_up_output);
+    if expected_mlp_activation.len() != intermediate_elements {
+        return Err("failed to build linear-attn layer batch MLP activation reference".to_string());
+    }
+    let mlp_activation_max_abs_diff = verify_f32_close(
+        "linear-attn layer batch MLP activation",
+        &mlp_activation,
+        &expected_mlp_activation,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+    let expected_layer_output = mlp_down_output
+        .iter()
+        .zip(attention_output.iter())
+        .map(|(lhs, rhs)| lhs + rhs)
+        .collect::<Vec<_>>();
+    let layer_residual_max_abs_diff = verify_f32_close(
+        "linear-attn layer batch layer residual output",
+        &layer_output,
+        &expected_layer_output,
+        1e-4_f32,
+        1e-5_f32,
+    )?;
+    let output_elements = qkv_output_elements
+        .checked_add(sequence_elements)
+        .and_then(|value| value.checked_add(gate_beta_elements))
+        .and_then(|value| value.checked_add(gate_beta_elements))
+        .and_then(|value| value.checked_add(sequence_elements))
+        .and_then(|value| value.checked_add(sequence_elements))
+        .and_then(|value| value.checked_add(sequence_elements))
+        .and_then(|value| value.checked_add(sequence_elements))
+        .and_then(|value| value.checked_add(intermediate_elements))
+        .and_then(|value| value.checked_add(intermediate_elements))
+        .and_then(|value| value.checked_add(intermediate_elements))
+        .and_then(|value| value.checked_add(sequence_elements))
+        .and_then(|value| value.checked_add(sequence_elements))
+        .ok_or_else(|| "linear-attn layer batch output element count overflows".to_string())?;
+    let preview_len = layer_output.len().min(8);
+    Ok(format!(
+        "package-linear-attn-layer-batch-smoke package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} intermediate={} key_heads={} value_heads={} key_dim={} value_dim={} channels={} kernel_size={} q_scale={q_scale:.9} qk_l2_norm={} input_elements={} output_elements={} executor=segmented_rmsnorm_f32+aq4_matvec_batch_f32+linear_attn_qkv_prepare_batch_f32+linear_attn_gate_beta_f32+linear_attn_recurrent_f32+segmented_rmsnorm_silu_mul_f32+aq4_matvec_batch_f32+add_f32+segmented_rmsnorm_f32+aq4_matvec_batch_f32+silu_mul_f32+aq4_matvec_batch_f32+add_f32 real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} token_tps_mean={} output_element_tps_mean={} gate_max_abs_diff={gate_max_abs_diff:.9} beta_max_abs_diff={beta_max_abs_diff:.9} recurrent_output_max_abs_diff={recurrent_output_max_abs_diff:.9} recurrent_state_max_abs_diff={recurrent_state_max_abs_diff:.9} attention_post_max_abs_diff={attention_post_max_abs_diff:.9} attention_residual_max_abs_diff={attention_residual_max_abs_diff:.9} mlp_norm_max_abs_diff={mlp_norm_max_abs_diff:.9} mlp_activation_max_abs_diff={mlp_activation_max_abs_diff:.9} layer_residual_max_abs_diff={layer_residual_max_abs_diff:.9} layer_preview={} verified=true",
+        path,
+        layer_index,
+        input_norm_tensor,
+        qkv_tensor,
+        z_tensor,
+        a_tensor,
+        b_tensor,
+        conv_tensor,
+        a_log_tensor,
+        dt_bias_tensor,
+        norm_tensor,
+        out_tensor,
+        post_norm_tensor,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        sequence_len,
+        hidden,
+        intermediate,
+        key_heads,
+        value_heads,
+        key_dim,
+        value_dim,
+        channels,
+        kernel_size,
+        qk_l2_norm,
+        sequence_elements,
+        output_elements,
+        sequence_len,
+        info.backend,
+        device_index,
+        info.name,
+        measured_repeats,
+        wall_ms,
+        wall_ms_min,
+        wall_ms_max,
+        tps(sequence_len, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        tps(output_elements, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        format_f32_preview(&layer_output[..preview_len]),
+    ))
+}
+
 fn current_git_commit() -> Option<String> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -33671,7 +34815,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-layer-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
     );
     eprintln!(
         "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
@@ -33708,6 +34852,9 @@ fn print_help() {
     );
     eprintln!(
         "package-linear-attn-mlp-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
+    );
+    eprintln!(
+        "package-linear-attn-layer-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
     );
     eprintln!(
         "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"
