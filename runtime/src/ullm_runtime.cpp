@@ -3789,6 +3789,7 @@ extern "C" __global__ void ullm_decode_attn_f32_kernel(
         return R"(
 extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
     const float *q,
+    const float *gate,
     const float *k_cache,
     const float *v_cache,
     const unsigned int *block_table,
@@ -3868,7 +3869,15 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
             }
         }
         if (tid < value_dim) {
-            output[q_head * value_dim + tid] = weighted / denominator;
+            const unsigned long long output_index = q_head * value_dim + tid;
+            const float decoded = weighted / denominator;
+            if (gate != nullptr) {
+                const float gate_value = gate[output_index];
+                const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
+                output[output_index] = sigmoid * decoded;
+            } else {
+                output[output_index] = decoded;
+            }
         }
         return;
     }
@@ -3926,7 +3935,14 @@ extern "C" __global__ void ullm_paged_decode_attn_f32_kernel(
             (physical_timestep * kv_heads + kv_head) * value_dim + value;
         weighted += weight * v_cache[v_index];
     }
-    output[index] = weighted / denominator;
+    const float decoded = weighted / denominator;
+    if (gate != nullptr) {
+        const float gate_value = gate[index];
+        const float sigmoid = 1.0f / (1.0f + expf(-gate_value));
+        output[index] = sigmoid * decoded;
+    } else {
+        output[index] = decoded;
+    }
 }
 )";
     }
@@ -12063,6 +12079,7 @@ HipPagedDecodeAttnKernelCache &hip_paged_decode_attn_kernel_cache() {
 
 bool paged_decode_attn_f32_hip_kernel(
     const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
     const ullm_runtime_buffer *k_cache_buffer,
     const ullm_runtime_buffer *v_cache_buffer,
     const ullm_runtime_buffer *block_table_buffer,
@@ -12105,12 +12122,14 @@ bool paged_decode_attn_f32_hip_kernel(
     unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
     unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
     void *q_ptr = q_buffer->ptr;
+    void *gate_ptr = gate_buffer == nullptr ? nullptr : gate_buffer->ptr;
     void *k_ptr = k_cache_buffer->ptr;
     void *v_ptr = v_cache_buffer->ptr;
     void *block_table_ptr = block_table_buffer->ptr;
     void *output_ptr = output_buffer->ptr;
     void *kernel_params[] = {
         &q_ptr,
+        &gate_ptr,
         &k_ptr,
         &v_ptr,
         &block_table_ptr,
@@ -12142,6 +12161,7 @@ bool paged_decode_attn_f32_hip_kernel(
 
 ullm_status paged_decode_attn_f32_hip_staging(
     const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
     const ullm_runtime_buffer *k_cache_buffer,
     const ullm_runtime_buffer *v_cache_buffer,
     const ullm_runtime_buffer *block_table_buffer,
@@ -12154,6 +12174,7 @@ ullm_status paged_decode_attn_f32_hip_staging(
     size_t value_dim,
     float softmax_scale,
     size_t q_bytes,
+    size_t gate_bytes,
     size_t k_bytes,
     size_t v_bytes,
     size_t block_table_bytes,
@@ -12161,6 +12182,7 @@ ullm_status paged_decode_attn_f32_hip_staging(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream) {
     std::vector<float> host_q(q_bytes / sizeof(float));
+    std::vector<float> host_gate(gate_bytes / sizeof(float));
     std::vector<float> host_k(k_bytes / sizeof(float));
     std::vector<float> host_v(v_bytes / sizeof(float));
     std::vector<std::uint32_t> host_block_table(block_table_bytes / sizeof(std::uint32_t));
@@ -12168,13 +12190,23 @@ ullm_status paged_decode_attn_f32_hip_staging(
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
     const int device_id = q_buffer->hip_device_id;
 
-    if (!hip_runtime().copy_async(
+    bool copied = hip_runtime().copy_async(
             host_q.data(),
             q_buffer->ptr,
             q_bytes,
             HIP_MEMCPY_DEVICE_TO_HOST,
             hip_stream,
-            device_id) ||
+            device_id);
+    if (copied && gate_buffer != nullptr) {
+        copied = hip_runtime().copy_async(
+            host_gate.data(),
+            gate_buffer->ptr,
+            gate_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id);
+    }
+    if (!copied ||
         !hip_runtime().copy_async(
             host_k.data(),
             k_cache_buffer->ptr,
@@ -12223,6 +12255,13 @@ ullm_status paged_decode_attn_f32_hip_staging(
         value_dim,
         softmax_scale,
         host_output.data());
+    if (gate_buffer != nullptr) {
+        for (size_t i = 0; i < host_output.size(); ++i) {
+            const float gate_value = host_gate[i];
+            const float sigmoid = 1.0f / (1.0f + std::exp(-gate_value));
+            host_output[i] *= sigmoid;
+        }
+    }
     if (!hip_runtime().copy_async(
             output_buffer->ptr,
             host_output.data(),
@@ -18660,8 +18699,9 @@ ullm_status ullm_runtime_decode_attn_f32(
         stream);
 }
 
-ullm_status ullm_runtime_paged_decode_attn_f32(
+ullm_status paged_decode_attn_f32_impl(
     const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
     const ullm_runtime_buffer *k_cache_buffer,
     const ullm_runtime_buffer *v_cache_buffer,
     const ullm_runtime_buffer *block_table_buffer,
@@ -18693,7 +18733,8 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
         set_error("f32 paged decode attention softmax scale must be finite and greater than zero");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
-    if (!buffers_share_backend(q_buffer, k_cache_buffer) ||
+    if ((gate_buffer != nullptr && !buffers_share_backend(q_buffer, gate_buffer)) ||
+        !buffers_share_backend(q_buffer, k_cache_buffer) ||
         !buffers_share_backend(q_buffer, v_cache_buffer) ||
         !buffers_share_backend(q_buffer, block_table_buffer) ||
         !buffers_share_backend(q_buffer, output_buffer)) {
@@ -18749,12 +18790,17 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
     const size_t q_bytes = q_elements * sizeof(float);
+    const size_t gate_bytes = gate_buffer == nullptr ? 0 : output_elements * sizeof(float);
     const size_t k_bytes = k_elements * sizeof(float);
     const size_t v_bytes = v_elements * sizeof(float);
     const size_t output_bytes = output_elements * sizeof(float);
     const size_t block_table_bytes = block_table_entries * sizeof(std::uint32_t);
     if (q_buffer->bytes < q_bytes) {
         set_error("f32 paged decode attention q buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (gate_buffer != nullptr && gate_buffer->bytes < gate_bytes) {
+        set_error("f32 paged decode attention gate buffer is too small");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
     if (k_cache_buffer->bytes < k_bytes) {
@@ -18776,6 +18822,8 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
 
     if (q_buffer->backend == BackendKind::Cpu) {
         const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *gate =
+            gate_buffer == nullptr ? nullptr : static_cast<const float *>(gate_buffer->ptr);
         const auto *k_cache = static_cast<const float *>(k_cache_buffer->ptr);
         const auto *v_cache = static_cast<const float *>(v_cache_buffer->ptr);
         const auto *block_table = static_cast<const std::uint32_t *>(block_table_buffer->ptr);
@@ -18799,6 +18847,13 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
             value_dim,
             softmax_scale,
             output);
+        if (gate != nullptr) {
+            for (size_t i = 0; i < output_elements; ++i) {
+                const float gate_value = gate[i];
+                const float sigmoid = 1.0f / (1.0f + std::exp(-gate_value));
+                output[i] *= sigmoid;
+            }
+        }
         set_error("");
         return ULLM_STATUS_OK;
     }
@@ -18806,6 +18861,7 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
     std::string hip_kernel_error;
     if (paged_decode_attn_f32_hip_kernel(
             q_buffer,
+            gate_buffer,
             k_cache_buffer,
             v_cache_buffer,
             block_table_buffer,
@@ -18833,6 +18889,7 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
     }
     return paged_decode_attn_f32_hip_staging(
         q_buffer,
+        gate_buffer,
         k_cache_buffer,
         v_cache_buffer,
         block_table_buffer,
@@ -18845,10 +18902,82 @@ ullm_status ullm_runtime_paged_decode_attn_f32(
         value_dim,
         softmax_scale,
         q_bytes,
+        gate_bytes,
         k_bytes,
         v_bytes,
         block_table_bytes,
         output_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_paged_decode_attn_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    return paged_decode_attn_f32_impl(
+        q_buffer,
+        nullptr,
+        k_cache_buffer,
+        v_cache_buffer,
+        block_table_buffer,
+        cache_len,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *gate_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    const ullm_runtime_buffer *block_table_buffer,
+    size_t cache_len,
+    size_t block_size,
+    size_t cache_blocks,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (gate_buffer == nullptr) {
+        set_error("f32 paged decode attention sigmoid gate received a null gate buffer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    return paged_decode_attn_f32_impl(
+        q_buffer,
+        gate_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
+        block_table_buffer,
+        cache_len,
+        block_size,
+        cache_blocks,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
         output_buffer,
         stream);
 }

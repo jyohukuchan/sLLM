@@ -17512,6 +17512,48 @@ impl PackageLinearAttnComponentStepMs {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct PackageSelfAttnComponentStepMs {
+    input_rmsnorm_ms: f64,
+    qkv_projection_ms: f64,
+    qk_norm_rope_kv_write_ms: f64,
+    paged_decode_ms: f64,
+    output_gate_ms: f64,
+    o_projection_residual_ms: f64,
+    post_rmsnorm_ms: f64,
+    mlp_gate_up_activation_ms: f64,
+    mlp_down_residual_ms: f64,
+}
+
+impl PackageSelfAttnComponentStepMs {
+    fn total_ms(&self) -> f64 {
+        self.input_rmsnorm_ms
+            + self.qkv_projection_ms
+            + self.qk_norm_rope_kv_write_ms
+            + self.paged_decode_ms
+            + self.output_gate_ms
+            + self.o_projection_residual_ms
+            + self.post_rmsnorm_ms
+            + self.mlp_gate_up_activation_ms
+            + self.mlp_down_residual_ms
+    }
+
+    fn report_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "input_rmsnorm_ms": self.input_rmsnorm_ms,
+            "qkv_projection_ms": self.qkv_projection_ms,
+            "qk_norm_rope_kv_write_ms": self.qk_norm_rope_kv_write_ms,
+            "paged_decode_ms": self.paged_decode_ms,
+            "output_gate_ms": self.output_gate_ms,
+            "o_projection_residual_ms": self.o_projection_residual_ms,
+            "post_rmsnorm_ms": self.post_rmsnorm_ms,
+            "mlp_gate_up_activation_ms": self.mlp_gate_up_activation_ms,
+            "mlp_down_residual_ms": self.mlp_down_residual_ms,
+            "total_ms": self.total_ms(),
+        })
+    }
+}
+
 impl PackageTokenIdsIncrementalLayer {
     fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
         match self {
@@ -17537,6 +17579,16 @@ impl PackageTokenIdsIncrementalLayer {
                 .map(PackageLinearAttnComponentStepMs::report_json)
                 .unwrap_or(serde_json::Value::Null),
             PackageTokenIdsIncrementalLayer::SelfAttention(_) => serde_json::Value::Null,
+        }
+    }
+
+    fn take_self_attn_component_step_ms(&mut self) -> serde_json::Value {
+        match self {
+            PackageTokenIdsIncrementalLayer::LinearAttention(_) => serde_json::Value::Null,
+            PackageTokenIdsIncrementalLayer::SelfAttention(layer) => layer
+                .take_last_component_step_ms()
+                .map(PackageSelfAttnComponentStepMs::report_json)
+                .unwrap_or(serde_json::Value::Null),
         }
     }
 
@@ -17692,7 +17744,15 @@ fn package_token_ids_incremental_layers_step_device(
     hidden: usize,
     label: &str,
     sync_each_layer_for_timing: bool,
-) -> Result<(usize, Vec<f64>, Vec<serde_json::Value>), String> {
+) -> Result<
+    (
+        usize,
+        Vec<f64>,
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+    ),
+    String,
+> {
     if residual.len() != hidden {
         return Err(format!(
             "{label} residual length {} does not match hidden {hidden}",
@@ -17708,6 +17768,7 @@ fn package_token_ids_incremental_layers_step_device(
     let mut residual_device_layer: Option<usize> = None;
     let mut layer_step_ms = Vec::with_capacity(layers.len());
     let mut linear_attn_component_step_ms = Vec::with_capacity(layers.len());
+    let mut self_attn_component_step_ms = Vec::with_capacity(layers.len());
 
     for layer_position in 0..layers.len() {
         let layer_step_started = Instant::now();
@@ -17751,10 +17812,18 @@ fn package_token_ids_incremental_layers_step_device(
         layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
         linear_attn_component_step_ms
             .push(layers[layer_position].take_linear_attn_component_step_ms());
+        self_attn_component_step_ms.push(layers[layer_position].take_self_attn_component_step_ms());
     }
 
     residual_device_layer
-        .map(|layer_position| (layer_position, layer_step_ms, linear_attn_component_step_ms))
+        .map(|layer_position| {
+            (
+                layer_position,
+                layer_step_ms,
+                linear_attn_component_step_ms,
+                self_attn_component_step_ms,
+            )
+        })
         .ok_or_else(|| format!("{label} missing final device residual"))
 }
 
@@ -17770,7 +17839,15 @@ fn package_token_ids_incremental_layers_step_device_input(
     hidden: usize,
     label: &str,
     sync_each_layer_for_timing: bool,
-) -> Result<(usize, Vec<f64>, Vec<serde_json::Value>), String> {
+) -> Result<
+    (
+        usize,
+        Vec<f64>,
+        Vec<serde_json::Value>,
+        Vec<serde_json::Value>,
+    ),
+    String,
+> {
     if layers.is_empty() {
         return Err(format!(
             "{label} device layer step requires at least one layer"
@@ -17788,6 +17865,7 @@ fn package_token_ids_incremental_layers_step_device_input(
 
     let mut layer_step_ms = Vec::with_capacity(layers.len());
     let mut linear_attn_component_step_ms = Vec::with_capacity(layers.len());
+    let mut self_attn_component_step_ms = Vec::with_capacity(layers.len());
     let first_label = format!("{label} layer 0 position {rope_position}");
     let first_started = Instant::now();
     layers[0].step_from_device_to_device(
@@ -17806,6 +17884,7 @@ fn package_token_ids_incremental_layers_step_device_input(
     }
     layer_step_ms.push(first_started.elapsed().as_secs_f64() * 1000.0);
     linear_attn_component_step_ms.push(layers[0].take_linear_attn_component_step_ms());
+    self_attn_component_step_ms.push(layers[0].take_self_attn_component_step_ms());
 
     for layer_position in 1..layers.len() {
         let layer_step_started = Instant::now();
@@ -17834,12 +17913,14 @@ fn package_token_ids_incremental_layers_step_device_input(
         layer_step_ms.push(layer_step_started.elapsed().as_secs_f64() * 1000.0);
         linear_attn_component_step_ms
             .push(layers[layer_position].take_linear_attn_component_step_ms());
+        self_attn_component_step_ms.push(layers[layer_position].take_self_attn_component_step_ms());
     }
 
     Ok((
         layers.len() - 1,
         layer_step_ms,
         linear_attn_component_step_ms,
+        self_attn_component_step_ms,
     ))
 }
 
@@ -18244,6 +18325,8 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let mut decode_layer_step_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut decode_linear_attn_component_step_ms =
         Vec::with_capacity(generated_tokens.saturating_sub(1));
+    let mut decode_self_attn_component_step_ms =
+        Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut decode_lm_head_ms = Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut decode_positions = Vec::with_capacity(generated_tokens.saturating_sub(1));
     let mut last_top_logits = prefill_top_logits.clone();
@@ -18296,77 +18379,40 @@ fn package_token_ids_generate_incremental_smoke_impl(
             .checked_add(decode_index)
             .ok_or_else(|| "incremental decode cache position overflows".to_string())?;
         let decode_layers_started = Instant::now();
-        let (top_logits, next, layers_step_ms, layer_step_ms, linear_attn_component_step_ms) =
-            if lm_head_runtime.supports_device_input() {
-                let final_norm_runtime = final_norm_runtime.as_mut().ok_or_else(|| {
-                    "incremental decode final RMSNorm runtime is missing".to_string()
-                })?;
-                let (final_layer_position, layer_step_ms, linear_attn_component_step_ms) =
-                    if let Some(runtime) = embedding_runtime.as_ref() {
-                        package_token_ids_incremental_layers_step_device_input(
-                            &mut stream,
-                            &mut layers,
-                            rotary_dim_value,
-                            rope_base,
-                            position,
-                            cache_position,
-                            runtime.output_buffer(),
-                            hidden,
-                            "incremental decode",
-                            sync_decode_each_layer_for_timing,
-                        )?
-                    } else {
-                        let embedding_values = embedding_values.take().ok_or_else(|| {
-                            "incremental decode missing host embedding".to_string()
-                        })?;
-                        package_token_ids_incremental_layers_step_device(
-                            &mut stream,
-                            &mut layers,
-                            rotary_dim_value,
-                            rope_base,
-                            position,
-                            cache_position,
-                            embedding_values,
-                            hidden,
-                            "incremental decode",
-                            sync_decode_each_layer_for_timing,
-                        )?
-                    };
-                if sync_decode_layers_for_timing && !sync_decode_each_layer_for_timing {
-                    stream.synchronize().map_err(|err| {
-                        format!("failed to synchronize incremental decode layers: {err}")
-                    })?;
-                }
-                let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
-                let final_hidden_buffer = layers
-                    .get(final_layer_position)
-                    .ok_or_else(|| {
-                        format!("incremental decode final layer {final_layer_position} is missing")
-                    })?
-                    .output_buffer();
-                let decode_lm_head_started = Instant::now();
-                let (top_logits, next) = package_token_ids_incremental_final_logits_device(
+        let (
+            top_logits,
+            next,
+            layers_step_ms,
+            layer_step_ms,
+            linear_attn_component_step_ms,
+            self_attn_component_step_ms,
+        ) = if lm_head_runtime.supports_device_input() {
+            let final_norm_runtime = final_norm_runtime
+                .as_mut()
+                .ok_or_else(|| "incremental decode final RMSNorm runtime is missing".to_string())?;
+            let (
+                final_layer_position,
+                layer_step_ms,
+                linear_attn_component_step_ms,
+                self_attn_component_step_ms,
+            ) = if let Some(runtime) = embedding_runtime.as_ref() {
+                package_token_ids_incremental_layers_step_device_input(
                     &mut stream,
-                    &mut lm_head_runtime,
-                    final_norm_runtime,
-                    final_hidden_buffer,
-                    top_k,
+                    &mut layers,
+                    rotary_dim_value,
+                    rope_base,
+                    position,
+                    cache_position,
+                    runtime.output_buffer(),
+                    hidden,
                     "incremental decode",
-                )?;
-                let lm_head_step_ms = decode_lm_head_started.elapsed().as_secs_f64() * 1000.0;
-                decode_lm_head_ms.push(lm_head_step_ms);
-                (
-                    top_logits,
-                    next,
-                    layers_step_ms,
-                    layer_step_ms,
-                    linear_attn_component_step_ms,
-                )
+                    sync_decode_each_layer_for_timing,
+                )?
             } else {
                 let embedding_values = embedding_values
                     .take()
                     .ok_or_else(|| "incremental decode missing host embedding".to_string())?;
-                let (residual, layer_step_ms) = package_token_ids_incremental_layers_step(
+                package_token_ids_incremental_layers_step_device(
                     &mut stream,
                     &mut layers,
                     rotary_dim_value,
@@ -18376,35 +18422,85 @@ fn package_token_ids_generate_incremental_smoke_impl(
                     embedding_values,
                     hidden,
                     "incremental decode",
-                )?;
-                let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
-                let decode_lm_head_started = Instant::now();
-                let (top_logits, next) = package_token_ids_incremental_final_logits(
-                    path,
-                    &mut stream,
-                    &mut lm_head_runtime,
-                    &residual,
-                    &final_norm,
-                    top_k,
-                )?;
-                let lm_head_step_ms = decode_lm_head_started.elapsed().as_secs_f64() * 1000.0;
-                decode_lm_head_ms.push(lm_head_step_ms);
-                let linear_attn_component_step_ms =
-                    vec![serde_json::Value::Null; layer_step_ms.len()];
-                (
-                    top_logits,
-                    next,
-                    layers_step_ms,
-                    layer_step_ms,
-                    linear_attn_component_step_ms,
-                )
+                    sync_decode_each_layer_for_timing,
+                )?
             };
+            if sync_decode_layers_for_timing && !sync_decode_each_layer_for_timing {
+                stream.synchronize().map_err(|err| {
+                    format!("failed to synchronize incremental decode layers: {err}")
+                })?;
+            }
+            let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
+            let final_hidden_buffer = layers
+                .get(final_layer_position)
+                .ok_or_else(|| {
+                    format!("incremental decode final layer {final_layer_position} is missing")
+                })?
+                .output_buffer();
+            let decode_lm_head_started = Instant::now();
+            let (top_logits, next) = package_token_ids_incremental_final_logits_device(
+                &mut stream,
+                &mut lm_head_runtime,
+                final_norm_runtime,
+                final_hidden_buffer,
+                top_k,
+                "incremental decode",
+            )?;
+            let lm_head_step_ms = decode_lm_head_started.elapsed().as_secs_f64() * 1000.0;
+            decode_lm_head_ms.push(lm_head_step_ms);
+            (
+                top_logits,
+                next,
+                layers_step_ms,
+                layer_step_ms,
+                linear_attn_component_step_ms,
+                self_attn_component_step_ms,
+            )
+        } else {
+            let embedding_values = embedding_values
+                .take()
+                .ok_or_else(|| "incremental decode missing host embedding".to_string())?;
+            let (residual, layer_step_ms) = package_token_ids_incremental_layers_step(
+                &mut stream,
+                &mut layers,
+                rotary_dim_value,
+                rope_base,
+                position,
+                cache_position,
+                embedding_values,
+                hidden,
+                "incremental decode",
+            )?;
+            let layers_step_ms = decode_layers_started.elapsed().as_secs_f64() * 1000.0;
+            let decode_lm_head_started = Instant::now();
+            let (top_logits, next) = package_token_ids_incremental_final_logits(
+                path,
+                &mut stream,
+                &mut lm_head_runtime,
+                &residual,
+                &final_norm,
+                top_k,
+            )?;
+            let lm_head_step_ms = decode_lm_head_started.elapsed().as_secs_f64() * 1000.0;
+            decode_lm_head_ms.push(lm_head_step_ms);
+            let linear_attn_component_step_ms = vec![serde_json::Value::Null; layer_step_ms.len()];
+            let self_attn_component_step_ms = vec![serde_json::Value::Null; layer_step_ms.len()];
+            (
+                top_logits,
+                next,
+                layers_step_ms,
+                layer_step_ms,
+                linear_attn_component_step_ms,
+                self_attn_component_step_ms,
+            )
+        };
         last_top_logits = top_logits;
         decode_step_ms.push(decode_started.elapsed().as_secs_f64() * 1000.0);
         decode_embedding_ms.push(embedding_step_ms);
         decode_layers_ms.push(layers_step_ms);
         decode_layer_step_ms.push(layer_step_ms);
         decode_linear_attn_component_step_ms.push(linear_attn_component_step_ms);
+        decode_self_attn_component_step_ms.push(self_attn_component_step_ms);
         decode_positions.push(position);
         generated_token_ids.push(next);
         sequence_ids.push(next);
@@ -18486,10 +18582,12 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "sync_layers_for_timing": sync_decode_layers_for_timing,
             "sync_each_layer_for_timing": sync_decode_each_layer_for_timing,
             "sync_linear_attn_components_for_timing": sync_linear_attn_components_for_timing,
+            "sync_self_attn_components_for_timing": env_flag_enabled("ULLM_SYNC_SELF_ATTN_COMPONENTS_FOR_TIMING"),
             "use_aq4_matvec_qkv_z_gate_beta": use_aq4_matvec_qkv_z_gate_beta,
             "use_aq4_matvec_pair_qkv_z": use_aq4_matvec_pair_qkv_z,
             "use_aq4_matvec_triple_self_attn_qkv": use_aq4_matvec_triple_self_attn_qkv,
             "use_aq4_matvec_pair_self_attn_qk": use_aq4_matvec_pair_self_attn_qk,
+            "use_paged_decode_sigmoid_gate_self_attn": !env_flag_enabled("ULLM_DISABLE_PAGED_DECODE_SIGMOID_GATE_SELF_ATTN"),
             "positions": decode_positions,
             "step_wall_ms": decode_step_ms,
             "step_wall_summary": decode_step_summary,
@@ -18497,6 +18595,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
             "layers_step_ms": decode_layers_ms,
             "layer_step_ms": decode_layer_step_ms,
             "linear_attn_component_step_ms": decode_linear_attn_component_step_ms,
+            "self_attn_component_step_ms": decode_self_attn_component_step_ms,
             "lm_head_step_ms": decode_lm_head_ms,
             "wall_ms": decode_ms,
             "timed_step_tps": tps(timed_decode_tokens, decode_ms),
@@ -30480,6 +30579,9 @@ enum PackageSelfAttnResidentStepInput<'a> {
 }
 
 struct PackageSelfAttnResidentStepLayer {
+    sync_component_timing: bool,
+    last_component_step_ms: Option<PackageSelfAttnComponentStepMs>,
+    use_paged_decode_sigmoid_gate: bool,
     hidden: usize,
     q_heads: usize,
     kv_heads: usize,
@@ -30908,6 +31010,14 @@ impl PackageSelfAttnResidentStepLayer {
         }
 
         Ok(Self {
+            sync_component_timing: env_flag_enabled("ULLM_SYNC_SELF_ATTN_COMPONENTS_FOR_TIMING"),
+            last_component_step_ms: None,
+            use_paged_decode_sigmoid_gate: matches!(
+                q_projection_layout,
+                PackageSelfAttnQProjectionLayout::Qwen35Gated
+            ) && !env_flag_enabled(
+                "ULLM_DISABLE_PAGED_DECODE_SIGMOID_GATE_SELF_ATTN",
+            ),
             hidden,
             q_heads,
             kv_heads,
@@ -31028,6 +31138,10 @@ impl PackageSelfAttnResidentStepLayer {
         &self.layer_output_buffer
     }
 
+    fn take_last_component_step_ms(&mut self) -> Option<PackageSelfAttnComponentStepMs> {
+        self.last_component_step_ms.take()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_device_step(
         &mut self,
@@ -31045,6 +31159,24 @@ impl PackageSelfAttnResidentStepLayer {
                 self.written_len
             ));
         }
+        self.last_component_step_ms = None;
+        let mut component_step_ms = PackageSelfAttnComponentStepMs::default();
+        let sync_component_timing = self.sync_component_timing;
+        let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
+                                started: Instant,
+                                component_label: &str|
+         -> Result<f64, String> {
+            if sync_component_timing {
+                stream.synchronize().map_err(|err| {
+                    format!("failed to synchronize {label} self-attn {component_label}: {err}")
+                })?;
+                Ok(started.elapsed().as_secs_f64() * 1000.0)
+            } else {
+                Ok(0.0)
+            }
+        };
+
+        let component_started = Instant::now();
         match input {
             PackageSelfAttnResidentStepInput::InternalInputBuffer => ullm_runtime_sys::rmsnorm_f32(
                 &self.input_buffer,
@@ -31066,7 +31198,10 @@ impl PackageSelfAttnResidentStepLayer {
             }
         }
         .map_err(|err| format!("failed to run {label} self-attn input RMSNorm: {err}"))?;
+        component_step_ms.input_rmsnorm_ms =
+            finish_component(stream, component_started, "input RMSNorm")?;
 
+        let component_started = Instant::now();
         if !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_TRIPLE_SELF_ATTN_QKV") {
             self.q_matrix.matvec_triple_with(
                 &self.k_matrix,
@@ -31113,7 +31248,10 @@ impl PackageSelfAttnResidentStepLayer {
                 "self-attn resident v projection",
             )?;
         }
+        component_step_ms.qkv_projection_ms =
+            finish_component(stream, component_started, "q/k/v projection")?;
 
+        let component_started = Instant::now();
         match self.q_projection_layout {
             PackageSelfAttnQProjectionLayout::Plain => {
                 ullm_runtime_sys::segmented_rmsnorm_f32(
@@ -31206,32 +31344,61 @@ impl PackageSelfAttnResidentStepLayer {
                 })?;
             }
         }
+        component_step_ms.qk_norm_rope_kv_write_ms =
+            finish_component(stream, component_started, "q/k norm RoPE paged KV write")?;
 
         self.written_len = self
             .written_len
             .checked_add(1)
             .ok_or_else(|| format!("{label} self-attn written length overflows"))?;
 
-        ullm_runtime_sys::paged_decode_attn_f32(
-            &self.q_rope_buffer,
-            &self.k_cache_buffer,
-            &self.v_cache_buffer,
-            &self.block_table_buffer,
-            self.written_len,
-            self.block_size,
-            self.cache_blocks,
-            self.q_heads,
-            self.kv_heads,
-            self.head_dim,
-            self.value_dim,
-            1.0_f32 / (self.head_dim as f32).sqrt(),
-            &mut self.attention_output_buffer,
-            Some(stream),
-        )
+        let component_started = Instant::now();
+        if self.use_paged_decode_sigmoid_gate {
+            ullm_runtime_sys::paged_decode_attn_sigmoid_gate_f32(
+                &self.q_rope_buffer,
+                &self.q_gate_buffer,
+                &self.k_cache_buffer,
+                &self.v_cache_buffer,
+                &self.block_table_buffer,
+                self.written_len,
+                self.block_size,
+                self.cache_blocks,
+                self.q_heads,
+                self.kv_heads,
+                self.head_dim,
+                self.value_dim,
+                1.0_f32 / (self.head_dim as f32).sqrt(),
+                &mut self.attention_output_buffer,
+                Some(stream),
+            )
+        } else {
+            ullm_runtime_sys::paged_decode_attn_f32(
+                &self.q_rope_buffer,
+                &self.k_cache_buffer,
+                &self.v_cache_buffer,
+                &self.block_table_buffer,
+                self.written_len,
+                self.block_size,
+                self.cache_blocks,
+                self.q_heads,
+                self.kv_heads,
+                self.head_dim,
+                self.value_dim,
+                1.0_f32 / (self.head_dim as f32).sqrt(),
+                &mut self.attention_output_buffer,
+                Some(stream),
+            )
+        }
         .map_err(|err| format!("failed to run {label} self-attn paged decode: {err}"))?;
+        component_step_ms.paged_decode_ms =
+            finish_component(stream, component_started, "paged decode")?;
 
+        let component_started = Instant::now();
         let projection_input_buffer = match self.q_projection_layout {
             PackageSelfAttnQProjectionLayout::Plain => &self.attention_output_buffer,
+            PackageSelfAttnQProjectionLayout::Qwen35Gated if self.use_paged_decode_sigmoid_gate => {
+                &self.attention_output_buffer
+            }
             PackageSelfAttnQProjectionLayout::Qwen35Gated
                 if !env_flag_enabled("ULLM_DISABLE_SIGMOID_MUL_IN_PLACE") =>
             {
@@ -31258,6 +31425,10 @@ impl PackageSelfAttnResidentStepLayer {
                 &self.attention_projection_input_buffer
             }
         };
+        component_step_ms.output_gate_ms =
+            finish_component(stream, component_started, "output gate")?;
+
+        let component_started = Instant::now();
         self.o_matrix
             .matvec_add(
                 projection_input_buffer,
@@ -31272,6 +31443,10 @@ impl PackageSelfAttnResidentStepLayer {
             .map_err(|err| {
                 format!("failed to run {label} self-attn o projection residual: {err}")
             })?;
+        component_step_ms.o_projection_residual_ms =
+            finish_component(stream, component_started, "o projection residual")?;
+
+        let component_started = Instant::now();
         ullm_runtime_sys::rmsnorm_f32(
             &self.attention_block_output_buffer,
             &self.post_norm_weight_buffer,
@@ -31281,6 +31456,10 @@ impl PackageSelfAttnResidentStepLayer {
             Some(stream),
         )
         .map_err(|err| format!("failed to run {label} self-attn post RMSNorm: {err}"))?;
+        component_step_ms.post_rmsnorm_ms =
+            finish_component(stream, component_started, "post RMSNorm")?;
+
+        let component_started = Instant::now();
         self.mlp_gate_matrix.matvec_silu_mul_with(
             &self.mlp_up_matrix,
             &self.post_normed_buffer,
@@ -31288,6 +31467,10 @@ impl PackageSelfAttnResidentStepLayer {
             stream,
             "self-attn resident MLP gate/up activation",
         )?;
+        component_step_ms.mlp_gate_up_activation_ms =
+            finish_component(stream, component_started, "MLP gate/up activation")?;
+
+        let component_started = Instant::now();
         self.mlp_down_matrix
             .matvec_add(
                 &self.mlp_activation_buffer,
@@ -31297,6 +31480,11 @@ impl PackageSelfAttnResidentStepLayer {
                 "self-attn resident MLP down residual",
             )
             .map_err(|err| format!("failed to run {label} self-attn MLP down residual: {err}"))?;
+        component_step_ms.mlp_down_residual_ms =
+            finish_component(stream, component_started, "MLP down residual")?;
+        if sync_component_timing {
+            self.last_component_step_ms = Some(component_step_ms);
+        }
         Ok(())
     }
 }

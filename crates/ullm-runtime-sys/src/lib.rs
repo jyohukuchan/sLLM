@@ -504,6 +504,23 @@ unsafe extern "C" {
         output: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
+        q: *const RawRuntimeBuffer,
+        gate: *const RawRuntimeBuffer,
+        k_cache: *const RawRuntimeBuffer,
+        v_cache: *const RawRuntimeBuffer,
+        block_table: *const RawRuntimeBuffer,
+        cache_len: usize,
+        block_size: usize,
+        cache_blocks: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        output: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_paged_kv_write_f32(
         k: *const RawRuntimeBuffer,
         v: *const RawRuntimeBuffer,
@@ -3080,6 +3097,58 @@ pub fn paged_decode_attn_f32(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn paged_decode_attn_sigmoid_gate_f32(
+    q: &RuntimeBuffer,
+    gate: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    block_table: &RuntimeBuffer,
+    cache_len: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if q_heads == 0 || value_dim == 0 {
+        return Err(
+            "f32 paged decode attention sigmoid gate q_heads/value_dim must be greater than zero"
+                .to_string(),
+        );
+    }
+    let gate_bytes = q_heads
+        .checked_mul(value_dim)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "f32 paged decode attention sigmoid gate byte size overflows".to_string())?;
+    check_copy_range(0, gate_bytes, gate.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_paged_decode_attn_sigmoid_gate_f32(
+            q.raw.as_ptr(),
+            gate.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            block_table.raw.as_ptr(),
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 pub fn paged_kv_write_f32(
     k: &RuntimeBuffer,
     v: &RuntimeBuffer,
@@ -5096,6 +5165,112 @@ mod tests {
 
         paged_decode_attn_f32(
             &q,
+            &k_cache,
+            &v_cache,
+            &block_table,
+            cache_len,
+            block_size,
+            cache_blocks,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_paged_decode_attn_sigmoid_gate_f32_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cache_len = 5_usize;
+        let block_size = 2_usize;
+        let cache_blocks = 4_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let gate_values = (0..q_heads * value_dim)
+            .map(|index| ((index * 7) as f32 - 5.0) / 9.0)
+            .collect::<Vec<_>>();
+        let k_cache_values = (0..cache_blocks * block_size * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_cache_values = (0..cache_blocks * block_size * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let block_table_values = vec![2_u32, 0_u32, 3_u32];
+        let decoded = expected_paged_decode_attn(
+            &q_values,
+            &k_cache_values,
+            &v_cache_values,
+            &block_table_values,
+            cache_len,
+            block_size,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+        let expected = expected_sigmoid_mul(&gate_values, &decoded);
+
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut gate = context
+            .alloc_buffer(gate_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k_cache = context
+            .alloc_buffer(k_cache_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v_cache = context
+            .alloc_buffer(v_cache_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut block_table = context
+            .alloc_buffer(block_table_values.len() * std::mem::size_of::<u32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        gate.copy_from_host(0, &f32s_to_le_bytes(&gate_values), Some(&mut stream))
+            .unwrap();
+        k_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&k_cache_values), Some(&mut stream))
+            .unwrap();
+        v_cache
+            .copy_from_host(0, &f32s_to_le_bytes(&v_cache_values), Some(&mut stream))
+            .unwrap();
+        let block_table_bytes: Vec<u8> = block_table_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        block_table
+            .copy_from_host(0, &block_table_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        paged_decode_attn_sigmoid_gate_f32(
+            &q,
+            &gate,
             &k_cache,
             &v_cache,
             &block_table,
