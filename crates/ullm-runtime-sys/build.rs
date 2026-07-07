@@ -11,9 +11,23 @@ fn main() {
 
     let header = root.join("runtime/include/ullm_runtime.h");
     let source = root.join("runtime/src/ullm_runtime.cpp");
+    let include_sources = [
+        root.join("runtime/src/ullm_runtime_hiprtc_sources.inc"),
+        root.join("runtime/src/ullm_runtime_api.inc"),
+        root.join("runtime/src/ullm_runtime_api_core.inc"),
+        root.join("runtime/src/ullm_runtime_api_aq4.inc"),
+        root.join("runtime/src/ullm_runtime_api_linear_attn_prepare.inc"),
+        root.join("runtime/src/ullm_runtime_api_primitives.inc"),
+        root.join("runtime/src/ullm_runtime_api_attention.inc"),
+        root.join("runtime/src/ullm_runtime_api_linear_attn.inc"),
+        root.join("runtime/src/ullm_runtime_api_smoke.inc"),
+    ];
 
     println!("cargo:rerun-if-changed={}", header.display());
     println!("cargo:rerun-if-changed={}", source.display());
+    for include_source in include_sources {
+        println!("cargo:rerun-if-changed={}", include_source.display());
+    }
 
     cc::Build::new()
         .cpp(true)
