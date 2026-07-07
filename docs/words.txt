@@ -16,6 +16,7 @@ batch throughput workload manifest:package-batch-throughput-benchをworkload gri
 executor parallelism fields:workloadのconcurrent_requestsではなく、実際のexecutorが同時に処理するtoken数・request数・real batch可否を表すbenchmark metadata。logical batch誤読を避けるために使う
 cached prefix prefill:既存のKV cache長Lに対して新規input chunk M tokenを追加するprefill系workload。速度の分母はMだが、attention costは主にM*L+M^2/2で決まるため、LとMを分けて記録する
 long context upper bound:2^16 token級のcold prefillやcached prefix付きprefillで、常用benchmarkではなく長コンテキスト上限の実行可能性、OOM境界、attention scalingを確認する測定枠
+runtime cached prefix attention smoke:synthetic Q/K/Vを使い、既存KV cache長Lに対して新規chunk M tokenをdecode_attn_f32の連続実行で測るruntime component smoke。最適化済みchunked prefillではなく、cached prefix attentionのbaselineと長prefix時のOOM/速度境界を確認する
 prefill RMSNorm batch smoke:package prompt embeddingを[tokens,hidden] device bufferに載せ、segmented RMSNormで複数tokenを一括正規化するsmoke。projection/attention/MLPのreal batch化前にprefill buffer境界を検証する
 AQ4 matvec batch runtime:同じAQ4 resident matrixに対して複数input vectorを[tokens,cols] layoutで受け取り、[tokens,rows] outputを返すruntime API。prefill projectionをtoken batch化するための最初のAQ4 projection境界
 package prefill AQ4 matvec batch smoke:package prompt embedding行を[tokens,hidden] device bufferへ載せ、指定AQ4 projection tensorをAQ4 matvec batch runtimeでまとめて実行し、materialized F32 matvec由来のexpected outputと比較するsmoke。attentionやMLP全体ではなくprojection batch kernelの正しさと速度を測る

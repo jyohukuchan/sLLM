@@ -621,6 +621,36 @@ Guard:
 - SQ候補のprefill評価へ進む前に、self-attention prefill attention kernelをtiled/blocked化して、長いpromptでのO(N^2)部分を現実的な速度に近づける必要がある。
 - 次はo projection/residualへ広げる前に、causal attention prefill kernel自体のcomponent benchmarkと最小限のtiling方針を固める。
 
+2026-07-07 cached prefix attention baseline:
+
+- `runtime-cached-prefix-attn-smoke` を追加した。
+- synthetic Q/K/Vを使い、既存KV cache長 `L` に対して新規input chunk `M` tokenを `decode_attn_f32` の連続実行で処理する。
+- これは最適化済みchunked cached-prefix prefillではない。cached prefix attentionのbaseline、OOM境界、prefix長scalingを測るためのruntime component smokeである。
+- R9700では `ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL=1` を付けて、staging fallbackなしで確認した。
+- 巨大prefixではfull host verificationが支配的になるため、output guardは代表座標のsampled verificationとして記録する。
+
+R9700 release results:
+
+| cached prefix L | new input M | wall ms mean | new input tok/s | estimated attention work | attention pair/s | note |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 4096 | 1 | 98.653080 | 10.136531 | 4097 | 41529.367495 | measured 3 |
+| 4096 | 16 | 1570.769684 | 10.186089 | 65672 | 41808.802824 | measured 3 |
+| 16384 | 1 | 510.701715 | 1.958090 | 16385 | 32083.307181 | measured 1 |
+| 65536 | 1 | 2030.332401 | 0.492530 | 65537 | 32278.950958 | measured 1 |
+
+Guard:
+
+- `verification=sampled`
+- `sampled_max_abs_diff = 0` in all measured rows
+
+解釈:
+
+- `decode_attn_f32_loop` baselineでは、cached prefix `L=4096` 時点で約 `10 tok/s`、`L=65536` では約 `0.49 tok/s` まで落ちる。
+- `L=4096, M=1` と `L=4096, M=16` のnew input tok/sはほぼ同じなので、現baselineは `M` 方向のchunk並列化ができていない。
+- `attention_pair_tps` は `32k-42k pair/s` 程度で、prefix長方向にはおおむね線形に悪化している。
+- SQ/FP8候補のprefill評価へ進む前に、`M x L` と `M x M` をまとめて扱うchunked cached-prefix attention kernelが必要である。
+- 次の実装対象は、`decode_attn_f32` loopではなく、`cached_prefix_chunked` executorである。
+
 ## Decision gates
 
 ### FP8 candidate can continue if

@@ -68,6 +68,16 @@ fn main() -> ExitCode {
         Some("runtime-rope-smoke") => runtime_rope_smoke(env::args().nth(2)),
         Some("runtime-causal-attn-smoke") => runtime_causal_attn_smoke(env::args().nth(2)),
         Some("runtime-decode-attn-smoke") => runtime_decode_attn_smoke(env::args().nth(2)),
+        Some("runtime-cached-prefix-attn-smoke") => runtime_cached_prefix_attn_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+        ),
         Some("runtime-paged-decode-attn-smoke") => {
             runtime_paged_decode_attn_smoke(env::args().nth(2))
         }
@@ -1730,6 +1740,505 @@ fn runtime_decode_attn_smoke(device_index: Option<String>) -> ExitCode {
         format_f32_preview(&output)
     );
     ExitCode::SUCCESS
+}
+
+fn runtime_cached_prefix_attn_smoke(
+    device_index: Option<String>,
+    cached_prefix_tokens: Option<String>,
+    new_tokens: Option<String>,
+    measured_repeats: Option<String>,
+    q_heads: Option<String>,
+    kv_heads: Option<String>,
+    head_dim: Option<String>,
+    value_dim: Option<String>,
+) -> ExitCode {
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let cached_prefix_tokens =
+        match parse_optional_usize(cached_prefix_tokens, 4096, "cached prefix tokens") {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
+    let new_tokens = match parse_optional_usize(new_tokens, 16, "new tokens") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("new tokens must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 3, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let q_heads = match parse_optional_usize(q_heads, 16, "q heads") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("q heads must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let kv_heads = match parse_optional_usize(kv_heads, 4, "kv heads") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("kv heads must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let head_dim = match parse_optional_usize(head_dim, 256, "head dim") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("head dim must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let value_dim = match parse_optional_usize(value_dim, 256, "value dim") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("value dim must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match runtime_cached_prefix_attn_smoke_impl(
+        device_index,
+        cached_prefix_tokens,
+        new_tokens,
+        measured_repeats,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_cached_prefix_attn_smoke_impl(
+    device_index: u32,
+    cached_prefix_tokens: usize,
+    new_tokens: usize,
+    measured_repeats: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+) -> Result<String, String> {
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err(format!(
+            "runtime cached prefix attention requires q_heads to be a multiple of kv_heads: q_heads={q_heads} kv_heads={kv_heads}"
+        ));
+    }
+    let total_context_tokens = cached_prefix_tokens
+        .checked_add(new_tokens)
+        .ok_or_else(|| "runtime cached prefix attention total context overflows".to_string())?;
+    let q_elements = q_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| "runtime cached prefix attention q element count overflows".to_string())?;
+    let output_elements = q_heads.checked_mul(value_dim).ok_or_else(|| {
+        "runtime cached prefix attention output element count overflows".to_string()
+    })?;
+    let q_sequence_elements = new_tokens.checked_mul(q_elements).ok_or_else(|| {
+        "runtime cached prefix attention q sequence element count overflows".to_string()
+    })?;
+    let kv_head_context = total_context_tokens.checked_mul(kv_heads).ok_or_else(|| {
+        "runtime cached prefix attention kv head-context count overflows".to_string()
+    })?;
+    let k_cache_elements = kv_head_context.checked_mul(head_dim).ok_or_else(|| {
+        "runtime cached prefix attention k cache element count overflows".to_string()
+    })?;
+    let v_cache_elements = kv_head_context.checked_mul(value_dim).ok_or_else(|| {
+        "runtime cached prefix attention v cache element count overflows".to_string()
+    })?;
+    let estimated_attention_pairs = cached_prefix_attention_pairs(cached_prefix_tokens, new_tokens)
+        .ok_or_else(|| "runtime cached prefix attention pair count overflows".to_string())?;
+    let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+    let host_input_elements = q_sequence_elements
+        .checked_add(k_cache_elements)
+        .and_then(|value| value.checked_add(v_cache_elements))
+        .ok_or_else(|| {
+            "runtime cached prefix attention host input element count overflows".to_string()
+        })?;
+    let host_input_bytes = checked_f32_byte_len(
+        host_input_elements,
+        "runtime cached prefix attention synthetic host input",
+    )?;
+    let max_host_input_bytes = 8_usize
+        .checked_mul(1024)
+        .and_then(|value| value.checked_mul(1024))
+        .and_then(|value| value.checked_mul(1024))
+        .ok_or_else(|| "runtime cached prefix attention host input limit overflows".to_string())?;
+    if host_input_bytes > max_host_input_bytes {
+        return Err(format!(
+            "runtime cached prefix attention synthetic host input would allocate {host_input_bytes} bytes, above limit {max_host_input_bytes}; reduce cached_prefix_tokens/new_tokens or dimensions"
+        ));
+    }
+
+    let q_sequence = (0..q_sequence_elements)
+        .map(|index| synthetic_attention_f32(index, 17))
+        .collect::<Vec<_>>();
+    let k_cache = (0..k_cache_elements)
+        .map(|index| synthetic_attention_f32(index, 31))
+        .collect::<Vec<_>>();
+    let v_cache = (0..v_cache_elements)
+        .map(|index| synthetic_attention_f32(index, 47))
+        .collect::<Vec<_>>();
+
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let mut k_cache_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            k_cache_elements,
+            "runtime cached prefix attention k cache",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate runtime cached prefix attention k cache: {err}")
+        })?;
+    let mut v_cache_buffer = context
+        .alloc_buffer(checked_f32_byte_len(
+            v_cache_elements,
+            "runtime cached prefix attention v cache",
+        )?)
+        .map_err(|err| {
+            format!("failed to allocate runtime cached prefix attention v cache: {err}")
+        })?;
+    {
+        let k_bytes = encode_f32_to_bytes(&k_cache);
+        k_cache_buffer
+            .copy_from_host(0, &k_bytes, Some(&mut stream))
+            .map_err(|err| {
+                format!("failed to copy runtime cached prefix attention k cache: {err}")
+            })?;
+    }
+    {
+        let v_bytes = encode_f32_to_bytes(&v_cache);
+        v_cache_buffer
+            .copy_from_host(0, &v_bytes, Some(&mut stream))
+            .map_err(|err| {
+                format!("failed to copy runtime cached prefix attention v cache: {err}")
+            })?;
+    }
+
+    let q_bytes = checked_f32_byte_len(q_elements, "runtime cached prefix attention q token")?;
+    let output_bytes = checked_f32_byte_len(
+        output_elements,
+        "runtime cached prefix attention output token",
+    )?;
+    let mut q_buffers = Vec::with_capacity(new_tokens);
+    let mut output_buffers = Vec::with_capacity(new_tokens);
+    for token_index in 0..new_tokens {
+        let q_start = token_index
+            .checked_mul(q_elements)
+            .ok_or_else(|| "runtime cached prefix attention q start overflows".to_string())?;
+        let q_end = q_start
+            .checked_add(q_elements)
+            .ok_or_else(|| "runtime cached prefix attention q end overflows".to_string())?;
+        let mut q_buffer = context.alloc_buffer(q_bytes).map_err(|err| {
+            format!(
+                "failed to allocate runtime cached prefix attention q token {token_index}: {err}"
+            )
+        })?;
+        let q_token_bytes = encode_f32_to_bytes(&q_sequence[q_start..q_end]);
+        q_buffer
+            .copy_from_host(0, &q_token_bytes, Some(&mut stream))
+            .map_err(|err| {
+                format!(
+                    "failed to copy runtime cached prefix attention q token {token_index}: {err}"
+                )
+            })?;
+        q_buffers.push(q_buffer);
+        output_buffers.push(context.alloc_buffer(output_bytes).map_err(|err| {
+            format!("failed to allocate runtime cached prefix attention output token {token_index}: {err}")
+        })?);
+    }
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize runtime cached prefix attention setup: {err}")
+    })?;
+
+    let measured_ms = {
+        let mut run_cached_prefix_attn =
+            |stream: &mut ullm_runtime_sys::RuntimeStream| -> Result<(), String> {
+                for (token_index, (q_buffer, output_buffer)) in
+                    q_buffers.iter().zip(output_buffers.iter_mut()).enumerate()
+                {
+                    let cache_len = cached_prefix_tokens
+                        .checked_add(token_index)
+                        .and_then(|value| value.checked_add(1))
+                        .ok_or_else(|| {
+                            "runtime cached prefix attention step cache length overflows"
+                                .to_string()
+                        })?;
+                    ullm_runtime_sys::decode_attn_f32(
+                        q_buffer,
+                        &k_cache_buffer,
+                        &v_cache_buffer,
+                        cache_len,
+                        q_heads,
+                        kv_heads,
+                        head_dim,
+                        value_dim,
+                        softmax_scale,
+                        output_buffer,
+                        Some(stream),
+                    )
+                    .map_err(|err| {
+                        format!(
+                            "failed to run runtime cached prefix attention step {token_index}: {err}"
+                        )
+                    })?;
+                }
+                Ok(())
+            };
+
+        run_cached_prefix_attn(&mut stream)?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize runtime cached prefix attention warmup: {err}")
+        })?;
+
+        let mut measured_ms = Vec::with_capacity(measured_repeats);
+        for _ in 0..measured_repeats {
+            let started = Instant::now();
+            run_cached_prefix_attn(&mut stream)?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize runtime cached prefix attention measured run: {err}")
+            })?;
+            measured_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        measured_ms
+    };
+
+    let wall_ms = measured_ms.iter().sum::<f64>() / measured_ms.len() as f64;
+    let wall_ms_min = measured_ms
+        .iter()
+        .copied()
+        .min_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+    let wall_ms_max = measured_ms
+        .iter()
+        .copied()
+        .max_by(f64::total_cmp)
+        .unwrap_or(wall_ms);
+
+    let sample_steps = cached_prefix_sample_steps(new_tokens);
+    let mut max_abs_diff = 0.0_f32;
+    let mut sample_count = 0_usize;
+    let mut output_preview = Vec::new();
+    for (sample_index, token_index) in sample_steps.iter().copied().enumerate() {
+        let output = read_runtime_buffer_f32(
+            &output_buffers[token_index],
+            &mut stream,
+            output_elements,
+            "runtime cached prefix attention sampled output",
+        )?;
+        if token_index == new_tokens - 1 {
+            output_preview = output[..output.len().min(8)].to_vec();
+        }
+        let q_head = match sample_index % 3 {
+            0 => 0,
+            1 => q_heads / 2,
+            _ => q_heads - 1,
+        };
+        let value_index = match sample_index % 3 {
+            0 => 0,
+            1 => value_dim / 2,
+            _ => value_dim - 1,
+        };
+        let q_start = token_index.checked_mul(q_elements).ok_or_else(|| {
+            "runtime cached prefix attention sampled q start overflows".to_string()
+        })?;
+        let q_end = q_start
+            .checked_add(q_elements)
+            .ok_or_else(|| "runtime cached prefix attention sampled q end overflows".to_string())?;
+        let cache_len = cached_prefix_tokens
+            .checked_add(token_index)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                "runtime cached prefix attention sampled cache length overflows".to_string()
+            })?;
+        let expected = runtime_host_decode_attn_f32_sample(
+            &q_sequence[q_start..q_end],
+            &k_cache,
+            &v_cache,
+            cache_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            q_head,
+            value_index,
+        )
+        .ok_or_else(|| {
+            "runtime cached prefix attention failed to build sampled reference".to_string()
+        })?;
+        let actual = output[q_head * value_dim + value_index];
+        max_abs_diff = max_abs_diff.max((actual - expected).abs());
+        sample_count += 1;
+    }
+    if output_preview.is_empty() {
+        let last_output = read_runtime_buffer_f32(
+            &output_buffers[new_tokens - 1],
+            &mut stream,
+            output_elements,
+            "runtime cached prefix attention last output",
+        )?;
+        output_preview = last_output[..last_output.len().min(8)].to_vec();
+    }
+    if max_abs_diff > 2e-4_f32 {
+        return Err(format!(
+            "runtime cached prefix attention sampled guard failed: max_abs_diff={max_abs_diff:.9}"
+        ));
+    }
+
+    let cache_kv_bytes_total = checked_f32_byte_len(
+        k_cache_elements
+            .checked_add(v_cache_elements)
+            .ok_or_else(|| "runtime cached prefix attention kv byte count overflows".to_string())?,
+        "runtime cached prefix attention total kv cache",
+    )?;
+    let q_bytes_total = checked_f32_byte_len(
+        q_sequence_elements,
+        "runtime cached prefix attention total q sequence",
+    )?;
+    let output_bytes_total = checked_f32_byte_len(
+        new_tokens
+            .checked_mul(output_elements)
+            .ok_or_else(|| "runtime cached prefix attention total output overflows".to_string())?,
+        "runtime cached prefix attention total output",
+    )?;
+    let attention_pair_tps = if wall_ms > 0.0 {
+        Some((estimated_attention_pairs as f64) / wall_ms * 1000.0)
+    } else {
+        None
+    };
+
+    Ok(format!(
+        "runtime-cached-prefix-attn-smoke backend={} device_index={} name=\"{}\" prefill_mode=cached_prefix executor=decode_attn_f32_loop cached_prefix_tokens={} new_prefill_tokens={} total_context_tokens_after_prefill={} q_heads={} kv_heads={} head_dim={} value_dim={} softmax_scale={softmax_scale:.9} estimated_prefill_attention_work_tokens={} cache_kv_bytes_total={} q_bytes_total={} output_bytes_total={} warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} prefill_total_input_tps={} attention_pair_tps_mean={} verification=sampled sample_count={} sampled_max_abs_diff={max_abs_diff:.9} output_preview={} verified=true",
+        info.backend,
+        device_index,
+        info.name,
+        cached_prefix_tokens,
+        new_tokens,
+        total_context_tokens,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        estimated_attention_pairs,
+        cache_kv_bytes_total,
+        q_bytes_total,
+        output_bytes_total,
+        measured_repeats,
+        wall_ms,
+        wall_ms_min,
+        wall_ms_max,
+        tps(new_tokens, wall_ms)
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        attention_pair_tps
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+        sample_count,
+        format_f32_preview(&output_preview),
+    ))
+}
+
+fn synthetic_attention_f32(index: usize, salt: usize) -> f32 {
+    let value = index.wrapping_mul(37).wrapping_add(salt.wrapping_mul(101)) % 1024;
+    ((value as f32) / 512.0 - 1.0) * 0.25
+}
+
+fn cached_prefix_attention_pairs(cached_prefix_tokens: usize, new_tokens: usize) -> Option<u128> {
+    let prefix = (cached_prefix_tokens as u128).checked_mul(new_tokens as u128)?;
+    let chunk = (new_tokens as u128).checked_mul(new_tokens.checked_add(1)? as u128)? / 2;
+    prefix.checked_add(chunk)
+}
+
+fn cached_prefix_sample_steps(new_tokens: usize) -> Vec<usize> {
+    let mut steps = vec![0, new_tokens / 2, new_tokens - 1];
+    steps.sort_unstable();
+    steps.dedup();
+    steps
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_host_decode_attn_f32_sample(
+    q: &[f32],
+    k_cache: &[f32],
+    v_cache: &[f32],
+    cache_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    q_head: usize,
+    value_index: usize,
+) -> Option<f32> {
+    if cache_len == 0
+        || q_heads == 0
+        || kv_heads == 0
+        || head_dim == 0
+        || value_dim == 0
+        || q_head >= q_heads
+        || value_index >= value_dim
+        || !q_heads.is_multiple_of(kv_heads)
+        || q.len() != q_heads * head_dim
+        || k_cache.len() < cache_len * kv_heads * head_dim
+        || v_cache.len() < cache_len * kv_heads * value_dim
+    {
+        return None;
+    }
+    let q_per_kv = q_heads / kv_heads;
+    let kv_head = q_head / q_per_kv;
+    let q_base = q_head * head_dim;
+    let mut scores = Vec::with_capacity(cache_len);
+    for source_timestep in 0..cache_len {
+        let k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+        let score = (0..head_dim)
+            .map(|dim| q[q_base + dim] * k_cache[k_base + dim])
+            .sum::<f32>()
+            * softmax_scale;
+        scores.push(score);
+    }
+    let max_score = scores
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, |max, score| max.max(score));
+    let mut denominator = 0.0_f32;
+    let mut weighted = 0.0_f32;
+    for (source_timestep, score) in scores.iter().copied().enumerate() {
+        let weight = (score - max_score).exp();
+        let v_index = (source_timestep * kv_heads + kv_head) * value_dim + value_index;
+        denominator += weight;
+        weighted += weight * v_cache[v_index];
+    }
+    Some(weighted / denominator)
 }
 
 fn runtime_paged_decode_attn_smoke(device_index: Option<String>) -> ExitCode {
@@ -35700,13 +36209,16 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-qkv-rope-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-layer-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-cached-prefix-attn-smoke [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-qkv-rope-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-layer-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
     );
     eprintln!(
         "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
     );
     eprintln!(
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
+    );
+    eprintln!(
+        "runtime-cached-prefix-attn-smoke: [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM]"
     );
     eprintln!(
         "package-token-ids-bench: same arguments as package-token-ids-generate-smoke; writes the same measured JSON report"
