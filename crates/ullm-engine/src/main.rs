@@ -16690,18 +16690,27 @@ struct PackageFinalNormRuntime {
     output_buffer: ullm_runtime_sys::RuntimeBuffer,
 }
 
+enum PackageEmbeddingStorage {
+    Bf16 {
+        matrix_buffer: ullm_runtime_sys::RuntimeBuffer,
+        matrix_bytes: usize,
+    },
+    Aq4 {
+        matrix: PackageAq4ResidentMatvec,
+    },
+}
+
 struct PackageEmbeddingRuntime {
     dtype: String,
     shape: Vec<u64>,
     vocab: usize,
     hidden: usize,
-    matrix_buffer: ullm_runtime_sys::RuntimeBuffer,
+    storage: PackageEmbeddingStorage,
     output_buffer: ullm_runtime_sys::RuntimeBuffer,
-    matrix_bytes: usize,
 }
 
 impl PackageEmbeddingRuntime {
-    fn load_bf16_if_available(
+    fn load_if_available(
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         path: &str,
@@ -16709,6 +16718,57 @@ impl PackageEmbeddingRuntime {
         hidden: usize,
     ) -> Result<Option<Self>, String> {
         let selector = TensorSelector::Name(QWEN3_EMBED_TOKENS_TENSOR.to_string());
+        if select_tensor_payload_bundle(path, &selector).is_ok() {
+            let mut registry = WeightRegistry::new();
+            let matrix = PackageAq4ResidentMatvec::load(
+                context,
+                stream,
+                &mut registry,
+                path,
+                QWEN3_EMBED_TOKENS_TENSOR,
+                chunk_bytes,
+            )
+            .map_err(|err| format!("failed to load resident AQ4 embedding tensor: {err}"))?;
+            let vocab = matrix.rows;
+            let cols = matrix.cols;
+            if cols != hidden {
+                return Err(format!(
+                    "resident AQ4 embedding hidden mismatch: embedding={cols} hidden={hidden}"
+                ));
+            }
+            let shape = vec![
+                u64::try_from(vocab)
+                    .map_err(|_| "resident AQ4 embedding vocab exceeds u64".to_string())?,
+                u64::try_from(hidden)
+                    .map_err(|_| "resident AQ4 embedding hidden exceeds u64".to_string())?,
+            ];
+            let mut output_buffer = context
+                .alloc_buffer(checked_f32_byte_len(
+                    hidden,
+                    "resident AQ4 embedding output",
+                )?)
+                .map_err(|err| {
+                    format!("failed to allocate resident AQ4 embedding output: {err}")
+                })?;
+            matrix.row_f32(
+                0,
+                &mut output_buffer,
+                stream,
+                "resident AQ4 embedding prewarm",
+            )?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize resident AQ4 embedding load: {err}")
+            })?;
+            return Ok(Some(Self {
+                dtype: "AQ4".to_string(),
+                shape,
+                vocab,
+                hidden,
+                storage: PackageEmbeddingStorage::Aq4 { matrix },
+                output_buffer,
+            }));
+        }
+
         let bundle = select_passthrough_payload_bundle(path, &selector)
             .map_err(|err| format!("failed to select resident embedding tensor: {err}"))?;
         validate_passthrough_shape_elements(&bundle)
@@ -16800,9 +16860,11 @@ impl PackageEmbeddingRuntime {
             shape: bundle.shape,
             vocab,
             hidden,
-            matrix_buffer,
+            storage: PackageEmbeddingStorage::Bf16 {
+                matrix_buffer,
+                matrix_bytes,
+            },
             output_buffer,
-            matrix_bytes,
         }))
     }
 
@@ -16818,15 +16880,33 @@ impl PackageEmbeddingRuntime {
                 self.vocab
             ));
         }
-        ullm_runtime_sys::bf16_row_f32(
-            &self.matrix_buffer,
-            self.vocab,
-            self.hidden,
-            token_id,
-            &mut self.output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to gather {label} resident embedding row: {err}"))
+        match &self.storage {
+            PackageEmbeddingStorage::Bf16 { matrix_buffer, .. } => ullm_runtime_sys::bf16_row_f32(
+                matrix_buffer,
+                self.vocab,
+                self.hidden,
+                token_id,
+                &mut self.output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to gather {label} resident BF16 embedding row: {err}")),
+            PackageEmbeddingStorage::Aq4 { matrix } => matrix.row_f32(
+                token_id,
+                &mut self.output_buffer,
+                stream,
+                &format!("{label} resident AQ4 embedding"),
+            ),
+        }
+    }
+
+    fn gather_token_values(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        token_id: usize,
+        label: &str,
+    ) -> Result<Vec<f32>, String> {
+        self.gather_token(stream, token_id, label)?;
+        read_runtime_buffer_f32(&self.output_buffer, stream, self.hidden, label)
     }
 
     fn output_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
@@ -16834,16 +16914,55 @@ impl PackageEmbeddingRuntime {
     }
 
     fn report_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "mode": "gpu_resident_bf16",
-            "tensor": QWEN3_EMBED_TOKENS_TENSOR,
-            "dtype": self.dtype,
-            "shape": self.shape,
-            "vocab": self.vocab,
-            "hidden": self.hidden,
-            "matrix_bytes": self.matrix_bytes,
-        })
+        match &self.storage {
+            PackageEmbeddingStorage::Bf16 { matrix_bytes, .. } => serde_json::json!({
+                "mode": "gpu_resident_bf16",
+                "tensor": QWEN3_EMBED_TOKENS_TENSOR,
+                "dtype": self.dtype,
+                "shape": self.shape,
+                "vocab": self.vocab,
+                "hidden": self.hidden,
+                "matrix_bytes": matrix_bytes,
+            }),
+            PackageEmbeddingStorage::Aq4 { matrix } => serde_json::json!({
+                "mode": "gpu_resident_aq4",
+                "tensor": QWEN3_EMBED_TOKENS_TENSOR,
+                "dtype": self.dtype,
+                "shape": self.shape,
+                "vocab": self.vocab,
+                "hidden": self.hidden,
+                "group_size": matrix.group_size,
+                "scale_count": matrix.scale_count,
+                "tensor_scale": matrix.tensor_scale,
+            }),
+        }
     }
+}
+
+fn package_embedding_shape(path: &str) -> Result<(usize, usize), String> {
+    let selector = TensorSelector::Name(QWEN3_EMBED_TOKENS_TENSOR.to_string());
+    if let Ok(bundle) = select_tensor_payload_bundle(path, &selector) {
+        let elements = usize::try_from(bundle.elements)
+            .map_err(|_| "resident AQ4 embedding element count exceeds usize".to_string())?;
+        return matrix_shape_rows_cols(&bundle.shape, elements)
+            .map_err(|err| format!("invalid resident AQ4 embedding shape: {err}"));
+    }
+
+    let bundle = select_passthrough_payload_bundle(path, &selector)
+        .map_err(|err| format!("failed to select resident embedding tensor: {err}"))?;
+    validate_passthrough_shape_elements(&bundle)
+        .map_err(|err| format!("invalid resident embedding shape: {err}"))?;
+    if bundle.shape.len() != 2 {
+        return Err(format!(
+            "resident embedding must be 2D, got shape {:?}",
+            bundle.shape
+        ));
+    }
+    let rows = usize::try_from(bundle.shape[0])
+        .map_err(|_| "resident embedding vocab size is too large".to_string())?;
+    let cols = usize::try_from(bundle.shape[1])
+        .map_err(|_| "resident embedding hidden size is too large".to_string())?;
+    Ok((rows, cols))
 }
 
 impl PackageFinalNormRuntime {
@@ -17769,20 +17888,19 @@ fn package_token_ids_generate_incremental_smoke_impl(
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
 
-    let embed_started = Instant::now();
-    let embedding_rows =
-        read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
-            .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
-    let hidden = embedding_rows.columns;
-    if hidden == 0 || embedding_rows.values.len() != prompt_token_ids.len() * hidden {
+    let (embedding_vocab, hidden) = package_embedding_shape(path)?;
+    if hidden == 0 {
+        return Err("incremental prompt embedding hidden size is zero".to_string());
+    }
+    if let Some(token_id) = prompt_token_ids
+        .iter()
+        .copied()
+        .find(|token_id| *token_id >= embedding_vocab)
+    {
         return Err(format!(
-            "incremental prompt embedding shape mismatch: hidden={} values={} prompt_tokens={}",
-            hidden,
-            embedding_rows.values.len(),
-            prompt_token_ids.len()
+            "incremental prompt token id {token_id} is out of embedding range 0..{embedding_vocab}"
         ));
     }
-    let embed_ms = embed_started.elapsed().as_secs_f64() * 1000.0;
 
     let total_tokens = prompt_token_ids
         .len()
@@ -17926,7 +18044,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let lm_head_load_ms = lm_head_load_started.elapsed().as_secs_f64() * 1000.0;
     let embedding_runtime_load_started = Instant::now();
     let mut embedding_runtime = if lm_head_runtime.supports_device_input() {
-        PackageEmbeddingRuntime::load_bf16_if_available(
+        PackageEmbeddingRuntime::load_if_available(
             &mut context,
             &mut stream,
             path,
@@ -17938,9 +18056,45 @@ fn package_token_ids_generate_incremental_smoke_impl(
     };
     let embedding_runtime_load_ms = embedding_runtime_load_started.elapsed().as_secs_f64() * 1000.0;
 
+    let embed_started = Instant::now();
+    let mut residual_sequence = if let Some(runtime) = embedding_runtime.as_mut() {
+        let mut values = Vec::with_capacity(prompt_token_ids.len() * hidden);
+        for (index, &token_id) in prompt_token_ids.iter().enumerate() {
+            let row = runtime.gather_token_values(
+                &mut stream,
+                token_id,
+                &format!("incremental prompt embedding token {index}"),
+            )?;
+            if row.len() != hidden {
+                return Err(format!(
+                    "incremental prompt resident embedding length {} does not match hidden {hidden}",
+                    row.len()
+                ));
+            }
+            values.extend(row);
+        }
+        values
+    } else {
+        let embedding_rows =
+            read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &prompt_token_ids)
+                .map_err(|err| format!("failed to read prompt embedding rows: {err}"))?;
+        if embedding_rows.columns != hidden
+            || embedding_rows.values.len() != prompt_token_ids.len() * hidden
+        {
+            return Err(format!(
+                "incremental prompt embedding shape mismatch: hidden={} columns={} values={} prompt_tokens={}",
+                hidden,
+                embedding_rows.columns,
+                embedding_rows.values.len(),
+                prompt_token_ids.len()
+            ));
+        }
+        embedding_rows.values
+    };
+    let embed_ms = embed_started.elapsed().as_secs_f64() * 1000.0;
+
     let prefill_started = Instant::now();
     let prefill_layers_started = Instant::now();
-    let mut residual_sequence = embedding_rows.values;
     for (layer_position, layer) in layers.iter_mut().enumerate() {
         let mut next_sequence = Vec::with_capacity(residual_sequence.len());
         for timestep in 0..prompt_token_ids.len() {
@@ -29770,6 +29924,32 @@ impl PackageAq4ResidentMatvec {
             scale_values_buffer,
             row_scale_buffer,
         })
+    }
+
+    fn row_f32(
+        &self,
+        row_index: usize,
+        output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<(), String> {
+        ullm_runtime_sys::aq4_row_f32(
+            self.index_buffer.as_ref(),
+            self.scale_buffer.as_ref(),
+            self.codebook_buffer.as_ref(),
+            &self.scale_values_buffer,
+            self.row_scale_buffer.as_ref(),
+            self.scale_count,
+            self.group_size,
+            self.tensor_scale,
+            self.row_scale_count,
+            self.rows,
+            self.cols,
+            row_index,
+            output_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to gather {label} AQ4 row: {err}"))
     }
 
     fn matvec(

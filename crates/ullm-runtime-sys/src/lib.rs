@@ -78,6 +78,22 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_aq4_row_f32(
+        index_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        codebook_buffer: *const RawRuntimeBuffer,
+        scale_values_buffer: *const RawRuntimeBuffer,
+        row_scale_buffer: *const RawRuntimeBuffer,
+        scale_count: usize,
+        group_size: usize,
+        tensor_scale: f32,
+        row_scale_count: usize,
+        rows: usize,
+        cols: usize,
+        row_index: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_aq4_matvec_f32(
         index_buffer: *const RawRuntimeBuffer,
         scale_buffer: *const RawRuntimeBuffer,
@@ -753,6 +769,84 @@ pub fn aq4_dequant_f32(
             group_size,
             tensor_scale,
             elements,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn aq4_row_f32(
+    index_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    codebook_buffer: &RuntimeBuffer,
+    scale_values_buffer: &RuntimeBuffer,
+    row_scale_buffer: Option<&RuntimeBuffer>,
+    scale_count: usize,
+    group_size: usize,
+    tensor_scale: f32,
+    row_scale_count: usize,
+    rows: usize,
+    cols: usize,
+    row_index: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if scale_count == 0 {
+        return Err("AQ4 row scale table is empty".to_string());
+    }
+    if group_size == 0 {
+        return Err("AQ4 row group size must be greater than zero".to_string());
+    }
+    if rows == 0 || cols == 0 {
+        return Err("AQ4 row rows and cols must be greater than zero".to_string());
+    }
+    if row_index >= rows {
+        return Err("AQ4 row index is out of range".to_string());
+    }
+    if !tensor_scale.is_finite() || tensor_scale <= 0.0 {
+        return Err("AQ4 row tensor scale must be finite and greater than zero".to_string());
+    }
+    let elements = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "AQ4 row matrix element count overflows".to_string())?;
+    let index_bytes = elements / 2 + usize::from(!elements.is_multiple_of(2));
+    let groups = elements / group_size + usize::from(!elements.is_multiple_of(group_size));
+    let scale_value_bytes = scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 row scale value byte size overflows".to_string())?;
+    let row_scale_bytes = row_scale_count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 row scale override byte size overflows".to_string())?;
+    let output_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "AQ4 row output byte size overflows".to_string())?;
+    check_copy_range(0, index_bytes, index_buffer.size()?)?;
+    check_copy_range(0, groups, scale_buffer.size()?)?;
+    check_copy_range(0, 16 * std::mem::size_of::<f32>(), codebook_buffer.size()?)?;
+    check_copy_range(0, scale_value_bytes, scale_values_buffer.size()?)?;
+    if let Some(row_scale_buffer) = row_scale_buffer {
+        check_copy_range(0, row_scale_bytes, row_scale_buffer.size()?)?;
+    }
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    let row_scale_raw = row_scale_buffer
+        .map(|buffer| buffer.raw.as_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_aq4_row_f32(
+            index_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            codebook_buffer.raw.as_ptr(),
+            scale_values_buffer.raw.as_ptr(),
+            row_scale_raw,
+            scale_count,
+            group_size,
+            tensor_scale,
+            row_scale_count,
+            rows,
+            cols,
+            row_index,
             output_buffer.raw.as_ptr(),
             stream,
         )
@@ -3454,6 +3548,77 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_eq!(le_bytes_to_f32s(&output_bytes), vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn cpu_aq4_row_f32_reads_selected_row() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut indices = context.alloc_buffer(4).unwrap();
+        let mut scales = context.alloc_buffer(4).unwrap();
+        let mut codebook = context
+            .alloc_buffer(16 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut scale_values = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        indices
+            .copy_from_host(0, &[0x21, 0x43, 0x65, 0x87], Some(&mut stream))
+            .unwrap();
+        scales
+            .copy_from_host(0, &[0, 1, 2, 3], Some(&mut stream))
+            .unwrap();
+        codebook
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[
+                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0,
+                    15.0,
+                ]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        scale_values
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[1.0, 10.0, 100.0, 1000.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        aq4_row_f32(
+            &indices,
+            &scales,
+            &codebook,
+            &scale_values,
+            None,
+            4,
+            2,
+            0.5,
+            0,
+            2,
+            4,
+            1,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 4 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(
+            le_bytes_to_f32s(&output_bytes),
+            vec![250.0, 300.0, 3500.0, 4000.0]
+        );
     }
 
     #[test]
