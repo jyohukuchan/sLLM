@@ -700,7 +700,7 @@ RoPE guard:
 - `4096`: `q_rope_abs_floor=0.000819000`, `q_rope_max_abs_diff=0.000506938`, `k_rope_max_abs_diff=0.000336170`
 - `8192`: `q_rope_abs_floor=0.001638200`, `q_rope_max_abs_diff=0.001175225`, `k_rope_max_abs_diff=0.000833869`
 - `16384`: `q_rope_abs_floor=0.003276600`, `q_rope_max_abs_diff=0.002606988`, `k_rope_max_abs_diff=0.001518801`
-- 4096以上ではfull host attention reference verificationを避け、15点のsampled attention verificationを使う。確認時間は4096で約 `0.91s`、8192で約 `1.73s`、16384で約 `3.42s`。
+- 1024以上ではfull host attention reference verificationを避け、15点のsampled attention verificationを使う。確認時間は4096で約 `0.91s`、8192で約 `1.73s`、16384で約 `3.42s`。
 
 解釈:
 
@@ -708,6 +708,45 @@ RoPE guard:
 - Phase C4 cold prefill length scalingの必須範囲 `N=1024/2048/4096/8192/16384` は、self-attention attention componentとして取得できた。
 - 4096 tokenで約 `3.06k tok/s`、8192 tokenで約 `1.59k tok/s`、16384 tokenで約 `0.78k tok/s` まで落ちており、長尺側は引き続きcausal attentionのO(N^2)部分が支配的である。
 - 次はo projection/residualまで接続してself-attention layer partialを再測定し、layer単位でattention支配が維持されるかを確認する。その後、必要ならcausal attention kernelのtile/blocking再設計へ戻る。
+
+2026-07-07 self-attention block batch v1:
+
+- `package-self-attn-block-batch-smoke` を追加した。
+- 既存のself-attention attention batch pathに、`sigmoid(q_gate) * attention -> o_proj AQ4 batch -> residual add` を接続した。
+- attention verificationは、full host referenceが1024 token時点で約18秒かかるため、1024以上ではsampled verificationへ切り替えた。
+- `o_proj` は長尺promptでfull host projection referenceを作らず、AQ4 row dot productのsampled verificationで確認する。
+- 保存先:
+  - `benchmarks/results/2026-07-07/runtime-causal-attn-source-shared/phase-c4-self-attn-block-batch-v1.md`
+
+R9700 release results:
+
+| component | prompt tokens | wall ms mean | token/s mean | attention diff | o proj diff | block diff | note |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| self-attention block batch | 128 | 11.099879 | 11531.656891 | 0.000011265 | 0.000000864 | 0.000000000 | measured 3 |
+| self-attention block batch | 512 | 54.498359 | 9394.778233 | 0.000011265 | 0.000000864 | 0.000000000 | measured 3 |
+| self-attention block batch | 1024 | 141.180790 | 7253.111418 | 0.000000130 | 0.000000864 | 0.000000000 | sampled |
+| self-attention block batch | 2048 | 433.086886 | 4728.843256 | 0.000000209 | 0.000000864 | 0.000000000 | sampled |
+| self-attention block batch | 4096 | 1450.365419 | 2824.115872 | 0.000000209 | 0.000000864 | 0.000000000 | sampled |
+| self-attention block batch | 8192 | 5382.886791 | 1521.859983 | 0.000000104 | 0.000000864 | 0.000000000 | sampled |
+| self-attention block batch | 16384 | 21844.617459 | 750.024578 | 0.000000320 | 0.000000864 | 0.000000000 | sampled |
+
+Attention-only comparison:
+
+| prompt tokens | attention-only ms | block ms | block delta ms | block/attention wall |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 | 7.637947 | 11.099879 | 3.461932 | 1.453x |
+| 512 | 43.796889 | 54.498359 | 10.701470 | 1.244x |
+| 1024 | 116.215921 | 141.180790 | 24.964869 | 1.215x |
+| 2048 | 374.883299 | 433.086886 | 58.203587 | 1.155x |
+| 4096 | 1339.278313 | 1450.365419 | 111.087106 | 1.083x |
+| 8192 | 5157.917832 | 5382.886791 | 224.968959 | 1.044x |
+| 16384 | 20944.388749 | 21844.617459 | 900.228710 | 1.043x |
+
+解釈:
+
+- o projection/residualまで接続しても、長尺promptではcausal attention支配が維持される。
+- block/attention wall ratioは128 tokenで約 `1.45x`、512 tokenで約 `1.24x` だが、8192/16384では約 `1.04x` まで下がる。
+- self-attention block単位でもPhase C4のcold prefill length scalingは取れた。次はpost-attention RMSNorm/MLPまで含むself-attention layer partialか、causal attention kernelのtile/blocking再設計へ進む。
 
 2026-07-07 cached prefix attention baseline:
 

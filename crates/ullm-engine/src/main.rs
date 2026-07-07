@@ -352,6 +352,17 @@ fn main() -> ExitCode {
             env::args().nth(9),
             env::args().nth(10),
         ),
+        Some("package-self-attn-block-batch-smoke") => package_self_attn_block_batch_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+        ),
         Some("package-linear-attn-proj-batch-smoke") => package_linear_attn_proj_batch_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -18092,6 +18103,7 @@ fn package_linear_attn_proj_batch_smoke_impl(
 enum SelfAttnBatchSmokeStage {
     QkvRope,
     Attention,
+    Block,
 }
 
 impl SelfAttnBatchSmokeStage {
@@ -18099,11 +18111,19 @@ impl SelfAttnBatchSmokeStage {
         match self {
             SelfAttnBatchSmokeStage::QkvRope => "package-self-attn-qkv-rope-batch-smoke",
             SelfAttnBatchSmokeStage::Attention => "package-self-attn-attention-batch-smoke",
+            SelfAttnBatchSmokeStage::Block => "package-self-attn-block-batch-smoke",
         }
     }
 
     fn include_attention(self) -> bool {
-        self == SelfAttnBatchSmokeStage::Attention
+        matches!(
+            self,
+            SelfAttnBatchSmokeStage::Attention | SelfAttnBatchSmokeStage::Block
+        )
+    }
+
+    fn include_block(self) -> bool {
+        self == SelfAttnBatchSmokeStage::Block
     }
 }
 
@@ -18245,6 +18265,75 @@ fn package_self_attn_attention_batch_smoke(
     }
 }
 
+fn package_self_attn_block_batch_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-self-attn-block-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 3, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_self_attn_qkv_rope_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        prompt_token_ids,
+        measured_repeats,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        SelfAttnBatchSmokeStage::Block,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn package_self_attn_qkv_rope_batch_smoke_impl(
     path: &str,
@@ -18284,6 +18373,7 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
     let k_tensor = format!("model.language_model.layers.{layer_index}.self_attn.k_proj.weight");
     let v_tensor = format!("model.language_model.layers.{layer_index}.self_attn.v_proj.weight");
+    let o_tensor = format!("model.language_model.layers.{layer_index}.self_attn.o_proj.weight");
     let q_norm_tensor =
         format!("model.language_model.layers.{layer_index}.self_attn.q_norm.weight");
     let k_norm_tensor =
@@ -18401,6 +18491,18 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         &v_tensor,
         chunk_bytes,
     )?;
+    let o_matrix = if stage.include_block() {
+        Some(PackageAq4ResidentMatvec::load(
+            &mut context,
+            &mut stream,
+            &mut registry,
+            path,
+            &o_tensor,
+            chunk_bytes,
+        )?)
+    } else {
+        None
+    };
     if q_matrix.cols != hidden || k_matrix.cols != hidden || v_matrix.cols != hidden {
         return Err(format!(
             "self-attn qkv RoPE batch q/k/v hidden mismatch: q_cols={} k_cols={} v_cols={} hidden={hidden}",
@@ -18439,6 +18541,17 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         ));
     }
     let value_dim = v_matrix.rows / kv_heads;
+    let attention_width = q_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| "self-attn batch attention width overflows".to_string())?;
+    if let Some(o_matrix) = o_matrix.as_ref() {
+        if o_matrix.rows != hidden || o_matrix.cols != attention_width {
+            return Err(format!(
+                "self-attn block batch o projection shape mismatch: o=[{},{}] expected [{hidden},{attention_width}]",
+                o_matrix.rows, o_matrix.cols
+            ));
+        }
+    }
 
     let input_elements = sequence_len
         .checked_mul(hidden)
@@ -18461,8 +18574,7 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         .and_then(|value| value.checked_mul(head_dim))
         .ok_or_else(|| "self-attn qkv RoPE batch k output element count overflows".to_string())?;
     let attention_output_elements = sequence_len
-        .checked_mul(q_heads)
-        .and_then(|value| value.checked_mul(value_dim))
+        .checked_mul(attention_width)
         .ok_or_else(|| "self-attn attention batch output element count overflows".to_string())?;
     let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
 
@@ -18546,6 +18658,48 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
             "self-attn attention batch output",
         )?)
         .map_err(|err| format!("failed to allocate self-attn attention batch output: {err}"))?;
+    let mut attention_projection_input_buffer = if stage.include_block() {
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    attention_output_elements,
+                    "self-attn block batch attention projection input",
+                )?)
+                .map_err(|err| {
+                    format!(
+                        "failed to allocate self-attn block batch attention projection input: {err}"
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut attn_projected_buffer = if stage.include_block() {
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    input_elements,
+                    "self-attn block batch projected output",
+                )?)
+                .map_err(|err| {
+                    format!("failed to allocate self-attn block batch projected output: {err}")
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut block_output_buffer = if stage.include_block() {
+        Some(
+            context
+                .alloc_buffer(checked_f32_byte_len(
+                    input_elements,
+                    "self-attn block batch output",
+                )?)
+                .map_err(|err| format!("failed to allocate self-attn block batch output: {err}"))?,
+        )
+    } else {
+        None
+    };
 
     input_buffer
         .copy_from_host(
@@ -18645,6 +18799,46 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
                     format!("failed to run self-attn attention batch causal attention: {err}")
                 })?;
             }
+            if stage.include_block() {
+                let attention_projection_input_buffer =
+                    attention_projection_input_buffer.as_mut().ok_or_else(|| {
+                        "self-attn block batch projection input buffer missing".to_string()
+                    })?;
+                let attn_projected_buffer = attn_projected_buffer
+                    .as_mut()
+                    .ok_or_else(|| "self-attn block batch projected buffer missing".to_string())?;
+                let block_output_buffer = block_output_buffer
+                    .as_mut()
+                    .ok_or_else(|| "self-attn block batch output buffer missing".to_string())?;
+                let o_matrix = o_matrix
+                    .as_ref()
+                    .ok_or_else(|| "self-attn block batch o projection missing".to_string())?;
+                ullm_runtime_sys::sigmoid_mul_f32(
+                    &q_gate_buffer,
+                    &attention_output_buffer,
+                    attention_output_elements,
+                    attention_projection_input_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run self-attn block batch output gate: {err}"))?;
+                o_matrix.matvec_batch(
+                    attention_projection_input_buffer,
+                    sequence_len,
+                    attn_projected_buffer,
+                    stream,
+                    "self-attn block batch o projection",
+                )?;
+                ullm_runtime_sys::add_f32(
+                    attn_projected_buffer,
+                    &input_buffer,
+                    input_elements,
+                    block_output_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!("failed to run self-attn block batch residual add: {err}")
+                })?;
+            }
             Ok(())
         };
 
@@ -18723,6 +18917,37 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
             &mut stream,
             attention_output_elements,
             "self-attn attention batch output",
+        )?)
+    } else {
+        None
+    };
+    let attention_projection_input =
+        if let Some(buffer) = attention_projection_input_buffer.as_ref() {
+            Some(read_runtime_buffer_f32(
+                buffer,
+                &mut stream,
+                attention_output_elements,
+                "self-attn block batch attention projection input",
+            )?)
+        } else {
+            None
+        };
+    let attn_projected = if let Some(buffer) = attn_projected_buffer.as_ref() {
+        Some(read_runtime_buffer_f32(
+            buffer,
+            &mut stream,
+            input_elements,
+            "self-attn block batch projected output",
+        )?)
+    } else {
+        None
+    };
+    let block_output = if let Some(buffer) = block_output_buffer.as_ref() {
+        Some(read_runtime_buffer_f32(
+            buffer,
+            &mut stream,
+            input_elements,
+            "self-attn block batch output",
         )?)
     } else {
         None
@@ -18856,6 +19081,66 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     } else {
         None
     };
+    let block_verification = if stage.include_block() {
+        let attention_output = attention_output.as_ref().ok_or_else(|| {
+            "self-attn block batch attention output missing for verification".to_string()
+        })?;
+        let attention_projection_input = attention_projection_input.as_ref().ok_or_else(|| {
+            "self-attn block batch projection input missing for verification".to_string()
+        })?;
+        let attn_projected = attn_projected.as_ref().ok_or_else(|| {
+            "self-attn block batch projected output missing for verification".to_string()
+        })?;
+        let block_output = block_output
+            .as_ref()
+            .ok_or_else(|| "self-attn block batch output missing for verification".to_string())?;
+        let o_matrix = o_matrix.as_ref().ok_or_else(|| {
+            "self-attn block batch o projection missing for verification".to_string()
+        })?;
+        let output_gate_max_abs_diff = verify_sigmoid_mul_f32_close(
+            "self-attn block batch output gate",
+            &q_gate,
+            attention_output,
+            attention_projection_input,
+            1e-5_f32,
+            1e-5_f32,
+        )?;
+        let mut o_row_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                o_matrix.cols,
+                "self-attn block batch sampled o projection row",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate self-attn block batch sampled o row: {err}")
+            })?;
+        let (o_proj_checked_values, o_proj_max_abs_diff) = verify_aq4_matvec_batch_output_sampled(
+            "self-attn block batch o projection",
+            o_matrix,
+            attention_projection_input,
+            attn_projected,
+            sequence_len,
+            &mut o_row_buffer,
+            &mut stream,
+            3e-3_f32,
+            2e-5_f32,
+        )?;
+        let block_max_abs_diff = verify_add_f32_close(
+            "self-attn block batch residual add",
+            &attn_projected,
+            &embedding_rows.values,
+            block_output,
+            1e-5_f32,
+            1e-6_f32,
+        )?;
+        Some((
+            output_gate_max_abs_diff,
+            o_proj_checked_values,
+            o_proj_max_abs_diff,
+            block_max_abs_diff,
+        ))
+    } else {
+        None
+    };
     let verification_wall_ms = verification_started.elapsed().as_secs_f64() * 1000.0;
 
     let output_elements = input_normed
@@ -18874,13 +19159,117 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
                     .unwrap_or(0),
             )
         })
+        .and_then(|value| {
+            value.checked_add(
+                attention_projection_input
+                    .as_ref()
+                    .map(|output| output.len())
+                    .unwrap_or(0),
+            )
+        })
+        .and_then(|value| {
+            value.checked_add(
+                attn_projected
+                    .as_ref()
+                    .map(|output| output.len())
+                    .unwrap_or(0),
+            )
+        })
+        .and_then(|value| {
+            value.checked_add(
+                block_output
+                    .as_ref()
+                    .map(|output| output.len())
+                    .unwrap_or(0),
+            )
+        })
         .ok_or_else(|| "self-attn qkv RoPE batch output element count overflows".to_string())?;
     let preview_len = q_rope.len().min(8);
-    let executor = if stage.include_attention() {
+    let executor = if stage.include_block() {
+        "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32+causal_attn_f32+sigmoid_mul_f32+aq4_matvec_batch_f32+add_f32"
+    } else if stage.include_attention() {
         "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32+causal_attn_f32"
     } else {
         "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32"
     };
+    if let Some(block_output) = block_output.as_ref() {
+        let attention_output = attention_output.as_ref().ok_or_else(|| {
+            "self-attn block batch attention output missing for report".to_string()
+        })?;
+        let attention_projection_input = attention_projection_input.as_ref().ok_or_else(|| {
+            "self-attn block batch projection input missing for report".to_string()
+        })?;
+        let attn_projected = attn_projected.as_ref().ok_or_else(|| {
+            "self-attn block batch projected output missing for report".to_string()
+        })?;
+        let (attention_verification_mode, attention_checked_values, attention_max_abs_diff) =
+            attention_verification.ok_or_else(|| {
+                "self-attn block batch attention verification summary missing".to_string()
+            })?;
+        let (
+            output_gate_max_abs_diff,
+            o_proj_checked_values,
+            o_proj_max_abs_diff,
+            block_max_abs_diff,
+        ) = block_verification
+            .ok_or_else(|| "self-attn block batch verification summary missing".to_string())?;
+        return Ok(format!(
+            "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} q_rows={} k_rows={} v_rows={} o_rows={} q_projection_layout={} q_gate_elements={} output_gate_layout=qwen3.5-sigmoid q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} input_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} verification_wall_ms={verification_wall_ms:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_verification={} attention_checked_values={} attention_max_abs_diff={:.9} output_gate_max_abs_diff={output_gate_max_abs_diff:.9} o_proj_verification=sampled o_proj_checked_values={} o_proj_max_abs_diff={o_proj_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} q_rope_preview={} attention_preview={} projection_input_preview={} projected_preview={} block_preview={} verified=true",
+            stage.smoke_name(),
+            path,
+            layer_index,
+            input_norm_tensor,
+            q_tensor,
+            k_tensor,
+            v_tensor,
+            o_tensor,
+            q_norm_tensor,
+            k_norm_tensor,
+            sequence_len,
+            hidden,
+            q_matrix.rows,
+            k_matrix.rows,
+            v_matrix.rows,
+            o_matrix.as_ref().map(|matrix| matrix.rows).unwrap_or(0),
+            q_split.layout,
+            expected_q_gate.len(),
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            rotary_dim,
+            position_offset,
+            rope_base,
+            input_elements,
+            output_elements,
+            executor,
+            sequence_len,
+            info.backend,
+            device_index,
+            info.name,
+            measured_repeats,
+            wall_ms,
+            wall_ms_min,
+            wall_ms_max,
+            tps(sequence_len, wall_ms)
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "null".to_string()),
+            tps(output_elements, wall_ms)
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "null".to_string()),
+            attention_verification_mode,
+            attention_checked_values,
+            attention_max_abs_diff,
+            o_proj_checked_values,
+            format_f32_preview(&q_rope[..preview_len]),
+            format_f32_preview(&attention_output[..attention_output.len().min(8)]),
+            format_f32_preview(
+                &attention_projection_input[..attention_projection_input.len().min(8)],
+            ),
+            format_f32_preview(&attn_projected[..attn_projected.len().min(8)]),
+            format_f32_preview(&block_output[..block_output.len().min(8)]),
+        ));
+    }
     if let Some(attention_output) = attention_output.as_ref() {
         let (attention_verification_mode, attention_checked_values, attention_max_abs_diff) =
             attention_verification.ok_or_else(|| {
@@ -36226,6 +36615,168 @@ fn verify_f32_close(
     Ok(max_abs_diff)
 }
 
+fn verify_sigmoid_mul_f32_close(
+    label: &str,
+    gate: &[f32],
+    input: &[f32],
+    actual: &[f32],
+    abs_floor: f32,
+    rel_scale: f32,
+) -> Result<f32, String> {
+    if gate.len() != input.len() || input.len() != actual.len() {
+        return Err(format!(
+            "{label} size mismatch: gate={} input={} actual={}",
+            gate.len(),
+            input.len(),
+            actual.len()
+        ));
+    }
+    let mut max_abs_diff = 0.0_f32;
+    for ((gate_value, input_value), actual_value) in
+        gate.iter().zip(input.iter()).zip(actual.iter())
+    {
+        let sigmoid = 1.0_f32 / (1.0_f32 + (-*gate_value).exp());
+        let expected = sigmoid * *input_value;
+        let diff = (*actual_value - expected).abs();
+        let tolerance = abs_floor.max(expected.abs() * rel_scale);
+        if diff > tolerance {
+            return Err(format!(
+                "{label} mismatch: max_abs_diff={diff} tolerance={tolerance}"
+            ));
+        }
+        max_abs_diff = max_abs_diff.max(diff);
+    }
+    Ok(max_abs_diff)
+}
+
+fn verify_add_f32_close(
+    label: &str,
+    lhs: &[f32],
+    rhs: &[f32],
+    actual: &[f32],
+    abs_floor: f32,
+    rel_scale: f32,
+) -> Result<f32, String> {
+    if lhs.len() != rhs.len() || rhs.len() != actual.len() {
+        return Err(format!(
+            "{label} size mismatch: lhs={} rhs={} actual={}",
+            lhs.len(),
+            rhs.len(),
+            actual.len()
+        ));
+    }
+    let mut max_abs_diff = 0.0_f32;
+    for ((lhs_value, rhs_value), actual_value) in lhs.iter().zip(rhs.iter()).zip(actual.iter()) {
+        let expected = *lhs_value + *rhs_value;
+        let diff = (*actual_value - expected).abs();
+        let tolerance = abs_floor.max(expected.abs() * rel_scale);
+        if diff > tolerance {
+            return Err(format!(
+                "{label} mismatch: max_abs_diff={diff} tolerance={tolerance}"
+            ));
+        }
+        max_abs_diff = max_abs_diff.max(diff);
+    }
+    Ok(max_abs_diff)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_aq4_matvec_batch_output_sampled(
+    label: &str,
+    matrix: &PackageAq4ResidentMatvec,
+    input: &[f32],
+    actual: &[f32],
+    batch_count: usize,
+    row_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    abs_floor: f32,
+    rel_scale: f32,
+) -> Result<(usize, f32), String> {
+    let expected_input_len = batch_count
+        .checked_mul(matrix.cols)
+        .ok_or_else(|| format!("{label} sampled input length overflows"))?;
+    let expected_actual_len = batch_count
+        .checked_mul(matrix.rows)
+        .ok_or_else(|| format!("{label} sampled output length overflows"))?;
+    if input.len() != expected_input_len || actual.len() != expected_actual_len {
+        return Err(format!(
+            "{label} sampled size mismatch: input={} expected_input={} actual={} expected_actual={}",
+            input.len(),
+            expected_input_len,
+            actual.len(),
+            expected_actual_len
+        ));
+    }
+    let sample_points = aq4_matvec_batch_sample_points(batch_count, matrix.rows);
+    if sample_points.is_empty() {
+        return Err(format!("{label} sampled verification has no sample points"));
+    }
+    let mut row_cache: Vec<(usize, Vec<f32>)> = Vec::new();
+    let mut max_abs_diff = 0.0_f32;
+    for (token_index, row_index) in sample_points.iter().copied() {
+        let row_position = if let Some(position) = row_cache
+            .iter()
+            .position(|(cached_row_index, _)| *cached_row_index == row_index)
+        {
+            position
+        } else {
+            matrix.row_f32(row_index, row_buffer, stream, label)?;
+            let row = read_runtime_buffer_f32(row_buffer, stream, matrix.cols, label)?;
+            row_cache.push((row_index, row));
+            row_cache.len() - 1
+        };
+        let row = &row_cache[row_position].1;
+        let input_start = token_index
+            .checked_mul(matrix.cols)
+            .ok_or_else(|| format!("{label} sampled input start overflows"))?;
+        let input_end = input_start
+            .checked_add(matrix.cols)
+            .ok_or_else(|| format!("{label} sampled input end overflows"))?;
+        let expected = row
+            .iter()
+            .zip(input[input_start..input_end].iter())
+            .map(|(lhs, rhs)| *lhs * *rhs)
+            .sum::<f32>();
+        let actual_index = token_index
+            .checked_mul(matrix.rows)
+            .and_then(|value| value.checked_add(row_index))
+            .ok_or_else(|| format!("{label} sampled output index overflows"))?;
+        let diff = (actual[actual_index] - expected).abs();
+        let tolerance = abs_floor.max(expected.abs() * rel_scale);
+        if diff > tolerance {
+            return Err(format!(
+                "{label} sampled mismatch: token_index={token_index} row_index={row_index} max_abs_diff={diff} tolerance={tolerance}"
+            ));
+        }
+        max_abs_diff = max_abs_diff.max(diff);
+    }
+    Ok((sample_points.len(), max_abs_diff))
+}
+
+fn aq4_matvec_batch_sample_points(batch_count: usize, rows: usize) -> Vec<(usize, usize)> {
+    if batch_count == 0 || rows == 0 {
+        return Vec::new();
+    }
+    let mut token_indices = vec![0, batch_count / 4, batch_count / 2, batch_count - 1];
+    if batch_count > 1 {
+        token_indices.push(1);
+    }
+    token_indices.sort_unstable();
+    token_indices.dedup();
+
+    let mut row_indices = vec![0, rows / 2, rows - 1];
+    row_indices.sort_unstable();
+    row_indices.dedup();
+
+    let mut points = Vec::with_capacity(token_indices.len() * row_indices.len());
+    for token_index in token_indices {
+        for row_index in row_indices.iter().copied() {
+            points.push((token_index, row_index));
+        }
+    }
+    points
+}
+
 fn self_attn_batch_rope_abs_floor(sequence_len: usize, position_offset: usize) -> f32 {
     let max_position = position_offset
         .saturating_add(sequence_len.saturating_sub(1))
@@ -36234,7 +36785,7 @@ fn self_attn_batch_rope_abs_floor(sequence_len: usize, position_offset: usize) -
 }
 
 fn self_attn_batch_use_sampled_attention_verification(sequence_len: usize) -> bool {
-    sequence_len >= 4096
+    sequence_len >= 1024
 }
 
 fn causal_attention_sample_points(
@@ -36503,7 +37054,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-cached-prefix-attn-smoke [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|decode_loop]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-qkv-rope-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-layer-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-cached-prefix-attn-smoke [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|decode_loop]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-qkv-rope-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-block-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-layer-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
     );
     eprintln!(
         "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
@@ -36546,6 +37097,9 @@ fn print_help() {
     );
     eprintln!(
         "package-linear-attn-attention-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
+    );
+    eprintln!(
+        "package-self-attn-block-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "package-linear-attn-mlp-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"

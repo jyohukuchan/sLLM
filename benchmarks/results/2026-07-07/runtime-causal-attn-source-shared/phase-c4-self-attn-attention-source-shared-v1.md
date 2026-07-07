@@ -40,4 +40,4 @@ The smoke now reports a length-aware `q_rope_abs_floor`/`k_rope_abs_floor`, capp
 | 8192 | 0.001638200 | 0.001175225 | 0.001638200 | 0.000833869 |
 | 16384 | 0.003276600 | 0.002606988 | 0.003276600 | 0.001518801 |
 
-Full host attention reference verification is expensive at `4096` tokens and above. The smoke now uses 15-value sampled attention verification for `4096+` unless full reference is explicitly needed.
+Full host attention reference verification is expensive at long prompts and was about `18.25s` at `1024` tokens in the block batch path. The smoke now uses 15-value sampled attention verification for `1024+` unless full reference is explicitly needed. Older rows above may still show full verification if they were measured before the threshold was lowered.
