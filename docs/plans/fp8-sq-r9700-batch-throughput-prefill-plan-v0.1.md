@@ -166,6 +166,27 @@
 3. RDNA4向けMFMA/WMMA layoutを小さいprototypeで検証し、QK/V accumulationをscalar loopから置き換える。
 4. package self-attention attention componentのexecutor選択にflash2を接続する。
 
+### 2026-07-08 progress: RDNA4 FP8 WMMA probe v1
+
+前回の要点:
+
+- cached-prefix/cold-prefillのFlashAttention2-style v1は、tile online-softmaxで改善したが、QK/V accumulationはまだscalar loopだった。
+- 次はRDNA4向けMFMA/WMMA layoutを小さいprototypeで検証し、attention本体へ組み込めるかを確認する段階だった。
+
+今回の変更点:
+
+- C ABI `ullm_runtime_wmma_fp8_probe`、Rust FFI `wmma_fp8_probe`、CLI `runtime-wmma-fp8-probe-smoke [DEVICE_INDEX]` を追加した。
+- HIPRTC kernelから `__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12` を直接呼ぶ最小プローブを追加した。
+- R9700/RDNA4 runtime device index `2` で、非0 markerが返ることを確認した。
+- V620/RDNA2 runtime device index `1` では0 markerで失敗扱いになり、RDNA4 FP8 WMMA検証が誤って成功扱いにならないことを確認した。
+- 結果は `benchmarks/results/2026-07-08/runtime-wmma/phase-c7-rdna4-fp8-wmma-probe-v1.md` に保存した。
+
+次の行動:
+
+1. このbuiltin呼び出しをattention score kernelへ直接入れるのではなく、まずQ/K tile layout、lane mapping、accumulator配置を小さいQK microkernelで固める。
+2. cached-prefix flash2とcausal flash2のscalar dot部分を、RDNA4 FP8 WMMAまたはF32/BF16 MFMA相当のmicrokernelで置き換える候補を作る。
+3. 置き換え後はtok/sだけではなくsampled diffを保存し、出力品質が壊滅的に崩れていないことを確認する。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。

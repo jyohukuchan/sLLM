@@ -86,6 +86,10 @@ ullm_status ullm_runtime_stream_destroy(ullm_runtime_stream *stream);
 
 ullm_status ullm_runtime_stream_synchronize(ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_wmma_fp8_probe(
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_aq4_dequant_f32(
     const ullm_runtime_buffer *index_buffer,
     const ullm_runtime_buffer *scale_buffer,

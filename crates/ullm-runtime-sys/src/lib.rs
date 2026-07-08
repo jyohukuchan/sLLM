@@ -66,6 +66,10 @@ unsafe extern "C" {
     ) -> c_int;
     fn ullm_runtime_stream_destroy(stream: *mut RawRuntimeStream) -> c_int;
     fn ullm_runtime_stream_synchronize(stream: *mut RawRuntimeStream) -> c_int;
+    fn ullm_runtime_wmma_fp8_probe(
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_aq4_dequant_f32(
         index_buffer: *const RawRuntimeBuffer,
         scale_buffer: *const RawRuntimeBuffer,
@@ -936,6 +940,15 @@ pub fn smoke_add_f32(lhs: &[f32], rhs: &[f32]) -> Result<Vec<f32>, String> {
         ullm_runtime_smoke_add_f32(lhs.as_ptr(), rhs.as_ptr(), out.as_mut_ptr(), out.len())
     })?;
     Ok(out)
+}
+
+pub fn wmma_fp8_probe(
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    check_copy_range(0, std::mem::size_of::<u32>(), output.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe { ullm_runtime_wmma_fp8_probe(output.raw.as_ptr(), stream) })
 }
 
 pub fn aq4_dequant_f32(
@@ -4934,6 +4947,22 @@ mod tests {
         let mut buffer = context.alloc_buffer(4).unwrap();
         let err = buffer.copy_from_host(3, &[1_u8, 2], None).unwrap_err();
         assert!(err.contains("out of bounds"));
+    }
+
+    #[test]
+    fn cpu_wmma_fp8_probe_writes_nonzero_marker() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut buffer = context.alloc_buffer(4).unwrap();
+        wmma_fp8_probe(&mut buffer, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut raw = [0_u8; 4];
+        buffer.copy_to_host(0, &mut raw, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let marker = u32::from_le_bytes(raw);
+        assert_ne!(marker, 0_u32);
     }
 
     #[test]
@@ -12202,6 +12231,33 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn first_hip_wmma_fp8_probe_writes_nonzero_marker_when_available() {
+        let rdna4_device = (1..device_count().unwrap()).find(|&index| {
+            device_info(index)
+                .map(|info| {
+                    info.backend == "hip"
+                        && (info.compute_major == 12 || info.gcn_arch_name.starts_with("gfx12"))
+                })
+                .unwrap_or(false)
+        });
+        let Some(device_index) = rdna4_device else {
+            return;
+        };
+        let mut context = RuntimeContext::create(device_index).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut buffer = context.alloc_buffer(4).unwrap();
+        wmma_fp8_probe(&mut buffer, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut raw = [0_u8; 4];
+        buffer.copy_to_host(0, &mut raw, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let marker = u32::from_le_bytes(raw);
+        assert_ne!(marker, 0_u32);
     }
 
     fn f32s_to_le_bytes(values: &[f32]) -> Vec<u8> {
