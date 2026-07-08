@@ -322,6 +322,21 @@ fn main() -> ExitCode {
             env::args().nth(11),
             env::args().nth(12),
         ),
+        Some("package-token-ids-mixed-request-state-smoke") => {
+            package_token_ids_mixed_request_state_smoke(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+                env::args().nth(8),
+                env::args().nth(9),
+                env::args().nth(10),
+                env::args().nth(11),
+                env::args().nth(12),
+            )
+        }
         Some("sq-fp8-token-ids-model-loop-smoke") => sq_fp8_token_ids_model_loop_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -19160,6 +19175,649 @@ fn package_token_ids_model_loop_smoke_impl_with_sq_overlay(
         lm_head_chunk_rows,
     )?;
     smoke_run.format_output(path, device_index, &info)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_mixed_request_state_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    prompt_token_ids_batch: Option<String>,
+    generated_tokens_batch: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-token-ids-mixed-request-state-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_layer_indices_for_package(
+        &path,
+        layer_indices.or_else(|| Some("manifest-all".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids_batch = match parse_package_prompt_token_ids_batch(
+        prompt_token_ids_batch.or_else(|| Some("len:2x2".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let generated_tokens_batch = match parse_package_generated_tokens_batch(
+        generated_tokens_batch,
+        prompt_token_ids_batch.len(),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 1, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    match package_token_ids_mixed_request_state_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_mixed_request_state_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    prompt_token_ids_batch: Vec<Vec<usize>>,
+    generated_tokens_batch: Vec<usize>,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+) -> Result<String, String> {
+    if layer_indices.is_empty() {
+        return Err("mixed request-state smoke requires at least one layer".to_string());
+    }
+    if prompt_token_ids_batch.is_empty() {
+        return Err("mixed request-state smoke requires at least one request".to_string());
+    }
+    if prompt_token_ids_batch.len() != generated_tokens_batch.len() {
+        return Err(format!(
+            "mixed request-state prompt request count {} does not match generated token count {}",
+            prompt_token_ids_batch.len(),
+            generated_tokens_batch.len()
+        ));
+    }
+
+    let run_started = Instant::now();
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create mixed request-state context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query mixed request-state device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create mixed request-state stream: {err}"))?;
+
+    let (embedding_vocab, hidden) = package_embedding_shape(path)?;
+    if hidden == 0 {
+        return Err("mixed request-state embedding hidden size is zero".to_string());
+    }
+    let max_total_tokens = prompt_token_ids_batch
+        .iter()
+        .zip(generated_tokens_batch.iter())
+        .map(|(prompt, generated)| prompt.len().saturating_add(*generated))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let block_size = 256_usize.min(max_total_tokens);
+    let request_plan = PackageModelLoopRequestPlan::from_token_id_batches(
+        path,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        hidden,
+        block_size,
+    )?;
+    let request_ids = request_plan
+        .requests
+        .iter()
+        .map(|request| request.id)
+        .collect::<Vec<_>>();
+
+    let layer_load_started = Instant::now();
+    let mut layers = Vec::with_capacity(layer_indices.len());
+    let mut layer_kinds = Vec::with_capacity(layer_indices.len());
+    let mut self_attn_shapes = Vec::new();
+    for &layer_index in &layer_indices {
+        let layer_kind = package_decoder_layer_kind(path, layer_index).map_err(|err| {
+            format!("failed to identify mixed request-state layer {layer_index}: {err}")
+        })?;
+        layer_kinds.push(layer_kind.as_str());
+        match layer_kind {
+            PackageDecoderLayerKind::LinearAttention => {
+                let layer = PackageLinearAttnResidentStepBatchLayer::load(
+                    &mut context,
+                    &mut stream,
+                    path,
+                    chunk_bytes,
+                    layer_index,
+                    request_ids.clone(),
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to load mixed request-state linear-attn layer {layer_index}: {err}"
+                    )
+                })?;
+                if layer.hidden() != hidden {
+                    return Err(format!(
+                        "mixed request-state linear-attn layer {layer_index} hidden mismatch: layer_hidden={} embedding_hidden={hidden}",
+                        layer.hidden()
+                    ));
+                }
+                layers.push(PackageMixedRequestStateLayer::LinearAttention(layer));
+            }
+            PackageDecoderLayerKind::SelfAttention => {
+                let layer = PackageSelfAttnResidentStepBatchLayer::load(
+                    &mut context,
+                    &mut stream,
+                    path,
+                    chunk_bytes,
+                    layer_index,
+                    request_ids.clone(),
+                    request_plan.block_size,
+                    request_plan.cache_blocks,
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to load mixed request-state self-attn layer {layer_index}: {err}"
+                    )
+                })?;
+                if layer.hidden() != hidden {
+                    return Err(format!(
+                        "mixed request-state self-attn layer {layer_index} hidden mismatch: layer_hidden={} embedding_hidden={hidden}",
+                        layer.hidden()
+                    ));
+                }
+                self_attn_shapes.push(serde_json::json!({
+                    "layer_index": layer.layer_index(),
+                    "q_heads": layer.q_heads(),
+                    "kv_heads": layer.kv_heads(),
+                    "head_dim": layer.head_dim(),
+                    "value_dim": layer.value_dim(),
+                    "block_size": layer.block_size(),
+                    "cache_blocks": layer.cache_blocks(),
+                }));
+                layers.push(PackageMixedRequestStateLayer::SelfAttention(layer));
+            }
+        }
+    }
+    let layer_load_ms = layer_load_started.elapsed().as_secs_f64() * 1000.0;
+
+    let rotary_dim_value = if let Some(head_dim) = layers
+        .iter()
+        .find_map(PackageMixedRequestStateLayer::self_attn_head_dim)
+    {
+        parse_package_token_ids_rotary_dim(head_dim, rotary_dim.as_deref())?
+    } else {
+        0
+    };
+
+    let prefill_started = Instant::now();
+    let mut prefill_batch_request_counts = Vec::new();
+    for timestep in 0..request_plan
+        .prompt_tokens
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+    {
+        let mut active_count = 0_usize;
+        for (request_index, request) in request_plan.requests.iter().enumerate() {
+            if timestep >= request.prompt_tokens {
+                continue;
+            }
+            active_count += 1;
+            let request_position_base = position_offset
+                .checked_add(
+                    request_index
+                        .checked_mul(request_plan.position_stride)
+                        .ok_or_else(|| {
+                            "mixed request-state request position stride overflows".to_string()
+                        })?,
+                )
+                .ok_or_else(|| "mixed request-state request position base overflows".to_string())?;
+            let rope_position = request_position_base
+                .checked_add(timestep)
+                .ok_or_else(|| "mixed request-state prefill position overflows".to_string())?;
+            let residual =
+                mixed_request_state_residual_slice(&request_plan, request_index, timestep, hidden)?
+                    .to_vec();
+            package_mixed_request_state_layers_step(
+                &mut stream,
+                &mut layers,
+                request.id,
+                residual,
+                hidden,
+                rotary_dim_value,
+                rope_base,
+                rope_position,
+                timestep,
+                &format!(
+                    "mixed request-state prefill request={} timestep={timestep}",
+                    request.id.0
+                ),
+            )?;
+        }
+        if active_count > 0 {
+            prefill_batch_request_counts.push(active_count);
+        }
+    }
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize mixed request-state prefill: {err}"))?;
+    let prefill_wall_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
+
+    let decode_started = Instant::now();
+    let mut decode_batch_request_counts = Vec::new();
+    for decode_index in 0..request_plan
+        .max_new_tokens
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+    {
+        let mut active_count = 0_usize;
+        for (request_index, request) in request_plan.requests.iter().enumerate() {
+            if decode_index >= request.max_new_tokens {
+                continue;
+            }
+            active_count += 1;
+            let token_index = request
+                .prompt_tokens
+                .checked_add(decode_index)
+                .ok_or_else(|| "mixed request-state decode token index overflows".to_string())?;
+            let request_position_base = position_offset
+                .checked_add(
+                    request_index
+                        .checked_mul(request_plan.position_stride)
+                        .ok_or_else(|| {
+                            "mixed request-state request position stride overflows".to_string()
+                        })?,
+                )
+                .ok_or_else(|| "mixed request-state request position base overflows".to_string())?;
+            let rope_position = request_position_base
+                .checked_add(token_index)
+                .ok_or_else(|| "mixed request-state decode position overflows".to_string())?;
+            let residual = mixed_request_state_residual_slice(
+                &request_plan,
+                request_index,
+                token_index,
+                hidden,
+            )?
+            .to_vec();
+            package_mixed_request_state_layers_step(
+                &mut stream,
+                &mut layers,
+                request.id,
+                residual,
+                hidden,
+                rotary_dim_value,
+                rope_base,
+                rope_position,
+                token_index,
+                &format!(
+                    "mixed request-state decode request={} decode_index={decode_index}",
+                    request.id.0
+                ),
+            )?;
+        }
+        if active_count > 0 {
+            decode_batch_request_counts.push(active_count);
+        }
+    }
+    stream
+        .synchronize()
+        .map_err(|err| format!("failed to synchronize mixed request-state decode: {err}"))?;
+    let decode_wall_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+
+    let final_norm = read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, chunk_bytes)
+        .map_err(|err| format!("failed to read mixed request-state final RMSNorm tensor: {err}"))?;
+    let final_norm_values =
+        effective_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
+    if final_norm_values.len() != hidden {
+        return Err(format!(
+            "mixed request-state final RMSNorm length mismatch: len={} hidden={hidden}",
+            final_norm_values.len()
+        ));
+    }
+
+    let mut resident_lm_head_runtime = None;
+    let mut final_top1_tokens = Vec::with_capacity(request_plan.request_count());
+    let mut final_top1_logits = Vec::with_capacity(request_plan.request_count());
+    let mut final_topk_tokens = Vec::with_capacity(request_plan.request_count());
+    let mut final_topk_logits = Vec::with_capacity(request_plan.request_count());
+    let final_logits_started = Instant::now();
+    for request in &request_plan.requests {
+        let final_layer = layers
+            .last()
+            .ok_or_else(|| "mixed request-state has no final layer".to_string())?;
+        let final_hidden = final_layer.read_output(&mut stream, request.id)?;
+        if final_hidden.len() != hidden {
+            return Err(format!(
+                "mixed request-state final hidden length mismatch for request {}: got {} expected {hidden}",
+                request.id.0,
+                final_hidden.len()
+            ));
+        }
+        let final_normed = runtime_host_rmsnorm_f32(&final_hidden, &final_norm_values, 1e-6_f32);
+        if final_normed.len() != hidden || final_normed.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "mixed request-state final normalized hidden for request {} contains invalid values",
+                request.id.0
+            ));
+        }
+        let top_logits = match package_lm_head_top_k_from_rows(
+            path,
+            &final_normed,
+            top_k,
+            lm_head_chunk_rows,
+        ) {
+            Ok((_, _, _, top_logits)) => top_logits,
+            Err(cpu_err) => {
+                if resident_lm_head_runtime.is_none() {
+                    resident_lm_head_runtime = Some(
+                            PackageLmHeadRuntime::load(
+                                PackageLmHeadMode::GpuResidentF32,
+                                &mut context,
+                                &mut stream,
+                                path,
+                                chunk_bytes,
+                                hidden,
+                                lm_head_chunk_rows,
+                            )
+                            .map_err(|resident_err| {
+                                format!(
+                                    "failed to load mixed request-state resident lm_head: cpu_chunked_error={cpu_err}; resident_error={resident_err}"
+                                )
+                            })?,
+                        );
+                }
+                resident_lm_head_runtime
+                    .as_mut()
+                    .ok_or_else(|| "mixed request-state resident lm_head disappeared".to_string())?
+                    .top_logits(path, &mut stream, &final_normed, top_k)?
+            }
+        };
+        let top1 = top_logits.first().ok_or_else(|| {
+            format!(
+                "mixed request-state request {} produced no logits",
+                request.id.0
+            )
+        })?;
+        final_top1_tokens.push(top1.token_id);
+        final_top1_logits.push(format!("{:.9}", top1.logit));
+        final_topk_tokens.push(
+            top_logits
+                .iter()
+                .map(|entry| entry.token_id.to_string())
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+        final_topk_logits.push(
+            top_logits
+                .iter()
+                .map(|entry| format!("{:.9}", entry.logit))
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+    }
+    let final_logits_wall_ms = final_logits_started.elapsed().as_secs_f64() * 1000.0;
+    let total_wall_ms = run_started.elapsed().as_secs_f64() * 1000.0;
+    let prefill_total_input_tokens = request_plan.prompt_tokens.iter().sum::<usize>();
+    let decode_total_generated_tokens = request_plan.max_new_tokens.iter().sum::<usize>();
+    let end_to_end_total_tokens = prefill_total_input_tokens
+        .checked_add(decode_total_generated_tokens)
+        .ok_or_else(|| "mixed request-state total token count overflows".to_string())?;
+
+    Ok(format!(
+        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} full_mixed_request_state=true request_state_dispatch=true throughput_row=false batching_mode=request_state_interleaved prefill_real_batch=false decode_real_batch=false prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        path,
+        layer_indices,
+        usize_csv(&layer_indices),
+        layer_kinds,
+        request_plan.input_source,
+        request_plan.prompt_token_ids_by_request,
+        request_plan.decode_token_ids_by_request,
+        top_k,
+        lm_head_chunk_rows,
+        final_top1_tokens,
+        usize_csv(&final_top1_tokens),
+        final_top1_logits.join(","),
+        final_topk_tokens.join(";"),
+        final_topk_logits.join(";"),
+        request_plan.position_stride,
+        request_plan.request_count(),
+        request_plan.request_count(),
+        request_plan.request_ids,
+        request_plan.prompt_tokens,
+        usize_csv(&request_plan.prompt_tokens),
+        request_plan.max_new_tokens,
+        usize_csv(&request_plan.max_new_tokens),
+        request_plan.total_tokens,
+        usize_csv(&request_plan.total_tokens),
+        prefill_total_input_tokens,
+        decode_total_generated_tokens,
+        end_to_end_total_tokens,
+        prefill_wall_ms,
+        decode_wall_ms,
+        final_logits_wall_ms,
+        layer_load_ms,
+        total_wall_ms,
+        optional_f64_string(tps(prefill_total_input_tokens, prefill_wall_ms)),
+        optional_f64_string(tps(decode_total_generated_tokens, decode_wall_ms)),
+        optional_f64_string(tps(end_to_end_total_tokens, total_wall_ms)),
+        request_plan.block_size,
+        request_plan.cache_blocks,
+        request_plan.block_tables,
+        prefill_batch_request_counts,
+        usize_csv(&prefill_batch_request_counts),
+        decode_batch_request_counts,
+        usize_csv(&decode_batch_request_counts),
+        hidden,
+        embedding_vocab,
+        serde_json::Value::Array(self_attn_shapes),
+        rotary_dim_value,
+        position_offset,
+        rope_base,
+        info.backend,
+        device_index,
+        info.name,
+    ))
+}
+
+fn usize_csv(values: &[usize]) -> String {
+    values
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn optional_f64_string(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.6}"))
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn mixed_request_state_residual_slice<'a>(
+    request_plan: &'a PackageModelLoopRequestPlan,
+    request_index: usize,
+    token_index: usize,
+    hidden: usize,
+) -> Result<&'a [f32], String> {
+    let request = request_plan.requests.get(request_index).ok_or_else(|| {
+        format!("mixed request-state request index {request_index} is out of range")
+    })?;
+    let total_tokens = request_plan
+        .total_tokens
+        .get(request_index)
+        .copied()
+        .ok_or_else(|| {
+            format!("mixed request-state total token count missing for request {request_index}")
+        })?;
+    if token_index >= total_tokens {
+        return Err(format!(
+            "mixed request-state token index {token_index} exceeds request {} total tokens {total_tokens}",
+            request.id.0
+        ));
+    }
+    let residual = request_plan
+        .initial_residuals
+        .get(request_index)
+        .ok_or_else(|| {
+            format!("mixed request-state residuals missing for request {request_index}")
+        })?;
+    let start = token_index
+        .checked_mul(hidden)
+        .ok_or_else(|| "mixed request-state residual start offset overflows".to_string())?;
+    let end = start
+        .checked_add(hidden)
+        .ok_or_else(|| "mixed request-state residual end offset overflows".to_string())?;
+    residual.get(start..end).ok_or_else(|| {
+        format!(
+            "mixed request-state residual slice out of range for request {} token {token_index}: range={start}..{end} len={}",
+            request.id.0,
+            residual.len()
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_mixed_request_state_layers_step(
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    layers: &mut [PackageMixedRequestStateLayer],
+    request_id: RequestId,
+    residual: Vec<f32>,
+    hidden: usize,
+    rotary_dim: usize,
+    rope_base: f32,
+    rope_position: usize,
+    cache_position: usize,
+    label: &str,
+) -> Result<usize, String> {
+    if layers.is_empty() {
+        return Err(format!(
+            "{label} mixed request-state layer step requires at least one layer"
+        ));
+    }
+    if residual.len() != hidden {
+        return Err(format!(
+            "{label} residual length {} does not match hidden {hidden}",
+            residual.len()
+        ));
+    }
+
+    let mut residual_host = Some(residual);
+    let mut residual_device_layer: Option<usize> = None;
+    for layer_position in 0..layers.len() {
+        let layer_label = format!("{label} layer {layer_position} position {rope_position}");
+        if let Some(previous_position) = residual_device_layer {
+            let (previous_layers, current_layers) = layers.split_at_mut(layer_position);
+            let previous = previous_layers.get(previous_position).ok_or_else(|| {
+                format!(
+                    "{layer_label} previous device residual layer {previous_position} is missing"
+                )
+            })?;
+            let residual_buffer = previous.output_buffer(request_id)?;
+            current_layers[0].step_from_device_to_device(
+                stream,
+                request_id,
+                residual_buffer,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                &layer_label,
+            )?;
+        } else {
+            let residual = residual_host
+                .take()
+                .ok_or_else(|| format!("{layer_label} missing host residual"))?;
+            layers[layer_position].step_from_host_to_device(
+                stream,
+                request_id,
+                &residual,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                &layer_label,
+            )?;
+        }
+        residual_device_layer = Some(layer_position);
+    }
+
+    residual_device_layer.ok_or_else(|| format!("{label} missing final device residual"))
 }
 
 const QWEN3_EMBED_TOKENS_TENSOR: &str = "model.language_model.embed_tokens.weight";
@@ -41442,6 +42100,9 @@ fn print_help() {
         "package-token-ids-model-loop-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn|manifest-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
+        "package-token-ids-mixed-request-state-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|manifest-all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+    );
+    eprintln!(
         "sq-fp8-token-ids-model-loop-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn|manifest-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
@@ -45297,6 +45958,10 @@ impl PackageLinearAttnResidentStepLayer {
 struct PackageSelfAttnResidentStepBatchLayer {
     layer_index: usize,
     hidden: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
     block_size: usize,
     cache_blocks: usize,
     request_index: std::collections::BTreeMap<RequestId, usize>,
@@ -45343,6 +46008,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
             .collect::<Result<Vec<_>, _>>()?;
         let mut layers = Vec::with_capacity(request_ids.len());
         let mut hidden = None;
+        let mut q_heads = None;
+        let mut kv_heads = None;
+        let mut head_dim = None;
+        let mut value_dim = None;
         for request_id in &request_ids {
             let layer = PackageSelfAttnResidentStepLayer::load(
                 context,
@@ -45369,6 +46038,46 @@ impl PackageSelfAttnResidentStepBatchLayer {
             } else {
                 hidden = Some(layer.hidden);
             }
+            if let Some(previous) = q_heads {
+                if previous != layer.q_heads {
+                    return Err(format!(
+                        "self-attn resident batch layer {layer_index} q_heads changed: previous={previous} current={}",
+                        layer.q_heads
+                    ));
+                }
+            } else {
+                q_heads = Some(layer.q_heads);
+            }
+            if let Some(previous) = kv_heads {
+                if previous != layer.kv_heads {
+                    return Err(format!(
+                        "self-attn resident batch layer {layer_index} kv_heads changed: previous={previous} current={}",
+                        layer.kv_heads
+                    ));
+                }
+            } else {
+                kv_heads = Some(layer.kv_heads);
+            }
+            if let Some(previous) = head_dim {
+                if previous != layer.head_dim {
+                    return Err(format!(
+                        "self-attn resident batch layer {layer_index} head_dim changed: previous={previous} current={}",
+                        layer.head_dim
+                    ));
+                }
+            } else {
+                head_dim = Some(layer.head_dim);
+            }
+            if let Some(previous) = value_dim {
+                if previous != layer.value_dim {
+                    return Err(format!(
+                        "self-attn resident batch layer {layer_index} value_dim changed: previous={previous} current={}",
+                        layer.value_dim
+                    ));
+                }
+            } else {
+                value_dim = Some(layer.value_dim);
+            }
             if layer.block_size != block_size || layer.cache_blocks != cache_blocks {
                 return Err(format!(
                     "self-attn resident batch layer {layer_index} cache shape changed: block_size={} cache_blocks={}",
@@ -45383,6 +46092,18 @@ impl PackageSelfAttnResidentStepBatchLayer {
         Ok(Self {
             layer_index,
             hidden,
+            q_heads: q_heads.ok_or_else(|| {
+                format!("self-attn resident batch layer {layer_index} has no q_heads")
+            })?,
+            kv_heads: kv_heads.ok_or_else(|| {
+                format!("self-attn resident batch layer {layer_index} has no kv_heads")
+            })?,
+            head_dim: head_dim.ok_or_else(|| {
+                format!("self-attn resident batch layer {layer_index} has no head_dim")
+            })?,
+            value_dim: value_dim.ok_or_else(|| {
+                format!("self-attn resident batch layer {layer_index} has no value_dim")
+            })?,
             block_size,
             cache_blocks,
             request_index,
@@ -45413,6 +46134,22 @@ impl PackageSelfAttnResidentStepBatchLayer {
 
     fn cache_blocks(&self) -> usize {
         self.cache_blocks
+    }
+
+    fn q_heads(&self) -> usize {
+        self.q_heads
+    }
+
+    fn kv_heads(&self) -> usize {
+        self.kv_heads
+    }
+
+    fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    fn value_dim(&self) -> usize {
+        self.value_dim
     }
 
     fn request_slot(&self, request_id: RequestId) -> Result<usize, String> {
@@ -45673,6 +46410,137 @@ impl PackageLinearAttnResidentStepBatchLayer {
         Ok(self
             .layer_for_request_mut(request_id)?
             .take_last_component_step_ms())
+    }
+}
+
+#[allow(dead_code)]
+enum PackageMixedRequestStateLayer {
+    LinearAttention(PackageLinearAttnResidentStepBatchLayer),
+    SelfAttention(PackageSelfAttnResidentStepBatchLayer),
+}
+
+#[allow(dead_code)]
+impl PackageMixedRequestStateLayer {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::LinearAttention(_) => PackageDecoderLayerKind::LinearAttention.as_str(),
+            Self::SelfAttention(_) => PackageDecoderLayerKind::SelfAttention.as_str(),
+        }
+    }
+
+    fn layer_index(&self) -> usize {
+        match self {
+            Self::LinearAttention(layer) => layer.layer_index(),
+            Self::SelfAttention(layer) => layer.layer_index(),
+        }
+    }
+
+    fn hidden(&self) -> usize {
+        match self {
+            Self::LinearAttention(layer) => layer.hidden(),
+            Self::SelfAttention(layer) => layer.hidden(),
+        }
+    }
+
+    fn self_attn_head_dim(&self) -> Option<usize> {
+        match self {
+            Self::LinearAttention(_) => None,
+            Self::SelfAttention(layer) => Some(layer.head_dim()),
+        }
+    }
+
+    fn self_attn_shape_json(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::LinearAttention(_) => None,
+            Self::SelfAttention(layer) => Some(serde_json::json!({
+                "layer_index": layer.layer_index(),
+                "q_heads": layer.q_heads(),
+                "kv_heads": layer.kv_heads(),
+                "head_dim": layer.head_dim(),
+                "value_dim": layer.value_dim(),
+                "block_size": layer.block_size(),
+                "cache_blocks": layer.cache_blocks(),
+            })),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_from_host_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_id: RequestId,
+        residual: &[f32],
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::LinearAttention(layer) => {
+                layer.step_from_host_to_device(stream, request_id, residual, label)
+            }
+            Self::SelfAttention(layer) => layer.step_from_host_to_device(
+                stream,
+                request_id,
+                residual,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                label,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_from_device_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_id: RequestId,
+        residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::LinearAttention(layer) => {
+                layer.step_from_device_to_device(stream, request_id, residual_buffer, label)
+            }
+            Self::SelfAttention(layer) => layer.step_from_device_to_device(
+                stream,
+                request_id,
+                residual_buffer,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                label,
+            ),
+        }
+    }
+
+    fn output_buffer(
+        &self,
+        request_id: RequestId,
+    ) -> Result<&ullm_runtime_sys::RuntimeBuffer, String> {
+        match self {
+            Self::LinearAttention(layer) => layer.output_buffer(request_id),
+            Self::SelfAttention(layer) => layer.output_buffer(request_id),
+        }
+    }
+
+    fn read_output(
+        &self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_id: RequestId,
+    ) -> Result<Vec<f32>, String> {
+        match self {
+            Self::LinearAttention(layer) => layer.read_output(stream, request_id),
+            Self::SelfAttention(layer) => layer.read_output(stream, request_id),
+        }
     }
 }
 

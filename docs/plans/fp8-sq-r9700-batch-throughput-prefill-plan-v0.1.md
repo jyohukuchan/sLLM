@@ -3398,6 +3398,50 @@ Inventory:
 2. 小さいB=2 / prompt=2 / generated=1で、manifest orderのfull mixed path smokeを作る。
 3. full mixed smoke後に、weights共有とactual throughput改善へ進む。
 
+## 2026-07-09 progress: T1 mixed request-state layer enum smoke
+
+前回の要点:
+
+- linear-attention側とself-attention側のrequest-state ownerは揃った。
+- full mixed-attention runnerへ進むには、両ownerを同じlayer enumでdispatchし、linear-attn層からself-attn層へdevice bufferを渡せる必要があった。
+- SQ throughput比較用のreal batch rowへ進む前に、小さいmixed pathでstateがrequest間に混ざらない境界を通す必要があった。
+
+今回の変更点:
+
+- `PackageMixedRequestStateLayer` を追加した。
+- `package-token-ids-mixed-request-state-smoke` を追加した。
+- R9700上で実packageのlayer `0,3` を `batch=2`、`prompt=2`、`generated=1` で実行した。
+- token ID embedding入力、linear-attention request state、self-attention paged KV state、final RMSNorm、lm_head top1 guardまでを同じsmokeで接続した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-mixed-request-state-layer-enum-smoke-v1.md` に保存した。
+
+実測値:
+
+| field | value |
+| --- | --- |
+| layers | `0,3` |
+| layer kinds | `linear_attention,self_attention` |
+| batching mode | `request_state_interleaved` |
+| throughput row | `false` |
+| prefill real batch | `false` |
+| decode real batch | `false` |
+| prefill request counts | `2,2` |
+| decode request counts | `2` |
+| final top1 tokens | `151353,151353` |
+| verified | `true` |
+
+判断:
+
+- mixed request-state layer enumは、小さいlinear-attn→self-attn pathでは動作した。
+- これはthroughput rowではなく、full mixed real-batch runnerへ進む前のdispatch/state guardである。
+- 現時点ではrequest slotごとにresident weightsとcache bufferを持つため、shared-weight final designではない。
+- `prefill_real_batch=false` / `decode_real_batch=false` なので、SQ/vLLM throughput比較には使わない。
+
+次の行動:
+
+1. `0,3` guardから `manifest-all` へ広げ、full mixed layer orderで壊れないことを確認する。
+2. full manifest smoke後に、shared resident weights + per-request state bufferへ寄せる。
+3. その後、full packageで `batching.mode=real`、`prefill_real_batch=true`、`decode_real_batch=true` のAQ4 baseline rowを作る。
+
 ## Risks
 
 | risk | impact | handling |
