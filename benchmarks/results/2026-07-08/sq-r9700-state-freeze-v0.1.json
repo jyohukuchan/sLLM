@@ -88,7 +88,9 @@
   },
   "t0_t2_status": {
     "t0_state_freeze": "done",
-    "t1_jsonl_schema_preservation": "partial_done",
+    "t1_jsonl_schema_preservation": "done_for_package_batch_v0_1",
+    "t1_jsonl_schema_preservation_artifact": "benchmarks/results/2026-07-08/package-batch-throughput/phase-t1-jsonl-preservation-v1.md",
+    "t1_jsonl_schema_preservation_note": "run-external-benchmark.py preserves package-batch total-throughput metrics, prefix/chunk/context accounting, executor accounting, and memory.kv_cache_bytes_total in inference-benchmark-result-v0.1 JSONL rows.",
     "t1_real_batch_runner": "not_done",
     "t2_artifact_metadata_path": "partial_done",
     "t2_runtime_load_path": "partial_done_overlay_package_load_path_with_guard_runner",
@@ -111,6 +113,7 @@
     "T2: treat the layers 3,7,11,15,19,23 failure as the next quality boundary",
     "T2: define whether the short guard requires strict top1 match, top-k overlap, or text-level tolerance",
     "T2: if strict top1 remains required, test additional fallback families, per-layer fallback, or stronger scale/layout for the 6-layer cumulative drift",
+    "T1: implement a real batch executor before using total throughput rows for SQ performance decisions",
     "T5: move to throughput comparison only after the full-target short guard satisfies the acceptance rule or the accepted quality tolerance is documented"
   ]
 }

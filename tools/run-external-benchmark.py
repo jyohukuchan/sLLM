@@ -542,6 +542,33 @@ def enrich_ullm_batch_workload(row: dict[str, Any], report: dict[str, Any]) -> N
             value = parse_int(metrics.get(key))
             if value is not None:
                 row_workload[key] = value
+    batching = report.get("batching")
+    if isinstance(batching, dict):
+        if row_workload.get("prefill_executor") is None and "prefill_executor" in batching:
+            row_workload["prefill_executor"] = batching.get("prefill_executor")
+        if (
+            row_workload.get("resolved_prefill_executor") is None
+            and "resolved_prefill_executor" in batching
+        ):
+            row_workload["resolved_prefill_executor"] = batching.get(
+                "resolved_prefill_executor"
+            )
+
+
+def enrich_ullm_batch_memory(row: dict[str, Any], report: dict[str, Any]) -> None:
+    row_memory = row.get("memory")
+    raw_memory = report.get("memory")
+    if not isinstance(row_memory, dict) or not isinstance(raw_memory, dict):
+        return
+    row_memory.update(
+        {
+            "kv_cache_bytes": raw_memory.get("kv_cache_bytes"),
+            "kv_cache_allocated_blocks": raw_memory.get("kv_cache_allocated_blocks"),
+            "kv_cache_free_blocks": raw_memory.get("kv_cache_free_blocks"),
+            "kv_cache_block_size": raw_memory.get("kv_cache_block_size"),
+            "kv_cache_bytes_total": raw_memory.get("kv_cache_bytes_total"),
+        }
+    )
 
 
 def default_metrics(memory: dict[str, Any]) -> dict[str, Any]:
@@ -796,17 +823,19 @@ def main() -> int:
         ullm_correctness = parse_ullm_batch_throughput_correctness(ullm_report)
     if ullm_correctness is not None:
         row["correctness"] = ullm_correctness
-        raw_memory = ullm_report.get("memory")
-        if isinstance(raw_memory, dict):
-            row["memory"].update(
-                {
-                    "kv_cache_bytes": raw_memory.get("kv_cache_bytes"),
-                    "kv_cache_allocated_blocks": raw_memory.get("kv_cache_allocated_blocks"),
-                    "kv_cache_free_blocks": raw_memory.get("kv_cache_free_blocks"),
-                    "kv_cache_block_size": raw_memory.get("kv_cache_block_size"),
-                    "kv_cache_bytes_total": raw_memory.get("kv_cache_bytes_total"),
-                }
-            )
+        if args.parse == "ullm-package-batch-throughput":
+            enrich_ullm_batch_memory(row, ullm_report)
+        else:
+            raw_memory = ullm_report.get("memory")
+            if isinstance(raw_memory, dict):
+                row["memory"].update(
+                    {
+                        "kv_cache_bytes": raw_memory.get("kv_cache_bytes"),
+                        "kv_cache_allocated_blocks": raw_memory.get("kv_cache_allocated_blocks"),
+                        "kv_cache_free_blocks": raw_memory.get("kv_cache_free_blocks"),
+                        "kv_cache_block_size": raw_memory.get("kv_cache_block_size"),
+                    }
+                )
     append_jsonl(args.output_jsonl, row)
     print(json.dumps(row, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if status == "ok" else 2

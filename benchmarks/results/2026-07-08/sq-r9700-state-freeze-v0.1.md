@@ -65,7 +65,7 @@ Required artifact metadata:
 | task | status | note |
 | --- | --- | --- |
 | T0 state freeze | done | This file and the paired JSON are the frozen anchor. |
-| T1 JSONL/schema preservation | partial done | Converted rows must retain prefill, KV, and executor accounting. |
+| T1 JSONL/schema preservation | done for v0.1 package batch rows | `run-external-benchmark.py` preserves total-throughput, prefix/chunk/context, executor, and KV cache accounting for `package-batch-throughput-bench-v0.1`; guarded by `phase-t1-jsonl-preservation-v1.md`. |
 | T1 real batch runner | not done | Needed before SQ throughput comparison. |
 | T2 artifact metadata path | partial done | `sq-fp8-w8a16-r9700-v0` manifest and writer are staged. |
 | T2 runtime load path | partial done | `sq-fp8-materialize-smoke` validates the artifact boundary; `sq-fp8-token-ids-logits-smoke` validates one selected tensor overlay in the package path. |
@@ -78,4 +78,5 @@ Required artifact metadata:
 3. Treat the layers `3,7,11,15,19,23` failure as the next T2 boundary.
 4. Define the T2 short-guard acceptance rule: strict top1 match, top-k overlap, or text-level tolerance.
 5. If strict top1 remains required, test additional fallback families, per-layer fallback, or stronger scale/layout for the 6-layer cumulative drift.
-6. Move to T5 throughput comparison only after the full-target guard satisfies the acceptance rule or the accepted quality tolerance is documented.
+6. Implement T1 real batch executor before using total throughput rows for SQ performance decisions.
+7. Move to T5 throughput comparison only after the full-target guard satisfies the acceptance rule or the accepted quality tolerance is documented.

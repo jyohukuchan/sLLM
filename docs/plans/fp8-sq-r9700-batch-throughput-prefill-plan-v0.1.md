@@ -33,7 +33,7 @@
 2. 6層bundleの累積driftを追加fallback、per-layer policy、またはより強いscale/layoutで縮める。
 3. `v` fallback + `q/k/o/gate/up/down` row-block32 FP8は、4-5層まで通った部分候補として固定し、回帰guardにする。
 4. full-target相当のT2 guardが通る、または失敗を許容する明確な品質基準が決まった段階で、T1 real batch runnerとT5 FP8/AQ4 throughput packへ進む。
-5. T1側ではJSONL集約、VRAM/KV cache記録、real batch executorを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
+5. T1側ではreal batch executorとVRAM samplingの実測gridを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
 6. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにする。
 7. cold prefillとfull-model prefill接続はT3として継続し、SQ候補比較の前に最低限の長さ別・batch別代表値を保存する。
 8. uLLM側でR9700のFP8/AQ4結果が同じschemaで揃った後、vLLM baselineを同じworkload gridで測る。
@@ -873,6 +873,33 @@ R9700 schema/control-plane smoke:
 - prefill、decode、end-to-endのtotal throughputは別々に保存される。
 - ただしこのsmokeは1 layer、4 token prompt、logical batch、requestごとのweight reloadありのschema確認であり、SQ候補の性能判断には使わない。
 - 次のT1実装課題は、workload runnerからこのreportをJSONLへ集約すること、VRAM samplingを付けること、そしてT4/T5へ向けてreal batch executorへ置き換えることである。
+
+### T1 current status: package batch JSONL preservation v1
+
+前回の要点:
+
+- `package-batch-throughput-bench` のraw JSONは、T1に必要なtotal throughputとcold prefill accountingを出していた。
+- ただし、`tools/run-external-benchmark.py --parse ullm-package-batch-throughput` を通した
+  `inference-benchmark-result-v0.1` JSONLで、SQ比較に必要なfieldが落ちないことはテストで固定できていなかった。
+
+今回の変更点:
+
+- `tools/run-external-benchmark.py` のpackage-batch変換で、raw `batching.prefill_executor` と
+  `batching.resolved_prefill_executor` をJSONL `workload.*` executor fieldへfallback保存するようにした。
+- package-batch専用のmemory enrichment helperを追加し、`memory.kv_cache_bytes_total` の保持を明示した。
+- `tests/test_external_benchmark_batch_parser.py` を追加し、次のfield preservationを単体テストで固定した。
+  `prefill_total_input_tokens_per_second`、`decode_total_generated_tokens_per_second`、
+  `end_to_end_total_tokens_per_second`、prefix/chunk/context accounting、executor accounting、
+  `memory.kv_cache_bytes_total`。
+- 合成 `package-batch-throughput-bench-v0.1` reportを `run-external-benchmark.py` のmain pathへ通し、
+  `resolved_prefill_executor` と `kv_cache_bytes_total` がJSONL rowに残ることを確認した。
+- 結果は `benchmarks/results/2026-07-08/package-batch-throughput/phase-t1-jsonl-preservation-v1.md` に保存した。
+
+次の行動:
+
+1. T1 JSONL/schema preservationはv0.1として完了扱いにする。
+2. T1 real batch runnerは未完了のまま残す。
+3. 次のT1実装は、logical batchではなく、prefillまたはdecodeのreal batch executorをfull package pathへ接続することに集中する。
 
 ### T2: FP8 SQ candidate package/runtime prototype, 3-5 days
 
