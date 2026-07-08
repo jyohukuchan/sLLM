@@ -23,6 +23,24 @@ TOOL = load_tool("run-external-benchmark.py")
 
 
 class ExternalBenchmarkBatchParserTests(unittest.TestCase):
+    def test_parses_topk_matrix_rows_with_comma_or_colon_items(self) -> None:
+        self.assertEqual(
+            TOOL.parse_int_matrix_csv("42,7,5;43,8,6"),
+            [[42, 7, 5], [43, 8, 6]],
+        )
+        self.assertEqual(
+            TOOL.parse_int_matrix_csv("42:7:5;43:8:6"),
+            [[42, 7, 5], [43, 8, 6]],
+        )
+        self.assertEqual(
+            TOOL.parse_float_matrix_csv("3.25,2.0;4.5,4.0"),
+            [[3.25, 2.0], [4.5, 4.0]],
+        )
+        self.assertEqual(
+            TOOL.parse_float_matrix_csv("3.25:2.0;4.5:4.0"),
+            [[3.25, 2.0], [4.5, 4.0]],
+        )
+
     def test_preserves_batch_throughput_accounting_executor_and_kv_memory(self) -> None:
         report = {
             "top_k": 8,

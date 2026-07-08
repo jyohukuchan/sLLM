@@ -3836,6 +3836,42 @@ Inventory:
 - countはlayer load/prewarmを含まず、B=4のprefill 2 token + decode 1 tokenの測定区間で12回になっている。
 - 次は `q/k/v` layer3 triple候補をprompt bundleまたは長めのprefill gridへ広げる。
 
+## 2026-07-09 progress: T2 SQ FP8 qkv triple full mixed prompt bundle
+
+前回の要点:
+
+- layer3 `q/k/v` SQ FP8候補は、短いB=1/4/8 smokeでAQ4 final top1と一致した。
+- telemetry追加により、SQ FP8 direct `triple` projection境界をstdout/JSONLで確認できるようになった。
+- ただし短い `len:2xB` smokeだけでは、SQ候補のquality guardとして弱かった。
+
+今回の変更点:
+
+- `q/k/v` layer3 triple候補をfull mixed `manifest-all` request-state pathへ流した。
+- prompt bundleは `len4`、`case_a`、`case_b` の3 requestにした。
+- AQ4 baselineとSQ FP8候補を同じbatch=3、prefill/decode real batch pathで比較した。
+- `final_topk_tokens_csv` / `final_topk_logits_csv` のrequest内区切りが `:` の場合もJSONLへ保存できるようにparserを修正した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-full-mixed-qkv-triple-prompt-bundle-v1.md` に保存した。
+
+実測値:
+
+| row | prefill real | decode real | prefill tok/s | decode tok/s | end-to-end tok/s | final top1 | strict top1 |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- |
+| AQ4 baseline | true | true | 67.314582 | 81.344364 | 35.092672 | `24218,4105,329` | reference |
+| SQ `qkv-layer3-q32-k16-v32` | true | true | 60.207097 | 79.538849 | 31.731900 | `24218,5582,329` | 2 / 3 |
+
+判断:
+
+- `q/k/v` layer3 triple候補は、full mixed prompt bundleではstrict top1を維持できなかった。
+- `case_a` はtop8集合自体は同じだが、AQ4 top1 `4105` とSQ top1 `5582` が入れ替わった。差は小さいが、現T2 guardはstrict top1なのでfailureとして扱う。
+- direct triple pathそのものは `sq_fp8_triple_matvec_count=23` で確認できたため、この候補は「triple境界の回帰サンプル」として保存する。
+- この候補はSQ policyへ昇格しない。次はlayer3より広げる前に、row-block幅、scale粒度、または対象familyを変えてstrict top1を守る候補を探す。
+
+次の行動:
+
+1. layer3 `q/k/v` tripleはregression boundaryとして残し、昇格候補から外す。
+2. 次のT2探索では、`q/k` pair、`k`単体、または別row-block/scale粒度の `q/k/v` をprompt bundleで先に通す。
+3. top-k overlap、AQ4 top1 rank、logit marginを候補比較JSONへ保存し、strict top1 failureを診断しやすくする。
+
 ## Risks
 
 | risk | impact | handling |

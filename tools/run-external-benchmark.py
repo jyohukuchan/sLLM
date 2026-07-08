@@ -403,7 +403,7 @@ def parse_int_matrix_csv(value: Any) -> list[list[int]]:
         return []
     rows: list[list[int]] = []
     for raw_row in value.split(";"):
-        row = parse_int_csv(raw_row)
+        row = parse_int_csv(raw_row.replace(":", ","))
         if not row:
             return []
         rows.append(row)
@@ -417,7 +417,7 @@ def parse_float_matrix_csv(value: Any) -> list[list[float]]:
         return []
     rows: list[list[float]] = []
     for raw_row in value.split(";"):
-        row = parse_float_csv(raw_row)
+        row = parse_float_csv(raw_row.replace(":", ","))
         if not row:
             return []
         rows.append(row)
