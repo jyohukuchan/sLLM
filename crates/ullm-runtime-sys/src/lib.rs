@@ -384,6 +384,46 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_sq_fp8_matvec_pair_f32(
+        left_payload_buffer: *const RawRuntimeBuffer,
+        left_scale_buffer: *const RawRuntimeBuffer,
+        left_scale_kind: u32,
+        left_scale_block_cols: usize,
+        right_payload_buffer: *const RawRuntimeBuffer,
+        right_scale_buffer: *const RawRuntimeBuffer,
+        right_scale_kind: u32,
+        right_scale_block_cols: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        left_rows: usize,
+        right_rows: usize,
+        cols: usize,
+        left_output_buffer: *mut RawRuntimeBuffer,
+        right_output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_sq_fp8_matvec_triple_f32(
+        first_payload_buffer: *const RawRuntimeBuffer,
+        first_scale_buffer: *const RawRuntimeBuffer,
+        first_scale_kind: u32,
+        first_scale_block_cols: usize,
+        second_payload_buffer: *const RawRuntimeBuffer,
+        second_scale_buffer: *const RawRuntimeBuffer,
+        second_scale_kind: u32,
+        second_scale_block_cols: usize,
+        third_payload_buffer: *const RawRuntimeBuffer,
+        third_scale_buffer: *const RawRuntimeBuffer,
+        third_scale_kind: u32,
+        third_scale_block_cols: usize,
+        input_buffer: *const RawRuntimeBuffer,
+        first_rows: usize,
+        second_rows: usize,
+        third_rows: usize,
+        cols: usize,
+        first_output_buffer: *mut RawRuntimeBuffer,
+        second_output_buffer: *mut RawRuntimeBuffer,
+        third_output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_matvec_bf16_f32(
         matrix_buffer: *const RawRuntimeBuffer,
         input_buffer: *const RawRuntimeBuffer,
@@ -2632,6 +2672,226 @@ pub fn sq_fp8_matvec_batch_f32(
             scale_block_cols,
             batch_count,
             output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+fn sq_fp8_scale_byte_len(
+    rows: usize,
+    cols: usize,
+    scale_kind: u32,
+    scale_block_cols: usize,
+    label: &str,
+) -> Result<usize, String> {
+    if scale_kind > SQ_FP8_SCALE_ROW_BLOCK {
+        return Err(format!(
+            "{label} scale kind must be tensor(0), row(1), or row_block(2)"
+        ));
+    }
+    if scale_kind == SQ_FP8_SCALE_ROW_BLOCK && scale_block_cols == 0 {
+        return Err(format!(
+            "{label} row_block scale_block_cols must be greater than zero"
+        ));
+    }
+    let scale_values = if scale_kind == SQ_FP8_SCALE_TENSOR {
+        1
+    } else if scale_kind == SQ_FP8_SCALE_ROW {
+        rows
+    } else {
+        let blocks_per_row = cols
+            .checked_add(scale_block_cols - 1)
+            .and_then(|value| value.checked_div(scale_block_cols))
+            .ok_or_else(|| format!("{label} row_block count overflows"))?;
+        rows.checked_mul(blocks_per_row)
+            .ok_or_else(|| format!("{label} row_block scale count overflows"))?
+    };
+    scale_values
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| format!("{label} scale byte size overflows"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn sq_fp8_matvec_pair_f32(
+    left_payload_buffer: &RuntimeBuffer,
+    left_scale_buffer: &RuntimeBuffer,
+    left_scale_kind: u32,
+    left_scale_block_cols: usize,
+    right_payload_buffer: &RuntimeBuffer,
+    right_scale_buffer: &RuntimeBuffer,
+    right_scale_kind: u32,
+    right_scale_block_cols: usize,
+    input_buffer: &RuntimeBuffer,
+    left_rows: usize,
+    right_rows: usize,
+    cols: usize,
+    left_output_buffer: &mut RuntimeBuffer,
+    right_output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if left_rows == 0 || right_rows == 0 || cols == 0 {
+        return Err("SQ FP8 matvec pair rows and cols must be greater than zero".to_string());
+    }
+    let left_payload_bytes = left_rows
+        .checked_mul(cols)
+        .ok_or_else(|| "SQ FP8 matvec pair left payload byte size overflows".to_string())?;
+    let right_payload_bytes = right_rows
+        .checked_mul(cols)
+        .ok_or_else(|| "SQ FP8 matvec pair right payload byte size overflows".to_string())?;
+    let left_scale_bytes = sq_fp8_scale_byte_len(
+        left_rows,
+        cols,
+        left_scale_kind,
+        left_scale_block_cols,
+        "SQ FP8 matvec pair left",
+    )?;
+    let right_scale_bytes = sq_fp8_scale_byte_len(
+        right_rows,
+        cols,
+        right_scale_kind,
+        right_scale_block_cols,
+        "SQ FP8 matvec pair right",
+    )?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec pair input byte size overflows".to_string())?;
+    let left_output_bytes = left_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec pair left output byte size overflows".to_string())?;
+    let right_output_bytes = right_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec pair right output byte size overflows".to_string())?;
+    check_copy_range(0, left_payload_bytes, left_payload_buffer.size()?)?;
+    check_copy_range(0, right_payload_bytes, right_payload_buffer.size()?)?;
+    check_copy_range(0, left_scale_bytes, left_scale_buffer.size()?)?;
+    check_copy_range(0, right_scale_bytes, right_scale_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    check_copy_range(0, left_output_bytes, left_output_buffer.size()?)?;
+    check_copy_range(0, right_output_bytes, right_output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_sq_fp8_matvec_pair_f32(
+            left_payload_buffer.raw.as_ptr(),
+            left_scale_buffer.raw.as_ptr(),
+            left_scale_kind,
+            left_scale_block_cols,
+            right_payload_buffer.raw.as_ptr(),
+            right_scale_buffer.raw.as_ptr(),
+            right_scale_kind,
+            right_scale_block_cols,
+            input_buffer.raw.as_ptr(),
+            left_rows,
+            right_rows,
+            cols,
+            left_output_buffer.raw.as_ptr(),
+            right_output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn sq_fp8_matvec_triple_f32(
+    first_payload_buffer: &RuntimeBuffer,
+    first_scale_buffer: &RuntimeBuffer,
+    first_scale_kind: u32,
+    first_scale_block_cols: usize,
+    second_payload_buffer: &RuntimeBuffer,
+    second_scale_buffer: &RuntimeBuffer,
+    second_scale_kind: u32,
+    second_scale_block_cols: usize,
+    third_payload_buffer: &RuntimeBuffer,
+    third_scale_buffer: &RuntimeBuffer,
+    third_scale_kind: u32,
+    third_scale_block_cols: usize,
+    input_buffer: &RuntimeBuffer,
+    first_rows: usize,
+    second_rows: usize,
+    third_rows: usize,
+    cols: usize,
+    first_output_buffer: &mut RuntimeBuffer,
+    second_output_buffer: &mut RuntimeBuffer,
+    third_output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if first_rows == 0 || second_rows == 0 || third_rows == 0 || cols == 0 {
+        return Err("SQ FP8 matvec triple rows and cols must be greater than zero".to_string());
+    }
+    let first_payload_bytes = first_rows
+        .checked_mul(cols)
+        .ok_or_else(|| "SQ FP8 matvec triple first payload byte size overflows".to_string())?;
+    let second_payload_bytes = second_rows
+        .checked_mul(cols)
+        .ok_or_else(|| "SQ FP8 matvec triple second payload byte size overflows".to_string())?;
+    let third_payload_bytes = third_rows
+        .checked_mul(cols)
+        .ok_or_else(|| "SQ FP8 matvec triple third payload byte size overflows".to_string())?;
+    let first_scale_bytes = sq_fp8_scale_byte_len(
+        first_rows,
+        cols,
+        first_scale_kind,
+        first_scale_block_cols,
+        "SQ FP8 matvec triple first",
+    )?;
+    let second_scale_bytes = sq_fp8_scale_byte_len(
+        second_rows,
+        cols,
+        second_scale_kind,
+        second_scale_block_cols,
+        "SQ FP8 matvec triple second",
+    )?;
+    let third_scale_bytes = sq_fp8_scale_byte_len(
+        third_rows,
+        cols,
+        third_scale_kind,
+        third_scale_block_cols,
+        "SQ FP8 matvec triple third",
+    )?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec triple input byte size overflows".to_string())?;
+    let first_output_bytes = first_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec triple first output byte size overflows".to_string())?;
+    let second_output_bytes = second_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec triple second output byte size overflows".to_string())?;
+    let third_output_bytes = third_rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec triple third output byte size overflows".to_string())?;
+    check_copy_range(0, first_payload_bytes, first_payload_buffer.size()?)?;
+    check_copy_range(0, second_payload_bytes, second_payload_buffer.size()?)?;
+    check_copy_range(0, third_payload_bytes, third_payload_buffer.size()?)?;
+    check_copy_range(0, first_scale_bytes, first_scale_buffer.size()?)?;
+    check_copy_range(0, second_scale_bytes, second_scale_buffer.size()?)?;
+    check_copy_range(0, third_scale_bytes, third_scale_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    check_copy_range(0, first_output_bytes, first_output_buffer.size()?)?;
+    check_copy_range(0, second_output_bytes, second_output_buffer.size()?)?;
+    check_copy_range(0, third_output_bytes, third_output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_sq_fp8_matvec_triple_f32(
+            first_payload_buffer.raw.as_ptr(),
+            first_scale_buffer.raw.as_ptr(),
+            first_scale_kind,
+            first_scale_block_cols,
+            second_payload_buffer.raw.as_ptr(),
+            second_scale_buffer.raw.as_ptr(),
+            second_scale_kind,
+            second_scale_block_cols,
+            third_payload_buffer.raw.as_ptr(),
+            third_scale_buffer.raw.as_ptr(),
+            third_scale_kind,
+            third_scale_block_cols,
+            input_buffer.raw.as_ptr(),
+            first_rows,
+            second_rows,
+            third_rows,
+            cols,
+            first_output_buffer.raw.as_ptr(),
+            second_output_buffer.raw.as_ptr(),
+            third_output_buffer.raw.as_ptr(),
             stream,
         )
     })
@@ -5791,6 +6051,180 @@ mod tests {
             le_bytes_to_f32s(&output_bytes),
             vec![-11.0, 1.25, 12.0, 0.25]
         );
+    }
+
+    #[test]
+    fn cpu_sq_fp8_matvec_pair_f32_computes_expected_mixed_scale_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut left_payload = context.alloc_buffer(6).unwrap();
+        let mut left_scales = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut right_payload = context.alloc_buffer(6).unwrap();
+        let mut right_scales = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut left_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut right_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let payload = [0x38, 0x40, 0xb8, 0x30, 0x00, 0x38];
+        left_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        right_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        left_scales
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[2.0, 4.0, 1.0, 0.5]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        right_scales
+            .copy_from_host(0, &f32s_to_le_bytes(&[1.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        sq_fp8_matvec_pair_f32(
+            &left_payload,
+            &left_scales,
+            SQ_FP8_SCALE_ROW_BLOCK,
+            2,
+            &right_payload,
+            &right_scales,
+            SQ_FP8_SCALE_TENSOR,
+            0,
+            &input,
+            2,
+            2,
+            3,
+            &mut left_output,
+            &mut right_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut left_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut right_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        left_output
+            .copy_to_host(0, &mut left_bytes, Some(&mut stream))
+            .unwrap();
+        right_output
+            .copy_to_host(0, &mut right_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&left_bytes), vec![-11.0, 1.25]);
+        assert_eq!(le_bytes_to_f32s(&right_bytes), vec![-3.5, 2.25]);
+    }
+
+    #[test]
+    fn cpu_sq_fp8_matvec_triple_f32_computes_expected_mixed_scale_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut first_payload = context.alloc_buffer(6).unwrap();
+        let mut first_scales = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut second_payload = context.alloc_buffer(6).unwrap();
+        let mut second_scales = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut third_payload = context.alloc_buffer(6).unwrap();
+        let mut third_scales = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut first_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut second_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut third_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let payload = [0x38, 0x40, 0xb8, 0x30, 0x00, 0x38];
+        first_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        second_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        third_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        first_scales
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[2.0, 4.0, 1.0, 0.5]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        second_scales
+            .copy_from_host(0, &f32s_to_le_bytes(&[1.0]), Some(&mut stream))
+            .unwrap();
+        third_scales
+            .copy_from_host(0, &f32s_to_le_bytes(&[2.0, 0.5]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        sq_fp8_matvec_triple_f32(
+            &first_payload,
+            &first_scales,
+            SQ_FP8_SCALE_ROW_BLOCK,
+            2,
+            &second_payload,
+            &second_scales,
+            SQ_FP8_SCALE_TENSOR,
+            0,
+            &third_payload,
+            &third_scales,
+            SQ_FP8_SCALE_ROW,
+            0,
+            &input,
+            2,
+            2,
+            2,
+            3,
+            &mut first_output,
+            &mut second_output,
+            &mut third_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut first_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut second_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut third_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        first_output
+            .copy_to_host(0, &mut first_bytes, Some(&mut stream))
+            .unwrap();
+        second_output
+            .copy_to_host(0, &mut second_bytes, Some(&mut stream))
+            .unwrap();
+        third_output
+            .copy_to_host(0, &mut third_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&first_bytes), vec![-11.0, 1.25]);
+        assert_eq!(le_bytes_to_f32s(&second_bytes), vec![-3.5, 2.25]);
+        assert_eq!(le_bytes_to_f32s(&third_bytes), vec![-7.0, 1.125]);
     }
 
     #[test]
@@ -10170,6 +10604,186 @@ mod tests {
             &[-11.0, 1.25, 12.0, 0.25],
             1e-6,
         );
+    }
+
+    #[test]
+    fn first_hip_sq_fp8_matvec_pair_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut left_payload = context.alloc_buffer(6).unwrap();
+        let mut left_scales = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut right_payload = context.alloc_buffer(6).unwrap();
+        let mut right_scales = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut left_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut right_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let payload = [0x38, 0x40, 0xb8, 0x30, 0x00, 0x38];
+        left_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        right_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        left_scales
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[2.0, 4.0, 1.0, 0.5]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        right_scales
+            .copy_from_host(0, &f32s_to_le_bytes(&[1.0]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        sq_fp8_matvec_pair_f32(
+            &left_payload,
+            &left_scales,
+            SQ_FP8_SCALE_ROW_BLOCK,
+            2,
+            &right_payload,
+            &right_scales,
+            SQ_FP8_SCALE_TENSOR,
+            0,
+            &input,
+            2,
+            2,
+            3,
+            &mut left_output,
+            &mut right_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut left_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut right_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        left_output
+            .copy_to_host(0, &mut left_bytes, Some(&mut stream))
+            .unwrap();
+        right_output
+            .copy_to_host(0, &mut right_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&left_bytes), &[-11.0, 1.25], 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&right_bytes), &[-3.5, 2.25], 1e-6);
+    }
+
+    #[test]
+    fn first_hip_sq_fp8_matvec_triple_f32_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut first_payload = context.alloc_buffer(6).unwrap();
+        let mut first_scales = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut second_payload = context.alloc_buffer(6).unwrap();
+        let mut second_scales = context.alloc_buffer(std::mem::size_of::<f32>()).unwrap();
+        let mut third_payload = context.alloc_buffer(6).unwrap();
+        let mut third_scales = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut first_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut second_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut third_output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let payload = [0x38, 0x40, 0xb8, 0x30, 0x00, 0x38];
+        first_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        second_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        third_payload
+            .copy_from_host(0, &payload, Some(&mut stream))
+            .unwrap();
+        first_scales
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[2.0, 4.0, 1.0, 0.5]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        second_scales
+            .copy_from_host(0, &f32s_to_le_bytes(&[1.0]), Some(&mut stream))
+            .unwrap();
+        third_scales
+            .copy_from_host(0, &f32s_to_le_bytes(&[2.0, 0.5]), Some(&mut stream))
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        sq_fp8_matvec_triple_f32(
+            &first_payload,
+            &first_scales,
+            SQ_FP8_SCALE_ROW_BLOCK,
+            2,
+            &second_payload,
+            &second_scales,
+            SQ_FP8_SCALE_TENSOR,
+            0,
+            &third_payload,
+            &third_scales,
+            SQ_FP8_SCALE_ROW,
+            0,
+            &input,
+            2,
+            2,
+            2,
+            3,
+            &mut first_output,
+            &mut second_output,
+            &mut third_output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut first_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut second_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        let mut third_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        first_output
+            .copy_to_host(0, &mut first_bytes, Some(&mut stream))
+            .unwrap();
+        second_output
+            .copy_to_host(0, &mut second_bytes, Some(&mut stream))
+            .unwrap();
+        third_output
+            .copy_to_host(0, &mut third_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&first_bytes), &[-11.0, 1.25], 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&second_bytes), &[-3.5, 2.25], 1e-6);
+        assert_f32s_close(&le_bytes_to_f32s(&third_bytes), &[-7.0, 1.125], 1e-6);
     }
 
     #[test]

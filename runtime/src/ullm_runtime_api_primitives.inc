@@ -419,6 +419,457 @@ ullm_status ullm_runtime_sq_fp8_matvec_batch_f32(
         stream);
 }
 
+ullm_status ullm_runtime_sq_fp8_matvec_pair_f32(
+    const ullm_runtime_buffer *left_payload_buffer,
+    const ullm_runtime_buffer *left_scale_buffer,
+    uint32_t left_scale_kind,
+    size_t left_scale_block_cols,
+    const ullm_runtime_buffer *right_payload_buffer,
+    const ullm_runtime_buffer *right_scale_buffer,
+    uint32_t right_scale_kind,
+    size_t right_scale_block_cols,
+    const ullm_runtime_buffer *input_buffer,
+    size_t left_rows,
+    size_t right_rows,
+    size_t cols,
+    ullm_runtime_buffer *left_output_buffer,
+    ullm_runtime_buffer *right_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (left_payload_buffer == nullptr || left_scale_buffer == nullptr ||
+        right_payload_buffer == nullptr || right_scale_buffer == nullptr ||
+        input_buffer == nullptr || left_output_buffer == nullptr || right_output_buffer == nullptr) {
+        set_error("SQ FP8 matvec pair received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (left_rows == 0 || right_rows == 0 || cols == 0) {
+        set_error("SQ FP8 matvec pair rows and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (left_scale_kind > 2u || right_scale_kind > 2u) {
+        set_error("SQ FP8 matvec pair scale kind must be tensor(0), row(1), or row_block(2)");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((left_scale_kind == 2u && left_scale_block_cols == 0) ||
+        (right_scale_kind == 2u && right_scale_block_cols == 0)) {
+        set_error("SQ FP8 matvec pair row_block scale_block_cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(left_payload_buffer, left_scale_buffer) ||
+        !buffers_share_backend(left_payload_buffer, right_payload_buffer) ||
+        !buffers_share_backend(left_payload_buffer, right_scale_buffer) ||
+        !buffers_share_backend(left_payload_buffer, input_buffer) ||
+        !buffers_share_backend(left_payload_buffer, left_output_buffer) ||
+        !buffers_share_backend(left_payload_buffer, right_output_buffer)) {
+        set_error("SQ FP8 matvec pair buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(left_output_buffer, stream) ||
+        !stream_matches_buffer(right_output_buffer, stream)) {
+        set_error("SQ FP8 matvec pair stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    auto scale_values_for = [max_size, cols](size_t rows,
+                                             uint32_t scale_kind,
+                                             size_t scale_block_cols,
+                                             const char *label,
+                                             size_t *out) -> bool {
+        if (out == nullptr) {
+            return false;
+        }
+        if (scale_kind == 0u) {
+            *out = 1;
+            return true;
+        }
+        if (scale_kind == 1u) {
+            *out = rows;
+            return true;
+        }
+        const size_t blocks_per_row = (cols + scale_block_cols - 1) / scale_block_cols;
+        if (blocks_per_row > max_size / rows) {
+            set_error((std::string("SQ FP8 matvec pair ") + label +
+                       " row_block scale count overflows")
+                          .c_str());
+            return false;
+        }
+        *out = rows * blocks_per_row;
+        return true;
+    };
+    auto matrix_bytes_for = [max_size, cols](size_t rows, const char *label, size_t *out) -> bool {
+        if (rows > max_size / cols) {
+            set_error(
+                (std::string("SQ FP8 matvec pair ") + label + " matrix element count overflows")
+                    .c_str());
+            return false;
+        }
+        *out = rows * cols;
+        return true;
+    };
+    size_t left_payload_bytes = 0;
+    size_t right_payload_bytes = 0;
+    size_t left_scale_values = 0;
+    size_t right_scale_values = 0;
+    if (!matrix_bytes_for(left_rows, "left", &left_payload_bytes) ||
+        !matrix_bytes_for(right_rows, "right", &right_payload_bytes) ||
+        !scale_values_for(
+            left_rows, left_scale_kind, left_scale_block_cols, "left", &left_scale_values) ||
+        !scale_values_for(
+            right_rows, right_scale_kind, right_scale_block_cols, "right", &right_scale_values)) {
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (cols > max_size / sizeof(float) ||
+        left_rows > max_size / sizeof(float) ||
+        right_rows > max_size / sizeof(float) ||
+        left_scale_values > max_size / sizeof(float) ||
+        right_scale_values > max_size / sizeof(float)) {
+        set_error("SQ FP8 matvec pair byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t input_bytes = cols * sizeof(float);
+    const size_t left_output_bytes = left_rows * sizeof(float);
+    const size_t right_output_bytes = right_rows * sizeof(float);
+    const size_t left_scale_bytes = left_scale_values * sizeof(float);
+    const size_t right_scale_bytes = right_scale_values * sizeof(float);
+    if (left_payload_buffer->bytes < left_payload_bytes ||
+        right_payload_buffer->bytes < right_payload_bytes ||
+        left_scale_buffer->bytes < left_scale_bytes ||
+        right_scale_buffer->bytes < right_scale_bytes ||
+        input_buffer->bytes < input_bytes ||
+        left_output_buffer->bytes < left_output_bytes ||
+        right_output_buffer->bytes < right_output_bytes) {
+        set_error("SQ FP8 matvec pair buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (left_payload_buffer->backend == BackendKind::Cpu) {
+        if (!sq_fp8_matvec_pair_f32_host(
+                static_cast<const uint8_t *>(left_payload_buffer->ptr),
+                static_cast<const float *>(left_scale_buffer->ptr),
+                left_scale_kind,
+                left_scale_block_cols,
+                static_cast<const uint8_t *>(right_payload_buffer->ptr),
+                static_cast<const float *>(right_scale_buffer->ptr),
+                right_scale_kind,
+                right_scale_block_cols,
+                static_cast<const float *>(input_buffer->ptr),
+                left_rows,
+                right_rows,
+                cols,
+                static_cast<float *>(left_output_buffer->ptr),
+                static_cast<float *>(right_output_buffer->ptr))) {
+            set_error("SQ FP8 matvec pair host path rejected invalid values");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (sq_fp8_matvec_pair_f32_hip_kernel(
+            left_payload_buffer,
+            left_scale_buffer,
+            left_scale_kind,
+            left_scale_block_cols,
+            right_payload_buffer,
+            right_scale_buffer,
+            right_scale_kind,
+            right_scale_block_cols,
+            input_buffer,
+            left_rows,
+            right_rows,
+            cols,
+            left_output_buffer,
+            right_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_PAIR_KERNEL") != nullptr ||
+        std::getenv("ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "SQ FP8 matvec pair HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    const ullm_status left_status = ullm_runtime_sq_fp8_matvec_f32(
+        left_payload_buffer,
+        left_scale_buffer,
+        input_buffer,
+        left_rows,
+        cols,
+        left_scale_kind,
+        left_scale_block_cols,
+        left_output_buffer,
+        stream);
+    if (left_status != ULLM_STATUS_OK) {
+        return left_status;
+    }
+    return ullm_runtime_sq_fp8_matvec_f32(
+        right_payload_buffer,
+        right_scale_buffer,
+        input_buffer,
+        right_rows,
+        cols,
+        right_scale_kind,
+        right_scale_block_cols,
+        right_output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_sq_fp8_matvec_triple_f32(
+    const ullm_runtime_buffer *first_payload_buffer,
+    const ullm_runtime_buffer *first_scale_buffer,
+    uint32_t first_scale_kind,
+    size_t first_scale_block_cols,
+    const ullm_runtime_buffer *second_payload_buffer,
+    const ullm_runtime_buffer *second_scale_buffer,
+    uint32_t second_scale_kind,
+    size_t second_scale_block_cols,
+    const ullm_runtime_buffer *third_payload_buffer,
+    const ullm_runtime_buffer *third_scale_buffer,
+    uint32_t third_scale_kind,
+    size_t third_scale_block_cols,
+    const ullm_runtime_buffer *input_buffer,
+    size_t first_rows,
+    size_t second_rows,
+    size_t third_rows,
+    size_t cols,
+    ullm_runtime_buffer *first_output_buffer,
+    ullm_runtime_buffer *second_output_buffer,
+    ullm_runtime_buffer *third_output_buffer,
+    ullm_runtime_stream *stream) {
+    if (first_payload_buffer == nullptr || first_scale_buffer == nullptr ||
+        second_payload_buffer == nullptr || second_scale_buffer == nullptr ||
+        third_payload_buffer == nullptr || third_scale_buffer == nullptr ||
+        input_buffer == nullptr || first_output_buffer == nullptr ||
+        second_output_buffer == nullptr || third_output_buffer == nullptr) {
+        set_error("SQ FP8 matvec triple received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (first_rows == 0 || second_rows == 0 || third_rows == 0 || cols == 0) {
+        set_error("SQ FP8 matvec triple rows and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (first_scale_kind > 2u || second_scale_kind > 2u || third_scale_kind > 2u) {
+        set_error("SQ FP8 matvec triple scale kind must be tensor(0), row(1), or row_block(2)");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((first_scale_kind == 2u && first_scale_block_cols == 0) ||
+        (second_scale_kind == 2u && second_scale_block_cols == 0) ||
+        (third_scale_kind == 2u && third_scale_block_cols == 0)) {
+        set_error("SQ FP8 matvec triple row_block scale_block_cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(first_payload_buffer, first_scale_buffer) ||
+        !buffers_share_backend(first_payload_buffer, second_payload_buffer) ||
+        !buffers_share_backend(first_payload_buffer, second_scale_buffer) ||
+        !buffers_share_backend(first_payload_buffer, third_payload_buffer) ||
+        !buffers_share_backend(first_payload_buffer, third_scale_buffer) ||
+        !buffers_share_backend(first_payload_buffer, input_buffer) ||
+        !buffers_share_backend(first_payload_buffer, first_output_buffer) ||
+        !buffers_share_backend(first_payload_buffer, second_output_buffer) ||
+        !buffers_share_backend(first_payload_buffer, third_output_buffer)) {
+        set_error("SQ FP8 matvec triple buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(first_output_buffer, stream) ||
+        !stream_matches_buffer(second_output_buffer, stream) ||
+        !stream_matches_buffer(third_output_buffer, stream)) {
+        set_error("SQ FP8 matvec triple stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    auto scale_values_for = [max_size, cols](size_t rows,
+                                             uint32_t scale_kind,
+                                             size_t scale_block_cols,
+                                             const char *label,
+                                             size_t *out) -> bool {
+        if (scale_kind == 0u) {
+            *out = 1;
+            return true;
+        }
+        if (scale_kind == 1u) {
+            *out = rows;
+            return true;
+        }
+        const size_t blocks_per_row = (cols + scale_block_cols - 1) / scale_block_cols;
+        if (blocks_per_row > max_size / rows) {
+            set_error((std::string("SQ FP8 matvec triple ") + label +
+                       " row_block scale count overflows")
+                          .c_str());
+            return false;
+        }
+        *out = rows * blocks_per_row;
+        return true;
+    };
+    auto matrix_bytes_for = [max_size, cols](size_t rows, const char *label, size_t *out) -> bool {
+        if (rows > max_size / cols) {
+            set_error(
+                (std::string("SQ FP8 matvec triple ") + label + " matrix element count overflows")
+                    .c_str());
+            return false;
+        }
+        *out = rows * cols;
+        return true;
+    };
+    size_t first_payload_bytes = 0;
+    size_t second_payload_bytes = 0;
+    size_t third_payload_bytes = 0;
+    size_t first_scale_values = 0;
+    size_t second_scale_values = 0;
+    size_t third_scale_values = 0;
+    if (!matrix_bytes_for(first_rows, "first", &first_payload_bytes) ||
+        !matrix_bytes_for(second_rows, "second", &second_payload_bytes) ||
+        !matrix_bytes_for(third_rows, "third", &third_payload_bytes) ||
+        !scale_values_for(
+            first_rows, first_scale_kind, first_scale_block_cols, "first", &first_scale_values) ||
+        !scale_values_for(
+            second_rows, second_scale_kind, second_scale_block_cols, "second", &second_scale_values) ||
+        !scale_values_for(
+            third_rows, third_scale_kind, third_scale_block_cols, "third", &third_scale_values)) {
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (cols > max_size / sizeof(float) ||
+        first_rows > max_size / sizeof(float) ||
+        second_rows > max_size / sizeof(float) ||
+        third_rows > max_size / sizeof(float) ||
+        first_scale_values > max_size / sizeof(float) ||
+        second_scale_values > max_size / sizeof(float) ||
+        third_scale_values > max_size / sizeof(float)) {
+        set_error("SQ FP8 matvec triple byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t input_bytes = cols * sizeof(float);
+    const size_t first_output_bytes = first_rows * sizeof(float);
+    const size_t second_output_bytes = second_rows * sizeof(float);
+    const size_t third_output_bytes = third_rows * sizeof(float);
+    const size_t first_scale_bytes = first_scale_values * sizeof(float);
+    const size_t second_scale_bytes = second_scale_values * sizeof(float);
+    const size_t third_scale_bytes = third_scale_values * sizeof(float);
+    if (first_payload_buffer->bytes < first_payload_bytes ||
+        second_payload_buffer->bytes < second_payload_bytes ||
+        third_payload_buffer->bytes < third_payload_bytes ||
+        first_scale_buffer->bytes < first_scale_bytes ||
+        second_scale_buffer->bytes < second_scale_bytes ||
+        third_scale_buffer->bytes < third_scale_bytes ||
+        input_buffer->bytes < input_bytes ||
+        first_output_buffer->bytes < first_output_bytes ||
+        second_output_buffer->bytes < second_output_bytes ||
+        third_output_buffer->bytes < third_output_bytes) {
+        set_error("SQ FP8 matvec triple buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (first_payload_buffer->backend == BackendKind::Cpu) {
+        if (!sq_fp8_matvec_triple_f32_host(
+                static_cast<const uint8_t *>(first_payload_buffer->ptr),
+                static_cast<const float *>(first_scale_buffer->ptr),
+                first_scale_kind,
+                first_scale_block_cols,
+                static_cast<const uint8_t *>(second_payload_buffer->ptr),
+                static_cast<const float *>(second_scale_buffer->ptr),
+                second_scale_kind,
+                second_scale_block_cols,
+                static_cast<const uint8_t *>(third_payload_buffer->ptr),
+                static_cast<const float *>(third_scale_buffer->ptr),
+                third_scale_kind,
+                third_scale_block_cols,
+                static_cast<const float *>(input_buffer->ptr),
+                first_rows,
+                second_rows,
+                third_rows,
+                cols,
+                static_cast<float *>(first_output_buffer->ptr),
+                static_cast<float *>(second_output_buffer->ptr),
+                static_cast<float *>(third_output_buffer->ptr))) {
+            set_error("SQ FP8 matvec triple host path rejected invalid values");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (sq_fp8_matvec_triple_f32_hip_kernel(
+            first_payload_buffer,
+            first_scale_buffer,
+            first_scale_kind,
+            first_scale_block_cols,
+            second_payload_buffer,
+            second_scale_buffer,
+            second_scale_kind,
+            second_scale_block_cols,
+            third_payload_buffer,
+            third_scale_buffer,
+            third_scale_kind,
+            third_scale_block_cols,
+            input_buffer,
+            first_rows,
+            second_rows,
+            third_rows,
+            cols,
+            first_output_buffer,
+            second_output_buffer,
+            third_output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL") != nullptr ||
+        std::getenv("ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "SQ FP8 matvec triple HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    const ullm_status first_status = ullm_runtime_sq_fp8_matvec_f32(
+        first_payload_buffer,
+        first_scale_buffer,
+        input_buffer,
+        first_rows,
+        cols,
+        first_scale_kind,
+        first_scale_block_cols,
+        first_output_buffer,
+        stream);
+    if (first_status != ULLM_STATUS_OK) {
+        return first_status;
+    }
+    const ullm_status second_status = ullm_runtime_sq_fp8_matvec_f32(
+        second_payload_buffer,
+        second_scale_buffer,
+        input_buffer,
+        second_rows,
+        cols,
+        second_scale_kind,
+        second_scale_block_cols,
+        second_output_buffer,
+        stream);
+    if (second_status != ULLM_STATUS_OK) {
+        return second_status;
+    }
+    return ullm_runtime_sq_fp8_matvec_f32(
+        third_payload_buffer,
+        third_scale_buffer,
+        input_buffer,
+        third_rows,
+        cols,
+        third_scale_kind,
+        third_scale_block_cols,
+        third_output_buffer,
+        stream);
+}
+
 ullm_status ullm_runtime_matvec_bf16_f32(
     const ullm_runtime_buffer *matrix_buffer,
     const ullm_runtime_buffer *input_buffer,

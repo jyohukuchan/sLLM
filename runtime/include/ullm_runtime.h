@@ -404,6 +404,46 @@ ullm_status ullm_runtime_sq_fp8_matvec_batch_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_sq_fp8_matvec_pair_f32(
+    const ullm_runtime_buffer *left_payload_buffer,
+    const ullm_runtime_buffer *left_scale_buffer,
+    uint32_t left_scale_kind,
+    size_t left_scale_block_cols,
+    const ullm_runtime_buffer *right_payload_buffer,
+    const ullm_runtime_buffer *right_scale_buffer,
+    uint32_t right_scale_kind,
+    size_t right_scale_block_cols,
+    const ullm_runtime_buffer *input_buffer,
+    size_t left_rows,
+    size_t right_rows,
+    size_t cols,
+    ullm_runtime_buffer *left_output_buffer,
+    ullm_runtime_buffer *right_output_buffer,
+    ullm_runtime_stream *stream);
+
+ullm_status ullm_runtime_sq_fp8_matvec_triple_f32(
+    const ullm_runtime_buffer *first_payload_buffer,
+    const ullm_runtime_buffer *first_scale_buffer,
+    uint32_t first_scale_kind,
+    size_t first_scale_block_cols,
+    const ullm_runtime_buffer *second_payload_buffer,
+    const ullm_runtime_buffer *second_scale_buffer,
+    uint32_t second_scale_kind,
+    size_t second_scale_block_cols,
+    const ullm_runtime_buffer *third_payload_buffer,
+    const ullm_runtime_buffer *third_scale_buffer,
+    uint32_t third_scale_kind,
+    size_t third_scale_block_cols,
+    const ullm_runtime_buffer *input_buffer,
+    size_t first_rows,
+    size_t second_rows,
+    size_t third_rows,
+    size_t cols,
+    ullm_runtime_buffer *first_output_buffer,
+    ullm_runtime_buffer *second_output_buffer,
+    ullm_runtime_buffer *third_output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_matvec_bf16_f32(
     const ullm_runtime_buffer *matrix_buffer,
     const ullm_runtime_buffer *input_buffer,

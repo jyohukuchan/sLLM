@@ -43301,6 +43301,13 @@ struct PackageAq4StorageRef<'a> {
     row_scale_buffer: Option<&'a ullm_runtime_sys::RuntimeBuffer>,
 }
 
+struct PackageSqFp8StorageRef<'a> {
+    payload_buffer: &'a ullm_runtime_sys::RuntimeBuffer,
+    scale_buffer: &'a ullm_runtime_sys::RuntimeBuffer,
+    scale_kind: u32,
+    scale_block_cols: usize,
+}
+
 #[derive(Default)]
 struct PackageResidentSharedBufferRegistry {
     buffers: std::collections::BTreeMap<String, std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>>,
@@ -44200,6 +44207,25 @@ impl PackageAq4ResidentMatvec {
         !matches!(self.storage, PackageResidentMatvecStorage::Aq4 { .. })
     }
 
+    fn sq_fp8_storage(&self) -> Option<PackageSqFp8StorageRef<'_>> {
+        match &self.storage {
+            PackageResidentMatvecStorage::SqFp8 {
+                payload_buffer,
+                scale_buffer,
+                scale_kind,
+                scale_block_cols,
+            } => Some(PackageSqFp8StorageRef {
+                payload_buffer: payload_buffer.as_ref(),
+                scale_buffer: scale_buffer.as_ref(),
+                scale_kind: *scale_kind,
+                scale_block_cols: *scale_block_cols,
+            }),
+            PackageResidentMatvecStorage::Aq4 { .. } | PackageResidentMatvecStorage::F32 { .. } => {
+                None
+            }
+        }
+    }
+
     fn row_f32(
         &self,
         row_index: usize,
@@ -44452,6 +44478,26 @@ impl PackageAq4ResidentMatvec {
                 self.rows, self.cols, right.rows, right.cols
             ));
         }
+        if let (Some(left_sq), Some(right_sq)) = (self.sq_fp8_storage(), right.sq_fp8_storage()) {
+            return ullm_runtime_sys::sq_fp8_matvec_pair_f32(
+                left_sq.payload_buffer,
+                left_sq.scale_buffer,
+                left_sq.scale_kind,
+                left_sq.scale_block_cols,
+                right_sq.payload_buffer,
+                right_sq.scale_buffer,
+                right_sq.scale_kind,
+                right_sq.scale_block_cols,
+                input_buffer,
+                self.rows,
+                right.rows,
+                self.cols,
+                left_output_buffer,
+                right_output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run {label} SQ FP8 matvec pair: {err}"));
+        }
         if self.is_f32() || right.is_f32() {
             self.matvec(input_buffer, left_output_buffer, stream, label)?;
             return right.matvec(input_buffer, right_output_buffer, stream, label);
@@ -44514,6 +44560,36 @@ impl PackageAq4ResidentMatvec {
                 "{label} AQ4 matvec triple column mismatch: first=[{},{}] second=[{},{}] third=[{},{}]",
                 self.rows, self.cols, second.rows, second.cols, third.rows, third.cols
             ));
+        }
+        if let (Some(first_sq), Some(second_sq), Some(third_sq)) = (
+            self.sq_fp8_storage(),
+            second.sq_fp8_storage(),
+            third.sq_fp8_storage(),
+        ) {
+            return ullm_runtime_sys::sq_fp8_matvec_triple_f32(
+                first_sq.payload_buffer,
+                first_sq.scale_buffer,
+                first_sq.scale_kind,
+                first_sq.scale_block_cols,
+                second_sq.payload_buffer,
+                second_sq.scale_buffer,
+                second_sq.scale_kind,
+                second_sq.scale_block_cols,
+                third_sq.payload_buffer,
+                third_sq.scale_buffer,
+                third_sq.scale_kind,
+                third_sq.scale_block_cols,
+                input_buffer,
+                self.rows,
+                second.rows,
+                third.rows,
+                self.cols,
+                first_output_buffer,
+                second_output_buffer,
+                third_output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run {label} SQ FP8 matvec triple: {err}"));
         }
         if self.is_f32() || second.is_f32() || third.is_f32() {
             self.matvec(input_buffer, first_output_buffer, stream, label)?;
