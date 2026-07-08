@@ -3872,6 +3872,39 @@ Inventory:
 2. 次のT2探索では、`q/k` pair、`k`単体、または別row-block/scale粒度の `q/k/v` をprompt bundleで先に通す。
 3. top-k overlap、AQ4 top1 rank、logit marginを候補比較JSONへ保存し、strict top1 failureを診断しやすくする。
 
+## 2026-07-09 progress: T2 SQ FP8 qk pair full mixed prompt bundle
+
+前回の要点:
+
+- layer3 `q/k/v` SQ FP8 triple候補は、full mixed prompt bundleで `case_a` のtop1をAQ4 `4105` からSQ `5582` へ入れ替えた。
+- 切り分けとして、`v_proj` をAQ4のまま残し、layer3 `q/k` pairだけをSQ FP8にした場合のqualityを見る必要があった。
+
+今回の変更点:
+
+- layer3 `q/k` pair候補 `sq-fp8-w8a16-r9700-v0-qk-layer3-q32-k16` を、同じfull mixed prompt bundleで再測定した。
+- `ULLM_DISABLE_AQ4_MATVEC_TRIPLE_SELF_ATTN_QKV=1` と `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_PAIR_KERNEL=1` を付け、pair境界が実際に踏まれることをtelemetryで確認した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-full-mixed-qk-pair-prompt-bundle-v1.md` に保存した。
+
+実測値:
+
+| row | prefill real | decode real | prefill tok/s | decode tok/s | end-to-end tok/s | final top1 | strict top1 |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- |
+| AQ4 baseline | true | true | 67.210503 | 81.070892 | 35.003929 | `24218,4105,329` | reference |
+| SQ `qk-layer3-q32-k16` | true | true | 61.363454 | 78.083528 | 33.570044 | `24218,4105,329` | 3 / 3 |
+
+判断:
+
+- layer3 `q/k` pair候補は、full mixed prompt bundleでstrict top1を維持した。
+- `case_a` はSQ top1 `4105` とrank2 `5582` の差が約 `0.000080586` しかないため、通るが余裕は薄い。
+- 直前の `q/k/v` triple failureは、`q/k` だけではなく、`v_proj` 追加または `q/k/v` のscale組み合わせで発生した可能性が高い。
+- このrunではpair境界を強制するためAQ4 QKV triple fused dispatchを無効化しているので、throughputは最終速度比較ではなく診断値として扱う。
+
+次の行動:
+
+1. `q/k` layer3 pairを現在のfull mixed prompt-bundle pass境界として保存する。
+2. `v_proj` 単体または `q/k + v` の別row-block/scale粒度を試し、`case_a` のtop1 swapを避けられるか確認する。
+3. speed評価では、通常dispatchと比較可能な条件に戻して再測する。
+
 ## Risks
 
 | risk | impact | handling |

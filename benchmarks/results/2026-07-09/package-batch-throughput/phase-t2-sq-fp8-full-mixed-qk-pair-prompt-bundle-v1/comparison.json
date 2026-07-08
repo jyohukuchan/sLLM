@@ -1,0 +1,206 @@
+{
+  "aq4": {
+    "case_id": "aq4-full-mixed-prompt-bundle",
+    "decode_tps": 81.070892,
+    "end_to_end_tps": 35.003929,
+    "final_top1_tokens": [
+      24218,
+      4105,
+      329
+    ],
+    "prefill_tps": 67.210503,
+    "vram_consumed_bytes": 5080682496
+  },
+  "candidate": {
+    "artifact": "/tmp/ullm-sq-fp8-qk-layer3-q32-k16-policy-v0.1-artifact",
+    "id": "sq-fp8-w8a16-r9700-v0-qk-layer3-q32-k16"
+  },
+  "interpretation": "q/k layer3 pair direct FP8 preserves strict top1 on this prompt bundle; q/k/v failure is likely introduced by adding v_proj or the triple candidate scale mix, not by q/k alone.",
+  "quality": {
+    "per_prompt": [
+      {
+        "aq4_margin_over_sq_top1_in_aq4": 0.0,
+        "aq4_top1": 24218,
+        "aq4_top1_logit_in_aq4": 7.201347828,
+        "aq4_top1_logit_in_sq": 7.117062569,
+        "aq4_top1_rank_in_sq_top8": 1,
+        "aq4_top8_tokens": [
+          24218,
+          41813,
+          88110,
+          14482,
+          81395,
+          61946,
+          56374,
+          60607
+        ],
+        "label": "len4",
+        "prompt_token_ids": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "sq_margin_over_aq4_top1_in_sq": 0.0,
+        "sq_top1": 24218,
+        "sq_top1_logit_in_aq4": 7.201347828,
+        "sq_top1_logit_in_sq": 7.117062569,
+        "sq_top1_margin_over_second_in_sq": 0.31212663699999954,
+        "sq_top1_rank_in_aq4_top8": 1,
+        "sq_top8_tokens": [
+          24218,
+          41813,
+          88110,
+          14482,
+          81395,
+          61946,
+          56374,
+          59514
+        ],
+        "strict_top1_match": true,
+        "top8_overlap_count": 7
+      },
+      {
+        "aq4_margin_over_sq_top1_in_aq4": 0.0,
+        "aq4_top1": 4105,
+        "aq4_top1_logit_in_aq4": 4.995436668,
+        "aq4_top1_logit_in_sq": 5.078003407,
+        "aq4_top1_rank_in_sq_top8": 1,
+        "aq4_top8_tokens": [
+          4105,
+          5582,
+          42228,
+          513,
+          200,
+          1119,
+          998,
+          314
+        ],
+        "label": "case_a",
+        "prompt_token_ids": [
+          100,
+          200,
+          300,
+          400,
+          500,
+          600,
+          700,
+          800
+        ],
+        "sq_margin_over_aq4_top1_in_sq": 0.0,
+        "sq_top1": 4105,
+        "sq_top1_logit_in_aq4": 4.995436668,
+        "sq_top1_logit_in_sq": 5.078003407,
+        "sq_top1_margin_over_second_in_sq": 8.058600000016014e-05,
+        "sq_top1_rank_in_aq4_top8": 1,
+        "sq_top8_tokens": [
+          4105,
+          5582,
+          42228,
+          513,
+          1119,
+          200,
+          998,
+          314
+        ],
+        "strict_top1_match": true,
+        "top8_overlap_count": 8
+      },
+      {
+        "aq4_margin_over_sq_top1_in_aq4": 0.0,
+        "aq4_top1": 329,
+        "aq4_top1_logit_in_aq4": 4.806379318,
+        "aq4_top1_logit_in_sq": 4.814768791,
+        "aq4_top1_rank_in_sq_top8": 1,
+        "aq4_top8_tokens": [
+          329,
+          933,
+          8903,
+          261,
+          294,
+          1547,
+          334,
+          627
+        ],
+        "label": "case_b",
+        "prompt_token_ids": [
+          42,
+          314,
+          2718,
+          1618,
+          12345,
+          23456,
+          34567,
+          45678
+        ],
+        "sq_margin_over_aq4_top1_in_sq": 0.0,
+        "sq_top1": 329,
+        "sq_top1_logit_in_aq4": 4.806379318,
+        "sq_top1_logit_in_sq": 4.814768791,
+        "sq_top1_margin_over_second_in_sq": 0.18217849699999977,
+        "sq_top1_rank_in_aq4_top8": 1,
+        "sq_top8_tokens": [
+          329,
+          933,
+          8903,
+          261,
+          294,
+          334,
+          627,
+          1547
+        ],
+        "strict_top1_match": true,
+        "top8_overlap_count": 8
+      }
+    ],
+    "strict_top1_all_match": true,
+    "strict_top1_pass_count": 3,
+    "strict_top1_total": 3
+  },
+  "run_id": "phase-t2-sq-fp8-full-mixed-qk-pair-prompt-bundle-v1",
+  "speed_caveat": "SQ pair run disables AQ4 QKV triple fused dispatch to force q/k pair boundary, so throughput is diagnostic rather than an apples-to-apples final speed comparison.",
+  "sq": {
+    "case_id": "sq-qk-layer3-full-mixed-prompt-bundle",
+    "decode_tps": 78.083528,
+    "end_to_end_tps": 33.570044,
+    "final_top1_tokens": [
+      24218,
+      4105,
+      329
+    ],
+    "prefill_tps": 61.363454,
+    "sq_fp8_batch_matvec_count": 0,
+    "sq_fp8_pair_matvec_count": 23,
+    "sq_fp8_single_matvec_count": 0,
+    "sq_fp8_triple_matvec_count": 0,
+    "sq_projection_boundary": "pair",
+    "vram_consumed_bytes": 4464140288
+  },
+  "workload": {
+    "batch_size": 3,
+    "decode_real_batch": true,
+    "generated_tokens_per_request": [
+      1,
+      1,
+      1
+    ],
+    "path": "manifest-all full mixed request-state",
+    "prefill_real_batch": true,
+    "prompt_bundle": [
+      "len4",
+      "case_a",
+      "case_b"
+    ],
+    "prompt_tokens_per_request": [
+      4,
+      8,
+      8
+    ],
+    "sq_notes": [
+      "full-mixed-prompt-bundle",
+      "prompt_bundle=len4_case_a_case_b",
+      "ULLM_DISABLE_AQ4_MATVEC_TRIPLE_SELF_ATTN_QKV=1",
+      "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_PAIR_KERNEL=1"
+    ]
+  }
+}
