@@ -116,6 +116,28 @@
 - v2 builtin conversion結果より `L=65536` のFP8 tok/sまたはpair/sが明確に改善する。
 - F32 baselineに対して、kernel構造による改善とFP8 cache byte削減による改善を分けて説明できる。
 
+### 2026-07-08 progress: cached-prefix flash2 FP8 v1
+
+前回の要点:
+
+- FlashAttention2-style tiled attentionを、まずR9700/RDNA4のcached-prefix FP8 K/V cache向けに実装する方針だった。
+- 既存の `cached_prefix_chunked` は比較baselineとして残す方針だった。
+
+今回の変更点:
+
+- `ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2` を追加した。
+- `runtime-cached-prefix-attn-smoke` に `cached_prefix_flash2` executorを追加した。
+- HIPRTC kernel `ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel` は、64 token tileのscoreをshared memoryに置き、online softmaxでmax、denominator、weighted valueを更新する。
+- R9700で `M=16` と `M=128` の代表gridを測定し、旧FP8 `cached_prefix_chunked` 比で `1.15x-1.50x` のtok/sを確認した。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c5-flash2-tiled-online-softmax-v1.md` に保存した。
+
+次の行動:
+
+1. `M=512` まで含めた保存gridを追加測定する。
+2. 現v1はWMMA/MFMA未使用なので、QK/Vのmatmul構造をRDNA4向けに詰める。
+3. cold prefill causal attention側にも同じtile online-softmax方針を展開する。
+4. F32版flash2を追加するか、FP8専用最適化として扱うかを次の計測結果で判断する。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。

@@ -221,3 +221,4 @@ linear attention Conv1d activation:Qwen3.5 linear attentionではdepthwise Conv1
 self-attention input RMSNorm:Qwen3/Qwen3.5 decoder layerのself-attentionで、層入力をinput_layernormで正規化してからq/k/v projectionへ渡す境界。residual addには正規化前の層入力を使うため、projection入力とresidual入力を分けて扱う
 row-scale overrides:package manifestの任意metadataとして、量子化済みmatrixをAQ4 materializeした直後に指定rowへ正の有限scaleを掛ける補正情報。full tensor name、row index、scale、任意sourceを持ち、元のquantized payloadは変更しない
 manifest row-scale compensation:row-scale overridesをloader/materialize経路で適用するprototype補正。smoke-only CLI overrideではなくpackage metadataから有効化されるため、通常のpackage materialize利用者にも同じ補正済みruntime matrixを返す
+cached prefix flash2 attention:cached prefix prefill向けに、長いprefixを固定token tileに分け、各tileのscoreをshared memoryに保持しながらonline softmaxでmax、denominator、weighted valueを更新するFlashAttention2-style runtime kernel。現在の初期実装はR9700/RDNA4のFP8 E4M3 K/V cache評価向けで、FP8値とscaleをkernel内で復号して使う

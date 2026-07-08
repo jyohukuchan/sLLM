@@ -838,6 +838,189 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3(
         stream);
 }
 
+ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    float k_scale,
+    float v_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        output_buffer == nullptr) {
+        set_error("fp8 e4m3 cached prefix flash2 attention received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (new_tokens == 0 || q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0) {
+        set_error("fp8 e4m3 cached prefix flash2 attention dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((q_heads % kv_heads) != 0) {
+        set_error("fp8 e4m3 cached prefix flash2 attention q_heads must be a multiple of kv_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error(
+            "fp8 e4m3 cached prefix flash2 attention softmax scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(k_scale) || k_scale <= 0.0f ||
+        !std::isfinite(v_scale) || v_scale <= 0.0f) {
+        set_error("fp8 e4m3 cached prefix flash2 attention scales must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error(
+            "fp8 e4m3 cached prefix flash2 attention buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("fp8 e4m3 cached prefix flash2 attention stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (new_tokens > max_size - cached_prefix_len) {
+        set_error("fp8 e4m3 cached prefix flash2 attention total context overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t total_context = cached_prefix_len + new_tokens;
+
+    if (q_heads > max_size / new_tokens) {
+        set_error("fp8 e4m3 cached prefix flash2 attention q head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_head_sequence = new_tokens * q_heads;
+    if (head_dim > max_size / q_head_sequence ||
+        value_dim > max_size / q_head_sequence) {
+        set_error("fp8 e4m3 cached prefix flash2 attention q/output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = q_head_sequence * head_dim;
+    const size_t output_elements = q_head_sequence * value_dim;
+
+    if (kv_heads > max_size / total_context) {
+        set_error("fp8 e4m3 cached prefix flash2 attention kv head-context element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_context = total_context * kv_heads;
+    if (head_dim > max_size / kv_head_context ||
+        value_dim > max_size / kv_head_context) {
+        set_error("fp8 e4m3 cached prefix flash2 attention kv element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements = kv_head_context * head_dim;
+    const size_t v_elements = kv_head_context * value_dim;
+
+    if (q_elements > max_size / sizeof(float) ||
+        output_elements > max_size / sizeof(float)) {
+        set_error("fp8 e4m3 cached prefix flash2 attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t k_bytes = k_elements;
+    const size_t v_bytes = v_elements;
+    const size_t output_bytes = output_elements * sizeof(float);
+    if (q_buffer->bytes < q_bytes) {
+        set_error("fp8 e4m3 cached prefix flash2 attention q buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_cache_buffer->bytes < k_bytes) {
+        set_error("fp8 e4m3 cached prefix flash2 attention k cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_cache_buffer->bytes < v_bytes) {
+        set_error("fp8 e4m3 cached prefix flash2 attention v cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < output_bytes) {
+        set_error("fp8 e4m3 cached prefix flash2 attention output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k_cache = static_cast<const uint8_t *>(k_cache_buffer->ptr);
+        const auto *v_cache = static_cast<const uint8_t *>(v_cache_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        cached_prefix_attn_fp8_e4m3_host(
+            q,
+            k_cache,
+            v_cache,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            k_scale,
+            v_scale,
+            output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (cached_prefix_attn_fp8_e4m3_flash2_hip_kernel(
+            q_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            k_scale,
+            v_scale,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_FLASH2_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ?
+                "fp8 e4m3 cached prefix flash2 attention HIP kernel is unavailable" :
+                hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return cached_prefix_attn_fp8_e4m3_hip_staging(
+        q_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
+        cached_prefix_len,
+        new_tokens,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        k_scale,
+        v_scale,
+        q_bytes,
+        k_bytes,
+        v_bytes,
+        output_bytes,
+        output_buffer,
+        stream);
+}
+
 ullm_status paged_decode_attn_f32_impl(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *gate_buffer,

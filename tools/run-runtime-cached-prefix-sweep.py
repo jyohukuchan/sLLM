@@ -18,7 +18,12 @@ from typing import Any
 SCHEMA_VERSION = "runtime-cached-prefix-attn-sweep-v0.1"
 SMOKE_PREFIX = "runtime-cached-prefix-attn-smoke "
 EXECUTOR_ENVS = {
-    "cached_prefix_chunked": {"ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_KERNEL": "1"},
+    "cached_prefix_chunked": {
+        "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_KERNEL": "1"
+    },
+    "cached_prefix_flash2": {
+        "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_FLASH2_KERNEL": "1"
+    },
     "decode_loop": {"ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL": "1"},
 }
 
@@ -79,11 +84,13 @@ def executor_csv(value: str) -> list[str]:
         item = raw_item.strip()
         if item == "chunked":
             item = "cached_prefix_chunked"
+        if item == "flash2":
+            item = "cached_prefix_flash2"
         if item == "decode_attn_f32_loop":
             item = "decode_loop"
         if item not in EXECUTOR_ENVS:
             raise SystemExit(
-                "executors must contain cached_prefix_chunked|chunked|decode_loop"
+                "executors must contain cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|decode_loop"
             )
         executors.append(item)
     if not executors:

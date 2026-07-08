@@ -596,6 +596,22 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    float k_scale,
+    float v_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_paged_decode_attn_f32(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_cache_buffer,
