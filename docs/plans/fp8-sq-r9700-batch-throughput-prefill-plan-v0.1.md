@@ -2939,6 +2939,40 @@ Quality:
 3. 次はlayer19 `down_proj` row-block64を追加して、同じMLP output projection branchを別レイヤーで広げられるかを見る。
 4. layer7 `up/gate/down`、layer11 `up_proj`、layer15 `up/gate/down_proj` は既存failure guardがあるためfallbackに残す。
 
+## 2026-07-09 progress: T2 SQ FP8 model-loop selected-layer k/o layer19 down64
+
+前回の要点:
+
+- 15 tensor版 `selected-layer-ko-layer3-down64-plus-layer11-down64` はcurrent passing branchとして維持している。
+- layer15 `down_proj` row-block64は `len4` でstrict top1を壊したためfailure guardになった。
+- 次のT2対象は、layer19 `down_proj` row-block64を追加して同じMLP output projection branchを別レイヤーで広げられるかを見ることだった。
+
+今回の変更点:
+
+- current 15 tensor branchにlayer19 `down_proj` row-block64を追加した16 tensor policyを作成した。
+- R9700のsix-layer token-id model-loop prompt bundleで評価し、結果を `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer19-down64-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| variant | FP8 tensors | pass | final top1 | len4 AQ4 rank in SQ top8 | case_a AQ4 rank in SQ top8 | case_b AQ4 rank in SQ top8 | prefill tok/s | decode tok/s |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| `selected-layer-ko-layer3-down64-layer11-down64-plus-layer19-down64` | 16 | 2 / 3 | `102446,237950,182949` | 2 | 1 | 1 | 33.060194 | 32.529504 |
+
+判断:
+
+- layer19 `down_proj` row-block64を追加すると、`len4` のtop1がAQ4 `110784` からSQ `102446` に変わる。
+- `case_a` と `case_b` はAQ4 top1を維持し、`len4` でもAQ4 top1はSQ top8内の2位に残る。
+- T2 promotion ruleはstrict top1なので、この16 tensor branchはpromoteしない。
+- current passing branchは15 tensor版 `selected-layer-ko-layer3-down64-plus-layer11-down64` のままとする。
+- この結果はselected-layer model-loop guardであり、full LM throughputや最終SQ性能とは扱わない。
+
+次の行動:
+
+1. 15 tensor版 `selected-layer-ko-layer3-down64-plus-layer11-down64` をcurrent passing branchとして保持する。
+2. layer19 `down_proj` row-block64はfailure guardとして残す。
+3. 次はlayer23 `down_proj` row-block64を追加して、同じMLP output projection branchを別レイヤーで広げられるかを見る。
+4. layer7 `up/gate/down`、layer11 `up_proj`、layer15 `up/gate/down_proj`、layer19 `up/gate/down_proj` は既存failure guardがあるためfallbackに残す。
+
 ## Risks
 
 | risk | impact | handling |

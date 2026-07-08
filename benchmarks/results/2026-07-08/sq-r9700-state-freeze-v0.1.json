@@ -86,7 +86,8 @@
     "T2: keep layer11 up_proj row-block32 and row-block16 as failure guards",
     "T2: keep selected-layer-ko-layer3-down64-plus-layer11-down64 as the current passing branch",
     "T2: keep layer15 down_proj row-block64 as a failure guard; current passing branch remains selected-layer-ko-layer3-down64-plus-layer11-down64",
-    "T2: probe layer19 down_proj row-block64 on top of the current passing branch"
+    "T2: keep layer19 down_proj row-block64 as a failure guard; current passing branch remains selected-layer-ko-layer3-down64-plus-layer11-down64",
+    "T2: probe layer23 down_proj row-block64 on top of the current passing branch"
   ],
   "schema_version": "sq-r9700-state-freeze-v0.1",
   "sq_candidate": {
@@ -652,6 +653,17 @@
     "t2_sq_selected_layer_ko_layer15_down64_policy_artifact_jsons": [
       "benchmarks/results/2026-07-09/sq-fp8-selected-layer-ko-plus-layer3-o32-down64-plus-layer11-down64-plus-layer15-down64-policy-artifact-v0.1.json"
     ],
-    "t2_sq_selected_layer_ko_layer15_down64_note": "R9700 model-loop prompt bundle shows selected-layer-ko-layer3-down64-layer11-down64-plus-layer15-down64 passes only 2/3 strict top1. len4 changes from AQ4 110784 to SQ 102446, with AQ4 top1 at SQ top8 rank 2. Keep selected-layer-ko-layer3-down64-plus-layer11-down64 as the current passing branch and keep layer15 down_proj row-block64 as a failure guard. These are selected-layer model-loop guards, not final full LM throughput."
+    "t2_sq_selected_layer_ko_layer15_down64_note": "R9700 model-loop prompt bundle shows selected-layer-ko-layer3-down64-layer11-down64-plus-layer15-down64 passes only 2/3 strict top1. len4 changes from AQ4 110784 to SQ 102446, with AQ4 top1 at SQ top8 rank 2. Keep selected-layer-ko-layer3-down64-plus-layer11-down64 as the current passing branch and keep layer15 down_proj row-block64 as a failure guard. These are selected-layer model-loop guards, not final full LM throughput.",
+    "t2_sq_selected_layer_ko_layer19_down64": "partial_done_layer19_down64_fails_len4",
+    "t2_sq_selected_layer_ko_layer19_down64_artifact": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer19-down64-v1.md",
+    "t2_sq_selected_layer_ko_layer19_down64_comparison_json": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer19-down64-v1/comparison.json",
+    "t2_sq_selected_layer_ko_layer19_down64_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer19-down64-v1/results.jsonl",
+    "t2_sq_selected_layer_ko_layer19_down64_policy_jsons": [
+      "benchmarks/results/2026-07-09/sq-fp8-selected-layer-ko-plus-layer3-o32-down64-plus-layer11-down64-plus-layer19-down64-policy-v0.1.json"
+    ],
+    "t2_sq_selected_layer_ko_layer19_down64_policy_artifact_jsons": [
+      "benchmarks/results/2026-07-09/sq-fp8-selected-layer-ko-plus-layer3-o32-down64-plus-layer11-down64-plus-layer19-down64-policy-artifact-v0.1.json"
+    ],
+    "t2_sq_selected_layer_ko_layer19_down64_note": "R9700 model-loop prompt bundle shows selected-layer-ko-layer3-down64-layer11-down64-plus-layer19-down64 passes only 2/3 strict top1. len4 changes from AQ4 110784 to SQ 102446, with AQ4 top1 at SQ top8 rank 2. Keep selected-layer-ko-layer3-down64-plus-layer11-down64 as the current passing branch and keep layer19 down_proj row-block64 as a failure guard. These are selected-layer model-loop guards, not final full LM throughput."
   }
 }
