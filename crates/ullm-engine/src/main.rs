@@ -43,8 +43,9 @@ use ullm_engine::package::{
 };
 use ullm_engine::qwen3_loader::{
     Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
-    qwen3_decoder_layer_runtime_weights_from_package,
+    Qwen3PackageSqOverlay, qwen3_decoder_layer_runtime_weights_from_package,
     qwen3_package_decoder_layer_runtime_from_package,
+    qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay,
     qwen3_package_model_run_prefill_step_from_sequence,
     qwen3_package_model_run_ready_batch_from_sequences, qwen3_package_model_stack_runner,
     qwen3_self_attn_runtime_weights_from_package,
@@ -316,6 +317,19 @@ fn main() -> ExitCode {
             env::args().nth(9),
             env::args().nth(10),
             env::args().nth(11),
+        ),
+        Some("sq-fp8-token-ids-logits-smoke") => sq_fp8_token_ids_logits_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+            env::args().nth(11),
+            env::args().nth(12),
         ),
         Some("package-token-ids-generate-smoke" | "package-token-ids-bench") => {
             package_token_ids_generate_smoke(
@@ -18134,6 +18148,105 @@ fn package_token_ids_logits_smoke(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn sq_fp8_token_ids_logits_smoke(
+    path: Option<String>,
+    artifact_path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    token_ids: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("sq-fp8-token-ids-logits-smoke requires a .ullm.d package path");
+        return ExitCode::from(2);
+    };
+    let Some(artifact_path) = artifact_path else {
+        eprintln!("sq-fp8-token-ids-logits-smoke requires an SQ FP8 artifact path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_layer_indices(layer_indices) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let token_ids = match parse_package_token_ids(token_ids) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 8, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let artifact = match read_sq_fp8_artifact(&artifact_path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read SQ FP8 artifact: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match package_token_ids_logits_smoke_impl_with_sq_overlay(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        token_ids,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        Some(&artifact),
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn package_token_ids_generate_smoke(
     path: Option<String>,
     device_index: Option<String>,
@@ -29218,6 +29331,35 @@ fn package_token_ids_logits_smoke_impl(
     rope_base: f32,
     position_offset: usize,
 ) -> Result<String, String> {
+    package_token_ids_logits_smoke_impl_with_sq_overlay(
+        path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        token_ids,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_logits_smoke_impl_with_sq_overlay(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    token_ids: Vec<usize>,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+    sq_artifact: Option<&ullm_engine::sq::SqFp8Artifact>,
+) -> Result<String, String> {
     if token_ids.is_empty() {
         return Err("package token-id logits smoke requires at least one token ID".to_string());
     }
@@ -29234,6 +29376,20 @@ fn package_token_ids_logits_smoke_impl(
     let mut stream = context
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let sq_overlay = sq_artifact.map(|artifact| Qwen3PackageSqOverlay {
+        artifact,
+        row_chunk: 256,
+    });
+    let sq_overlay_json = sq_artifact.map(|artifact| {
+        serde_json::json!({
+            "artifact": artifact.artifact_dir,
+            "candidate": artifact.manifest.candidate.id,
+            "schema_version": artifact.manifest.schema_version,
+            "fp8_tensor_count": artifact.manifest.storage.fp8_tensor_count,
+            "passthrough_tensor_count": artifact.manifest.storage.passthrough_tensor_count,
+            "row_chunk": 256,
+        })
+    });
 
     let embed_started = Instant::now();
     let embedding_rows =
@@ -29285,13 +29441,24 @@ fn package_token_ids_logits_smoke_impl(
         match layer_kind {
             PackageDecoderLayerKind::SelfAttention => {
                 let layer_load_started = Instant::now();
-                let layer = qwen3_package_decoder_layer_runtime_from_package(
-                    &mut context,
-                    &mut stream,
-                    path,
-                    chunk_bytes,
-                    layer_index,
-                )
+                let layer = if let Some(overlay) = sq_overlay.as_ref() {
+                    qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay(
+                        &mut context,
+                        &mut stream,
+                        path,
+                        chunk_bytes,
+                        layer_index,
+                        Some(overlay),
+                    )
+                } else {
+                    qwen3_package_decoder_layer_runtime_from_package(
+                        &mut context,
+                        &mut stream,
+                        path,
+                        chunk_bytes,
+                        layer_index,
+                    )
+                }
                 .map_err(|err| {
                     format!("failed to load self-attn package layer {layer_index}: {err}")
                 })?;
@@ -29425,8 +29592,44 @@ fn package_token_ids_logits_smoke_impl(
     let final_norm_ms = final_started.elapsed().as_secs_f64() * 1000.0;
 
     let lm_head_started = Instant::now();
-    let (lm_head_vocab, lm_head_dtype, lm_head_shape, top_logits) =
-        package_lm_head_top_k_from_rows(path, &final_normed, top_k, lm_head_chunk_rows)?;
+    let (lm_head_report, top_logits) = match package_lm_head_top_k_from_rows(
+        path,
+        &final_normed,
+        top_k,
+        lm_head_chunk_rows,
+    ) {
+        Ok((lm_head_vocab, lm_head_dtype, lm_head_shape, top_logits)) => (
+            serde_json::json!({
+                "tensor": QWEN3_LM_HEAD_TENSOR,
+                "mode": PackageLmHeadMode::CpuChunked.as_str(),
+                "dtype": lm_head_dtype,
+                "shape": lm_head_shape,
+                "vocab": lm_head_vocab,
+                "chunk_rows": lm_head_chunk_rows,
+            }),
+            top_logits,
+        ),
+        Err(cpu_err) => {
+            let resident_load_started = Instant::now();
+            let mut lm_head_runtime = PackageLmHeadRuntime::load(
+                    PackageLmHeadMode::GpuResidentF32,
+                    &mut context,
+                    &mut stream,
+                    path,
+                    chunk_bytes,
+                    hidden,
+                    lm_head_chunk_rows,
+                )
+                .map_err(|resident_err| {
+                    format!(
+                        "failed to compute lm_head top-k: cpu_chunked_error={cpu_err}; resident_error={resident_err}"
+                    )
+                })?;
+            let resident_load_ms = resident_load_started.elapsed().as_secs_f64() * 1000.0;
+            let top_logits = lm_head_runtime.top_logits(path, &mut stream, &final_normed, top_k)?;
+            (lm_head_runtime.report_json(resident_load_ms), top_logits)
+        }
+    };
     let lm_head_ms = lm_head_started.elapsed().as_secs_f64() * 1000.0;
     let total_ms = run_started.elapsed().as_secs_f64() * 1000.0;
 
@@ -29442,6 +29645,7 @@ fn package_token_ids_logits_smoke_impl(
     let report = serde_json::json!({
         "schema_version": "package-token-ids-logits-smoke-v0.1",
         "package": path,
+        "sq_overlay": sq_overlay_json,
         "backend": info.backend.to_string(),
         "device_index": device_index,
         "device_name": info.name,
@@ -29464,13 +29668,7 @@ fn package_token_ids_logits_smoke_impl(
             "dtype": final_norm.dtype,
             "shape": final_norm.shape,
         },
-        "lm_head": {
-            "tensor": QWEN3_LM_HEAD_TENSOR,
-            "dtype": lm_head_dtype,
-            "shape": lm_head_shape,
-            "vocab": lm_head_vocab,
-            "chunk_rows": lm_head_chunk_rows,
-        },
+        "lm_head": lm_head_report,
         "top_k": top_k,
         "top_logits": top_logits_json,
         "timing_ms": {
@@ -39594,6 +39792,9 @@ fn print_help() {
     );
     eprintln!(
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
+    );
+    eprintln!(
+        "sq-fp8-token-ids-logits-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "runtime-cached-prefix-attn-smoke: [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|cached_prefix_flash2_fp8q|cached_prefix_rocwmma_fp8|cached_prefix_rdna4_fp8_auto|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]"

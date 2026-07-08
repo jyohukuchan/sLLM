@@ -75,14 +75,20 @@
     "t1_jsonl_schema_preservation": "partial_done",
     "t1_real_batch_runner": "not_done",
     "t2_artifact_metadata_path": "partial_done",
-    "t2_runtime_load_path": "partial_done",
+    "t2_runtime_load_path": "partial_done_overlay_package_load_path",
     "t2_runtime_load_smoke": "sq-fp8-materialize-smoke cpu0 and r9700-device2 verified",
-    "t2_short_prompt_guard": "blocked_on_full_sq_model_load"
+    "t2_short_prompt_guard": "partial_done_multi_layer_quality_boundary_found",
+    "t2_short_prompt_guard_artifacts": [
+      "benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md",
+      "benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md",
+      "benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md"
+    ],
+    "t2_short_prompt_guard_note": "One selected q_proj tensor and then the layer 3 projection set are loaded from SQ FP8 while the rest falls back to AQ4. The layer 3 projection-set guard matched AQ4 top1 in 3/3 short token-ID cases. Expanding to layers 3,7 changed top1 for attention-only, MLP-only, and attention+MLP overlays, while AQ4 top1 remained inside SQ top8. Full-target SQ guard is still pending and needs family/scale/acceptance-rule work."
   },
   "next_steps": [
     "T2: keep sq-fp8-materialize-smoke as the runtime artifact-boundary guard",
-    "T2: connect SQ FP8 materialization to the existing package model load path",
-    "T2: run short prompt guard once the model path can consume selected FP8 tensors",
-    "T3: move to batch/cold/cached-prefix/decode grid after short guard passes"
+    "T2: split the layers 3,7 ranking drift by tensor family and scale choice",
+    "T2: define whether the short guard requires strict top1 match, top-k overlap, or text-level tolerance",
+    "T3: move to batch/cold/cached-prefix/decode grid only after the full-target short guard satisfies the acceptance rule"
   ]
 }

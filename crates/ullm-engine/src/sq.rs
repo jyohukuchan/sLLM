@@ -102,6 +102,15 @@ pub struct SqFp8MaterializedRows {
     pub buffer: RuntimeBuffer,
 }
 
+#[derive(Debug)]
+pub struct SqFp8MaterializedTensor {
+    pub tensor_index: usize,
+    pub tensor_name: String,
+    pub rows: usize,
+    pub cols: usize,
+    pub buffer: RuntimeBuffer,
+}
+
 pub fn read_sq_fp8_artifact(path: impl AsRef<Path>) -> Result<SqFp8Artifact, String> {
     let artifact_dir = path.as_ref();
     let manifest_path = artifact_dir.join("sq_manifest.json");
@@ -264,6 +273,70 @@ pub fn materialize_sq_fp8_tensor_rows_to_runtime_f32(
     })
 }
 
+pub fn materialize_named_sq_fp8_tensor_to_runtime_f32(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    artifact: &SqFp8Artifact,
+    tensor_name: &str,
+    row_chunk: usize,
+) -> Result<Option<SqFp8MaterializedTensor>, String> {
+    if row_chunk == 0 {
+        return Err("SQ FP8 row_chunk must be greater than zero".to_string());
+    }
+    let Some(tensor_index) =
+        find_sq_fp8_tensor_index_by_exact_name(&artifact.manifest, tensor_name)
+    else {
+        return Ok(None);
+    };
+    let tensor = artifact
+        .manifest
+        .fp8_tensors
+        .get(tensor_index)
+        .ok_or_else(|| format!("SQ FP8 tensor index {tensor_index} disappeared"))?;
+    let (rows, cols) = sq_fp8_tensor_rows_cols(tensor)?;
+    let output_bytes = rows
+        .checked_mul(cols)
+        .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| format!("SQ FP8 materialized byte size overflows for {tensor_name}"))?;
+    let mut buffer = context.alloc_buffer(output_bytes).map_err(|err| {
+        format!("failed to allocate SQ FP8 materialized output for {tensor_name}: {err}")
+    })?;
+    for start_row in (0..rows).step_by(row_chunk) {
+        let count = row_chunk.min(rows - start_row);
+        let values = materialize_sq_fp8_tensor_rows_to_host_f32(
+            &artifact.artifact_dir,
+            tensor,
+            start_row,
+            count,
+        )?;
+        let row_offset_bytes = start_row
+            .checked_mul(cols)
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| format!("SQ FP8 materialized offset overflows for {tensor_name}"))?;
+        let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
+        for value in &values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        buffer
+            .copy_from_host(row_offset_bytes, &bytes, Some(stream))
+            .map_err(|err| {
+                format!(
+                    "failed to copy SQ FP8 materialized rows for {tensor_name} to runtime: {err}"
+                )
+            })?;
+    }
+    stream.synchronize().map_err(|err| {
+        format!("failed to synchronize after SQ FP8 materialized copy for {tensor_name}: {err}")
+    })?;
+    Ok(Some(SqFp8MaterializedTensor {
+        tensor_index,
+        tensor_name: tensor.name.clone(),
+        rows,
+        cols,
+        buffer,
+    }))
+}
+
 pub fn materialize_sq_fp8_tensor_rows_to_host_f32(
     artifact_dir: &Path,
     tensor: &SqFp8TensorEntry,
@@ -371,6 +444,16 @@ pub fn materialize_sq_fp8_tensor_rows_to_host_f32(
     }
     payload.clear();
     Ok(output)
+}
+
+pub fn find_sq_fp8_tensor_index_by_exact_name(
+    manifest: &SqFp8ArtifactManifest,
+    tensor_name: &str,
+) -> Option<usize> {
+    manifest
+        .fp8_tensors
+        .iter()
+        .position(|tensor| tensor.name == tensor_name)
 }
 
 pub fn sq_fp8_tensor_rows_cols(tensor: &SqFp8TensorEntry) -> Result<(usize, usize), String> {

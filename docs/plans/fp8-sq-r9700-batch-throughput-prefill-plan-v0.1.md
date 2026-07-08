@@ -1678,7 +1678,10 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - T0は完了扱いにする。R9700 runtime device index、AQ4 baseline package、AQ4 prompt-suite summary、result schema、SQ候補ID、cached-prefix default executorを `benchmarks/results/2026-07-08/sq-r9700-state-freeze-v0.1.*` に固定する。
 - T1は「比較行に必要な情報を落とさない」段階まで進める。`inference-benchmark-result-v0.1` と `batch-throughput-workload-v0.1` で、prefill mode、cached prefix token数、新規prefill token数、total context token数、推定attention work、KV cache bytes、requested/resolved executorを保持する。
 - T2はartifact境界を先に作る。`sq-fp8-w8a16-r9700-v0` のmanifest仕様と、safetensors modelからFP8 E4M3 payload + F32 scale metadataを生成するwriterを追加する。
-- T2のruntime load pathは、`sq_manifest.json` 読込と選択tensor行のFP8 E4M3 + F32 scale materialize smokeまで進める。short prompt guardは未完了として残す。
+- T2のruntime load pathは、`sq_manifest.json` 読込と選択tensor行のFP8 E4M3 + F32 scale materialize smokeから、既存package model loadへSQ overlayを差し込む段階まで進める。
+- short prompt guardは、1 tensorの `q_proj` SQ FP8 overlay + AQ4 fallbackではtop1一致まで通った。
+- その後、同一layerのself-attention `q/k/v/o_proj` とMLP `gate/up/down_proj` の7 tensor overlayでも、短い3ケースでtop1がAQ4 baselineと一致した。ただしfull FP8 SQ候補ではないため、T2全体はまだ完了扱いにしない。
+- 複数self-attention layerへ広げた `layers=3,7` では、attention-only、MLP-only、attention+MLPのいずれもtop1がAQ4 baselineから入れ替わった。AQ4 top1はSQ top8内に残るため壊滅的崩壊ではないが、full-targetへ進む前にfamily/scale/許容基準の切り分けが必要である。
 
 現在のT0-T2状態:
 
@@ -1689,16 +1692,16 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | T1 real batch/total throughput runner | not done | next runner work |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done | `tools/build-sq-fp8-w8a16-artifact.py` |
-| T2 runtime load path | partial done | `crates/ullm-engine/src/sq.rs`, `sq-fp8-materialize-smoke` |
-| T2 short prompt guard | not done | blocked on full SQ model load integration |
+| T2 runtime load path | partial done | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke` |
+| T2 short prompt guard | partial done with boundary found | one-tensor and layer-3 projection-set guards passed top1; layers `3,7` found ranking drift: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md` |
 
 次の行動:
 
-1. T1のrunner smokeを行い、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executorが失われないことを確認する。
-2. T2のartifact writerを小さいsafetensors fixtureと実モデルmetadata-onlyで検証し、payload byte数、scale byte数、passthrough理由、checksumがmanifestと一致することを確認する。
-3. runtime load pathでは、`sq-fp8-materialize-smoke` を小さいpayload fixtureとR9700で維持し、FP8 artifact boundaryを壊さない。
-4. 次に、SQ artifactのmaterialize helperを既存package model loadへ接続し、short prompt guardでAQ4 baselineと出力品質を比較する。
-5. short prompt guardが通った後にT3へ移り、`batch=1/4/8`、cold prefill、cached prefix `L=65536,M=1/16/128/512`、decodeを同じschemaで保存する。
+1. T2 short guardは、複数layerで観測したranking driftをfamily別に切り分ける。最初に `q/k/v/o`、`gate/up`、`down` を分ける。
+2. full SQ候補に近いartifactへ進む前に、top1 matchだけを合格条件にするか、top-k overlapやtext-level guardも許容するかを決めるための比較表を作る。
+3. scale granularityやscale dtypeを変えられる範囲で試し、row-F32 scaleのまま進めるべきかを判断する。
+4. T1のrunner smokeを行い、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executorが失われないことを確認する。
+5. T2のfull-target short guardが合格基準を満たした後にT3へ移り、`batch=1/4/8`、cold prefill、cached prefix `L=65536,M=1/16/128/512`、decodeを同じschemaで保存する。
 
 2026-07-08 runtime loader smoke result:
 
@@ -1706,6 +1709,32 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - Added `ullm-engine sq-fp8-materialize-smoke`.
 - Verified a 4x8 FP8 artifact fixture on CPU device `0` and R9700 device `2`.
 - R9700 smoke selected `gate_proj`, materialized two rows from FP8 E4M3 + F32 row scale, copied them to runtime memory, read them back, and reported `roundtrip_max_abs_diff=0`.
+
+2026-07-08 SQ FP8 overlay logits guard result:
+
+- Added a package load overlay path that can materialize exact-name SQ FP8 tensors and fall back to the existing AQ4 package tensors for the rest.
+- Added `ullm-engine sq-fp8-token-ids-logits-smoke`.
+- Generated a one-tensor artifact for `model.language_model.layers.3.self_attn.q_proj.weight`.
+- R9700 short guard with token IDs `1,2,3,4` matched AQ4 baseline top1 token `55020`.
+- Top8 common tokens were `7 / 8`, so this is a useful boundary guard, not yet a full SQ quality result.
+- Result: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`.
+
+2026-07-08 SQ FP8 layer projection-set guard result:
+
+- Generated a 7 tensor artifact covering layer 3 self-attention `q/k/v/o_proj` and MLP `gate/up/down_proj`.
+- R9700 short guard bundle used three token-ID sequences.
+- AQ4 and SQ overlay top1 matched in `3 / 3` cases.
+- Top8 common tokens were `7 / 8`, `5 / 8`, and `4 / 8`.
+- The SQ path spent about `18.3-18.7 s` in `layer_load` because v0.1 still materializes FP8 to host F32 before runtime copy. This is not a native FP8 speed result.
+- Result: `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`.
+
+2026-07-08 SQ FP8 multi-layer quality boundary:
+
+- Generated layers `3,7` overlay artifacts for attention-only, MLP-only, and attention+MLP projection sets.
+- Layer 7 alone still matched top1 for token IDs `1,2,3,4`.
+- With layers `3,7` together, attention-only, MLP-only, and attention+MLP overlays all changed top1.
+- AQ4 top1 remained inside the SQ top8 in all three multi-layer overlays, so the issue is ranking drift, not total logits collapse.
+- Result: `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`.
 
 ## Risks
 

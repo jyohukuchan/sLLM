@@ -117,7 +117,7 @@ The v0.1 artifact is the payload and metadata boundary for T2. Runtime execution
 1. Build and validate `sq_manifest.json`. Done for the first smoke path.
 2. Generate a small FP8 payload artifact and verify file sizes/checksums. Done for the first smoke path.
 3. Add a runtime loader that can resolve FP8 payload plus scale files for selected tensors. Partially done.
-4. Connect the loader to short prompt guard. Not done.
+4. Connect the loader to short prompt guard. Partially done for a one-tensor `q_proj` overlay.
 
 The first runtime loader entrypoint is:
 
@@ -131,3 +131,16 @@ runtime buffer, then reads the buffer back to verify the runtime transfer.
 
 This is not yet the short prompt guard. It proves the runtime can consume the FP8 artifact boundary
 without expanding the full model at once.
+
+The first package-path overlay guard is:
+
+```text
+ullm-engine sq-fp8-token-ids-logits-smoke PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]
+```
+
+It loads exact-name SQ FP8 tensors from the artifact and falls back to the existing AQ4 package
+tensors for names not present in the artifact. The first R9700 guard covered only
+`model.language_model.layers.3.self_attn.q_proj.weight`. The second guard covered all layer 3
+self-attention and MLP projection tensors. A later layers `3,7` guard found top1 ranking drift while
+keeping the AQ4 top1 inside SQ top8. These are runtime boundary and short-quality guards, not full
+SQ candidate quality results.

@@ -20,7 +20,8 @@ use crate::loader::{
     materialize_selected_aq4_matrix, read_named_passthrough_f32,
 };
 use crate::scheduler::{RequestId, SchedulerDecodeRequest, SchedulerState};
-use ullm_runtime_sys::{RuntimeContext, RuntimeStream};
+use crate::sq::{SqFp8Artifact, materialize_named_sq_fp8_tensor_to_runtime_f32};
+use ullm_runtime_sys::{RuntimeBuffer, RuntimeContext, RuntimeStream};
 
 pub struct Qwen3PackageDecoderLayerRuntime {
     pub layer_index: usize,
@@ -52,6 +53,12 @@ pub struct Qwen3PackageModelRuntime {
     pub value_dim: usize,
     pub softmax_scale: f32,
     pub mlp_epsilon: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Qwen3PackageSqOverlay<'a> {
+    pub artifact: &'a SqFp8Artifact,
+    pub row_chunk: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +228,17 @@ impl Qwen3PackageModelRuntime {
         chunk_bytes: usize,
         layer_indices: &[usize],
     ) -> Result<Self, String> {
+        Self::load_with_sq_overlay(context, stream, path, chunk_bytes, layer_indices, None)
+    }
+
+    pub fn load_with_sq_overlay(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        layer_indices: &[usize],
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+    ) -> Result<Self, String> {
         if layer_indices.is_empty() {
             return Err(
                 "Qwen3 package model runtime requires at least one layer index".to_string(),
@@ -237,13 +255,16 @@ impl Qwen3PackageModelRuntime {
 
         let mut layers = Vec::with_capacity(layer_indices.len());
         for &layer_index in layer_indices {
-            layers.push(qwen3_package_decoder_layer_runtime_from_package(
-                context,
-                stream,
-                path,
-                chunk_bytes,
-                layer_index,
-            )?);
+            layers.push(
+                qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay(
+                    context,
+                    stream,
+                    path,
+                    chunk_bytes,
+                    layer_index,
+                    sq_overlay,
+                )?,
+            );
         }
 
         let first = layers
@@ -388,6 +409,24 @@ pub fn qwen3_package_decoder_layer_runtime_from_package(
     chunk_bytes: usize,
     layer_index: usize,
 ) -> Result<Qwen3PackageDecoderLayerRuntime, String> {
+    qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        layer_index,
+        None,
+    )
+}
+
+pub fn qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    layer_index: usize,
+    sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+) -> Result<Qwen3PackageDecoderLayerRuntime, String> {
     let input_norm_tensor =
         format!("model.language_model.layers.{layer_index}.input_layernorm.weight");
     let q_tensor = format!("model.language_model.layers.{layer_index}.self_attn.q_proj.weight");
@@ -412,7 +451,7 @@ pub fn qwen3_package_decoder_layer_runtime_from_package(
     k_norm.values = effective_rmsnorm_weight_values(&k_norm_tensor, &k_norm.values);
     let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
     post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
-    let weights = qwen3_decoder_layer_runtime_weights_from_package(
+    let weights = qwen3_decoder_layer_runtime_weights_from_package_with_sq_overlay(
         context,
         stream,
         path,
@@ -427,6 +466,7 @@ pub fn qwen3_package_decoder_layer_runtime_from_package(
         &gate_tensor,
         &up_tensor,
         &down_tensor,
+        sq_overlay,
     )?;
     let runtime_shape = qwen3_self_attn_runtime_shape(&weights.self_attn)?;
     if weights.post_attention.hidden != runtime_shape.hidden {
@@ -470,6 +510,35 @@ pub fn qwen3_self_attn_runtime_weights_from_package(
     q_norm: &PassthroughF32Data,
     k_norm: &PassthroughF32Data,
 ) -> Result<Qwen3SelfAttnRuntimeWeights, String> {
+    qwen3_self_attn_runtime_weights_from_package_with_sq_overlay(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        o_tensor,
+        q_norm,
+        k_norm,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn qwen3_self_attn_runtime_weights_from_package_with_sq_overlay(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    q_tensor: &str,
+    k_tensor: &str,
+    v_tensor: &str,
+    o_tensor: &str,
+    q_norm: &PassthroughF32Data,
+    k_norm: &PassthroughF32Data,
+    sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+) -> Result<Qwen3SelfAttnRuntimeWeights, String> {
     let head_dim = q_norm.values.len();
     if head_dim == 0 || k_norm.values.len() != head_dim {
         return Err(format!(
@@ -480,37 +549,41 @@ pub fn qwen3_self_attn_runtime_weights_from_package(
     }
 
     let mut registry = WeightRegistry::new();
-    let (q_rows, q_cols, q_matrix) = materialize_selected_aq4_matrix(
+    let (q_rows, q_cols, q_matrix) = materialize_package_projection_matrix(
         context,
         stream,
         &mut registry,
         path,
         q_tensor,
         chunk_bytes,
+        sq_overlay,
     )?;
-    let (k_rows, k_cols, k_matrix) = materialize_selected_aq4_matrix(
+    let (k_rows, k_cols, k_matrix) = materialize_package_projection_matrix(
         context,
         stream,
         &mut registry,
         path,
         k_tensor,
         chunk_bytes,
+        sq_overlay,
     )?;
-    let (v_rows, v_cols, v_matrix) = materialize_selected_aq4_matrix(
+    let (v_rows, v_cols, v_matrix) = materialize_package_projection_matrix(
         context,
         stream,
         &mut registry,
         path,
         v_tensor,
         chunk_bytes,
+        sq_overlay,
     )?;
-    let (o_rows, o_cols, o_matrix) = materialize_selected_aq4_matrix(
+    let (o_rows, o_cols, o_matrix) = materialize_package_projection_matrix(
         context,
         stream,
         &mut registry,
         path,
         o_tensor,
         chunk_bytes,
+        sq_overlay,
     )?;
 
     if q_cols != k_cols || q_cols != v_cols {
@@ -568,6 +641,33 @@ pub fn qwen3_post_attention_runtime_weights_from_package(
     up_tensor: &str,
     down_tensor: &str,
 ) -> Result<Qwen3PostAttentionRuntimeWeights, String> {
+    qwen3_post_attention_runtime_weights_from_package_with_sq_overlay(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        hidden,
+        post_norm,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn qwen3_post_attention_runtime_weights_from_package_with_sq_overlay(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    hidden: usize,
+    post_norm: &PassthroughF32Data,
+    gate_tensor: &str,
+    up_tensor: &str,
+    down_tensor: &str,
+    sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+) -> Result<Qwen3PostAttentionRuntimeWeights, String> {
     if post_norm.values.len() != hidden {
         return Err(format!(
             "post RMSNorm length must match hidden={hidden}: len={}",
@@ -586,29 +686,32 @@ pub fn qwen3_post_attention_runtime_weights_from_package(
         .map_err(|err| format!("failed to synchronize after post RMSNorm weight copy: {err}"))?;
 
     let mut registry = WeightRegistry::new();
-    let (gate_rows, gate_cols, gate_matrix) = materialize_selected_aq4_matrix(
+    let (gate_rows, gate_cols, gate_matrix) = materialize_package_projection_matrix(
         context,
         stream,
         &mut registry,
         path,
         gate_tensor,
         chunk_bytes,
+        sq_overlay,
     )?;
-    let (up_rows, up_cols, up_matrix) = materialize_selected_aq4_matrix(
+    let (up_rows, up_cols, up_matrix) = materialize_package_projection_matrix(
         context,
         stream,
         &mut registry,
         path,
         up_tensor,
         chunk_bytes,
+        sq_overlay,
     )?;
-    let (down_rows, down_cols, down_matrix) = materialize_selected_aq4_matrix(
+    let (down_rows, down_cols, down_matrix) = materialize_package_projection_matrix(
         context,
         stream,
         &mut registry,
         path,
         down_tensor,
         chunk_bytes,
+        sq_overlay,
     )?;
     if gate_rows != up_rows || gate_cols != up_cols || gate_cols != hidden {
         return Err(format!(
@@ -653,7 +756,7 @@ pub fn qwen3_decoder_layer_runtime_weights_from_package(
     up_tensor: &str,
     down_tensor: &str,
 ) -> Result<Qwen3DecoderLayerRuntimeWeights, String> {
-    let self_attn = qwen3_self_attn_runtime_weights_from_package(
+    qwen3_decoder_layer_runtime_weights_from_package_with_sq_overlay(
         context,
         stream,
         path,
@@ -664,8 +767,46 @@ pub fn qwen3_decoder_layer_runtime_weights_from_package(
         o_tensor,
         q_norm,
         k_norm,
+        post_norm,
+        gate_tensor,
+        up_tensor,
+        down_tensor,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn qwen3_decoder_layer_runtime_weights_from_package_with_sq_overlay(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    path: &str,
+    chunk_bytes: usize,
+    q_tensor: &str,
+    k_tensor: &str,
+    v_tensor: &str,
+    o_tensor: &str,
+    q_norm: &PassthroughF32Data,
+    k_norm: &PassthroughF32Data,
+    post_norm: &PassthroughF32Data,
+    gate_tensor: &str,
+    up_tensor: &str,
+    down_tensor: &str,
+    sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+) -> Result<Qwen3DecoderLayerRuntimeWeights, String> {
+    let self_attn = qwen3_self_attn_runtime_weights_from_package_with_sq_overlay(
+        context,
+        stream,
+        path,
+        chunk_bytes,
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        o_tensor,
+        q_norm,
+        k_norm,
+        sq_overlay,
     )?;
-    let post_attention = qwen3_post_attention_runtime_weights_from_package(
+    let post_attention = qwen3_post_attention_runtime_weights_from_package_with_sq_overlay(
         context,
         stream,
         path,
@@ -675,12 +816,51 @@ pub fn qwen3_decoder_layer_runtime_weights_from_package(
         gate_tensor,
         up_tensor,
         down_tensor,
+        sq_overlay,
     )?;
 
     Ok(Qwen3DecoderLayerRuntimeWeights {
         self_attn,
         post_attention,
     })
+}
+
+fn materialize_package_projection_matrix(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    registry: &mut WeightRegistry,
+    package_path: &str,
+    tensor_name: &str,
+    chunk_bytes: usize,
+    sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+) -> Result<(usize, usize, RuntimeBuffer), String> {
+    if let Some(overlay) = sq_overlay {
+        match materialize_named_sq_fp8_tensor_to_runtime_f32(
+            context,
+            stream,
+            overlay.artifact,
+            tensor_name,
+            overlay.row_chunk,
+        ) {
+            Ok(Some(materialized)) => {
+                return Ok((materialized.rows, materialized.cols, materialized.buffer));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to materialize SQ FP8 overlay tensor {tensor_name}: {err}"
+                ));
+            }
+        }
+    }
+    materialize_selected_aq4_matrix(
+        context,
+        stream,
+        registry,
+        package_path,
+        tensor_name,
+        chunk_bytes,
+    )
 }
 
 #[cfg(test)]
