@@ -3487,6 +3487,43 @@ Inventory:
 2. full package pathで `batching.mode=real`、`prefill_real_batch=true`、`decode_real_batch=true` のAQ4 baseline rowを保存する。
 3. その後、SQ FP8候補を同じworkload gridへ接続する。
 
+## 2026-07-09 progress: T1 mixed request-state AQ4 payload sharing
+
+前回の要点:
+
+- `manifest-all` full mixed request-state smokeは32層全体で通った。
+- ただしrequest slotごとにresident layerをロードしており、AQ4 payloadもslotごとに再ロードしていた。
+- full package real throughputへ進むには、少なくとも同一layer内のrequest slot間でweight payloadを共有する必要があった。
+
+今回の変更点:
+
+- `PackageAq4ResidentMatvec::load` が、同じ `WeightRegistry` 内に既に同名tensorがある場合、そのloaded tensor bundleを再利用するようにした。
+- `PackageLinearAttnResidentStepBatchLayer` と `PackageSelfAttnResidentStepBatchLayer` は、request slot生成時に同じ `WeightRegistry` を渡すようにした。
+- smoke出力に `slot_aq4_payload_registry_shared=true` を追加した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-mixed-request-state-aq4-payload-sharing-v1.md` に保存した。
+
+実測値:
+
+| field | before | after |
+| --- | ---: | ---: |
+| final top1 tokens | `44370,5446` | `44370,5446` |
+| layer load ms | 18416.054962 | 17828.586114 |
+| total wall ms | 19055.161428 | 18452.035174 |
+| slot AQ4 payload registry shared | n/a | `true` |
+| verified | `true` | `true` |
+
+判断:
+
+- 同一layer内のrequest slot間でAQ4 index/scale/codebook runtime bufferを共有する最初の境界は通った。
+- これは完全なshared resident weightsではない。RMSNorm/aux passthrough buffers、AQ4 `scale_values_buffer`、workspace、Conv1d history、recurrent state、paged KV cacheはまだslotごとに持っている。
+- `prefill_real_batch=false` / `decode_real_batch=false` のままなので、SQ/vLLM throughput比較には使わない。
+
+次の行動:
+
+1. `scale_values_buffer` とpassthrough weight buffersをslot間で共有できるようにする。
+2. workspace/state/cacheを分離したまま、weight-only resident bundleをlayerごとに1つへ寄せる。
+3. request-batch stepをreal batch executorへ置き換えてfull package throughput rowを作る。
+
 ## Risks
 
 | risk | impact | handling |

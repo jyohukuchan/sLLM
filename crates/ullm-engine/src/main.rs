@@ -19640,7 +19640,7 @@ fn package_token_ids_mixed_request_state_smoke_impl(
         .ok_or_else(|| "mixed request-state total token count overflows".to_string())?;
 
     Ok(format!(
-        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} full_mixed_request_state=true request_state_dispatch=true throughput_row=false batching_mode=request_state_interleaved prefill_real_batch=false decode_real_batch=false prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} full_mixed_request_state=true request_state_dispatch=true throughput_row=false batching_mode=request_state_interleaved prefill_real_batch=false decode_real_batch=false prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
         path,
         layer_indices,
         usize_csv(&layer_indices),
@@ -43582,19 +43582,27 @@ impl PackageAq4ResidentMatvec {
         let selector = TensorSelector::Name(tensor_name.to_string());
         let bundle = select_tensor_payload_bundle(path, &selector)
             .map_err(|err| format!("failed to select tensor payloads for {tensor_name}: {err}"))?;
-        let registry_index = registry
-            .load_and_insert(
-                context,
-                stream,
-                &bundle,
-                LoadOptions {
-                    chunk_bytes,
-                    verify: true,
-                },
-            )
-            .map_err(|err| {
-                format!("failed to register tensor payloads for {tensor_name}: {err}")
-            })?;
+        let registry_index = if let Some((existing_index, _)) = registry
+            .iter()
+            .enumerate()
+            .find(|(_, bundle)| bundle.tensor_name == tensor_name)
+        {
+            existing_index
+        } else {
+            registry
+                .load_and_insert(
+                    context,
+                    stream,
+                    &bundle,
+                    LoadOptions {
+                        chunk_bytes,
+                        verify: true,
+                    },
+                )
+                .map_err(|err| {
+                    format!("failed to register tensor payloads for {tensor_name}: {err}")
+                })?
+        };
         let loaded = registry
             .get(registry_index)
             .ok_or_else(|| "registered tensor disappeared from weight registry".to_string())?;
@@ -44198,6 +44206,32 @@ impl PackageSelfAttnResidentStepLayer {
         block_size: usize,
         cache_blocks: usize,
     ) -> Result<Self, String> {
+        let mut registry = WeightRegistry::new();
+        Self::load_with_registry(
+            context,
+            stream,
+            &mut registry,
+            path,
+            chunk_bytes,
+            layer_index,
+            block_table,
+            block_size,
+            cache_blocks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_with_registry(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        block_table: &[u32],
+        block_size: usize,
+        cache_blocks: usize,
+    ) -> Result<Self, String> {
         if block_table.len() != cache_blocks {
             return Err(format!(
                 "self-attn resident block table length {} does not match cache blocks {cache_blocks}",
@@ -44229,11 +44263,10 @@ impl PackageSelfAttnResidentStepLayer {
         let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
         post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
 
-        let mut registry = WeightRegistry::new();
         let q_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &q_tensor,
             chunk_bytes,
@@ -44241,7 +44274,7 @@ impl PackageSelfAttnResidentStepLayer {
         let k_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &k_tensor,
             chunk_bytes,
@@ -44249,7 +44282,7 @@ impl PackageSelfAttnResidentStepLayer {
         let v_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &v_tensor,
             chunk_bytes,
@@ -44257,7 +44290,7 @@ impl PackageSelfAttnResidentStepLayer {
         let o_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &o_tensor,
             chunk_bytes,
@@ -44265,7 +44298,7 @@ impl PackageSelfAttnResidentStepLayer {
         let mlp_gate_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &gate_tensor,
             chunk_bytes,
@@ -44273,7 +44306,7 @@ impl PackageSelfAttnResidentStepLayer {
         let mlp_up_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &up_tensor,
             chunk_bytes,
@@ -44281,7 +44314,7 @@ impl PackageSelfAttnResidentStepLayer {
         let mlp_down_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &down_tensor,
             chunk_bytes,
@@ -45113,6 +45146,25 @@ impl PackageLinearAttnResidentStepLayer {
         chunk_bytes: usize,
         layer_index: usize,
     ) -> Result<Self, String> {
+        let mut registry = WeightRegistry::new();
+        Self::load_with_registry(
+            context,
+            stream,
+            &mut registry,
+            path,
+            chunk_bytes,
+            layer_index,
+        )
+    }
+
+    fn load_with_registry(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+    ) -> Result<Self, String> {
         let key_heads = 16_usize;
         let value_heads = 32_usize;
         let key_dim = 128_usize;
@@ -45217,11 +45269,10 @@ impl PackageLinearAttnResidentStepLayer {
         let post_norm_weight_values =
             effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
 
-        let mut registry = WeightRegistry::new();
         let qkv_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &qkv_tensor,
             chunk_bytes,
@@ -45229,7 +45280,7 @@ impl PackageLinearAttnResidentStepLayer {
         let a_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &a_tensor,
             chunk_bytes,
@@ -45237,7 +45288,7 @@ impl PackageLinearAttnResidentStepLayer {
         let b_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &b_tensor,
             chunk_bytes,
@@ -45245,7 +45296,7 @@ impl PackageLinearAttnResidentStepLayer {
         let z_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &z_tensor,
             chunk_bytes,
@@ -45253,7 +45304,7 @@ impl PackageLinearAttnResidentStepLayer {
         let out_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &out_tensor,
             chunk_bytes,
@@ -45261,7 +45312,7 @@ impl PackageLinearAttnResidentStepLayer {
         let mlp_gate_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &gate_tensor,
             chunk_bytes,
@@ -45269,7 +45320,7 @@ impl PackageLinearAttnResidentStepLayer {
         let mlp_up_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &up_tensor,
             chunk_bytes,
@@ -45277,7 +45328,7 @@ impl PackageLinearAttnResidentStepLayer {
         let mlp_down_matrix = PackageAq4ResidentMatvec::load(
             context,
             stream,
-            &mut registry,
+            registry,
             path,
             &down_tensor,
             chunk_bytes,
@@ -46012,10 +46063,12 @@ impl PackageSelfAttnResidentStepBatchLayer {
         let mut kv_heads = None;
         let mut head_dim = None;
         let mut value_dim = None;
+        let mut registry = WeightRegistry::new();
         for request_id in &request_ids {
-            let layer = PackageSelfAttnResidentStepLayer::load(
+            let layer = PackageSelfAttnResidentStepLayer::load_with_registry(
                 context,
                 stream,
+                &mut registry,
                 path,
                 chunk_bytes,
                 layer_index,
@@ -46283,14 +46336,21 @@ impl PackageLinearAttnResidentStepBatchLayer {
             package_linear_attn_request_slot_index(&request_ids, "linear-attn resident batch")?;
         let mut layers = Vec::with_capacity(request_ids.len());
         let mut hidden = None;
+        let mut registry = WeightRegistry::new();
         for request_id in &request_ids {
-            let layer =
-                PackageLinearAttnResidentStepLayer::load(context, stream, path, chunk_bytes, layer_index)
-                    .map_err(|err| {
-                        format!(
-                            "failed to load linear-attn resident batch layer {layer_index} for request {request_id:?}: {err}"
-                        )
-                    })?;
+            let layer = PackageLinearAttnResidentStepLayer::load_with_registry(
+                context,
+                stream,
+                &mut registry,
+                path,
+                chunk_bytes,
+                layer_index,
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to load linear-attn resident batch layer {layer_index} for request {request_id:?}: {err}"
+                )
+            })?;
             if let Some(previous) = hidden {
                 if previous != layer.hidden {
                     return Err(format!(
