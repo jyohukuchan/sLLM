@@ -1,0 +1,257 @@
+{
+  "schema_version": "sq-fp8-policy-v0.1",
+  "date": "2026-07-09",
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-layer7-o32-plus-layer11-k16-o32-up16-plus-layer15-k16-o32-plus-layer19-k16-o32-plus-layer23-k16-o32-plus-layer3-o32-down64",
+  "policy_id": "layer7_o32_plus_layer11_k16_o32_up16_plus_layer15_k16_o32_plus_layer19_k16_o32_plus_layer23_k16_o32_plus_layer3_o32_down64",
+  "status": "model_loop_selected_layer_ko_layer3_o_probe_not_promoted",
+  "target_gpu": "R9700/RDNA4",
+  "scale": {
+    "granularity": "row_block",
+    "block_cols": 32,
+    "dtype": "f32",
+    "overrides": [
+      {
+        "id": "k-rowblock16",
+        "include_regex": "^model\\.language_model\\.layers\\.(3|7|11|15|19|23)\\.self_attn\\.k_proj\\.weight$",
+        "granularity": "row_block",
+        "block_cols": 16
+      },
+      {
+        "id": "layer3-down-rowblock64",
+        "include_regex": "^model\\.language_model\\.layers\\.3\\.mlp\\.down_proj\\.weight$",
+        "granularity": "row_block",
+        "block_cols": 64
+      },
+      {
+        "id": "layer11-up-rowblock16",
+        "include_regex": "^model\\.language_model\\.layers\\.11\\.mlp\\.up_proj\\.weight$",
+        "granularity": "row_block",
+        "block_cols": 16
+      }
+    ]
+  },
+  "fp8_selection": {
+    "include_regex": "^model\\.language_model\\.layers\\.(3\\.self_attn\\.k_proj|3\\.self_attn\\.o_proj|3\\.mlp\\.up_proj|3\\.mlp\\.down_proj|7\\.self_attn\\.k_proj|7\\.self_attn\\.o_proj|11\\.self_attn\\.k_proj|11\\.self_attn\\.o_proj|11\\.mlp\\.up_proj|15\\.self_attn\\.k_proj|15\\.self_attn\\.o_proj|19\\.self_attn\\.k_proj|19\\.self_attn\\.o_proj|23\\.self_attn\\.k_proj|23\\.self_attn\\.o_proj)\\.weight$",
+    "families": [
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.o_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 32
+      },
+      {
+        "family": "mlp.up_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 32
+      },
+      {
+        "family": "mlp.down_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 64
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          7
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.o_proj",
+        "layers": [
+          7
+        ],
+        "scale_block_cols": 32
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          11
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.o_proj",
+        "layers": [
+          11
+        ],
+        "scale_block_cols": 32
+      },
+      {
+        "family": "mlp.up_proj",
+        "layers": [
+          11
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          15
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.o_proj",
+        "layers": [
+          15
+        ],
+        "scale_block_cols": 32
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          19
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.o_proj",
+        "layers": [
+          19
+        ],
+        "scale_block_cols": 32
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          23
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.o_proj",
+        "layers": [
+          23
+        ],
+        "scale_block_cols": 32
+      }
+    ],
+    "expected_fp8_tensor_count": 15
+  },
+  "fallback_policy": [
+    {
+      "family": "layer7.mlp.up_proj",
+      "layers": [
+        7
+      ],
+      "reason": "current_layer7_up_fallback_boundary"
+    },
+    {
+      "family": "layer7.mlp.down_proj",
+      "layers": [
+        7
+      ],
+      "reason": "layer7_down64_single_add_failed_case_a"
+    },
+    {
+      "family": "layer7.mlp.gate_proj",
+      "layers": [
+        7
+      ],
+      "reason": "layer7_o32_gate32_combined_failed_case_a"
+    },
+    {
+      "family": "layer11.mlp.up_proj/down_proj/gate_proj",
+      "layers": [
+        11
+      ],
+      "reason": "not_selected_in_current_o32_branch_probe"
+    },
+    {
+      "family": "layer15.mlp.up_proj/down_proj/gate_proj",
+      "layers": [
+        15
+      ],
+      "reason": "not_selected_in_current_o32_branch_layer15_probe"
+    },
+    {
+      "family": "layer19.mlp.up_proj/down_proj/gate_proj",
+      "layers": [
+        19
+      ],
+      "reason": "not_selected_in_current_o32_branch_layer19_probe"
+    },
+    {
+      "family": "layer23.mlp.up_proj/down_proj/gate_proj",
+      "layers": [
+        23
+      ],
+      "reason": "not_selected_in_current_o32_branch_layer23_probe"
+    },
+    {
+      "family": "all_other_language_model_tensors",
+      "layers": "all",
+      "reason": "not_selected_in_current_o32_branch_probe"
+    },
+    {
+      "family": "visual_mtp_rdna2_tp_targets",
+      "layers": "all",
+      "reason": "deferred_target"
+    }
+  ],
+  "acceptance_rule": {
+    "promotion_rule": "strict_top1",
+    "diagnostic_only": [
+      "topk_common",
+      "baseline_top1_rank_in_sq_topk",
+      "sq_top1_minus_baseline_top1_logit"
+    ]
+  },
+  "prompt_bundle_result": {
+    "status": "failed_strict_top1",
+    "strict_top1_pass_count": 2,
+    "case_count": 3,
+    "final_top1_tokens": [
+      102446,
+      237950,
+      182949
+    ],
+    "aq4_baseline_top1": [
+      110784,
+      237950,
+      182949
+    ],
+    "failure_cases": [
+      "len4"
+    ],
+    "aq4_top1_rank_in_sq_top8": [
+      {
+        "case": "len4",
+        "rank": 2
+      },
+      {
+        "case": "case_a",
+        "rank": 1
+      },
+      {
+        "case": "case_b",
+        "rank": 1
+      }
+    ],
+    "result": "layer11 up_proj row-block16 does not recover the up32 len4 failure; not promoted"
+  },
+  "artifacts": [],
+  "notes": [
+    "layer3 k16/o32/up32 + layers 7/11/15/19/23 k16/o32; layer7 up/down/gate fallback",
+    "Adds layer3 mlp.down_proj row-block64 on top of selected-layer-ko-plus-layer3-o32 for T2 model-loop strict-top1 probing.",
+    "Adds layer11 mlp.up_proj row-block32 on top of selected-layer-ko-plus-layer3-o32-down64 for T2 model-loop strict-top1 probing.",
+    "Uses layer11 mlp.up_proj row-block16 as a recovery probe after layer11 up32 changed len4 top1."
+  ],
+  "next_steps": [
+    "Build with tools/build-sq-fp8-w8a16-artifact.py --policy-json.",
+    "Run the six-layer token-id model-loop prompt bundle against the generated artifact."
+  ]
+}

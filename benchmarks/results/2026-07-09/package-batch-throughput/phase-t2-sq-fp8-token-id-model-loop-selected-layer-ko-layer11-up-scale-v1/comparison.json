@@ -1,0 +1,569 @@
+{
+  "schema_version": "sq-fp8-model-loop-comparison-v0.1",
+  "date": "2026-07-09",
+  "run_id": "phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer11-up-scale-v1",
+  "baseline": {
+    "source_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-prompt-bundle-v1/results.jsonl",
+    "case_id": "aq4-r9700-token-id-model-loop-prompt-bundle-layers3-7-11-15-19-23-b3",
+    "final_top1_tokens": [
+      110784,
+      237950,
+      182949
+    ],
+    "final_topk_tokens": [
+      [
+        110784,
+        242203,
+        102446,
+        143001,
+        172083,
+        120222,
+        69538,
+        135929
+      ],
+      [
+        237950,
+        111791,
+        13817,
+        26293,
+        193706,
+        172960,
+        68712,
+        134735
+      ],
+      [
+        182949,
+        121250,
+        159207,
+        69895,
+        97533,
+        214852,
+        139376,
+        188263
+      ]
+    ],
+    "metrics": {
+      "prefill_tokens_per_second": 33.04426,
+      "decode_tokens_per_second": 32.565648,
+      "end_to_end_total_tokens_per_second": 32.981036,
+      "vram_consumed_bytes": 5885833216,
+      "vram_peak_bytes": 6016020480,
+      "wrapper_elapsed_seconds": 5.223469406017102
+    },
+    "batching": {
+      "component_command": "package-token-ids-model-loop-smoke",
+      "component_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+      "decode_executor": "stack_ready_batch",
+      "decode_executor_request_parallelism": 3,
+      "decode_real_batch": true,
+      "mode": "real",
+      "prefill_batch_request_counts": [
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2
+      ],
+      "prefill_executor": "stack_prefill_request_batch_step",
+      "prefill_executor_request_parallelism": 3,
+      "prefill_executor_token_parallelism": null,
+      "prefill_real_batch": true,
+      "resolved_prefill_executor": "stack_prefill_request_batch_step",
+      "scheduler_policy": "model_loop_ready_batch"
+    }
+  },
+  "variants": [
+    {
+      "variant": "selected-layer-ko-layer3-down64-plus-layer11-up32",
+      "description": "layer3 k16/o32/up32/down64 + layer11 k16/o32/up32 + layers 7/15/19/23 k16/o32; layer3 gate and layer7 up/down/gate fallback",
+      "source_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer11-up32-v1/results.jsonl",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-layer7-o32-plus-layer11-k16-o32-up32-plus-layer15-k16-o32-plus-layer19-k16-o32-plus-layer23-k16-o32-plus-layer3-o32-down64",
+      "artifact": "/tmp/ullm-sq-fp8-selected-layer-ko-plus-layer3-o32-down64-plus-layer11-up32-policy-v0.1-artifact",
+      "fp8_tensor_count": 15,
+      "passthrough_tensor_count": 760,
+      "strict_top1_pass_count": 2,
+      "case_count": 3,
+      "strict_top1_pass": false,
+      "pass_by_case": [
+        {
+          "case": "len4",
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "aq4_top1": 110784,
+          "sq_top1": 102446,
+          "strict_top1_match": false
+        },
+        {
+          "case": "case_a",
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "aq4_top1": 237950,
+          "sq_top1": 237950,
+          "strict_top1_match": true
+        },
+        {
+          "case": "case_b",
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "aq4_top1": 182949,
+          "sq_top1": 182949,
+          "strict_top1_match": true
+        }
+      ],
+      "aq4_top1_rank_in_sq_top8": [
+        {
+          "case": "len4",
+          "aq4_top1_rank_in_sq_top8": 2
+        },
+        {
+          "case": "case_a",
+          "aq4_top1_rank_in_sq_top8": 1
+        },
+        {
+          "case": "case_b",
+          "aq4_top1_rank_in_sq_top8": 1
+        }
+      ],
+      "top8_common": [
+        {
+          "case": "len4",
+          "common_top8_count": 8
+        },
+        {
+          "case": "case_a",
+          "common_top8_count": 8
+        },
+        {
+          "case": "case_b",
+          "common_top8_count": 8
+        }
+      ],
+      "sq_top1_margin": [
+        {
+          "case": "len4",
+          "sq_top1": 102446,
+          "sq_top1_logit": 5.185584,
+          "sq_top2": 110784,
+          "sq_top2_logit": 5.145612,
+          "sq_top1_minus_top2_logit": 0.03997200000000056
+        },
+        {
+          "case": "case_a",
+          "sq_top1": 237950,
+          "sq_top1_logit": 5.423766,
+          "sq_top2": 13817,
+          "sq_top2_logit": 5.292482,
+          "sq_top1_minus_top2_logit": 0.13128399999999996
+        },
+        {
+          "case": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_logit": 6.475089,
+          "sq_top2": 97533,
+          "sq_top2_logit": 6.042094,
+          "sq_top1_minus_top2_logit": 0.432995
+        }
+      ],
+      "final_top1_tokens": [
+        102446,
+        237950,
+        182949
+      ],
+      "final_topk_tokens": [
+        [
+          102446,
+          110784,
+          242203,
+          120222,
+          69538,
+          143001,
+          150160,
+          91225
+        ],
+        [
+          237950,
+          13817,
+          111791,
+          124170,
+          172960,
+          208360,
+          68712,
+          181585
+        ],
+        [
+          182949,
+          97533,
+          69895,
+          214852,
+          121250,
+          161229,
+          90132,
+          243285
+        ]
+      ],
+      "metrics": {
+        "prefill_tokens_per_second": 28.741285,
+        "decode_tokens_per_second": 30.527447,
+        "end_to_end_total_tokens_per_second": 28.962318,
+        "vram_consumed_bytes": 5757968384,
+        "vram_peak_bytes": 5888155648,
+        "wrapper_elapsed_seconds": 35.133055545040406
+      },
+      "batching": {
+        "component_command": "sq-fp8-token-ids-model-loop-smoke",
+        "component_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+        "decode_executor": "stack_ready_batch",
+        "decode_executor_request_parallelism": 3,
+        "decode_real_batch": true,
+        "mode": "real",
+        "prefill_batch_request_counts": [
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2
+        ],
+        "prefill_executor": "stack_prefill_request_batch_step",
+        "prefill_executor_request_parallelism": 3,
+        "prefill_executor_token_parallelism": null,
+        "prefill_real_batch": true,
+        "resolved_prefill_executor": "stack_prefill_request_batch_step",
+        "scheduler_policy": "model_loop_ready_batch"
+      }
+    },
+    {
+      "variant": "selected-layer-ko-layer3-down64-plus-layer11-up16",
+      "description": "layer3 k16/o32/up32/down64 + layer11 k16/o32/up16 recovery probe + layers 7/15/19/23 k16/o32; layer3 gate and layer7 up/down/gate fallback",
+      "source_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer11-up-scale-v1/results.jsonl",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-layer7-o32-plus-layer11-k16-o32-up16-plus-layer15-k16-o32-plus-layer19-k16-o32-plus-layer23-k16-o32-plus-layer3-o32-down64",
+      "artifact": "/tmp/ullm-sq-fp8-selected-layer-ko-plus-layer3-o32-down64-plus-layer11-up16-policy-v0.1-artifact",
+      "fp8_tensor_count": 15,
+      "passthrough_tensor_count": 760,
+      "strict_top1_pass_count": 2,
+      "case_count": 3,
+      "strict_top1_pass": false,
+      "pass_by_case": [
+        {
+          "case": "len4",
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "aq4_top1": 110784,
+          "sq_top1": 102446,
+          "strict_top1_match": false
+        },
+        {
+          "case": "case_a",
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "aq4_top1": 237950,
+          "sq_top1": 237950,
+          "strict_top1_match": true
+        },
+        {
+          "case": "case_b",
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "aq4_top1": 182949,
+          "sq_top1": 182949,
+          "strict_top1_match": true
+        }
+      ],
+      "aq4_top1_rank_in_sq_top8": [
+        {
+          "case": "len4",
+          "aq4_top1_rank_in_sq_top8": 2
+        },
+        {
+          "case": "case_a",
+          "aq4_top1_rank_in_sq_top8": 1
+        },
+        {
+          "case": "case_b",
+          "aq4_top1_rank_in_sq_top8": 1
+        }
+      ],
+      "top8_common": [
+        {
+          "case": "len4",
+          "common_top8_count": 8
+        },
+        {
+          "case": "case_a",
+          "common_top8_count": 8
+        },
+        {
+          "case": "case_b",
+          "common_top8_count": 8
+        }
+      ],
+      "sq_top1_margin": [
+        {
+          "case": "len4",
+          "sq_top1": 102446,
+          "sq_top1_logit": 5.192915,
+          "sq_top2": 110784,
+          "sq_top2_logit": 5.133017,
+          "sq_top1_minus_top2_logit": 0.05989800000000045
+        },
+        {
+          "case": "case_a",
+          "sq_top1": 237950,
+          "sq_top1_logit": 5.451594,
+          "sq_top2": 13817,
+          "sq_top2_logit": 5.260454,
+          "sq_top1_minus_top2_logit": 0.19113999999999987
+        },
+        {
+          "case": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_logit": 6.45122,
+          "sq_top2": 97533,
+          "sq_top2_logit": 6.038201,
+          "sq_top1_minus_top2_logit": 0.41301900000000025
+        }
+      ],
+      "final_top1_tokens": [
+        102446,
+        237950,
+        182949
+      ],
+      "final_topk_tokens": [
+        [
+          102446,
+          110784,
+          242203,
+          120222,
+          69538,
+          143001,
+          150160,
+          120224
+        ],
+        [
+          237950,
+          13817,
+          111791,
+          124170,
+          68712,
+          172960,
+          208360,
+          157171
+        ],
+        [
+          182949,
+          97533,
+          69895,
+          214852,
+          161229,
+          121250,
+          90132,
+          243285
+        ]
+      ],
+      "metrics": {
+        "prefill_tokens_per_second": 32.863404,
+        "decode_tokens_per_second": 32.437353,
+        "end_to_end_total_tokens_per_second": 32.807199,
+        "vram_consumed_bytes": 5757968384,
+        "vram_peak_bytes": 5888155648,
+        "wrapper_elapsed_seconds": 33.813732865964994
+      },
+      "batching": {
+        "component_command": "sq-fp8-token-ids-model-loop-smoke",
+        "component_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+        "decode_executor": "stack_ready_batch",
+        "decode_executor_request_parallelism": 3,
+        "decode_real_batch": true,
+        "mode": "real",
+        "prefill_batch_request_counts": [
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2
+        ],
+        "prefill_executor": "stack_prefill_request_batch_step",
+        "prefill_executor_request_parallelism": 3,
+        "prefill_executor_token_parallelism": null,
+        "prefill_real_batch": true,
+        "resolved_prefill_executor": "stack_prefill_request_batch_step",
+        "scheduler_policy": "model_loop_ready_batch"
+      }
+    }
+  ],
+  "promotion_rule": "strict_top1",
+  "notes": [
+    "Selected-layer token-id model-loop bridge, not full LM throughput.",
+    "Internal tok/s excludes SQ artifact read/materialization time; wrapper elapsed includes it.",
+    "Prompt bundle is len4, case_a, case_b batched together with one synthetic generated token per request.",
+    "Layer11 up_proj row-block32 changes len4 top1; row-block16 does not recover it. Keep selected-layer-ko-plus-layer3-o32-down64 as the current passing branch."
+  ]
+}
