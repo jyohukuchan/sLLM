@@ -254,6 +254,31 @@
 2. 続いてcold-prefill causal flash2へ、causal maskと複数query row/blockの扱いを入れて移植する。
 3. どちらもsampled diffを先に固定し、その後にtok/sを測ってtile sizeやblock割り当てを調整する。
 
+### 2026-07-08 progress: RDNA4 FP8 rocWMMA cached-prefix v1
+
+前回の要点:
+
+- rocWMMA attention probeで、FP8 QK tile、online softmax、V accumulationをstandalone固定shapeで動かせることを確認した。
+- 次はprobeではなく、`runtime-cached-prefix-attn-smoke` の計測経路へ接続する段階だった。
+
+今回の変更点:
+
+- C ABI `ullm_runtime_cached_prefix_attn_fp8_e4m3_rocwmma`、Rust FFI `cached_prefix_attn_fp8_e4m3_rocwmma`、CLI executor `cached_prefix_rocwmma_fp8` を追加した。
+- HIPRTC kernel `ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel` は、FP8 Q/K/V byte列、rocWMMA QK tile、online softmax、V accumulationを1 kernel内で処理する。
+- 現時点の制約はR9700/RDNA4、`head_dim=16`、`value_dim=16`、`q_heads/kv_heads` が16の倍数であること。
+- このexecutorだけQもFP8に量子化し、sampled referenceもdecoded FP8 Qを使うようにした。
+- R9700 device index `2` で `L=65536,M=512,q_heads=16,kv_heads=1,dim=16` まで通し、`14.627084ms`、`input tok/s=35003.559151`、`sampled_max_abs_diff=0.000000415` を確認した。
+- 追加で `q_heads=32,kv_heads=2` の複数KV head smokeも通し、strided K/V cache読み出しのsampled diffが `0.000000002` に収まることを確認した。
+- 同じ `L=4096,M=16,dim=16` では、`cached_prefix_rocwmma_fp8` が `0.911433ms`、既存 `cached_prefix_flash2 fp8_e4m3` が `3.252488ms`、旧 `cached_prefix_chunked fp8_e4m3` が `3.778853ms` だった。
+- V620/RDNA2 device index `1` ではRDNA4必須として拒否されることを確認した。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c11-rdna4-fp8-rocwmma-cached-prefix-v1.md` に保存した。
+
+次の行動:
+
+1. `head_dim=16` 固定を外す前に、Q row groupingとK/V tile再利用の設計を整理する。
+2. 実モデルのhead_dimに近いshapeへ拡張し、QをFP8にする影響とkernel構造改善を分離して測る。
+3. cold-prefill causal attention側へ、causal mask込みのrocWMMA tile方針を展開する。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。

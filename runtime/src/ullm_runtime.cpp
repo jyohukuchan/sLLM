@@ -837,6 +837,19 @@ public:
             error);
     }
 
+    bool compile_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            cached_prefix_rocwmma_fp8_e4m3_kernel_source(),
+            "ullm_cached_prefix_attn_fp8_e4m3_rocwmma.hip",
+            code,
+            error,
+            rocwmma_include_options());
+    }
+
     bool compile_paged_decode_attn_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -7493,6 +7506,72 @@ void cached_prefix_attn_fp8_e4m3_host(
     }
 }
 
+void cached_prefix_attn_fp8_e4m3_rocwmma_host(
+    const uint8_t *q,
+    const uint8_t *k_cache,
+    const uint8_t *v_cache,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    float q_scale,
+    float k_scale,
+    float v_scale,
+    float *output) {
+    const size_t q_per_kv = q_heads / kv_heads;
+    for (size_t token_index = 0; token_index < new_tokens; ++token_index) {
+        const size_t cache_len = cached_prefix_len + token_index + 1;
+        for (size_t q_head = 0; q_head < q_heads; ++q_head) {
+            const size_t kv_head = q_head / q_per_kv;
+            const size_t q_base = (token_index * q_heads + q_head) * head_dim;
+            float max_score = -std::numeric_limits<float>::infinity();
+            for (size_t source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+                const size_t k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                float score = 0.0f;
+                for (size_t dim = 0; dim < head_dim; ++dim) {
+                    score += (fp8_e4m3_to_f32_unscaled(q[q_base + dim]) * q_scale) *
+                             (fp8_e4m3_to_f32_unscaled(k_cache[k_base + dim]) * k_scale);
+                }
+                score *= softmax_scale;
+                max_score = std::max(max_score, score);
+            }
+
+            float denominator = 0.0f;
+            for (size_t source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+                const size_t k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                float score = 0.0f;
+                for (size_t dim = 0; dim < head_dim; ++dim) {
+                    score += (fp8_e4m3_to_f32_unscaled(q[q_base + dim]) * q_scale) *
+                             (fp8_e4m3_to_f32_unscaled(k_cache[k_base + dim]) * k_scale);
+                }
+                denominator += std::exp(score * softmax_scale - max_score);
+            }
+
+            const size_t output_base = (token_index * q_heads + q_head) * value_dim;
+            for (size_t value = 0; value < value_dim; ++value) {
+                float weighted = 0.0f;
+                for (size_t source_timestep = 0; source_timestep < cache_len; ++source_timestep) {
+                    const size_t k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+                    float score = 0.0f;
+                    for (size_t dim = 0; dim < head_dim; ++dim) {
+                        score += (fp8_e4m3_to_f32_unscaled(q[q_base + dim]) * q_scale) *
+                                 (fp8_e4m3_to_f32_unscaled(k_cache[k_base + dim]) * k_scale);
+                    }
+                    const float weight = std::exp(score * softmax_scale - max_score);
+                    const size_t v_index =
+                        (source_timestep * kv_heads + kv_head) * value_dim + value;
+                    weighted +=
+                        weight * (fp8_e4m3_to_f32_unscaled(v_cache[v_index]) * v_scale);
+                }
+                output[output_base + value] = weighted / denominator;
+            }
+        }
+    }
+}
+
 void paged_decode_attn_f32_host(
     const float *q,
     const float *k_cache,
@@ -10943,6 +11022,92 @@ HipCachedPrefixAttnFp8E4m3Flash2KernelCache &hip_cached_prefix_attn_fp8_e4m3_fla
     return cache;
 }
 
+class HipCachedPrefixAttnFp8E4m3RocwmmaKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
+                    arch,
+                    &code,
+                    &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ?
+                "failed to build fp8 e4m3 cached prefix rocWMMA attention HIP kernel" :
+                compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipCachedPrefixAttnFp8E4m3RocwmmaKernelCache &
+hip_cached_prefix_attn_fp8_e4m3_rocwmma_kernel_cache() {
+    static HipCachedPrefixAttnFp8E4m3RocwmmaKernelCache cache;
+    return cache;
+}
+
 bool cached_prefix_attn_fp8_e4m3_hip_kernel(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_cache_buffer,
@@ -11169,6 +11334,105 @@ bool cached_prefix_attn_fp8_e4m3_flash2_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for fp8 e4m3 cached prefix flash2 attention";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    float softmax_scale,
+    float q_scale,
+    float k_scale,
+    float v_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = q_buffer->hip_device_id;
+    int major = 0;
+    int minor = 0;
+    hip_runtime().device_compute_capability(device_id, &major, &minor);
+    if (major != 12) {
+        if (error != nullptr) {
+            *error = "fp8 e4m3 cached prefix rocWMMA attention requires RDNA4/gfx12 HIP device";
+        }
+        return false;
+    }
+    const size_t q_per_kv = q_heads / kv_heads;
+    if ((q_per_kv % 16u) != 0u) {
+        if (error != nullptr) {
+            *error = "fp8 e4m3 cached prefix rocWMMA attention requires q_heads/kv_heads to be a multiple of 16";
+        }
+        return false;
+    }
+    const size_t q_groups_per_kv = q_per_kv / 16u;
+    const size_t groups_per_token = kv_heads * q_groups_per_kv;
+    if (new_tokens > std::numeric_limits<size_t>::max() / groups_per_token) {
+        if (error != nullptr) {
+            *error =
+                "fp8 e4m3 cached prefix rocWMMA attention grid size overflows";
+        }
+        return false;
+    }
+    const size_t grid_size = new_tokens * groups_per_token;
+    if (grid_size > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error =
+                "fp8 e4m3 cached prefix rocWMMA attention grid size exceeds HIP grid limit";
+        }
+        return false;
+    }
+
+    void *function =
+        hip_cached_prefix_attn_fp8_e4m3_rocwmma_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 32;
+    unsigned long long kernel_cached_prefix_len =
+        static_cast<unsigned long long>(cached_prefix_len);
+    unsigned long long kernel_new_tokens = static_cast<unsigned long long>(new_tokens);
+    unsigned long long kernel_q_heads = static_cast<unsigned long long>(q_heads);
+    unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
+    unsigned long long kernel_q_groups_per_kv =
+        static_cast<unsigned long long>(q_groups_per_kv);
+    void *q_ptr = q_buffer->ptr;
+    void *k_ptr = k_cache_buffer->ptr;
+    void *v_ptr = v_cache_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &q_ptr,
+        &k_ptr,
+        &v_ptr,
+        &kernel_cached_prefix_len,
+        &kernel_new_tokens,
+        &kernel_q_heads,
+        &kernel_kv_heads,
+        &kernel_q_groups_per_kv,
+        &softmax_scale,
+        &q_scale,
+        &k_scale,
+        &v_scale,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(grid_size),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for fp8 e4m3 cached prefix rocWMMA attention";
         }
         return false;
     }

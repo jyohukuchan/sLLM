@@ -210,6 +210,168 @@ extern "C" __global__ void ullm_rocwmma_fp8_attn_probe_kernel(
 )";
     }
 
+    static const char *cached_prefix_rocwmma_fp8_e4m3_kernel_source() {
+        return R"(
+#include <rocwmma/rocwmma.hpp>
+
+__device__ float ullm_cached_prefix_rocwmma_fp8_e4m3_to_f32(unsigned char value) {
+#if defined(__gfx1200__) || defined(__gfx1201__)
+    return __builtin_amdgcn_cvt_f32_fp8(static_cast<unsigned int>(value), 0);
+#else
+    const unsigned int sign = static_cast<unsigned int>(value) >> 7;
+    const unsigned int exponent = (static_cast<unsigned int>(value) >> 3) & 0x0fu;
+    const unsigned int mantissa = static_cast<unsigned int>(value) & 0x07u;
+    if (exponent == 0u) {
+        const float magnitude = static_cast<float>(mantissa) * 0.001953125f;
+        return sign == 0u ? magnitude : -magnitude;
+    }
+    const unsigned int fp32_bits = (sign << 31) | ((exponent + 120u) << 23) | (mantissa << 20);
+    return __uint_as_float(fp32_bits);
+#endif
+}
+
+extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
+    const unsigned char *q,
+    const unsigned char *k_cache,
+    const unsigned char *v_cache,
+    unsigned long long cached_prefix_len,
+    unsigned long long new_tokens,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long q_groups_per_kv,
+    float softmax_scale,
+    float q_scale,
+    float k_scale,
+    float v_scale,
+    float *output) {
+    if (threadIdx.x >= 32u) {
+        return;
+    }
+#if defined(__gfx1200__) || defined(__gfx1201__)
+    using namespace rocwmma;
+    using FragA = fragment<matrix_a, 16, 16, 16, float8_t, row_major>;
+    using FragB = fragment<matrix_b, 16, 16, 16, float8_t, col_major>;
+    using FragC = fragment<accumulator, 16, 16, 16, float32_t, row_major>;
+
+    const unsigned long long groups_per_token = kv_heads * q_groups_per_kv;
+    const unsigned long long block = static_cast<unsigned long long>(blockIdx.x);
+    if (groups_per_token == 0ull || block >= new_tokens * groups_per_token) {
+        return;
+    }
+    const unsigned long long token_index = block / groups_per_token;
+    const unsigned long long group_within_token = block - token_index * groups_per_token;
+    const unsigned long long kv_head = group_within_token / q_groups_per_kv;
+    const unsigned long long q_group_in_kv = group_within_token - kv_head * q_groups_per_kv;
+    const unsigned long long q_per_kv = q_heads / kv_heads;
+    const unsigned long long q_head_base = kv_head * q_per_kv + q_group_in_kv * 16ull;
+    const unsigned long long cache_len = cached_prefix_len + token_index + 1ull;
+    const unsigned int lane = threadIdx.x;
+
+    __shared__ unsigned char k_tile[16 * 16];
+    __shared__ float scores[16 * 16];
+    __shared__ float row_max[16];
+    __shared__ float row_sum[16];
+    __shared__ float row_acc[16 * 16];
+
+    for (unsigned int index = lane; index < 16u; index += 32u) {
+        row_max[index] = -3.4028234663852886e38f;
+        row_sum[index] = 0.0f;
+    }
+    for (unsigned int index = lane; index < 16u * 16u; index += 32u) {
+        row_acc[index] = 0.0f;
+    }
+    __syncthreads();
+
+    FragA a;
+    FragB b;
+    FragC c;
+    const unsigned long long q_base = (token_index * q_heads + q_head_base) * 16ull;
+    load_matrix_sync(a, reinterpret_cast<const float8_t *>(q + q_base), 16);
+    const float score_scale = softmax_scale * q_scale * k_scale;
+
+    for (unsigned long long tile_start = 0ull; tile_start < cache_len; tile_start += 16ull) {
+        const unsigned long long remaining = cache_len - tile_start;
+        const unsigned int tile_count =
+            remaining < 16ull ? static_cast<unsigned int>(remaining) : 16u;
+
+        for (unsigned int index = lane; index < 16u * 16u; index += 32u) {
+            const unsigned int row = index / 16u;
+            const unsigned int col = index - row * 16u;
+            const unsigned long long source_timestep = tile_start + static_cast<unsigned long long>(row);
+            if (row < tile_count) {
+                const unsigned long long k_index = (source_timestep * kv_heads + kv_head) * 16ull +
+                    static_cast<unsigned long long>(col);
+                k_tile[index] = k_cache[k_index];
+            } else {
+                k_tile[index] = 0u;
+            }
+        }
+        __syncthreads();
+
+        fill_fragment(c, 0.0f);
+        load_matrix_sync(b, reinterpret_cast<const float8_t *>(k_tile), 16);
+        mma_sync(c, a, b, c);
+        store_matrix_sync(scores, c, 16);
+        __syncthreads();
+
+        if (lane < 16u) {
+            const unsigned int row = lane;
+            float tile_max = -3.4028234663852886e38f;
+            for (unsigned int col = 0u; col < tile_count; ++col) {
+                const float score = scores[row * 16u + col] * score_scale;
+                tile_max = score > tile_max ? score : tile_max;
+            }
+            const float old_max = row_max[row];
+            const float new_max = old_max > tile_max ? old_max : tile_max;
+            const float old_scale =
+                old_max <= -3.0e38f ? 0.0f : expf(old_max - new_max);
+            float tile_sum = 0.0f;
+            for (unsigned int value = 0u; value < 16u; ++value) {
+                row_acc[row * 16u + value] *= old_scale;
+            }
+            for (unsigned int col = 0u; col < tile_count; ++col) {
+                const float score = scores[row * 16u + col] * score_scale;
+                const float weight = expf(score - new_max);
+                tile_sum += weight;
+                const unsigned long long source_timestep =
+                    tile_start + static_cast<unsigned long long>(col);
+                const unsigned long long v_base = (source_timestep * kv_heads + kv_head) * 16ull;
+                for (unsigned int value = 0u; value < 16u; ++value) {
+                    row_acc[row * 16u + value] +=
+                        weight *
+                        (ullm_cached_prefix_rocwmma_fp8_e4m3_to_f32(
+                             v_cache[v_base + static_cast<unsigned long long>(value)]) *
+                         v_scale);
+                }
+            }
+            row_sum[row] = row_sum[row] * old_scale + tile_sum;
+            row_max[row] = new_max;
+        }
+        __syncthreads();
+    }
+
+    if (lane < 16u) {
+        const unsigned int row = lane;
+        const unsigned long long output_base = (token_index * q_heads + q_head_base) * 16ull;
+        const float denominator = row_sum[row];
+        for (unsigned int value = 0u; value < 16u; ++value) {
+            output[output_base + static_cast<unsigned long long>(row) * 16ull +
+                   static_cast<unsigned long long>(value)] =
+                row_acc[row * 16u + value] / denominator;
+        }
+    }
+#else
+    if (threadIdx.x == 0u) {
+        const unsigned long long output_elements = new_tokens * q_heads * 16ull;
+        for (unsigned long long i = 0ull; i < output_elements; ++i) {
+            output[i] = 0.0f;
+        }
+    }
+#endif
+}
+)";
+    }
+
     static const char *aq4_kernel_source() {
         return R"(
 extern "C" __global__ void ullm_aq4_dequant_f32_kernel(

@@ -647,6 +647,23 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_cached_prefix_attn_fp8_e4m3_rocwmma(
+        q_buffer: *const RawRuntimeBuffer,
+        k_buffer: *const RawRuntimeBuffer,
+        v_buffer: *const RawRuntimeBuffer,
+        cached_prefix_len: usize,
+        new_tokens: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        q_scale: f32,
+        k_scale: f32,
+        v_scale: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_paged_decode_attn_f32(
         q: *const RawRuntimeBuffer,
         k_cache: *const RawRuntimeBuffer,
@@ -4220,6 +4237,133 @@ pub fn cached_prefix_attn_fp8_e4m3_flash2(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn cached_prefix_attn_fp8_e4m3_rocwmma(
+    q: &RuntimeBuffer,
+    k_cache: &RuntimeBuffer,
+    v_cache: &RuntimeBuffer,
+    cached_prefix_len: usize,
+    new_tokens: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    q_scale: f32,
+    k_scale: f32,
+    v_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if new_tokens == 0 {
+        return Err(
+            "fp8 e4m3 cached prefix rocWMMA attention new_tokens must be greater than zero"
+                .to_string(),
+        );
+    }
+    if q_heads == 0 {
+        return Err(
+            "fp8 e4m3 cached prefix rocWMMA attention q_heads must be greater than zero"
+                .to_string(),
+        );
+    }
+    if kv_heads == 0 {
+        return Err(
+            "fp8 e4m3 cached prefix rocWMMA attention kv_heads must be greater than zero"
+                .to_string(),
+        );
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err(
+            "fp8 e4m3 cached prefix rocWMMA attention q_heads must be a multiple of kv_heads"
+                .to_string(),
+        );
+    }
+    if !(q_heads / kv_heads).is_multiple_of(16) {
+        return Err(
+            "fp8 e4m3 cached prefix rocWMMA attention requires q_heads/kv_heads to be a multiple of 16"
+                .to_string(),
+        );
+    }
+    if head_dim != 16 || value_dim != 16 {
+        return Err(
+            "fp8 e4m3 cached prefix rocWMMA attention currently requires head_dim=value_dim=16"
+                .to_string(),
+        );
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "fp8 e4m3 cached prefix rocWMMA attention softmax scale must be finite and greater than zero"
+                .to_string(),
+        );
+    }
+    if !q_scale.is_finite()
+        || q_scale <= 0.0
+        || !k_scale.is_finite()
+        || k_scale <= 0.0
+        || !v_scale.is_finite()
+        || v_scale <= 0.0
+    {
+        return Err(
+            "fp8 e4m3 cached prefix rocWMMA attention scales must be finite and greater than zero"
+                .to_string(),
+        );
+    }
+
+    let total_context = cached_prefix_len.checked_add(new_tokens).ok_or_else(|| {
+        "fp8 e4m3 cached prefix rocWMMA attention total context overflows".to_string()
+    })?;
+    let q_head_sequence = new_tokens.checked_mul(q_heads).ok_or_else(|| {
+        "fp8 e4m3 cached prefix rocWMMA attention q head-sequence count overflows".to_string()
+    })?;
+    let q_elements = q_head_sequence.checked_mul(head_dim).ok_or_else(|| {
+        "fp8 e4m3 cached prefix rocWMMA attention q element count overflows".to_string()
+    })?;
+    let kv_head_context = total_context.checked_mul(kv_heads).ok_or_else(|| {
+        "fp8 e4m3 cached prefix rocWMMA attention kv head-context count overflows".to_string()
+    })?;
+    let k_elements = kv_head_context.checked_mul(head_dim).ok_or_else(|| {
+        "fp8 e4m3 cached prefix rocWMMA attention k element count overflows".to_string()
+    })?;
+    let v_elements = kv_head_context.checked_mul(value_dim).ok_or_else(|| {
+        "fp8 e4m3 cached prefix rocWMMA attention v element count overflows".to_string()
+    })?;
+    let output_elements = q_head_sequence.checked_mul(value_dim).ok_or_else(|| {
+        "fp8 e4m3 cached prefix rocWMMA attention output element count overflows".to_string()
+    })?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            "fp8 e4m3 cached prefix rocWMMA attention output byte size overflows".to_string()
+        })?;
+
+    check_copy_range(0, q_elements, q.size()?)?;
+    check_copy_range(0, k_elements, k_cache.size()?)?;
+    check_copy_range(0, v_elements, v_cache.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_cached_prefix_attn_fp8_e4m3_rocwmma(
+            q.raw.as_ptr(),
+            k_cache.raw.as_ptr(),
+            v_cache.raw.as_ptr(),
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            q_scale,
+            k_scale,
+            v_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 pub fn paged_decode_attn_f32(
     q: &RuntimeBuffer,
     k_cache: &RuntimeBuffer,
@@ -7245,6 +7389,83 @@ mod tests {
             head_dim,
             value_dim,
             softmax_scale,
+            k_scale,
+            v_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_cached_prefix_attn_fp8_e4m3_rocwmma_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cached_prefix_len = 3_usize;
+        let new_tokens = 2_usize;
+        let total_context = cached_prefix_len + new_tokens;
+        let q_heads = 32_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 16_usize;
+        let value_dim = 16_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..new_tokens * q_heads * head_dim)
+            .map(|index| (index as f32 - 97.0) / 211.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..total_context * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 113.0) / 257.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..total_context * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 131.0) / 293.0)
+            .collect::<Vec<_>>();
+        let (q_fp8, q_scale, q_expected) = fp8_e4m3_quantize(&q_values);
+        let (k_fp8, k_scale, k_expected) = fp8_e4m3_quantize(&k_values);
+        let (v_fp8, v_scale, v_expected) = fp8_e4m3_quantize(&v_values);
+        let expected = expected_cached_prefix_attn(
+            &q_expected,
+            &k_expected,
+            &v_expected,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+
+        let mut q = context.alloc_buffer(q_fp8.len()).unwrap();
+        let mut k = context.alloc_buffer(k_fp8.len()).unwrap();
+        let mut v = context.alloc_buffer(v_fp8.len()).unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &q_fp8, Some(&mut stream)).unwrap();
+        k.copy_from_host(0, &k_fp8, Some(&mut stream)).unwrap();
+        v.copy_from_host(0, &v_fp8, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        cached_prefix_attn_fp8_e4m3_rocwmma(
+            &q,
+            &k,
+            &v,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            q_scale,
             k_scale,
             v_scale,
             &mut output,
@@ -11711,6 +11932,94 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-4);
+    }
+
+    #[test]
+    fn first_hip_cached_prefix_attn_fp8_e4m3_rocwmma_computes_expected_values_when_available() {
+        let rdna4_device = (1..device_count().unwrap()).find(|&index| {
+            device_info(index)
+                .map(|info| {
+                    info.backend == "hip"
+                        && (info.compute_major == 12 || info.gcn_arch_name.starts_with("gfx12"))
+                })
+                .unwrap_or(false)
+        });
+        let Some(device_index) = rdna4_device else {
+            return;
+        };
+        let mut context = RuntimeContext::create(device_index).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let cached_prefix_len = 3_usize;
+        let new_tokens = 2_usize;
+        let total_context = cached_prefix_len + new_tokens;
+        let q_heads = 32_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 16_usize;
+        let value_dim = 16_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..new_tokens * q_heads * head_dim)
+            .map(|index| (index as f32 - 97.0) / 211.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..total_context * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 113.0) / 257.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..total_context * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 131.0) / 293.0)
+            .collect::<Vec<_>>();
+        let (q_fp8, q_scale, q_expected) = fp8_e4m3_quantize(&q_values);
+        let (k_fp8, k_scale, k_expected) = fp8_e4m3_quantize(&k_values);
+        let (v_fp8, v_scale, v_expected) = fp8_e4m3_quantize(&v_values);
+        let expected = expected_cached_prefix_attn(
+            &q_expected,
+            &k_expected,
+            &v_expected,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+
+        let mut q = context.alloc_buffer(q_fp8.len()).unwrap();
+        let mut k = context.alloc_buffer(k_fp8.len()).unwrap();
+        let mut v = context.alloc_buffer(v_fp8.len()).unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &q_fp8, Some(&mut stream)).unwrap();
+        k.copy_from_host(0, &k_fp8, Some(&mut stream)).unwrap();
+        v.copy_from_host(0, &v_fp8, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        cached_prefix_attn_fp8_e4m3_rocwmma(
+            &q,
+            &k,
+            &v,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            q_scale,
+            k_scale,
+            v_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 5e-4);
     }
 
     #[test]

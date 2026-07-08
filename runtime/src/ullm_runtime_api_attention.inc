@@ -1528,6 +1528,180 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
         stream);
 }
 
+ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_rocwmma(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    float q_scale,
+    float k_scale,
+    float v_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
+        output_buffer == nullptr) {
+        set_error("fp8 e4m3 cached prefix rocWMMA attention received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (new_tokens == 0 || q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (head_dim != 16 || value_dim != 16) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention currently requires head_dim=value_dim=16");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((q_heads % kv_heads) != 0) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention q_heads must be a multiple of kv_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (((q_heads / kv_heads) % 16) != 0) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention requires q_heads/kv_heads to be a multiple of 16");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention softmax scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(q_scale) || q_scale <= 0.0f ||
+        !std::isfinite(k_scale) || k_scale <= 0.0f ||
+        !std::isfinite(v_scale) || v_scale <= 0.0f) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention scales must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_buffer, k_cache_buffer) ||
+        !buffers_share_backend(q_buffer, v_cache_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (new_tokens > max_size - cached_prefix_len) {
+        set_error("fp8 e4m3 cached prefix rocWMMA attention total context overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t total_context = cached_prefix_len + new_tokens;
+
+    if (q_heads > max_size / new_tokens) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention q head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_head_sequence = new_tokens * q_heads;
+    if (head_dim > max_size / q_head_sequence ||
+        value_dim > max_size / q_head_sequence) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention q/output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = q_head_sequence * head_dim;
+    const size_t output_elements = q_head_sequence * value_dim;
+
+    if (kv_heads > max_size / total_context) {
+        set_error(
+            "fp8 e4m3 cached prefix rocWMMA attention kv head-context element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_context = total_context * kv_heads;
+    if (head_dim > max_size / kv_head_context ||
+        value_dim > max_size / kv_head_context) {
+        set_error("fp8 e4m3 cached prefix rocWMMA attention kv element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements = kv_head_context * head_dim;
+    const size_t v_elements = kv_head_context * value_dim;
+
+    if (output_elements > max_size / sizeof(float)) {
+        set_error("fp8 e4m3 cached prefix rocWMMA attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements;
+    const size_t k_bytes = k_elements;
+    const size_t v_bytes = v_elements;
+    const size_t output_bytes = output_elements * sizeof(float);
+    if (q_buffer->bytes < q_bytes) {
+        set_error("fp8 e4m3 cached prefix rocWMMA attention q buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_cache_buffer->bytes < k_bytes) {
+        set_error("fp8 e4m3 cached prefix rocWMMA attention k cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_cache_buffer->bytes < v_bytes) {
+        set_error("fp8 e4m3 cached prefix rocWMMA attention v cache buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < output_bytes) {
+        set_error("fp8 e4m3 cached prefix rocWMMA attention output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        cached_prefix_attn_fp8_e4m3_rocwmma_host(
+            static_cast<const uint8_t *>(q_buffer->ptr),
+            static_cast<const uint8_t *>(k_cache_buffer->ptr),
+            static_cast<const uint8_t *>(v_cache_buffer->ptr),
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            q_scale,
+            k_scale,
+            v_scale,
+            static_cast<float *>(output_buffer->ptr));
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
+            q_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            cached_prefix_len,
+            new_tokens,
+            q_heads,
+            kv_heads,
+            softmax_scale,
+            q_scale,
+            k_scale,
+            v_scale,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    set_error(
+        hip_kernel_error.empty() ?
+            "fp8 e4m3 cached prefix rocWMMA attention HIP kernel is unavailable" :
+            hip_kernel_error.c_str());
+    return ULLM_STATUS_RUNTIME_ERROR;
+}
+
 ullm_status paged_decode_attn_f32_impl(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *gate_buffer,
