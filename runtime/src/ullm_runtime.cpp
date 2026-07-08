@@ -873,6 +873,18 @@ public:
             rocwmma_include_options());
     }
 
+    bool compile_sq_fp8_matvec_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            sq_fp8_matvec_kernel_source(),
+            "ullm_sq_fp8_matvec_f32.hip",
+            code,
+            error);
+    }
+
     bool compile_paged_decode_attn_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(
             arch,
@@ -5266,6 +5278,64 @@ void matvec_f32_host(
     }
 }
 
+float sq_fp8_e4m3fn_to_f32(uint8_t value) {
+    const unsigned int raw = static_cast<unsigned int>(value);
+    const unsigned int sign = raw >> 7;
+    const unsigned int exponent = (raw >> 3) & 0x0fu;
+    const unsigned int mantissa = raw & 0x07u;
+    if (exponent == 0x0fu && mantissa == 0x07u) {
+        return std::numeric_limits<float>::quiet_NaN();
+    }
+    float magnitude = 0.0f;
+    if (exponent == 0u) {
+        magnitude = static_cast<float>(mantissa) * 0.001953125f;
+    } else {
+        magnitude = std::ldexp(1.0f + static_cast<float>(mantissa) * 0.125f,
+                               static_cast<int>(exponent) - 7);
+    }
+    return sign == 0u ? magnitude : -magnitude;
+}
+
+bool sq_fp8_matvec_f32_host(
+    const uint8_t *payload,
+    const float *scales,
+    const float *input,
+    size_t rows,
+    size_t cols,
+    uint32_t scale_kind,
+    size_t scale_block_cols,
+    float *output) {
+    if (payload == nullptr || scales == nullptr || input == nullptr || output == nullptr) {
+        return false;
+    }
+    size_t blocks_per_row = 1;
+    if (scale_kind == 2u) {
+        if (scale_block_cols == 0) {
+            return false;
+        }
+        blocks_per_row = (cols + scale_block_cols - 1) / scale_block_cols;
+    }
+    for (size_t row = 0; row < rows; ++row) {
+        const size_t row_offset = row * cols;
+        float sum = 0.0f;
+        for (size_t col = 0; col < cols; ++col) {
+            float scale = scales[0];
+            if (scale_kind == 1u) {
+                scale = scales[row];
+            } else if (scale_kind == 2u) {
+                scale = scales[row * blocks_per_row + col / scale_block_cols];
+            }
+            const float value = sq_fp8_e4m3fn_to_f32(payload[row_offset + col]);
+            if (!std::isfinite(value) || !std::isfinite(scale) || scale <= 0.0f) {
+                return false;
+            }
+            sum += value * scale * input[col];
+        }
+        output[row] = sum;
+    }
+    return true;
+}
+
 float bf16_to_f32_host(uint16_t value) {
     const uint32_t bits = static_cast<uint32_t>(value) << 16;
     float result = 0.0f;
@@ -5379,6 +5449,87 @@ private:
 
 HipMatvecKernelCache &hip_matvec_kernel_cache() {
     static HipMatvecKernelCache cache;
+    return cache;
+}
+
+class HipSqFp8MatvecKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_sq_fp8_matvec_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_sq_fp8_matvec_f32_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build SQ FP8 matvec HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipSqFp8MatvecKernelCache &hip_sq_fp8_matvec_kernel_cache() {
+    static HipSqFp8MatvecKernelCache cache;
     return cache;
 }
 
@@ -5587,6 +5738,65 @@ bool matvec_f32_hip_kernel(
     return true;
 }
 
+bool sq_fp8_matvec_f32_hip_kernel(
+    const ullm_runtime_buffer *payload_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    uint32_t scale_kind,
+    size_t scale_block_cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = payload_buffer->hip_device_id;
+    void *function = hip_sq_fp8_matvec_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    constexpr unsigned int block_size = 256;
+    if (rows > static_cast<size_t>(std::numeric_limits<unsigned int>::max())) {
+        if (error != nullptr) {
+            *error = "SQ FP8 matvec row count exceeds HIP grid limit";
+        }
+        return false;
+    }
+    unsigned long long kernel_rows = static_cast<unsigned long long>(rows);
+    unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
+    unsigned long long kernel_scale_block_cols =
+        static_cast<unsigned long long>(scale_block_cols);
+    unsigned int kernel_scale_kind = scale_kind;
+    void *payload_ptr = payload_buffer->ptr;
+    void *scale_ptr = scale_buffer->ptr;
+    void *input_ptr = input_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {
+        &payload_ptr,
+        &scale_ptr,
+        &input_ptr,
+        &kernel_rows,
+        &kernel_cols,
+        &kernel_scale_kind,
+        &kernel_scale_block_cols,
+        &output_ptr,
+    };
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            static_cast<unsigned int>(rows),
+            block_size,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for SQ FP8 matvec";
+        }
+        return false;
+    }
+    return true;
+}
+
 bool matvec_bf16_f32_hip_kernel(
     const ullm_runtime_buffer *matrix_buffer,
     const ullm_runtime_buffer *input_buffer,
@@ -5729,6 +5939,85 @@ ullm_status matvec_f32_hip_staging(
     }
     if (!synchronize_hip_staging(stream, device_id)) {
         set_error("failed to synchronize f32 matvec HIP output staging copy");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status sq_fp8_matvec_f32_hip_staging(
+    const ullm_runtime_buffer *payload_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    uint32_t scale_kind,
+    size_t scale_block_cols,
+    size_t required_payload_bytes,
+    size_t required_scale_bytes,
+    size_t required_input_bytes,
+    size_t required_output_bytes,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    std::vector<uint8_t> host_payload(required_payload_bytes);
+    std::vector<float> host_scales(required_scale_bytes / sizeof(float));
+    std::vector<float> host_input(cols);
+    std::vector<float> host_output(rows);
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const int device_id = payload_buffer->hip_device_id;
+
+    if (!hip_runtime().copy_async(
+            host_payload.data(),
+            payload_buffer->ptr,
+            required_payload_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_scales.data(),
+            scale_buffer->ptr,
+            required_scale_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id) ||
+        !hip_runtime().copy_async(
+            host_input.data(),
+            input_buffer->ptr,
+            required_input_bytes,
+            HIP_MEMCPY_DEVICE_TO_HOST,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy SQ FP8 matvec HIP inputs to host staging buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize SQ FP8 matvec HIP input staging copies");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!sq_fp8_matvec_f32_host(
+            host_payload.data(),
+            host_scales.data(),
+            host_input.data(),
+            rows,
+            cols,
+            scale_kind,
+            scale_block_cols,
+            host_output.data())) {
+        set_error("failed to run SQ FP8 matvec host staging path");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!hip_runtime().copy_async(
+            output_buffer->ptr,
+            host_output.data(),
+            required_output_bytes,
+            HIP_MEMCPY_HOST_TO_DEVICE,
+            hip_stream,
+            device_id)) {
+        set_error("failed to copy SQ FP8 matvec host staging output to HIP buffer");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    if (!synchronize_hip_staging(stream, device_id)) {
+        set_error("failed to synchronize SQ FP8 matvec HIP output staging copy");
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     set_error("");

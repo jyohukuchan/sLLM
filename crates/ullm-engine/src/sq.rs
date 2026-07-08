@@ -112,6 +112,18 @@ pub struct SqFp8MaterializedTensor {
     pub buffer: RuntimeBuffer,
 }
 
+#[derive(Debug)]
+pub struct SqFp8CompactTensorBytes {
+    pub tensor_index: usize,
+    pub tensor_name: String,
+    pub rows: usize,
+    pub cols: usize,
+    pub payload: Vec<u8>,
+    pub scale_values: Vec<f32>,
+    pub scale_granularity: String,
+    pub scale_block_cols: usize,
+}
+
 pub fn read_sq_fp8_artifact(path: impl AsRef<Path>) -> Result<SqFp8Artifact, String> {
     let artifact_dir = path.as_ref();
     let manifest_path = artifact_dir.join("sq_manifest.json");
@@ -335,6 +347,71 @@ pub fn materialize_named_sq_fp8_tensor_to_runtime_f32(
         rows,
         cols,
         buffer,
+    }))
+}
+
+pub fn read_named_sq_fp8_tensor_compact_bytes(
+    artifact: &SqFp8Artifact,
+    tensor_name: &str,
+) -> Result<Option<SqFp8CompactTensorBytes>, String> {
+    let Some(tensor_index) =
+        find_sq_fp8_tensor_index_by_exact_name(&artifact.manifest, tensor_name)
+    else {
+        return Ok(None);
+    };
+    let tensor = artifact
+        .manifest
+        .fp8_tensors
+        .get(tensor_index)
+        .ok_or_else(|| format!("SQ FP8 tensor index {tensor_index} disappeared"))?;
+    let (rows, cols) = sq_fp8_tensor_rows_cols(tensor)?;
+    let payload_path =
+        artifact_relative_path(&artifact.artifact_dir, &tensor.payload_file, "payload")?;
+    let scale_path = artifact_relative_path(&artifact.artifact_dir, &tensor.scale_file, "scale")?;
+    let payload_bytes = rows
+        .checked_mul(cols)
+        .ok_or_else(|| format!("SQ FP8 payload byte size overflows for {tensor_name}"))?;
+    let payload = read_exact_at(&payload_path, 0, payload_bytes)?;
+    let scale_len = usize::try_from(tensor.scale_bytes)
+        .map_err(|_| format!("SQ FP8 scale byte size does not fit usize for {tensor_name}"))?;
+    let scale_values = decode_f32_le_values_exact(&read_exact_at(&scale_path, 0, scale_len)?)
+        .map_err(|err| format!("failed to decode SQ FP8 scales for {tensor_name}: {err}"))?;
+    let scale_block_cols = tensor
+        .scale_block_cols
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                format!("SQ FP8 scale_block_cols does not fit usize for {tensor_name}")
+            })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if scale_values.len()
+        != usize::try_from(tensor.scale_elements).map_err(|_| {
+            format!("SQ FP8 scale element count does not fit usize for {tensor_name}")
+        })?
+    {
+        return Err(format!(
+            "SQ FP8 scale element count mismatch for {tensor_name}: manifest={} decoded={}",
+            tensor.scale_elements,
+            scale_values.len()
+        ));
+    }
+    for (index, scale) in scale_values.iter().enumerate() {
+        if !scale.is_finite() || *scale <= 0.0 {
+            return Err(format!(
+                "SQ FP8 tensor {tensor_name} scale {index} is invalid: {scale}"
+            ));
+        }
+    }
+    Ok(Some(SqFp8CompactTensorBytes {
+        tensor_index,
+        tensor_name: tensor.name.clone(),
+        rows,
+        cols,
+        payload,
+        scale_values,
+        scale_granularity: tensor.scale_granularity.clone(),
+        scale_block_cols,
     }))
 }
 
@@ -977,6 +1054,21 @@ mod tests {
         assert_eq!(values, vec![2.0, 4.0, 0.25, -0.5, 4.0, 8.0, 0.125, -0.25]);
         let second_row = materialize_sq_fp8_tensor_rows_to_host_f32(&root, tensor, 1, 1).unwrap();
         assert_eq!(second_row, vec![4.0, 8.0, 0.125, -0.25]);
+        let compact =
+            read_named_sq_fp8_tensor_compact_bytes(&artifact, "layer.0.mlp.gate_proj.weight")
+                .unwrap()
+                .unwrap();
+        assert_eq!(compact.tensor_index, 0);
+        assert_eq!(compact.tensor_name, "layer.0.mlp.gate_proj.weight");
+        assert_eq!(compact.rows, 2);
+        assert_eq!(compact.cols, 4);
+        assert_eq!(
+            compact.payload,
+            vec![0x38, 0x40, 0x30, 0xb8, 0x38, 0x40, 0x30, 0xb8]
+        );
+        assert_eq!(compact.scale_values, vec![2.0, 0.5, 4.0, 0.25]);
+        assert_eq!(compact.scale_granularity, "row_block");
+        assert_eq!(compact.scale_block_cols, 2);
 
         fs::remove_dir_all(root).unwrap();
     }

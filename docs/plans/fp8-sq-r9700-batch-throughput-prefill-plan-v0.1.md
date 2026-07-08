@@ -3676,6 +3676,42 @@ Inventory:
 2. SQ FP8 direct matvecまたは低遅延dequant matvecを実装し、materialized F32 fallbackから外す。
 3. native SQ rowができたら、B=1/4/8と長いprefill/prefix gridへ同じcandidateを流す。
 
+## 2026-07-09 progress: T2 SQ FP8 direct matvec
+
+前回の要点:
+
+- full mixed strict-top1 regression subsetとしてpromoteできる保守候補は、layer3 `k_proj` row-block16の1 tensorだけだった。
+- 直前の結果は `sq_execution_mode=materialized_f32_fallback` であり、SQ payloadをF32 resident bufferへ全展開していた。
+
+今回の変更点:
+
+- runtimeへ `ullm_runtime_sq_fp8_matvec_f32` を追加した。
+- HIPRTC kernel `ullm_sq_fp8_matvec_f32_kernel` は、FP8 E4M3 payload byteとF32 scaleを直接読み、matvec内でdequantしてF32 outputへaccumulateする。
+- `PackageAq4ResidentMatvec` に `SqFp8` storageを追加し、SQ overlay tensorはF32 materializationではなくpayload/scale resident bufferとして保持する。
+- `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL=1` でR9700上のfull mixed B=1/4/8を実行し、HIP direct kernelが使われることを確認した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-direct-matvec-conservative-candidate-v1.md` と `results.jsonl` に保存した。
+
+実測値:
+
+| batch | SQ execution mode | SQ prefill tok/s | SQ decode tok/s | SQ end-to-end tok/s | F32 fallback end-to-end tok/s | AQ4 final top1 | SQ final top1 | top1 match |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| 1 | `direct_fp8_dequant_matvec` | 20.373389 | 79.999546 | 9.083299 | 8.301199 | `44370` | `44370` | `true` |
+| 4 | `direct_fp8_dequant_matvec` | 44.467487 | 81.012681 | 23.470577 | 25.144005 | `44370,5446,10701,25411` | `44370,5446,10701,25411` | `true` |
+| 8 | `direct_fp8_dequant_matvec` | 63.262438 | 81.320426 | 35.598166 | 35.820128 | `44370,5446,10701,25411,21901,685,279,27973` | `44370,5446,10701,25411,21901,685,279,27973` | `true` |
+
+判断:
+
+- SQ FP8 overlayの実行はF32 materialized bufferではなく、payload/scale resident bufferからのdirect dequant matvecへ移った。
+- 保守候補のB=1/4/8 final top1はAQ4 baselineと一致した。
+- 単一tensorだけの候補では、direct pathのend-to-end tok/sはmaterialized F32 fallbackとほぼ同等で、format性能の判断材料としてはまだ弱い。
+- 速度改善には、SQ tensor数を増やしてもqualityが崩れない候補探索、またはSQ FP8 pair/triple/fused matvecへの拡張が必要である。
+
+次の行動:
+
+1. `SqFp8` storageをpair/triple/fused matvecへ広げ、AQ4 fused pathと同じ呼び出し粒度に近づける。
+2. `up_proj` 系はrow-block幅、scale粒度、W8A8/activation scaleを変えて再探索する。
+3. qualityが通るcandidate数が増えた段階で、B=1/4/8と長いprefill/prefix gridを再計測する。
+
 ## Risks
 
 | risk | impact | handling |

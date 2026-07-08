@@ -381,6 +381,17 @@ ullm_status ullm_runtime_matvec_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_sq_fp8_matvec_f32(
+    const ullm_runtime_buffer *payload_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    uint32_t scale_kind,
+    size_t scale_block_cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_matvec_bf16_f32(
     const ullm_runtime_buffer *matrix_buffer,
     const ullm_runtime_buffer *input_buffer,

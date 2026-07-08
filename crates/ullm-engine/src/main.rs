@@ -55,7 +55,7 @@ use ullm_engine::scheduler::{
     SchedulerState,
 };
 use ullm_engine::sq::{
-    materialize_named_sq_fp8_tensor_to_runtime_f32, materialize_sq_fp8_tensor_rows_to_runtime_f32,
+    materialize_sq_fp8_tensor_rows_to_runtime_f32, read_named_sq_fp8_tensor_compact_bytes,
     read_sq_fp8_artifact, select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
 };
 
@@ -19862,7 +19862,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         .map(|info| info.row_chunk)
         .unwrap_or(0);
     let sq_execution_mode = if sq_overlay_enabled {
-        "materialized_f32_fallback"
+        "direct_fp8_dequant_matvec"
     } else {
         "none"
     };
@@ -43281,8 +43281,15 @@ enum PackageResidentMatvecStorage {
         scale_values_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
         row_scale_buffer: Option<std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>>,
     },
+    #[allow(dead_code)]
     F32 {
         matrix_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    },
+    SqFp8 {
+        payload_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+        scale_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+        scale_kind: u32,
+        scale_block_cols: usize,
     },
 }
 
@@ -43327,6 +43334,28 @@ impl PackageResidentSharedBufferRegistry {
         self.buffers.insert(key, buffer.clone());
         Ok(buffer)
     }
+
+    fn raw_buffer(
+        &mut self,
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        key: String,
+        values: &[u8],
+        label: &str,
+    ) -> Result<std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>, String> {
+        if let Some(buffer) = self.buffers.get(&key) {
+            return Ok(buffer.clone());
+        }
+        let mut buffer = context
+            .alloc_buffer(values.len())
+            .map_err(|err| format!("failed to allocate shared {label}: {err}"))?;
+        buffer
+            .copy_from_host(0, values, Some(stream))
+            .map_err(|err| format!("failed to copy shared {label}: {err}"))?;
+        let buffer = std::sync::Arc::new(buffer);
+        self.buffers.insert(key, buffer.clone());
+        Ok(buffer)
+    }
 }
 
 fn package_resident_f32_buffer(
@@ -43347,6 +43376,37 @@ fn package_resident_f32_buffer(
         .copy_from_host(0, &encode_f32_to_bytes(values), Some(stream))
         .map_err(|err| format!("failed to copy {label}: {err}"))?;
     Ok(std::sync::Arc::new(buffer))
+}
+
+fn package_resident_raw_buffer(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    shared_buffers: &mut Option<&mut PackageResidentSharedBufferRegistry>,
+    key: String,
+    values: &[u8],
+    label: &str,
+) -> Result<std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>, String> {
+    if let Some(shared) = shared_buffers.as_mut() {
+        return shared.raw_buffer(context, stream, key, values, label);
+    }
+    let mut buffer = context
+        .alloc_buffer(values.len())
+        .map_err(|err| format!("failed to allocate {label}: {err}"))?;
+    buffer
+        .copy_from_host(0, values, Some(stream))
+        .map_err(|err| format!("failed to copy {label}: {err}"))?;
+    Ok(std::sync::Arc::new(buffer))
+}
+
+fn sq_fp8_runtime_scale_kind(scale_granularity: &str, label: &str) -> Result<u32, String> {
+    match scale_granularity {
+        "tensor" => Ok(ullm_runtime_sys::SQ_FP8_SCALE_TENSOR),
+        "row" => Ok(ullm_runtime_sys::SQ_FP8_SCALE_ROW),
+        "row_block" => Ok(ullm_runtime_sys::SQ_FP8_SCALE_ROW_BLOCK),
+        other => Err(format!(
+            "{label} SQ FP8 scale_granularity must be tensor|row|row_block, got {other}"
+        )),
+    }
 }
 
 static AQ4_MATVEC_PREWARMED: AtomicBool = AtomicBool::new(false);
@@ -44050,37 +44110,53 @@ impl PackageAq4ResidentMatvec {
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         registry: &mut WeightRegistry,
-        shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        mut shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
         path: &str,
         tensor_name: &str,
         chunk_bytes: usize,
         sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
     ) -> Result<Self, String> {
         if let Some(overlay) = sq_overlay {
-            match materialize_named_sq_fp8_tensor_to_runtime_f32(
-                context,
-                stream,
-                overlay.artifact,
-                tensor_name,
-                overlay.row_chunk,
-            ) {
-                Ok(Some(materialized)) => {
+            match read_named_sq_fp8_tensor_compact_bytes(overlay.artifact, tensor_name) {
+                Ok(Some(compact)) => {
+                    let scale_kind =
+                        sq_fp8_runtime_scale_kind(&compact.scale_granularity, tensor_name)?;
+                    let scale_bytes = encode_f32_to_bytes(&compact.scale_values);
+                    let payload_buffer = package_resident_raw_buffer(
+                        context,
+                        stream,
+                        &mut shared_buffers,
+                        format!("sq-fp8-payload:{tensor_name}"),
+                        &compact.payload,
+                        &format!("SQ FP8 payload for {tensor_name}"),
+                    )?;
+                    let scale_buffer = package_resident_raw_buffer(
+                        context,
+                        stream,
+                        &mut shared_buffers,
+                        format!("sq-fp8-scale:{tensor_name}"),
+                        &scale_bytes,
+                        &format!("SQ FP8 scales for {tensor_name}"),
+                    )?;
                     return Ok(Self {
-                        rows: materialized.rows,
-                        cols: materialized.cols,
+                        rows: compact.rows,
+                        cols: compact.cols,
                         group_size: 0,
                         tensor_scale: 1.0,
-                        scale_count: 0,
+                        scale_count: compact.scale_values.len(),
                         row_scale_count: 0,
-                        storage: PackageResidentMatvecStorage::F32 {
-                            matrix_buffer: std::sync::Arc::new(materialized.buffer),
+                        storage: PackageResidentMatvecStorage::SqFp8 {
+                            payload_buffer,
+                            scale_buffer,
+                            scale_kind,
+                            scale_block_cols: compact.scale_block_cols,
                         },
                     });
                 }
                 Ok(None) => {}
                 Err(err) => {
                     return Err(format!(
-                        "failed to materialize SQ FP8 overlay tensor {tensor_name}: {err}"
+                        "failed to load SQ FP8 overlay tensor {tensor_name}: {err}"
                     ));
                 }
             }
@@ -44114,11 +44190,14 @@ impl PackageAq4ResidentMatvec {
             PackageResidentMatvecStorage::F32 { .. } => Err(format!(
                 "{label} requested AQ4 storage for SQ/F32 resident matrix"
             )),
+            PackageResidentMatvecStorage::SqFp8 { .. } => Err(format!(
+                "{label} requested AQ4 storage for SQ FP8 resident matrix"
+            )),
         }
     }
 
     fn is_f32(&self) -> bool {
-        matches!(self.storage, PackageResidentMatvecStorage::F32 { .. })
+        !matches!(self.storage, PackageResidentMatvecStorage::Aq4 { .. })
     }
 
     fn row_f32(
@@ -44166,6 +44245,9 @@ impl PackageAq4ResidentMatvec {
                     .copy_from_host(0, &bytes, Some(stream))
                     .map_err(|err| format!("failed to copy {label} F32 row to runtime: {err}"))
             }
+            PackageResidentMatvecStorage::SqFp8 { .. } => {
+                Err(format!("{label} SQ FP8 row read is not implemented"))
+            }
         }
     }
 
@@ -44206,6 +44288,23 @@ impl PackageAq4ResidentMatvec {
                 Some(stream),
             )
             .map_err(|err| format!("failed to run {label} F32 matvec: {err}")),
+            PackageResidentMatvecStorage::SqFp8 {
+                payload_buffer,
+                scale_buffer,
+                scale_kind,
+                scale_block_cols,
+            } => ullm_runtime_sys::sq_fp8_matvec_f32(
+                payload_buffer.as_ref(),
+                scale_buffer.as_ref(),
+                input_buffer,
+                self.rows,
+                self.cols,
+                *scale_kind,
+                *scale_block_cols,
+                output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run {label} SQ FP8 matvec: {err}")),
         }
     }
 
@@ -44297,7 +44396,8 @@ impl PackageAq4ResidentMatvec {
                 )
                 .map_err(|err| format!("failed to run {label} AQ4 matvec add: {err}"))
             }
-            PackageResidentMatvecStorage::F32 { .. } => {
+            PackageResidentMatvecStorage::F32 { .. }
+            | PackageResidentMatvecStorage::SqFp8 { .. } => {
                 self.matvec(input_buffer, output_buffer, stream, label)?;
                 let mut projected =
                     read_runtime_buffer_f32(output_buffer, stream, self.rows, label)?;

@@ -361,6 +361,17 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_sq_fp8_matvec_f32(
+        payload_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        scale_kind: u32,
+        scale_block_cols: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_matvec_bf16_f32(
         matrix_buffer: *const RawRuntimeBuffer,
         input_buffer: *const RawRuntimeBuffer,
@@ -2458,6 +2469,78 @@ pub fn matvec_f32(
             input_buffer.raw.as_ptr(),
             rows,
             cols,
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub const SQ_FP8_SCALE_TENSOR: u32 = 0;
+pub const SQ_FP8_SCALE_ROW: u32 = 1;
+pub const SQ_FP8_SCALE_ROW_BLOCK: u32 = 2;
+
+pub fn sq_fp8_matvec_f32(
+    payload_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    scale_kind: u32,
+    scale_block_cols: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if rows == 0 || cols == 0 {
+        return Err("SQ FP8 matvec rows and cols must be greater than zero".to_string());
+    }
+    if scale_kind > SQ_FP8_SCALE_ROW_BLOCK {
+        return Err(
+            "SQ FP8 matvec scale kind must be tensor(0), row(1), or row_block(2)".to_string(),
+        );
+    }
+    if scale_kind == SQ_FP8_SCALE_ROW_BLOCK && scale_block_cols == 0 {
+        return Err(
+            "SQ FP8 matvec row_block scale_block_cols must be greater than zero".to_string(),
+        );
+    }
+    let matrix_elements = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "SQ FP8 matvec matrix element count overflows".to_string())?;
+    let scale_values = if scale_kind == SQ_FP8_SCALE_TENSOR {
+        1
+    } else if scale_kind == SQ_FP8_SCALE_ROW {
+        rows
+    } else {
+        let blocks_per_row = cols
+            .checked_add(scale_block_cols - 1)
+            .and_then(|value| value.checked_div(scale_block_cols))
+            .ok_or_else(|| "SQ FP8 matvec row_block count overflows".to_string())?;
+        rows.checked_mul(blocks_per_row)
+            .ok_or_else(|| "SQ FP8 matvec row_block scale count overflows".to_string())?
+    };
+    let scale_bytes = scale_values
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec scale byte size overflows".to_string())?;
+    let input_bytes = cols
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec input byte size overflows".to_string())?;
+    let output_bytes = rows
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 matvec output byte size overflows".to_string())?;
+    check_copy_range(0, matrix_elements, payload_buffer.size()?)?;
+    check_copy_range(0, scale_bytes, scale_buffer.size()?)?;
+    check_copy_range(0, input_bytes, input_buffer.size()?)?;
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_sq_fp8_matvec_f32(
+            payload_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            rows,
+            cols,
+            scale_kind,
+            scale_block_cols,
             output_buffer.raw.as_ptr(),
             stream,
         )
@@ -5506,6 +5589,58 @@ mod tests {
             .unwrap();
         stream.synchronize().unwrap();
         assert_eq!(le_bytes_to_f32s(&output_bytes), vec![4.5, 9.0]);
+    }
+
+    #[test]
+    fn cpu_sq_fp8_matvec_f32_computes_expected_row_block_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut payload = context.alloc_buffer(6).unwrap();
+        let mut scales = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(2 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        payload
+            .copy_from_host(0, &[0x38, 0x40, 0xb8, 0x30, 0x00, 0x38], Some(&mut stream))
+            .unwrap();
+        scales
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[2.0, 4.0, 1.0, 0.5]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[0.5, -1.0, 2.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        sq_fp8_matvec_f32(
+            &payload,
+            &scales,
+            &input,
+            2,
+            3,
+            SQ_FP8_SCALE_ROW_BLOCK,
+            2,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 2 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&output_bytes), vec![-11.0, 1.25]);
     }
 
     #[test]
