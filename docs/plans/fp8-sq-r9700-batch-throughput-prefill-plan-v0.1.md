@@ -1568,6 +1568,31 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 1. 長prefix gridで `cached_prefix_rocwmma_fp8` を測るときは、少なくとも `auto,16,64` を比較できるようにする。
 2. 次のkernel構造変更では、このsweep結果をbaselineとして使う。
 
+### 2026-07-08 progress: rocWMMA long-prefix grid v1
+
+前回の要点:
+
+- `cached_prefix_rocwmma_fp8` のvalue group幅をsweep軸にした。
+- 次の判断には、`L={4096,16384,65536}`、`M={16,128,512}` の長prefix gridで、scalar flash2系と同一shape比較する必要があった。
+
+今回の変更点:
+
+- R9700で `cached_prefix_rocwmma_fp8` の `value_group={auto,16,64}` を長prefix gridで測定した。
+- 同じ `q_heads=16,kv_heads=1,head_dim=256,value_dim=256` で `cached_prefix_flash2` と `cached_prefix_flash2_fp8q` も測定した。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c17-rocwmma-long-prefix-grid-v1.md` に保存した。
+
+観察:
+
+- `M=16` ではscalar flash2/fp8qがまだ圧倒的に速く、rocWMMAは約 `0.19-0.24x` 程度に留まる。
+- `M=128` では全prefix長でrocWMMAがscalar flash2を上回り、`1.47-1.85x` 程度速かった。
+- `M=512` では `L=4096` と `L=65536` でrocWMMAが明確に速く、`L=16384` ではF32-Q scalar flash2に対してほぼ同等、FP8-Q scalar flash2には勝った。
+- runtime heuristicはこのgridで最速または最速近傍だった。
+
+次の行動:
+
+1. SQ cached-prefix評価では、短chunk/decode-likeは `cached_prefix_flash2_fp8q`、`M>=128` は `cached_prefix_rocwmma_fp8` を主要baselineとして扱う。
+2. 次のkernel変更は、`M=16` の弱さを埋めるためのmulti-query-token tile化を検討する。
+
 ## Risks
 
 | risk | impact | handling |
