@@ -34,6 +34,7 @@
 - `kup6_gate5_down5` はcase_a/case_bへ広げてもstrict top1を維持した。ただしcase_aのtop8 overlapは `2 / 8` と低く、full SQ policyではなく6層regression subsetとして扱う。
 - `kup6_gate5_down5` の選択FP8 family/layerとfallback family/layerを `sq-fp8-policy-v0.1` として保存した。
 - `tools/build-sq-fp8-w8a16-artifact.py` は `--policy-json` で `sq-fp8-policy-v0.1` を読み、policyのinclude regex、candidate ID、row-block scaleをartifact manifestへ反映できる。
+- `kup6_gate5_down5` policyから実FP8 payload artifactを生成し、R9700で `sq-fp8-materialize-smoke` を通した。
 - したがって現時点では、T2は「品質境界をかなり狭めたがfull-target SQ guard未完了」と扱う。
 - 一方で、prefill/cached-prefix attentionはSQ候補評価の前提速度としては一旦十分と判断する。追加のFlashAttention2-like最適化は有益だが、SQ策定フェーズを止めるblockerにはしない。
 - 以後の主軸は、FP8 SQ候補の品質境界を固定し、real batch total throughputを測り、AQ4 baselineとvLLM参考値へ同じschemaで接続することに移す。
@@ -42,7 +43,7 @@
 
 1. T2 short guardの昇格条件は、text-level guardが実装・採用されるまではstrict top1一致にする。
 2. `kup6_gate5_down5` を現在の6層strict-top1 regression subsetとして固定する。
-3. `benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json` を現在の六層policy representationとして使い、artifact生成では `--policy-json` で渡す。
+3. `benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json` を現在の六層policy representationとして使う。実payload artifactは `/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact` で確認済みだが、`/tmp` 配下なので必要時に `--policy-json` から再生成する。
 4. `kup6_ogatedown5` はstrict-top1 failureかつnear-miss guardとして保存する。
 5. top-k overlap、AQ4 top1 rank、logit gapは診断指標として保存するが、strict top1失敗を上書きしない。
 6. T1 real batch runnerとVRAM samplingの実測gridを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
@@ -1116,6 +1117,27 @@ Exit criteria:
 2. T1 real batch runnerを進め、SQ候補評価で使えるthroughput行を作る。
 3. throughput比較ではoverlay load timingを使わず、native FP8またはmaterialization-aware runtime pathを使う。
 
+### T2 current status: policy artifact materialize v1
+
+前回の要点:
+
+- `sq-fp8-policy-v0.1` をbuilderが読めるようになった。
+- dry-runでは `kup6_gate5_down5` が `22` FP8 tensors、`753` passthrough tensors、row-block32として解決された。
+
+今回の変更点:
+
+- `--policy-json benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json` から実FP8 payload artifactを生成した。
+- artifactは `/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact` に保存した。
+- manifestにはpolicy blockが入り、`policy_id=kup6_gate5_down5`、`fp8_tensor_count=22`、`passthrough_tensor_count=753`、row-block32が確認できた。
+- R9700 device index `2` で `model.language_model.layers.3.self_attn.k_proj.weight` の2 rowsをmaterializeし、`roundtrip_max_abs_diff=0`、`verified=true` を確認した。
+- 結果は `benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-artifact-v0.1.md` に保存した。
+
+次の行動:
+
+1. このartifactはruntime boundary check用に使える。
+2. throughput比較ではhost-side materialize/load timingを使わない。
+3. T1 full package real-batch runnerを進める。
+
 ### T3: Prefill optimization v0.1, 4-7 days
 
 目的:
@@ -1908,8 +1930,8 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | T1 result schema preservation | partial done | `docs/specs/batch-throughput-workload-v0.1.md`, `docs/specs/inference-benchmark-result-v0.1.md`, `tools/run-external-benchmark.py` |
 | T1 real batch/total throughput runner | not done | next runner work |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
-| T2 FP8 SQ artifact writer | partial done with policy input | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; dry-run confirmed `kup6_gate5_down5` selects `22` FP8 tensors and `753` passthrough tensors. |
-| T2 runtime load path | partial done | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization |
+| T2 FP8 SQ artifact writer | partial done with policy artifact verified | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; actual `kup6_gate5_down5` payload artifact generated under `/tmp` with `22` FP8 tensors and `753` passthrough tensors. |
+| T2 runtime load path | partial done with policy artifact materialize verified | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization; policy artifact materialize smoke verified on R9700. |
 | T2 short prompt guard | partial done with six-layer prompt bundle subset found | one-tensor and layer-3 projection-set guards passed top1; row-block scale produced a `v`-fallback mixed candidate; later six-layer split narrowed the safe subset to `k/up` over layers `3,7,11,15,19,23` plus at most two of `o/gate/down` over layers `3,7,11,15,19`; `kup6_gate5_down5` passes len4/case_a/case_b strict top1, but case_a top8 overlap is only `2 / 8`: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-family-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-per-layer-combination-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-kup6-gate5-down5-prompt-bundle-v0.1.md` |
 
 次の行動:
@@ -1995,6 +2017,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - SQ策定フェーズの主順序を、T2品質境界固定、T1 real batch throughput runner、T5 AQ4/FP8比較、T6/T7 vLLM比較に並べ直す。
 - T2では、`kup6_gate5_down5` を6層strict-top1 regression subsetとして扱う。ただしcase_aのtop8 overlapは低いため、full SQ policyには昇格しない。選択FP8/fallback方針は `sq-fp8-policy-v0.1` として保存した。
 - T1では、component prefill real-batch smoke outputを `inference-benchmark-result-v0.1` JSONLへ変換できる `ullm-component-prefill` parserを追加した。
+- T2では、`kup6_gate5_down5` policyから実FP8 payload artifactを生成し、runtime materialize smokeまで確認した。
 - throughput評価では、SQ overlayのhost-side materialize/load timingを使わない。速度比較はnative FP8 path、materialization-aware runtime path、またはworking-setを明示したpathに限定する。
 - SQ候補の採用判断では、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、quality、VRAM、resident bytes、materialized working-set bytesを同じ表で見る。
 

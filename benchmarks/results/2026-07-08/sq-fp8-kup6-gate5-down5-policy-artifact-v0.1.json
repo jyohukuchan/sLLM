@@ -1,0 +1,75 @@
+{
+  "schema_version": "sq-fp8-policy-artifact-result-v0.1",
+  "date": "2026-07-08",
+  "artifact_dir": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact",
+  "artifact_manifest": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact/sq_manifest.json",
+  "candidate_id": "sq-fp8-w8a16-r9700-v0",
+  "policy_id": "kup6_gate5_down5",
+  "source_policy_json": "benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json",
+  "source_model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "base_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+  "scale": {
+    "granularity": "row_block",
+    "block_cols": 32,
+    "dtype": "f32"
+  },
+  "storage": {
+    "artifact_disk_usage_bytes_approx": 935329792,
+    "artifact_file_count": 45,
+    "fp8_tensor_count": 22,
+    "passthrough_tensor_count": 753,
+    "fp8_payload_bytes": 830472192,
+    "fp8_scale_bytes": 103809024,
+    "passthrough_source_bytes_estimate": 17645272032,
+    "compact_resident_bytes_estimate": 18579553248,
+    "materialized_working_set_bytes_estimate": 201326592
+  },
+  "manifest_policy_block_present": true,
+  "fp8_tensor_names": [
+    "model.language_model.layers.11.mlp.down_proj.weight",
+    "model.language_model.layers.11.mlp.gate_proj.weight",
+    "model.language_model.layers.11.mlp.up_proj.weight",
+    "model.language_model.layers.11.self_attn.k_proj.weight",
+    "model.language_model.layers.15.mlp.down_proj.weight",
+    "model.language_model.layers.15.mlp.gate_proj.weight",
+    "model.language_model.layers.15.mlp.up_proj.weight",
+    "model.language_model.layers.15.self_attn.k_proj.weight",
+    "model.language_model.layers.19.mlp.down_proj.weight",
+    "model.language_model.layers.19.mlp.gate_proj.weight",
+    "model.language_model.layers.19.mlp.up_proj.weight",
+    "model.language_model.layers.19.self_attn.k_proj.weight",
+    "model.language_model.layers.23.mlp.up_proj.weight",
+    "model.language_model.layers.23.self_attn.k_proj.weight",
+    "model.language_model.layers.3.mlp.down_proj.weight",
+    "model.language_model.layers.3.mlp.gate_proj.weight",
+    "model.language_model.layers.3.mlp.up_proj.weight",
+    "model.language_model.layers.3.self_attn.k_proj.weight",
+    "model.language_model.layers.7.mlp.down_proj.weight",
+    "model.language_model.layers.7.mlp.gate_proj.weight",
+    "model.language_model.layers.7.mlp.up_proj.weight",
+    "model.language_model.layers.7.self_attn.k_proj.weight"
+  ],
+  "materialize_smoke": {
+    "command": "target/debug/ullm-engine sq-fp8-materialize-smoke /tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact 2 model.language_model.layers.3.self_attn.k_proj.weight 2 0",
+    "device_index": 2,
+    "backend": "hip",
+    "device_name": "AMD Radeon Graphics",
+    "tensor": "model.language_model.layers.3.self_attn.k_proj.weight",
+    "tensor_index": 17,
+    "family": "attn_k",
+    "shape": [
+      1024,
+      4096
+    ],
+    "row_count": 2,
+    "materialized_elements": 8192,
+    "output_bytes": 32768,
+    "roundtrip_max_abs_diff": 0.0,
+    "verified": true
+  },
+  "notes": [
+    "FP8 payload files are stored under /tmp and are not committed to git.",
+    "compact_resident_bytes_estimate includes passthrough source bytes and is intentionally conservative for this partial policy.",
+    "This verifies policy-json to manifest to runtime materialization, not throughput."
+  ]
+}

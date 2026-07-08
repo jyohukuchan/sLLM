@@ -140,9 +140,9 @@ bundle result.
 
 The v0.1 artifact is the payload and metadata boundary for T2. Runtime execution support is staged:
 
-1. Build and validate `sq_manifest.json`. Done for the first smoke path.
-2. Generate a small FP8 payload artifact and verify file sizes/checksums. Done for the first smoke path.
-3. Add a runtime loader that can resolve FP8 payload plus scale files for selected tensors. Partially done.
+1. Build and validate `sq_manifest.json`. Done for the first smoke path and current policy artifact.
+2. Generate FP8 payload artifacts and verify file sizes/checksums. Done for the first small smoke path and for the current `kup6_gate5_down5` policy artifact.
+3. Add a runtime loader that can resolve FP8 payload plus scale files for selected tensors. Partially done for row and row-block scale.
 4. Connect the loader to short prompt guard. Partially done for a one-tensor `q_proj` overlay.
 
 The first runtime loader entrypoint is:
@@ -211,6 +211,15 @@ while keeping `q/v/o` and layer `23` `gate/down` as fallback. This is the curren
 strict-top1 regression subset. It is still not a promoted full SQ policy because case_a top8 overlap
 is only `2 / 8` and broader coverage is missing. The reproducible policy record is saved as
 `benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json`.
+
+The same policy has been materialized into a real payload artifact at
+`/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact`. The manifest contains a policy block,
+`22` FP8 tensors, `753` passthrough tensors, and row-block32 F32 scales. R9700
+`sq-fp8-materialize-smoke` verified `model.language_model.layers.3.self_attn.k_proj.weight` with
+`roundtrip_max_abs_diff=0` and `verified=true`. The result record is saved as
+`benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-artifact-v0.1.md`. This verifies the
+policy-to-artifact-to-runtime boundary, not throughput or final SQ acceptance. Because the payload
+artifact is under `/tmp`, it must be regenerated from the policy JSON when absent.
 
 For repeatable guard runs, use:
 
