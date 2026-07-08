@@ -45026,6 +45026,175 @@ impl PackageLinearAttnResidentStepLayer {
     }
 }
 
+#[allow(dead_code)]
+struct PackageLinearAttnResidentStepBatchLayer {
+    layer_index: usize,
+    hidden: usize,
+    request_index: std::collections::BTreeMap<RequestId, usize>,
+    request_ids: Vec<RequestId>,
+    layers: Vec<PackageLinearAttnResidentStepLayer>,
+}
+
+#[allow(dead_code)]
+impl PackageLinearAttnResidentStepBatchLayer {
+    fn load(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        request_ids: Vec<RequestId>,
+    ) -> Result<Self, String> {
+        let request_index =
+            package_linear_attn_request_slot_index(&request_ids, "linear-attn resident batch")?;
+        let mut layers = Vec::with_capacity(request_ids.len());
+        let mut hidden = None;
+        for request_id in &request_ids {
+            let layer =
+                PackageLinearAttnResidentStepLayer::load(context, stream, path, chunk_bytes, layer_index)
+                    .map_err(|err| {
+                        format!(
+                            "failed to load linear-attn resident batch layer {layer_index} for request {request_id:?}: {err}"
+                        )
+                    })?;
+            if let Some(previous) = hidden {
+                if previous != layer.hidden {
+                    return Err(format!(
+                        "linear-attn resident batch layer {layer_index} hidden changed: previous={previous} current={}",
+                        layer.hidden
+                    ));
+                }
+            } else {
+                hidden = Some(layer.hidden);
+            }
+            layers.push(layer);
+        }
+        let hidden = hidden.ok_or_else(|| {
+            format!("linear-attn resident batch layer {layer_index} has no request slots")
+        })?;
+        Ok(Self {
+            layer_index,
+            hidden,
+            request_index,
+            request_ids,
+            layers,
+        })
+    }
+
+    fn request_ids(&self) -> &[RequestId] {
+        &self.request_ids
+    }
+
+    fn request_count(&self) -> usize {
+        self.request_ids.len()
+    }
+
+    fn layer_index(&self) -> usize {
+        self.layer_index
+    }
+
+    fn hidden(&self) -> usize {
+        self.hidden
+    }
+
+    fn request_slot(&self, request_id: RequestId) -> Result<usize, String> {
+        self.request_index.get(&request_id).copied().ok_or_else(|| {
+            format!(
+                "linear-attn resident batch layer {} has no state slot for request {request_id:?}",
+                self.layer_index
+            )
+        })
+    }
+
+    fn layer_for_request_mut(
+        &mut self,
+        request_id: RequestId,
+    ) -> Result<&mut PackageLinearAttnResidentStepLayer, String> {
+        let slot = self.request_slot(request_id)?;
+        self.layers.get_mut(slot).ok_or_else(|| {
+            format!(
+                "linear-attn resident batch layer {} missing state slot {slot} for request {request_id:?}",
+                self.layer_index
+            )
+        })
+    }
+
+    fn layer_for_request(
+        &self,
+        request_id: RequestId,
+    ) -> Result<&PackageLinearAttnResidentStepLayer, String> {
+        let slot = self.request_slot(request_id)?;
+        self.layers.get(slot).ok_or_else(|| {
+            format!(
+                "linear-attn resident batch layer {} missing state slot {slot} for request {request_id:?}",
+                self.layer_index
+            )
+        })
+    }
+
+    fn step_from_host_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_id: RequestId,
+        residual: &[f32],
+        label: &str,
+    ) -> Result<(), String> {
+        self.layer_for_request_mut(request_id)?
+            .step_from_host_to_device(stream, residual, label)
+    }
+
+    fn step_from_device_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_id: RequestId,
+        residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<(), String> {
+        self.layer_for_request_mut(request_id)?
+            .step_from_device_to_device(stream, residual_buffer, label)
+    }
+
+    fn output_buffer(
+        &self,
+        request_id: RequestId,
+    ) -> Result<&ullm_runtime_sys::RuntimeBuffer, String> {
+        Ok(self.layer_for_request(request_id)?.output_buffer())
+    }
+
+    fn read_output(
+        &self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_id: RequestId,
+    ) -> Result<Vec<f32>, String> {
+        self.layer_for_request(request_id)?.read_output(stream)
+    }
+
+    fn take_last_component_step_ms(
+        &mut self,
+        request_id: RequestId,
+    ) -> Result<Option<PackageLinearAttnComponentStepMs>, String> {
+        Ok(self
+            .layer_for_request_mut(request_id)?
+            .take_last_component_step_ms())
+    }
+}
+
+fn package_linear_attn_request_slot_index(
+    request_ids: &[RequestId],
+    label: &str,
+) -> Result<std::collections::BTreeMap<RequestId, usize>, String> {
+    if request_ids.is_empty() {
+        return Err(format!("{label} requires at least one request id"));
+    }
+    let mut index = std::collections::BTreeMap::new();
+    for (slot, &request_id) in request_ids.iter().enumerate() {
+        if index.insert(request_id, slot).is_some() {
+            return Err(format!("{label} has duplicate request id {request_id:?}"));
+        }
+    }
+    Ok(index)
+}
+
 fn runtime_host_linear_attn_gate_beta_f32(
     a: &[f32],
     b: &[f32],
@@ -45159,6 +45328,32 @@ fn runtime_host_linear_attn_recurrent_f32(
 #[cfg(test)]
 mod linear_attn_step_state_tests {
     use super::*;
+
+    #[test]
+    fn linear_attn_request_slot_index_rejects_empty_and_duplicate_ids() {
+        assert!(package_linear_attn_request_slot_index(&[], "test batch").is_err());
+        assert!(
+            package_linear_attn_request_slot_index(
+                &[RequestId(10), RequestId(11), RequestId(10)],
+                "test batch"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn linear_attn_request_slot_index_preserves_request_order() {
+        let index = package_linear_attn_request_slot_index(
+            &[RequestId(42), RequestId(7), RequestId(99)],
+            "test batch",
+        )
+        .unwrap();
+
+        assert_eq!(index.get(&RequestId(42)), Some(&0));
+        assert_eq!(index.get(&RequestId(7)), Some(&1));
+        assert_eq!(index.get(&RequestId(99)), Some(&2));
+        assert_eq!(index.len(), 3);
+    }
 
     #[test]
     fn linear_attn_conv1d_step_matches_full_causal_conv() {

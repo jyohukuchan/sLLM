@@ -75,6 +75,7 @@ Required artifact metadata:
 | T1 token-id model-loop real-prefill bridge | partial done for AQ4 selected-layer request-batch prefill guard | `package-token-ids-model-loop-smoke` now groups prefill by layer/timestep across active requests and emits `prefill_batch_request_counts_csv`. R9700 layers `3,7`, `batch=2`, `prompt=2`, `generated=1` preserved `batching.mode=real`, `prefill_real_batch=true`, `prefill_executor=stack_prefill_request_batch_step`, `prefill_batch_request_counts=2,2,2,2`, `decode_real_batch=true`, and final top1 tokens `155793,23175`; guarded by `phase-t1-token-id-model-loop-real-prefill-smoke-v1.md`. |
 | T1 self-attn stack real-batch bridge | partial done for manifest self-attention layers | `package-token-ids-model-loop-smoke` now accepts `all-self-attn` / `manifest-self-attn` and derives layers from manifest `q_norm` / `k_norm` tensors. R9700 AQ4 rows for layers `3,7,11,15,19,23,27,31` preserve `batching.mode=real`, `prefill_real_batch=true`, and `decode_real_batch=true` at `batch=4/8`; end-to-end tok/s was `73.078709` and `72.851718`. Guarded by `phase-t1-self-attn-stack-real-batch-small-grid-v1.md`; this is not full mixed-attention LM throughput. |
 | T1 full mixed layer kind inventory | partial done, implementation target fixed | `package-layer-kind-inventory-smoke` with `manifest-all` verified the AQ4 full package layer order as contiguous `0..31`, with self-attention layers `3,7,11,15,19,23,27,31` and 24 linear-attention layers. Guarded by `phase-t1-full-mixed-layer-kind-inventory-v1.md`; this is an inventory row, not throughput evidence. |
+| T1 linear-attn request state owner | partial done, state slot boundary added | `PackageLinearAttnResidentStepBatchLayer` maps `RequestId` to per-request `PackageLinearAttnResidentStepLayer` slots so linear-attention recurrent state and Conv1d history do not mix across requests. Guarded by `phase-t1-linear-attn-request-state-owner-v1.md`; this is a runner-side state boundary, not a throughput row or shared-weight final design. |
 | T1 full package total throughput runner | partial done with logical full-package grid | `package-batch-throughput-bench` full-package rows are saved for AQ4 `batch=1/4/8` in `phase-t1-full-package-logical-batch-small-grid-v1.md`. They preserve prefill/decode/end-to-end total throughput, KV cache bytes, VRAM, and correctness, but `batching.mode=logical`, `prefill_real_batch=false`, `decode_real_batch=false`, and weights are reloaded per request. Real request-batch prefill/decode/end-to-end rows are still needed before SQ throughput comparison. |
 | T2 artifact metadata path | partial done with policy artifact verified | `sq-fp8-w8a16-r9700-v0` manifest and writer are staged. `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; actual `kup6_gate5_down5` payload artifact generated under `/tmp` with `22` FP8 tensors and `753` passthrough tensors. |
 | T2 candidate matrix | done v0.1, quality/throughput pending | `tools/build-sq-fp8-candidate-matrix.py` builds `sq-fp8-format-candidate-matrix-v0.1.json` and `.md` from the current policy and artifact result. It fixes W8A16 F32-scale, scale16, scale8, W8A8, and hybrid fallback candidate axes. Strict top1 remains the promotion rule, and overlay load timing remains excluded from speed results. |
@@ -121,32 +122,33 @@ Required artifact metadata:
 9. Use synthetic and package-backed component real-batch rows only for kernel/schema validation, not final SQ package throughput.
 10. Use `phase-t1-self-attn-stack-real-batch-small-grid-v1` only as an intermediate manifest self-attention stack guard; extend T1 to full mixed-attention real request-batch prefill/decode/end-to-end rows before using total throughput rows for SQ performance decisions.
 11. Use `phase-t1-full-mixed-layer-kind-inventory-v1` as the full mixed-attention layer order target: layers `0..31`, self-attention at `3,7,11,15,19,23,27,31`, and linear-attention everywhere else.
-12. Use native FP8 or materialization-aware runtime paths for throughput comparison; do not use SQ overlay load timing as an SQ speed result.
-13. Keep `layer7-k16-up32` and `layer3-kup-plus-layer7-k16` as passing probes, and `layer3-kup-plus-layer7-up32` as the isolation failure guard.
-14. Keep `layer7-up-fallback` as the current passing boundary; keep `layer7-up16` and `layer7-up64` as failure guards.
-15. Keep `layer7-plus-o32` and `layer7-plus-gate32` as individual passing branches; keep `layer7-plus-down64` and `layer7-plus-o32-gate32` as failure guards.
-16. Keep `layer7-ogate-o16-gate32`, `layer7-ogate-o32-gate16`, and `layer7-ogate-o16-gate16` as evidence that row-block16 does not recover combined o/gate coverage.
-17. Keep `layer7-o32-plus-layer11-k16-o32` as the current passing branch and `layer7-o32-plus-layer11-k16` as its rollback guard.
-18. Keep `layer7-o32-layer11-o32-plus-layer15-k16-o32` as the current passing branch and `layer7-o32-layer11-o32-plus-layer15-k16` as its rollback guard.
-19. Keep `layer7-o32-layer11-o32-layer15-o32-plus-layer19-k16-o32` as the current passing branch and `layer7-o32-layer11-o32-layer15-o32-plus-layer19-k16` as its rollback guard.
-20. Keep `layer7-o32-layer11-o32-layer15-o32-layer19-o32-plus-layer23-k16-o32` as the current passing branch and `layer7-o32-layer11-o32-layer15-o32-layer19-o32-plus-layer23-k16` as its rollback guard.
-21. Keep `selected-layer-ko-plus-layer3-o32` as the current passing branch.
-22. Keep layer3 `gate_proj` row-block32 and row-block16 as failure guards.
-23. Keep `selected-layer-ko-plus-layer3-o32-down64` as the current passing branch.
-24. Keep layer11 `up_proj` row-block32 and row-block16 as failure guards.
-25. Keep `selected-layer-ko-layer3-down64-plus-layer11-down64` as the current passing branch.
-26. Keep layer15 `down_proj` row-block64 as a failure guard.
-27. Keep layer19 `down_proj` row-block64 as a failure guard.
-28. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer23-down64` as the current passing branch.
-29. Keep layer23 `up_proj` row-block32 and row-block16 as failure guards.
-30. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer23-gate32-down64` as the current passing branch.
-31. Keep layer11 `gate_proj` row-block32 and row-block16 as failure guards.
-32. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer15-gate32-plus-layer23-gate32-down64` as the current passing branch.
-33. Keep layer15 `down_proj` row-block64 as a failure guard.
-34. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer15-up32-gate32-plus-layer23-gate32-down64` as the current passing branch.
-35. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer15-up32-gate32-plus-layer19-gate32-plus-layer23-gate32-down64` as the current passing branch.
-36. Keep layer19 `down_proj` row-block64 as a failure guard.
-37. Keep layer19 `up_proj` row-block32 and row-block16 as failure guards.
-38. Resume T1 full-package real request-batch prefill/decode/end-to-end throughput work, or broaden T2 beyond the current selected-layer MLP probe set if quality exploration remains the priority.
-39. Move to T5 AQ4/FP8 throughput comparison after the T1 full package total-throughput runner exists and a T2 model-loop-safe subset is encoded in the runtime path.
-40. Run vLLM comparison only after uLLM R9700 `batch=1/4/8` AQ4 and FP8 rows share the same schema.
+12. Use `phase-t1-linear-attn-request-state-owner-v1` as the first linear-attention request-state boundary; next connect it to the full mixed runner layer enum.
+13. Use native FP8 or materialization-aware runtime paths for throughput comparison; do not use SQ overlay load timing as an SQ speed result.
+14. Keep `layer7-k16-up32` and `layer3-kup-plus-layer7-k16` as passing probes, and `layer3-kup-plus-layer7-up32` as the isolation failure guard.
+15. Keep `layer7-up-fallback` as the current passing boundary; keep `layer7-up16` and `layer7-up64` as failure guards.
+16. Keep `layer7-plus-o32` and `layer7-plus-gate32` as individual passing branches; keep `layer7-plus-down64` and `layer7-plus-o32-gate32` as failure guards.
+17. Keep `layer7-ogate-o16-gate32`, `layer7-ogate-o32-gate16`, and `layer7-ogate-o16-gate16` as evidence that row-block16 does not recover combined o/gate coverage.
+18. Keep `layer7-o32-plus-layer11-k16-o32` as the current passing branch and `layer7-o32-plus-layer11-k16` as its rollback guard.
+19. Keep `layer7-o32-layer11-o32-plus-layer15-k16-o32` as the current passing branch and `layer7-o32-layer11-o32-plus-layer15-k16` as its rollback guard.
+20. Keep `layer7-o32-layer11-o32-layer15-o32-plus-layer19-k16-o32` as the current passing branch and `layer7-o32-layer11-o32-layer15-o32-plus-layer19-k16` as its rollback guard.
+21. Keep `layer7-o32-layer11-o32-layer15-o32-layer19-o32-plus-layer23-k16-o32` as the current passing branch and `layer7-o32-layer11-o32-layer15-o32-layer19-o32-plus-layer23-k16` as its rollback guard.
+22. Keep `selected-layer-ko-plus-layer3-o32` as the current passing branch.
+23. Keep layer3 `gate_proj` row-block32 and row-block16 as failure guards.
+24. Keep `selected-layer-ko-plus-layer3-o32-down64` as the current passing branch.
+25. Keep layer11 `up_proj` row-block32 and row-block16 as failure guards.
+26. Keep `selected-layer-ko-layer3-down64-plus-layer11-down64` as the current passing branch.
+27. Keep layer15 `down_proj` row-block64 as a failure guard.
+28. Keep layer19 `down_proj` row-block64 as a failure guard.
+29. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer23-down64` as the current passing branch.
+30. Keep layer23 `up_proj` row-block32 and row-block16 as failure guards.
+31. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer23-gate32-down64` as the current passing branch.
+32. Keep layer11 `gate_proj` row-block32 and row-block16 as failure guards.
+33. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer15-gate32-plus-layer23-gate32-down64` as the current passing branch.
+34. Keep layer15 `down_proj` row-block64 as a failure guard.
+35. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer15-up32-gate32-plus-layer23-gate32-down64` as the current passing branch.
+36. Keep `selected-layer-ko-layer3-down64-layer11-down64-plus-layer15-up32-gate32-plus-layer19-gate32-plus-layer23-gate32-down64` as the current passing branch.
+37. Keep layer19 `down_proj` row-block64 as a failure guard.
+38. Keep layer19 `up_proj` row-block32 and row-block16 as failure guards.
+39. Resume T1 full-package real request-batch prefill/decode/end-to-end throughput work, or broaden T2 beyond the current selected-layer MLP probe set if quality exploration remains the priority.
+40. Move to T5 AQ4/FP8 throughput comparison after the T1 full package total-throughput runner exists and a T2 model-loop-safe subset is encoded in the runtime path.
+41. Run vLLM comparison only after uLLM R9700 `batch=1/4/8` AQ4 and FP8 rows share the same schema.

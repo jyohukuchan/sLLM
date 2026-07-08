@@ -3316,6 +3316,34 @@ Inventory:
 3. linear-attention層ではrequestごとのrecurrent stateとConv1d historyを保持する。
 4. full packageで `batching.mode=real`、`prefill_real_batch=true`、`decode_real_batch=true` のAQ4 baseline rowを保存してからSQ候補比較へ進む。
 
+## 2026-07-09 progress: T1 linear-attn request state owner
+
+前回の要点:
+
+- full mixed-attention layer orderは固定できた。
+- 次の実装blockerは、linear-attention層のrecurrent stateとcausal Conv1d historyをrequestごとに分離することだった。
+- 既存のlinear-attn resident step layerはsingle request向けだった。
+
+今回の変更点:
+
+- `PackageLinearAttnResidentStepBatchLayer` を追加した。
+- `RequestId` からlinear-attn resident layer state slotへ解決するownerにした。
+- 各slotは `PackageLinearAttnResidentStepLayer` を持ち、requestごとのrecurrent stateとConv1d historyを分離する。
+- 空request listと重複request idを拒否するunit testを追加した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-linear-attn-request-state-owner-v1.md` に保存した。
+
+判断:
+
+- これはthroughput rowではなく、full mixed real-batch runnerへ接続するためのstate ownerである。
+- 現時点ではweights共有ではなくrequest slotごとのresident layerを持つため、性能最終形ではshared resident weight + per-request state bufferへ寄せる必要がある。
+- ただし、full mixed pathに必要な「linear-attn stateがrequest間で混ざらない」契約はコード上で固定できた。
+
+次の行動:
+
+1. full mixed-attention runnerのlayer enumへlinear-attn request-batch ownerを接続する。
+2. 小さいB=2 / prompt=2 / generated=1で、full mixed pathの `prefill_real_batch=true` / `decode_real_batch=true` smokeを作る。
+3. その後、weights共有とactual throughputの改善へ進む。
+
 ## Risks
 
 | risk | impact | handling |
