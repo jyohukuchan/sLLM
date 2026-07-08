@@ -1972,7 +1972,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | --- | --- | --- |
 | T0 state freeze | done | `benchmarks/results/2026-07-08/sq-r9700-state-freeze-v0.1.json`, `.md` |
 | T1 result schema preservation | partial done | `docs/specs/batch-throughput-workload-v0.1.md`, `docs/specs/inference-benchmark-result-v0.1.md`, `tools/run-external-benchmark.py` |
-| T1 real batch/total throughput runner | partial done with package-backed component batch grid and logical full-package grid | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`, `phase-t1-package-prefill-component-batch-grid-v1.md`, `benchmarks/workloads/r9700-aq4-full-package-logical-batch-small-grid.json`, `phase-t1-full-package-logical-batch-small-grid-v1.md`; real full-package request-batch prefill/decode/end-to-end total throughput is still not done. |
+| T1 real batch/total throughput runner | partial done with package-backed component batch grid, logical full-package grid, and hybrid model-loop smoke | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`, `phase-t1-package-prefill-component-batch-grid-v1.md`, `benchmarks/workloads/r9700-aq4-full-package-logical-batch-small-grid.json`, `phase-t1-full-package-logical-batch-small-grid-v1.md`, `phase-t1-model-loop-hybrid-throughput-smoke-v1.md`; real full-package request-batch prefill/decode/end-to-end total throughput is still not done. |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done with policy artifact verified | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; actual `kup6_gate5_down5` payload artifact generated under `/tmp` with `22` FP8 tensors and `753` passthrough tensors. |
 | T2 runtime load path | partial done with policy artifact materialize verified | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization; policy artifact materialize smoke verified on R9700. |
@@ -2135,6 +2135,49 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 1. このlogical full-package gridは、schema/control-plane guardとして扱う。SQ/vLLM比較の最終性能判断には使わない。
 2. T1の次の実装は、full package pathへreal request-batch prefill/decode executorを接続し、同じ `batch=1/4/8` gridで `batching.mode=real` の行を出すことに集中する。
 3. real batch化後も同じJSONL schemaを使い、logical/realの差分が比較表で混ざらないようにする。
+
+## 2026-07-08 progress: T1 model-loop hybrid throughput smoke
+
+前回の要点:
+
+- logical full-package gridはschema/control-plane guardとして有効だが、real request-batch性能ではない。
+- 既存の `package-self-attn-mlp-block-model-loop-smoke` は、selected layer stackでschedulerとdecode ready batchを使う足場を持っていた。
+- ただし、stdoutにtimed total-throughput fieldsがなく、JSONL parserにも未接続だった。
+
+今回の変更点:
+
+- `package-self-attn-mlp-block-model-loop-smoke` に次のkey-value fieldsを追加した。
+  - `prefill_total_input_tokens`
+  - `decode_total_generated_tokens`
+  - `end_to_end_total_tokens`
+  - `prefill_wall_ms`
+  - `decode_wall_ms`
+  - `total_wall_ms`
+  - `prefill_total_input_tps`
+  - `decode_total_generated_tps`
+  - `end_to_end_total_tps`
+  - `layers_csv`
+  - `prompt_tokens_csv`
+  - `max_new_tokens_csv`
+  - `total_tokens_csv`
+  - `generated_tokens_csv`
+  - `decode_batch_ready_counts_csv`
+- `tools/run-external-benchmark.py --parse ullm-model-loop-throughput` を追加し、model-loop key-value stdoutを `inference-benchmark-result-v0.1` JSONLへ変換できるようにした。
+- R9700で layers `3,7`、sequence_len `3` のsmokeを実行した。
+  - `benchmarks/results/2026-07-08/package-batch-throughput/phase-t1-model-loop-hybrid-throughput-smoke-v1.md`
+- この行は `batching.mode=hybrid`、`prefill_real_batch=false`、`decode_real_batch=true`、`decode_executor_request_parallelism=2` を保存した。
+
+実測値:
+
+| layers | requests | prefill real | decode real | decode request parallelism | prefill total tok/s | decode generated tok/s | end-to-end tok/s | verified |
+| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | --- |
+| `3,7` | 3 | false | true | 2 | 78.702126 | 78.214266 | 78.492300 | true |
+
+次の行動:
+
+1. このhybrid rowはselected-layer stack guardとして扱う。full language-model SQ/vLLM比較には使わない。
+2. 次はtoken-id full package pathとmodel-loop stack runnerの接続点を作り、embedding、all selected runtime layers、final norm/lm_head、quality guardを同じrequest-batch scheduler上で扱う。
+3. prefillもrequest-batch化できた段階で `batching.mode=real` へ昇格する。decodeだけrealの間は `hybrid` として区別する。
 
 ## Risks
 

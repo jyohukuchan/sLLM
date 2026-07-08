@@ -277,6 +277,24 @@ requested workload batch and the executor's actual parallelism separately. A row
 `workload.component_total_input_tokens=8`, while `batching.prefill_executor_request_parallelism=1`
 and `batching.prefill_executor_token_parallelism=8`.
 
+Model-loop stack smokes may be converted with `--parse ullm-model-loop-throughput`. These rows are
+selected-layer stack rows, not final full language-model throughput rows. They may use
+`batching.mode="hybrid"` when prefill is still sequential per request/token but decode uses a real
+ready-batch executor. Such rows must preserve:
+
+- `batching.prefill_real_batch`
+- `batching.decode_real_batch`
+- `batching.decode_executor_request_parallelism`
+- `workload.layers_csv`
+- `workload.prompt_tokens_per_request`
+- `workload.generated_tokens_per_request`
+- `metrics.prefill_total_input_tokens_per_second`
+- `metrics.decode_total_generated_tokens_per_second`
+- `metrics.end_to_end_total_tokens_per_second`
+
+`hybrid` rows are useful for connecting scheduler/runtime request batching to the result schema, but
+they must not be mixed with final `real` full-package throughput rows in SQ/vLLM comparisons.
+
 SQ candidate rows may also carry a top-level `candidate` object:
 
 - `candidate.id`: e.g. `sq-fp8-w8a16-r9700-v0`
@@ -287,8 +305,9 @@ of live requests in the run. They are equal for fixed prompt/decode benchmark gr
 diverge once dynamic scheduling is implemented.
 
 uLLM may record `batching.mode` outside this generic schema. `logical` means requests are accounted
-as a batch but executed through sequential single-request paths. `real` means prefill and/or decode
-shares kernels, weight residency, or scheduler state across requests. Only `real` rows should be
+as a batch but executed through sequential single-request paths. `hybrid` means only part of the
+path, usually decode, shares kernels or scheduler state across requests. `real` means the measured
+full-package path uses request-batch execution for the relevant phase. Only `real` rows should be
 used to compare production batch throughput against vLLM.
 
 Raw uLLM package reports may also include `prefill.layer_step_summary`. This is diagnostic data for

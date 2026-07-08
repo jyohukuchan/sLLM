@@ -273,6 +273,72 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["batching"]["prefill_executor_request_parallelism"], 1)
         self.assertEqual(row["batching"]["prefill_executor_token_parallelism"], 8)
 
+    def test_parses_model_loop_hybrid_throughput_key_value_output(self) -> None:
+        stdout = (
+            "package-self-attn-mlp-block-model-loop-smoke "
+            "package=/tmp/model.ullm.d layers=[3, 7] layers_csv=3,7 "
+            "prefill_mode=synthetic_layer_stack batching_mode=hybrid "
+            "prefill_executor=stack_prefill_step decode_executor=stack_ready_batch "
+            "prefill_real_batch=false decode_real_batch=true "
+            "prefill_executor_request_parallelism=1 decode_executor_request_parallelism=2 "
+            "sequence_len=3 request_count=3 concurrent_requests=3 "
+            "prompt_tokens=[1, 2, 1] prompt_tokens_csv=1,2,1 "
+            "max_new_tokens=[2, 1, 0] max_new_tokens_csv=2,1,0 "
+            "total_tokens=[3, 3, 1] total_tokens_csv=3,3,1 "
+            "prefill_total_input_tokens=4 decode_total_generated_tokens=3 "
+            "end_to_end_total_tokens=7 prefill_wall_ms=47.124272 "
+            "decode_wall_ms=35.822329 total_wall_ms=82.946601 "
+            "prefill_total_input_tps=84.881948 "
+            "decode_total_generated_tps=83.746649 "
+            "end_to_end_total_tps=84.391644 "
+            "decode_batch_ready_counts=[2, 1] decode_batch_ready_counts_csv=2,1 "
+            "generated_tokens=[2, 1, 0] generated_tokens_csv=2,1,0 "
+            "layer_max_abs_diff=0.000000000 block_max_abs_diff=0.000000000 "
+            "backend=hip device_index=2 name=\"AMD Radeon Graphics\" verified=true"
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_model_loop_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 1,
+                "concurrent_requests": 1,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+        TOOL.enrich_ullm_model_loop_row(row, report)
+
+        self.assertEqual(report["command"], "package-self-attn-mlp-block-model-loop-smoke")
+        self.assertEqual(metrics["prefill_total_input_tokens"], 4)
+        self.assertEqual(metrics["decode_total_generated_tokens"], 3)
+        self.assertEqual(metrics["end_to_end_total_tokens"], 7)
+        self.assertEqual(metrics["prefill_total_input_tokens_per_second"], 84.881948)
+        self.assertEqual(metrics["decode_total_generated_tokens_per_second"], 83.746649)
+        self.assertEqual(metrics["end_to_end_total_tokens_per_second"], 84.391644)
+        self.assertEqual(row["workload"]["batch_size"], 3)
+        self.assertEqual(row["workload"]["concurrent_requests"], 3)
+        self.assertEqual(row["workload"]["prompt_tokens_per_request"], [1, 2, 1])
+        self.assertEqual(row["workload"]["generated_tokens_per_request"], [2, 1, 0])
+        self.assertEqual(
+            row["workload"]["total_context_tokens_after_prefill_per_request"],
+            [3, 3, 1],
+        )
+        self.assertEqual(row["workload"]["layers_csv"], "3,7")
+        self.assertEqual(row["batching"]["mode"], "hybrid")
+        self.assertFalse(row["batching"]["prefill_real_batch"])
+        self.assertTrue(row["batching"]["decode_real_batch"])
+        self.assertEqual(row["batching"]["decode_executor_request_parallelism"], 2)
+        self.assertEqual(row["batching"]["component_package"], "/tmp/model.ullm.d")
+
 
 if __name__ == "__main__":
     unittest.main()

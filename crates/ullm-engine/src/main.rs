@@ -14033,6 +14033,9 @@ struct PackageModelLoopExecutionSummary {
     second_batch_ready: usize,
     decode_batch_ready_counts: Vec<usize>,
     final_ready: usize,
+    prefill_wall_ms: f64,
+    decode_wall_ms: f64,
+    total_wall_ms: f64,
 }
 
 struct PackageModelLoopSmokeRun {
@@ -14410,11 +14413,15 @@ impl PackageModelLoopExecutionPlan {
         layer_run_plan: &mut PackageModelLoopLayerRunPlan,
     ) -> Result<PackageModelLoopExecutionSummary, String> {
         let mut layer_runner = self.build_layer_runner(context, stream, model, layer_run_plan)?;
+        let prefill_started = Instant::now();
         self.run_prefill_layers(&mut layer_runner, stream, model, layer_run_plan)?;
+        let prefill_wall_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
         request_plan.complete_prefill_all()?;
 
+        let decode_started = Instant::now();
         let decode_batch_ready_counts =
             self.run_decode_batches(&mut layer_runner, stream, request_plan, layer_run_plan)?;
+        let decode_wall_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
         let final_ready = self.final_ready(request_plan)?;
         self.verify_layer_caches(&layer_runner, stream, model, layer_run_plan)?;
 
@@ -14423,6 +14430,9 @@ impl PackageModelLoopExecutionPlan {
             second_batch_ready: decode_batch_ready_counts.get(1).copied().unwrap_or(0),
             decode_batch_ready_counts,
             final_ready,
+            prefill_wall_ms,
+            decode_wall_ms,
+            total_wall_ms: prefill_wall_ms + decode_wall_ms,
         })
     }
 
@@ -14632,6 +14642,67 @@ impl PackageModelLoopSmokeRun {
         let stats = self.request_plan.scheduler.allocator_stats();
         let cached_tokens = self.request_plan.cached_tokens()?;
         let generated_tokens = self.request_plan.generated_tokens()?;
+        let prefill_total_input_tokens = self
+            .request_plan
+            .prompt_tokens
+            .iter()
+            .try_fold(0_usize, |acc, value| acc.checked_add(*value))
+            .ok_or_else(|| "package model-loop prefill total input tokens overflow".to_string())?;
+        let decode_total_generated_tokens = generated_tokens
+            .iter()
+            .try_fold(0_usize, |acc, value| acc.checked_add(*value))
+            .ok_or_else(|| {
+                "package model-loop decode total generated tokens overflow".to_string()
+            })?;
+        let end_to_end_total_tokens = prefill_total_input_tokens
+            .checked_add(decode_total_generated_tokens)
+            .ok_or_else(|| "package model-loop end-to-end total tokens overflow".to_string())?;
+        let decode_executor_request_parallelism = execution_summary
+            .decode_batch_ready_counts
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let decode_real_batch = decode_executor_request_parallelism > 1;
+        let layer_indices_csv = self
+            .model
+            .layer_indices()
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let prompt_tokens_csv = self
+            .request_plan
+            .prompt_tokens
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let max_new_tokens_csv = self
+            .request_plan
+            .max_new_tokens
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let total_tokens_csv = self
+            .request_plan
+            .total_tokens
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let generated_tokens_csv = generated_tokens
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let decode_batch_ready_counts_csv = execution_summary
+            .decode_batch_ready_counts
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let decode_steps_by_layer = self.layer_run_plan.decode_steps_by_layer();
         let layer_indices = self.model.layer_indices();
         let input_norm_tensors = self
@@ -14675,9 +14746,12 @@ impl PackageModelLoopSmokeRun {
         let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
 
         Ok(format!(
-            "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} request_ids={:?} prompt_tokens={:?} max_new_tokens={:?} total_tokens={:?} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} decode_batch_ready_counts={:?} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+            "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} layers_csv={} prefill_mode=synthetic_layer_stack batching_mode=hybrid prefill_executor=stack_prefill_step decode_executor=stack_ready_batch prefill_real_batch=false decode_real_batch={} prefill_executor_request_parallelism=1 decode_executor_request_parallelism={} input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} decode_batch_ready_counts={:?} decode_batch_ready_counts_csv={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} generated_tokens_csv={} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
             path,
             layer_indices,
+            layer_indices_csv,
+            decode_real_batch,
+            decode_executor_request_parallelism,
             input_norm_tensors,
             q_tensors,
             k_tensors,
@@ -14691,20 +14765,41 @@ impl PackageModelLoopSmokeRun {
             down_tensors,
             self.sequence_len,
             self.request_plan.request_count(),
+            self.request_plan.request_count(),
             self.request_plan.request_ids,
             self.request_plan.prompt_tokens,
+            prompt_tokens_csv,
             self.request_plan.max_new_tokens,
+            max_new_tokens_csv,
             self.request_plan.total_tokens,
+            total_tokens_csv,
+            prefill_total_input_tokens,
+            decode_total_generated_tokens,
+            end_to_end_total_tokens,
+            execution_summary.prefill_wall_ms,
+            execution_summary.decode_wall_ms,
+            execution_summary.total_wall_ms,
+            tps(prefill_total_input_tokens, execution_summary.prefill_wall_ms)
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "null".to_string()),
+            tps(decode_total_generated_tokens, execution_summary.decode_wall_ms)
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "null".to_string()),
+            tps(end_to_end_total_tokens, execution_summary.total_wall_ms)
+                .map(|value| format!("{value:.6}"))
+                .unwrap_or_else(|| "null".to_string()),
             self.request_plan.block_size,
             self.request_plan.cache_blocks,
             self.request_plan.block_tables,
             execution_summary.first_batch_ready,
             execution_summary.second_batch_ready,
             execution_summary.decode_batch_ready_counts,
+            decode_batch_ready_counts_csv,
             execution_summary.final_ready,
             decode_steps_by_layer,
             cached_tokens,
             generated_tokens,
+            generated_tokens_csv,
             self.request_plan.scheduler.active_len(),
             stats.free_blocks,
             stats.allocated_blocks,

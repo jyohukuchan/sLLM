@@ -362,6 +362,21 @@ def parse_scalar_text(value: str) -> Any:
     return value
 
 
+def parse_int_csv(value: Any) -> list[int]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    parsed: list[int] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            return []
+        number = parse_int(item)
+        if number is None:
+            return []
+        parsed.append(number)
+    return parsed
+
+
 def parse_key_value_stdout(stdout: str) -> dict[str, Any]:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     if not lines:
@@ -566,6 +581,60 @@ def parse_ullm_component_prefill_metrics(
     }
 
 
+def parse_ullm_model_loop_metrics(
+    report: dict[str, Any], memory: dict[str, Any]
+) -> dict[str, Any]:
+    prefill_total_tps = parse_float(report.get("prefill_total_input_tps"))
+    decode_total_tps = parse_float(report.get("decode_total_generated_tps"))
+    end_to_end_total_tps = parse_float(report.get("end_to_end_total_tps"))
+    prefill_ms = parse_float(report.get("prefill_wall_ms"))
+    decode_ms = parse_float(report.get("decode_wall_ms"))
+    total_ms = parse_float(report.get("total_wall_ms"))
+    consumed_bytes = memory.get("consumed_total_bytes")
+    consumed_gib = consumed_bytes / 1024**3 if isinstance(consumed_bytes, int) else None
+    product = None
+    if decode_total_tps is not None and consumed_gib is not None:
+        product = decode_total_tps * consumed_gib
+
+    return {
+        "prefill_tokens_per_second": prefill_total_tps,
+        "decode_tokens_per_second": decode_total_tps,
+        "total_tokens_per_second": end_to_end_total_tps,
+        "prefill_total_input_tokens": parse_int(report.get("prefill_total_input_tokens")),
+        "decode_total_generated_tokens": parse_int(report.get("decode_total_generated_tokens")),
+        "generated_tokens_total": parse_int(report.get("decode_total_generated_tokens")),
+        "end_to_end_total_tokens": parse_int(report.get("end_to_end_total_tokens")),
+        "prefill_total_input_tokens_per_second": prefill_total_tps,
+        "decode_total_generated_tokens_per_second": decode_total_tps,
+        "end_to_end_total_tokens_per_second": end_to_end_total_tps,
+        "prefill_wall_time_seconds": prefill_ms / 1000.0 if prefill_ms is not None else None,
+        "decode_wall_time_seconds": decode_ms / 1000.0 if decode_ms is not None else None,
+        "total_wall_time_seconds": total_ms / 1000.0 if total_ms is not None else None,
+        "time_to_first_token_ms": prefill_ms,
+        "time_per_output_token_ms": (
+            (1000.0 / decode_total_tps) if decode_total_tps else None
+        ),
+        "latency_p50_ms": total_ms,
+        "latency_p95_ms": total_ms,
+        "time_to_first_token_ms_p50": prefill_ms,
+        "time_to_first_token_ms_p95": prefill_ms,
+        "request_latency_ms_p50": total_ms,
+        "request_latency_ms_p95": total_ms,
+        "time_per_output_token_ms_p50": (
+            (1000.0 / decode_total_tps) if decode_total_tps else None
+        ),
+        "time_per_output_token_ms_p95": (
+            (1000.0 / decode_total_tps) if decode_total_tps else None
+        ),
+        "per_request_decode_tps_mean": None,
+        "vram_baseline_bytes": memory.get("baseline_total_bytes"),
+        "vram_peak_bytes": memory.get("peak_total_bytes"),
+        "vram_consumed_bytes": consumed_bytes,
+        "decode_tokens_per_second_times_vram_consumed_gib": product,
+        "power_watts_avg": None,
+    }
+
+
 def parse_ullm_token_ids_correctness(report: dict[str, Any]) -> dict[str, Any] | None:
     if not report:
         return None
@@ -752,6 +821,72 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
     }
 
 
+def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> None:
+    row_workload = row.get("workload")
+    if not isinstance(row_workload, dict):
+        return
+    request_count = first_non_null(
+        parse_int(report.get("concurrent_requests")),
+        parse_int(report.get("request_count")),
+        parse_int(row_workload.get("concurrent_requests")),
+    )
+    prompt_tokens_per_request = parse_int_csv(report.get("prompt_tokens_csv"))
+    generated_tokens_per_request = parse_int_csv(report.get("generated_tokens_csv"))
+    total_context_tokens_per_request = parse_int_csv(report.get("total_tokens_csv"))
+    layers_csv = report.get("layers_csv")
+    if request_count is not None:
+        row_workload["batch_size"] = request_count
+        row_workload["concurrent_requests"] = request_count
+    row_workload["prefill_mode"] = report.get("prefill_mode") or "synthetic_layer_stack"
+    if isinstance(report.get("prefill_executor"), str):
+        row_workload["prefill_executor"] = report.get("prefill_executor")
+    if prompt_tokens_per_request:
+        row_workload["prompt_tokens_per_request"] = prompt_tokens_per_request
+        row_workload["cached_prefix_tokens_per_request"] = [
+            0 for _ in prompt_tokens_per_request
+        ]
+        row_workload["new_prefill_tokens_per_request"] = prompt_tokens_per_request
+    if total_context_tokens_per_request:
+        row_workload[
+            "total_context_tokens_after_prefill_per_request"
+        ] = total_context_tokens_per_request
+    if generated_tokens_per_request:
+        row_workload["generated_tokens_per_request"] = generated_tokens_per_request
+    for key in (
+        "prefill_total_input_tokens",
+        "decode_total_generated_tokens",
+        "end_to_end_total_tokens",
+    ):
+        value = parse_int(report.get(key))
+        if value is not None:
+            row_workload[key] = value
+    if isinstance(layers_csv, str):
+        row_workload["layers_csv"] = layers_csv
+    sequence_len = parse_int(report.get("sequence_len"))
+    if sequence_len is not None:
+        row_workload["sequence_len"] = sequence_len
+
+    batching_mode = report.get("batching_mode")
+    row["batching"] = {
+        "mode": batching_mode if isinstance(batching_mode, str) else "hybrid",
+        "prefill_executor": report.get("prefill_executor"),
+        "resolved_prefill_executor": report.get("prefill_executor"),
+        "prefill_real_batch": report.get("prefill_real_batch") is True,
+        "prefill_executor_token_parallelism": None,
+        "prefill_executor_request_parallelism": parse_int(
+            report.get("prefill_executor_request_parallelism")
+        ),
+        "decode_executor": report.get("decode_executor"),
+        "decode_real_batch": report.get("decode_real_batch") is True,
+        "decode_executor_request_parallelism": parse_int(
+            report.get("decode_executor_request_parallelism")
+        ),
+        "scheduler_policy": "model_loop_ready_batch",
+        "component_command": report.get("command"),
+        "component_package": report.get("package"),
+    }
+
+
 def default_metrics(memory: dict[str, Any]) -> dict[str, Any]:
     return {
         "prefill_tokens_per_second": None,
@@ -824,6 +959,7 @@ def main() -> int:
             "ullm-token-ids-generate",
             "ullm-package-batch-throughput",
             "ullm-component-prefill",
+            "ullm-model-loop-throughput",
         ],
         default="none",
     )
@@ -888,6 +1024,9 @@ def main() -> int:
     elif args.parse == "ullm-component-prefill" and status == "ok":
         ullm_report = parse_ullm_key_value_report(stdout_text, args.result_json)
         metrics = parse_ullm_component_prefill_metrics(ullm_report, memory)
+    elif args.parse == "ullm-model-loop-throughput" and status == "ok":
+        ullm_report = parse_ullm_key_value_report(stdout_text, args.result_json)
+        metrics = parse_ullm_model_loop_metrics(ullm_report, memory)
     elif args.parse == "vllm-throughput" and status == "ok":
         metrics = parse_vllm_metrics(stdout_text, args.result_json, memory)
     elif args.parse == "sglang-serving" and status == "ok":
@@ -1024,6 +1163,27 @@ def main() -> int:
             "sampled_max_abs_diff": first_non_null(
                 parse_float(ullm_report.get("sampled_max_abs_diff")),
                 parse_float(ullm_report.get("max_abs_diff")),
+            ),
+        }
+        ullm_correctness = None
+    elif args.parse == "ullm-model-loop-throughput":
+        enrich_ullm_model_loop_row(row, ullm_report)
+        verified = ullm_report.get("verified")
+        row["correctness"] = {
+            "reference": "sampled",
+            "reference_artifact": None,
+            "logits_relative_mse": None,
+            "logits_max_abs_diff": None,
+            "top_k": None,
+            "top_k_agreement": None,
+            "generated_prefix_matches_reference": verified if isinstance(verified, bool) else None,
+            "nan_count": None,
+            "inf_count": None,
+            "verified_all": verified if isinstance(verified, bool) else None,
+            "sample_count": None,
+            "sampled_max_abs_diff": first_non_null(
+                parse_float(ullm_report.get("layer_max_abs_diff")),
+                parse_float(ullm_report.get("block_max_abs_diff")),
             ),
         }
         ullm_correctness = None
