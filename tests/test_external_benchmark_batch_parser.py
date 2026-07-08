@@ -286,6 +286,8 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "prefill_real_batch=true decode_real_batch=true "
             "prefill_executor_request_parallelism=3 decode_executor_request_parallelism=2 "
             "final_lm_head_guard=true final_top1_tokens_csv=42,43,44 "
+            "final_topk_tokens_csv=42,7,5;43,8,6;44,9,1 "
+            "final_topk_logits_csv=3.250000,2.000000,1.500000;4.500000,4.000000,3.500000;5.750000,5.000000,4.250000 "
             "sequence_len=3 request_count=3 concurrent_requests=3 "
             "prompt_tokens=[1, 2, 1] prompt_tokens_csv=1,2,1 "
             "max_new_tokens=[2, 1, 0] max_new_tokens_csv=2,1,0 "
@@ -348,6 +350,14 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["sq_passthrough_tensor_count"], 753)
         self.assertEqual(row["workload"]["sq_row_chunk"], 256)
         self.assertEqual(row["workload"]["final_top1_tokens"], [42, 43, 44])
+        self.assertEqual(
+            row["workload"]["final_topk_tokens"],
+            [[42, 7, 5], [43, 8, 6], [44, 9, 1]],
+        )
+        self.assertEqual(
+            row["workload"]["final_topk_logits"],
+            [[3.25, 2.0, 1.5], [4.5, 4.0, 3.5], [5.75, 5.0, 4.25]],
+        )
         self.assertEqual(row["workload"]["layers_csv"], "3,7")
         self.assertEqual(row["batching"]["mode"], "real")
         self.assertTrue(row["batching"]["prefill_real_batch"])

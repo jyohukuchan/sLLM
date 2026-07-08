@@ -377,6 +377,45 @@ def parse_int_csv(value: Any) -> list[int]:
     return parsed
 
 
+def parse_float_csv(value: Any) -> list[float]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    parsed: list[float] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            return []
+        number = parse_float(item)
+        if number is None:
+            return []
+        parsed.append(number)
+    return parsed
+
+
+def parse_int_matrix_csv(value: Any) -> list[list[int]]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    rows: list[list[int]] = []
+    for raw_row in value.split(";"):
+        row = parse_int_csv(raw_row)
+        if not row:
+            return []
+        rows.append(row)
+    return rows
+
+
+def parse_float_matrix_csv(value: Any) -> list[list[float]]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    rows: list[list[float]] = []
+    for raw_row in value.split(";"):
+        row = parse_float_csv(raw_row)
+        if not row:
+            return []
+        rows.append(row)
+    return rows
+
+
 def parse_key_value_stdout(stdout: str) -> dict[str, Any]:
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     if not lines:
@@ -878,6 +917,12 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
     final_top1_tokens = parse_int_csv(report.get("final_top1_tokens_csv"))
     if final_top1_tokens:
         row_workload["final_top1_tokens"] = final_top1_tokens
+    final_topk_tokens = parse_int_matrix_csv(report.get("final_topk_tokens_csv"))
+    if final_topk_tokens:
+        row_workload["final_topk_tokens"] = final_topk_tokens
+    final_topk_logits = parse_float_matrix_csv(report.get("final_topk_logits_csv"))
+    if final_topk_logits:
+        row_workload["final_topk_logits"] = final_topk_logits
     sequence_len = parse_int(report.get("sequence_len"))
     if sequence_len is not None:
         row_workload["sequence_len"] = sequence_len

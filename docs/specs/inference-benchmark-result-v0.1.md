@@ -288,6 +288,8 @@ ready-batch executor. Such rows must preserve:
 - `workload.layers_csv`
 - `workload.prompt_tokens_per_request`
 - `workload.generated_tokens_per_request`
+- `workload.final_top1_tokens` when a final LM head guard is present
+- `workload.final_topk_tokens` and `workload.final_topk_logits` when top-k logits are emitted
 - `metrics.prefill_total_input_tokens_per_second`
 - `metrics.decode_total_generated_tokens_per_second`
 - `metrics.end_to_end_total_tokens_per_second`

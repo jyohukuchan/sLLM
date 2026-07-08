@@ -2331,6 +2331,50 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 3. `W8A8` はW8A16のquality guardとselected-layer throughput pathが安定してから進める。
 4. 先にselected-layer stackへtoken-id embedding、final norm/lm_head、quality guardを接続し、SQ候補のdriftとthroughputを同じscheduler pathで見る。
 
+## 2026-07-09 progress: T2 SQ FP8 token-id model-loop prompt bundle
+
+前回の要点:
+
+- T2では `sq-fp8-token-ids-model-loop-smoke` を追加し、`kup6_gate5_down5` SQ FP8 artifactをtoken-id model-loop request-batch prefill pathへ接続した。
+- 直前のsmokeは layers `3,7`、batch `2`、prompt `2` の小さい接続確認で、AQ4/SQのfinal top1は一致していた。
+- 次は既存の `len4`、`case_a`、`case_b` prompt bundleを同じscheduler pathへ流し、top1だけでなくtop-k overlap、AQ4 top1 rank、logit gapを保存する必要があった。
+
+今回の変更点:
+
+- `PackageModelLoopSmokeRun` のstdoutに `final_topk_tokens_csv` と `final_topk_logits_csv` を追加した。
+- `tools/run-external-benchmark.py --parse ullm-model-loop-throughput` は、それらを `workload.final_topk_tokens` と `workload.final_topk_logits` として保持する。
+- R9700でAQ4/SQを同じ条件で実行した。条件は layers `3,7,11,15,19,23`、batch `3`、top-k `8`、LM head chunk rows `4096`、prompt bundle `len4/case_a/case_b` である。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-prompt-bundle-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| row | batching | prefill real | decode real | prefill tok/s | decode tok/s | end-to-end tok/s | VRAM consumed bytes | wrapper elapsed s |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| AQ4 | real | true | true | 33.044260 | 32.565648 | 32.981036 | 5885833216 | 5.223 |
+| SQ FP8 W8A16 | real | true | true | 32.377649 | 32.021248 | 32.330712 | 5885886464 | 92.056 |
+
+Quality:
+
+| case | AQ4 top1 | SQ top1 | top1 match | AQ4 top1 rank in SQ top8 | top8 common |
+| --- | ---: | ---: | --- | ---: | ---: |
+| len4 | 110784 | 102446 | false | 3 | `6 / 8` |
+| case_a | 237950 | 111791 | false | 2 | `4 / 8` |
+| case_b | 182949 | 182949 | true | 1 | `6 / 8` |
+
+判断:
+
+- このselected-layer model-loop guardは、以前のdirect logits prompt-bundle guardより厳しい。token-id embedding、6 selected runtime layers、request-batch prefill、decode ready batch、final norm、lm_headを一つの経路で通すと、`kup6_gate5_down5` は `len4` と `case_a` でstrict top1を維持しなかった。
+- AQ4 top1は3ケースすべてSQ top8内に残っているので、regression subsetとしては有用である。
+- 現行のstrict top1 promotion ruleでは、`kup6_gate5_down5` はSQ quality policyへ昇格しない。
+- SQ wrapper elapsedはartifact read/materializationを含む。内部tok/sはload後のmodel-loop区間なので、速度比較ではこの2つを分けて読む。
+
+次の行動:
+
+1. `kup6_gate5_down5` はselected-layer regression subsetとして維持し、promoted SQ policyとは扱わない。
+2. 次のT2品質探索では、model-loop top1 driftを起こすFP8 coverageを削る方向、またはscale/layout候補を変える方向を優先する。
+3. 以後のAQ4/SQ比較では `final_topk_tokens` / `final_topk_logits` を保存し、top1だけで判断しない。
+4. full-package real batch throughputは引き続きT1aとして別に進める。
+
 ## Risks
 
 | risk | impact | handling |

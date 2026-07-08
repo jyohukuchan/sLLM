@@ -1,0 +1,165 @@
+{
+  "aq4_case_id": "aq4-r9700-token-id-model-loop-prompt-bundle-layers3-7-11-15-19-23-b3",
+  "batching_mode": "real",
+  "cases": [
+    {
+      "aq4_logit_for_sq_top1": 4.791738,
+      "aq4_top1": 110784,
+      "aq4_top1_logit": 5.045746,
+      "aq4_top1_minus_sq_top1_logit": 0.2540080000000007,
+      "aq4_top1_rank_in_sq_top8": 3,
+      "aq4_top8_tokens": [
+        110784,
+        242203,
+        102446,
+        143001,
+        172083,
+        120222,
+        69538,
+        135929
+      ],
+      "case_id": "len4",
+      "sq_logit_for_aq4_top1": 4.837879,
+      "sq_top1": 102446,
+      "sq_top1_logit": 4.999691,
+      "sq_top1_minus_aq4_top1_logit": 0.1618120000000003,
+      "sq_top1_rank_in_aq4_top8": 3,
+      "sq_top8_tokens": [
+        102446,
+        242203,
+        110784,
+        143001,
+        172083,
+        134440,
+        115326,
+        120222
+      ],
+      "token_ids": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "top1_match": false,
+      "top8_common": 6,
+      "top8_width": 8
+    },
+    {
+      "aq4_logit_for_sq_top1": 5.2197,
+      "aq4_top1": 237950,
+      "aq4_top1_logit": 5.541207,
+      "aq4_top1_minus_sq_top1_logit": 0.32150700000000043,
+      "aq4_top1_rank_in_sq_top8": 2,
+      "aq4_top8_tokens": [
+        237950,
+        111791,
+        13817,
+        26293,
+        193706,
+        172960,
+        68712,
+        134735
+      ],
+      "case_id": "case_a",
+      "sq_logit_for_aq4_top1": 5.236111,
+      "sq_top1": 111791,
+      "sq_top1_logit": 5.256941,
+      "sq_top1_minus_aq4_top1_logit": 0.020830000000000126,
+      "sq_top1_rank_in_aq4_top8": 2,
+      "sq_top8_tokens": [
+        111791,
+        237950,
+        207459,
+        157398,
+        172960,
+        68712,
+        124170,
+        153103
+      ],
+      "token_ids": [
+        100,
+        200,
+        300,
+        400,
+        500,
+        600,
+        700,
+        800
+      ],
+      "top1_match": false,
+      "top8_common": 4,
+      "top8_width": 8
+    },
+    {
+      "aq4_logit_for_sq_top1": 6.437163,
+      "aq4_top1": 182949,
+      "aq4_top1_logit": 6.437163,
+      "aq4_top1_minus_sq_top1_logit": 0.0,
+      "aq4_top1_rank_in_sq_top8": 1,
+      "aq4_top8_tokens": [
+        182949,
+        121250,
+        159207,
+        69895,
+        97533,
+        214852,
+        139376,
+        188263
+      ],
+      "case_id": "case_b",
+      "sq_logit_for_aq4_top1": 6.178861,
+      "sq_top1": 182949,
+      "sq_top1_logit": 6.178861,
+      "sq_top1_minus_aq4_top1_logit": 0.0,
+      "sq_top1_rank_in_aq4_top8": 1,
+      "sq_top8_tokens": [
+        182949,
+        69895,
+        97533,
+        121250,
+        214852,
+        159207,
+        161229,
+        243285
+      ],
+      "token_ids": [
+        42,
+        314,
+        2718,
+        1618,
+        12345,
+        23456,
+        34567,
+        45678
+      ],
+      "top1_match": true,
+      "top8_common": 6,
+      "top8_width": 8
+    }
+  ],
+  "decode_real_batch": true,
+  "layers_csv": "3,7,11,15,19,23",
+  "notes": [
+    "Selected-layer token-id model-loop bridge, not full LM throughput.",
+    "Internal tok/s excludes SQ artifact read/materialization time; wrapper elapsed includes it.",
+    "Prompt bundle is len4, case_a, case_b batched together with one synthetic generated token per request."
+  ],
+  "prefill_real_batch": true,
+  "run_id": "phase-t2-sq-fp8-token-id-model-loop-prompt-bundle-v1",
+  "schema_version": "ullm-model-loop-topk-comparison-v0.1",
+  "sq_artifact": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact",
+  "sq_candidate": "sq-fp8-w8a16-r9700-v0",
+  "sq_case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-layers3-7-11-15-19-23-b3",
+  "throughput": {
+    "aq4_decode_tps": 32.565648,
+    "aq4_end_to_end_tps": 32.981036,
+    "aq4_prefill_tps": 33.04426,
+    "aq4_vram_consumed_bytes": 5885833216,
+    "aq4_wrapper_elapsed_seconds": 5.223469406017102,
+    "sq_decode_tps": 32.021248,
+    "sq_end_to_end_tps": 32.330712,
+    "sq_prefill_tps": 32.377649,
+    "sq_vram_consumed_bytes": 5885886464,
+    "sq_wrapper_elapsed_seconds": 92.0563103830209
+  }
+}
