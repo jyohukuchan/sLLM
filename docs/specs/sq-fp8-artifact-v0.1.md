@@ -168,6 +168,13 @@ self-attention probe layers `3,7,11,15,19,23,27,31`. Layer `23` alone can be rec
 fallback, but `q/v` fallback across all six tested layers still leaves cumulative drift. Therefore
 the row-block32 mixed candidate is a partial T2 quality policy, not a final SQ artifact policy.
 
+T2 promotion rule v0.1 is strict top1 match for every evaluated short-guard case. Top-k overlap,
+AQ4 top1 rank inside SQ top-k, and SQ top1 minus AQ4 top1 logit gap are diagnostic-only fields
+until a text-level guard is implemented and explicitly accepted. The current mixed candidate
+acceptance result is saved in
+`benchmarks/results/2026-07-08/sq-fp8-mixed-candidate-acceptance-v0.1.md` and is not accepted for
+T2 promotion.
+
 For repeatable guard runs, use:
 
 ```text

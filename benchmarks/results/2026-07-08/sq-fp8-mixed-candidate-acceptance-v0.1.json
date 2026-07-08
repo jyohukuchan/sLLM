@@ -1,0 +1,236 @@
+{
+  "cases": [
+    {
+      "baseline_top1": 197397,
+      "baseline_top1_rank_in_sq_topk": 1,
+      "case": "sq-fp8-layers3-7-11-15-except-v-rowblock32-case-a-v0.1:except_v",
+      "diagnostic_topk_failure_reasons": [
+        "topk_common_below_threshold"
+      ],
+      "diagnostic_topk_pass": false,
+      "fp8_tensor_count": 24,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-except-v-rowblock32-case-a-v0.1.json",
+      "layers": "3,7,11,15",
+      "sq_top1": 197397,
+      "sq_top1_minus_baseline_top1_logit": 0.0,
+      "strict_top1_failure_reasons": [],
+      "strict_top1_pass": true,
+      "token_ids": "100,200,300,400,500,600,700,800",
+      "top1_match": true,
+      "topk_common": 4,
+      "verified": true
+    },
+    {
+      "baseline_top1": 187677,
+      "baseline_top1_rank_in_sq_topk": 1,
+      "case": "sq-fp8-layers3-7-11-15-except-v-rowblock32-len4-v0.1:except_v",
+      "diagnostic_topk_failure_reasons": [],
+      "diagnostic_topk_pass": true,
+      "fp8_tensor_count": 24,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-except-v-rowblock32-len4-v0.1.json",
+      "layers": "3,7,11,15",
+      "sq_top1": 187677,
+      "sq_top1_minus_baseline_top1_logit": 0.0,
+      "strict_top1_failure_reasons": [],
+      "strict_top1_pass": true,
+      "token_ids": "1,2,3,4",
+      "top1_match": true,
+      "topk_common": 5,
+      "verified": true
+    },
+    {
+      "baseline_top1": 219331,
+      "baseline_top1_rank_in_sq_topk": 1,
+      "case": "sq-fp8-layers3-7-11-15-except-v-rowblock32-case-b-v0.1:except_v",
+      "diagnostic_topk_failure_reasons": [],
+      "diagnostic_topk_pass": true,
+      "fp8_tensor_count": 24,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-except-v-rowblock32-case-b-v0.1.json",
+      "layers": "3,7,11,15",
+      "sq_top1": 219331,
+      "sq_top1_minus_baseline_top1_logit": 0.0,
+      "strict_top1_failure_reasons": [],
+      "strict_top1_pass": true,
+      "token_ids": "42,314,2718,1618,12345,23456,34567,45678",
+      "top1_match": true,
+      "topk_common": 5,
+      "verified": true
+    },
+    {
+      "baseline_top1": 120026,
+      "baseline_top1_rank_in_sq_topk": 1,
+      "case": "sq-fp8-layers3-7-11-15-19-except-v-rowblock32-len4-v0.1:except_v",
+      "diagnostic_topk_failure_reasons": [],
+      "diagnostic_topk_pass": true,
+      "fp8_tensor_count": 30,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-19-except-v-rowblock32-len4-v0.1.json",
+      "layers": "3,7,11,15,19",
+      "sq_top1": 120026,
+      "sq_top1_minus_baseline_top1_logit": 0.0,
+      "strict_top1_failure_reasons": [],
+      "strict_top1_pass": true,
+      "token_ids": "1,2,3,4",
+      "top1_match": true,
+      "topk_common": 6,
+      "verified": true
+    },
+    {
+      "baseline_top1": 70114,
+      "baseline_top1_rank_in_sq_topk": 5,
+      "case": "sq-fp8-layers3-7-11-15-19-23-except-v-rowblock32-len4-v0.1:except_v",
+      "diagnostic_topk_failure_reasons": [
+        "baseline_top1_rank_above_threshold",
+        "top1_gap_above_threshold"
+      ],
+      "diagnostic_topk_pass": false,
+      "fp8_tensor_count": 36,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-19-23-except-v-rowblock32-len4-v0.1.json",
+      "layers": "3,7,11,15,19,23",
+      "sq_top1": 157558,
+      "sq_top1_minus_baseline_top1_logit": 0.25058460235595703,
+      "strict_top1_failure_reasons": [
+        "top1_mismatch"
+      ],
+      "strict_top1_pass": false,
+      "token_ids": "1,2,3,4",
+      "top1_match": false,
+      "topk_common": 6,
+      "verified": true
+    },
+    {
+      "baseline_top1": 140864,
+      "baseline_top1_rank_in_sq_topk": null,
+      "case": "sq-fp8-all-self-attn-except-v-rowblock32-len4-v0.1:except_v",
+      "diagnostic_topk_failure_reasons": [
+        "topk_common_below_threshold",
+        "baseline_top1_rank_above_threshold",
+        "top1_gap_above_threshold"
+      ],
+      "diagnostic_topk_pass": false,
+      "fp8_tensor_count": 48,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-all-self-attn-except-v-rowblock32-len4-v0.1.json",
+      "layers": "3,7,11,15,19,23,27,31",
+      "sq_top1": 222957,
+      "sq_top1_minus_baseline_top1_logit": null,
+      "strict_top1_failure_reasons": [
+        "top1_mismatch"
+      ],
+      "strict_top1_pass": false,
+      "token_ids": "1,2,3,4",
+      "top1_match": false,
+      "topk_common": 4,
+      "verified": true
+    },
+    {
+      "baseline_top1": 108449,
+      "baseline_top1_rank_in_sq_topk": 2,
+      "case": "sq-fp8-layer23-except-v-rowblock32-len4-v0.1:except_v",
+      "diagnostic_topk_failure_reasons": [],
+      "diagnostic_topk_pass": true,
+      "fp8_tensor_count": 6,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-layer23-except-v-rowblock32-len4-v0.1.json",
+      "layers": "23",
+      "sq_top1": 29487,
+      "sq_top1_minus_baseline_top1_logit": 0.014239788055419922,
+      "strict_top1_failure_reasons": [
+        "top1_mismatch"
+      ],
+      "strict_top1_pass": false,
+      "token_ids": "1,2,3,4",
+      "top1_match": false,
+      "topk_common": 5,
+      "verified": true
+    },
+    {
+      "baseline_top1": 108449,
+      "baseline_top1_rank_in_sq_topk": 1,
+      "case": "sq-fp8-layer23-except-qv-rowblock32-len4-v0.1:except_qv",
+      "diagnostic_topk_failure_reasons": [],
+      "diagnostic_topk_pass": true,
+      "fp8_tensor_count": 5,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-layer23-except-qv-rowblock32-len4-v0.1.json",
+      "layers": "23",
+      "sq_top1": 108449,
+      "sq_top1_minus_baseline_top1_logit": 0.0,
+      "strict_top1_failure_reasons": [],
+      "strict_top1_pass": true,
+      "token_ids": "1,2,3,4",
+      "top1_match": true,
+      "topk_common": 6,
+      "verified": true
+    },
+    {
+      "baseline_top1": 70114,
+      "baseline_top1_rank_in_sq_topk": 5,
+      "case": "sq-fp8-layers3-7-11-15-19-23-except-v-q23-rowblock32-len4-v0.1:except_v_q23",
+      "diagnostic_topk_failure_reasons": [
+        "baseline_top1_rank_above_threshold",
+        "top1_gap_above_threshold"
+      ],
+      "diagnostic_topk_pass": false,
+      "fp8_tensor_count": 35,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-19-23-except-v-q23-rowblock32-len4-v0.1.json",
+      "layers": "3,7,11,15,19,23",
+      "sq_top1": 157558,
+      "sq_top1_minus_baseline_top1_logit": 0.21404218673706055,
+      "strict_top1_failure_reasons": [
+        "top1_mismatch"
+      ],
+      "strict_top1_pass": false,
+      "token_ids": "1,2,3,4",
+      "top1_match": false,
+      "topk_common": 6,
+      "verified": true
+    },
+    {
+      "baseline_top1": 70114,
+      "baseline_top1_rank_in_sq_topk": 4,
+      "case": "sq-fp8-layers3-7-11-15-19-23-except-qv-rowblock32-len4-v0.1:except_qv",
+      "diagnostic_topk_failure_reasons": [
+        "baseline_top1_rank_above_threshold"
+      ],
+      "diagnostic_topk_pass": false,
+      "fp8_tensor_count": 30,
+      "input_json": "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-19-23-except-qv-rowblock32-len4-v0.1.json",
+      "layers": "3,7,11,15,19,23",
+      "sq_top1": 157558,
+      "sq_top1_minus_baseline_top1_logit": 0.12424135208129883,
+      "strict_top1_failure_reasons": [
+        "top1_mismatch"
+      ],
+      "strict_top1_pass": false,
+      "token_ids": "1,2,3,4",
+      "top1_match": false,
+      "topk_common": 5,
+      "verified": true
+    }
+  ],
+  "inputs": [
+    "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-except-v-rowblock32-case-a-v0.1.json",
+    "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-except-v-rowblock32-len4-v0.1.json",
+    "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-except-v-rowblock32-case-b-v0.1.json",
+    "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-19-except-v-rowblock32-len4-v0.1.json",
+    "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-19-23-except-v-rowblock32-len4-v0.1.json",
+    "benchmarks/results/2026-07-08/sq-fp8-all-self-attn-except-v-rowblock32-len4-v0.1.json",
+    "benchmarks/results/2026-07-08/sq-fp8-layer23-except-v-rowblock32-len4-v0.1.json",
+    "benchmarks/results/2026-07-08/sq-fp8-layer23-except-qv-rowblock32-len4-v0.1.json",
+    "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-19-23-except-v-q23-rowblock32-len4-v0.1.json",
+    "benchmarks/results/2026-07-08/sq-fp8-layers3-7-11-15-19-23-except-qv-rowblock32-len4-v0.1.json"
+  ],
+  "policy": {
+    "diagnostic_max_baseline_rank": 2,
+    "diagnostic_max_top1_gap": 0.15,
+    "diagnostic_min_topk_common": 5,
+    "diagnostic_rule": "topk_rank_gap",
+    "promotion_rule": "strict_top1"
+  },
+  "schema_version": "sq-fp8-overlay-acceptance-v0.1",
+  "summary": {
+    "accepted_for_t2_promotion": false,
+    "case_count": 10,
+    "diagnostic_topk_pass_count": 5,
+    "diagnostic_topk_passed": false,
+    "strict_top1_pass_count": 5,
+    "strict_top1_passed": false
+  }
+}

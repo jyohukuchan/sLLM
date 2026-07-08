@@ -29,14 +29,15 @@
 
 ## 次の行動
 
-1. T2 short guardの正式なacceptance ruleを決める。候補はstrict top1一致、top-k overlapしきい値、短文生成のtext-level guardである。
-2. 6層bundleの累積driftを追加fallback、per-layer policy、またはより強いscale/layoutで縮める。
-3. `v` fallback + `q/k/o/gate/up/down` row-block32 FP8は、4-5層まで通った部分候補として固定し、回帰guardにする。
-4. full-target相当のT2 guardが通る、または失敗を許容する明確な品質基準が決まった段階で、T1 real batch runnerとT5 FP8/AQ4 throughput packへ進む。
-5. T1側ではreal batch executorとVRAM samplingの実測gridを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
-6. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにする。
-7. cold prefillとfull-model prefill接続はT3として継続し、SQ候補比較の前に最低限の長さ別・batch別代表値を保存する。
-8. uLLM側でR9700のFP8/AQ4結果が同じschemaで揃った後、vLLM baselineを同じworkload gridで測る。
+1. T2 short guardの昇格条件は、text-level guardが実装・採用されるまではstrict top1一致にする。
+2. top-k overlap、AQ4 top1 rank、logit gapは診断指標として保存するが、strict top1失敗を上書きしない。
+3. 6層bundleの累積driftを追加fallback、per-layer policy、またはより強いscale/layoutで縮める。
+4. `v` fallback + `q/k/o/gate/up/down` row-block32 FP8は、4-5層まで通った部分候補として固定し、回帰guardにする。
+5. full-target相当のT2 guardがstrict top1 ruleを満たす、またはtext-level guardを正式採用した段階で、T1 real batch runnerとT5 FP8/AQ4 throughput packへ進む。
+6. T1側ではreal batch executorとVRAM samplingの実測gridを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
+7. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにする。
+8. cold prefillとfull-model prefill接続はT3として継続し、SQ候補比較の前に最低限の長さ別・batch別代表値を保存する。
+9. uLLM側でR9700のFP8/AQ4結果が同じschemaで揃った後、vLLM baselineを同じworkload gridで測る。
 
 ## 2026-07-08 cached prefix FP8 KV cache note
 
@@ -962,6 +963,34 @@ Exit criteria:
 3. strict top1を維持する方針なら、6層bundleの累積driftを、追加fallback family、per-layer sensitivity policy、または強いscale/layoutで潰す。
 4. strict top1を緩める方針なら、短文生成品質、logit drift、top-k overlapを同じresult schemaで記録して、速度評価へ進める条件を明文化する。
 5. overlay load timingはSQ runtime速度ではないため、T5のthroughput比較には使わない。速度評価はT1 real batch runnerとnative/materialization-aware runtime pathで行う。
+
+### T2 current status: overlay acceptance rule v0.1
+
+前回の要点:
+
+- `v` fallback + `q/k/o/gate/up/down` row-block32 FP8は、4-5層までは有望だった。
+- 6層bundleとall self-attention probeではstrict top1が崩れた。
+- top-k overlapやAQ4 top1 rankは有用な診断指標だが、正式なT2昇格条件としては未確定だった。
+
+今回の変更点:
+
+- `tools/evaluate-sq-fp8-overlay-acceptance.py` を追加した。
+- `tests/test_sq_fp8_overlay_acceptance.py` を追加した。
+- T2 promotion rule v0.1を `strict_top1` として固定した。
+- 診断専用ruleとして `topk_common >= 5`、`baseline_top1_rank_in_sq_topk <= 2`、
+  `abs(sq_top1_minus_baseline_top1_logit) <= 0.15` を保存する。
+- 診断ruleはstrict top1 failureを上書きしない。
+- mixed candidate guard bundleを評価し、10ケース中strict top1 passは `5 / 10`、
+  accepted for T2 promotionは `false` だった。
+- 結果は `benchmarks/results/2026-07-08/sq-fp8-mixed-candidate-acceptance-v0.1.md` と
+  `benchmarks/results/2026-07-08/sq-fp8-mixed-candidate-acceptance-v0.1.json` に保存した。
+
+次の行動:
+
+1. text-level guardを正式採用するまでは、T2 promotionにはstrict top1一致を要求する。
+2. top-k/rank/gapは、near missと強い失敗を分ける診断列として使う。
+3. 6層bundleのstrict top1 failureを、per-layer/family fallbackまたはstronger scale/layoutで潰す。
+4. mixed candidateはまだT5 throughput比較用のpromoted SQ policyとして扱わない。
 
 ### T3: Prefill optimization v0.1, 4-7 days
 
