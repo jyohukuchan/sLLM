@@ -227,16 +227,31 @@ Raw uLLM package batch reports also preserve prefill workload accounting fields 
 planning grid:
 
 - `workload.prefill_mode`: `cold`, `cached_prefix`, or `decode` when supported by that runner.
+- `workload.prefill_executor`: requested prefill executor policy when supplied by the workload.
+- `workload.resolved_prefill_executor`: concrete executor used when an auto policy is resolved.
 - `workload.cached_prefix_tokens_per_request`
 - `workload.new_prefill_tokens_per_request`
 - `workload.total_context_tokens_after_prefill_per_request`
 - `metrics.cached_prefix_total_tokens`
 - `metrics.total_context_tokens_after_prefill`
 - `metrics.estimated_prefill_attention_work_tokens`
+- `batching.prefill_executor`
+- `batching.prefill_real_batch`
+- `batching.decode_executor`
+- `memory.kv_cache_bytes_total`
 
 For cold prefill, cached-prefix fields are zero and `estimated_prefill_attention_work_tokens` is the
 sum of `N * (N + 1) / 2` over requests. These fields are diagnostic/context columns; the comparison
 throughput keys remain the explicit total-throughput fields above.
+
+For cached-prefix component-derived SQ rows, record both `executor` and `resolved_executor` when the
+source report has an auto executor. `executor` names the requested policy, while
+`resolved_executor` names the concrete kernel path used for that case.
+
+SQ candidate rows may also carry a top-level `candidate` object:
+
+- `candidate.id`: e.g. `sq-fp8-w8a16-r9700-v0`
+- `candidate.artifact`: artifact directory or package path used for the run
 
 `batch_size` is the number of requests in one scheduling step. `concurrent_requests` is the number
 of live requests in the run. They are equal for fixed prompt/decode benchmark grids, but they may

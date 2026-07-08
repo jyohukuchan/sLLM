@@ -337,6 +337,10 @@ def run_external_prefix(
         ("engine_commit", "--engine-commit"),
         ("model_source", "--model-source"),
         ("model_revision", "--model-revision"),
+        ("sq_candidate", "--sq-candidate"),
+        ("candidate_artifact", "--candidate-artifact"),
+        ("prefill_executor", "--prefill-executor"),
+        ("resolved_prefill_executor", "--resolved-prefill-executor"),
     ]
     for key, flag in optional_pairs:
         value = optional_string(root.get(key), key)

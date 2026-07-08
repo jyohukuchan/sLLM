@@ -23,10 +23,15 @@ R9700/RDNA4 row and, if RDNA2 support is claimed, one V620/RDNA2 row.
   "case_id": "sqv0-a-qwen35-9b-r9700-v03-suite",
   "status": "ok",
   "candidate": {
-    "id": "sqv0_a",
-    "format_version": "sq-format-v0.1",
-    "description": "compact resident AQ-derived layout with layer-window materialization",
+    "id": "sq-fp8-w8a16-r9700-v0",
+    "format_version": "sq-fp8-w8a16-r9700-v0",
+    "description": "FP8 weight, BF16/F32 activation R9700 baseline candidate",
     "package_or_runtime_artifact": "/tmp/example-sqv0-a.ullm.d",
+    "artifact_manifest": "/tmp/example-sqv0-a.ullm.d/sq_manifest.json",
+    "weight_payload_dtype": "fp8_e4m3",
+    "activation_dtype": "bf16_or_f32",
+    "scale_granularity": "row",
+    "scale_dtype": "f32",
     "source_aq_policy": "qwen35_9b_p4p46_hidden3994_v1",
     "row_scale_override_policy": "preserved"
   },
@@ -46,8 +51,14 @@ R9700/RDNA4 row and, if RDNA2 support is claimed, one V620/RDNA2 row.
     "suite": "benchmarks/prompts/pre-sq-runtime-prompt-suite-v0.3.json",
     "batch_size": 1,
     "concurrent_requests": 1,
+    "prefill_mode": "cold",
     "prompt_tokens_per_request": [512],
+    "cached_prefix_tokens_per_request": [0],
+    "new_prefill_tokens_per_request": [512],
+    "total_context_tokens_after_prefill_per_request": [512],
     "generated_tokens_per_request": [128],
+    "prefill_executor": "cached_prefix_rdna4_fp8_auto",
+    "resolved_prefill_executor": null,
     "tensor_parallel": 1,
     "sampling": "greedy",
     "kv_cache_dtype": "f32"
@@ -57,7 +68,9 @@ R9700/RDNA4 row and, if RDNA2 support is claimed, one V620/RDNA2 row.
     "materialized_working_set_bytes": 0,
     "materialization_granularity": "layer_window",
     "whole_model_f32_resident": false,
-    "kv_cache_bytes": null
+    "kv_cache_bytes": null,
+    "passthrough_tensor_count": 0,
+    "fp8_tensor_count": 0
   },
   "timing": {
     "materialization_wall_ms": 0.0,
@@ -194,6 +207,20 @@ SQ format against vLLM batch throughput.
 - `materialization_granularity`: one of `tensor`, `projection_group`, `layer`, `layer_window`,
   `model`, or a more specific documented string.
 - `whole_model_f32_resident`: must be `false` for a useful first `sq` candidate.
+- `fp8_tensor_count`: number of tensors stored in the candidate FP8 payload.
+- `passthrough_tensor_count`: number of tensors intentionally left outside the FP8 payload.
+
+For `sq-fp8-w8a16-r9700-v0`, the candidate artifact manifest must record:
+
+- FP8 format: `fp8_e4m3`.
+- Activation dtype: `bf16_or_f32`.
+- Scale granularity: initially `row` unless explicitly changed in the row.
+- Scale dtype and layout.
+- Compact resident bytes.
+- Materialized working-set bytes estimate.
+- FP8 tensor list.
+- Passthrough tensor list and reason.
+- Source model path and source AQ4 baseline package when applicable.
 
 The first `sq` candidate may be useful even if decode TPS is similar to the AQ4 prototype, but only
 if compact residency or materialized working-set bytes are materially better and the guard bundle

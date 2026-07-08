@@ -1665,6 +1665,41 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 4. T3として、FP8候補をprefill/decode runnerへ接続し、cold prefill、cached prefix、decodeの代表gridを保存する。
 5. T5でAQ4 latest baselineとFP8候補を同一schemaで比較し、T6/T7でvLLM比較に進む。
 
+## 2026-07-08 T0-T2 plan update: SQ candidate scaffolding
+
+前回の要点:
+
+- cached-prefix attentionは、SQ候補評価を始めるための暫定速度に到達した。
+- SQ候補評価では、attention executorの改善だけを続けるより、FP8 SQ候補のartifact、result schema、batch throughput記録を先にそろえる段階へ移る。
+- 最初の候補はR9700専用の `sq-fp8-w8a16-r9700-v0` とし、V620/RDNA2向けdequant pathは後続へ回す。
+
+今回の変更点:
+
+- T0は完了扱いにする。R9700 runtime device index、AQ4 baseline package、AQ4 prompt-suite summary、result schema、SQ候補ID、cached-prefix default executorを `benchmarks/results/2026-07-08/sq-r9700-state-freeze-v0.1.*` に固定する。
+- T1は「比較行に必要な情報を落とさない」段階まで進める。`inference-benchmark-result-v0.1` と `batch-throughput-workload-v0.1` で、prefill mode、cached prefix token数、新規prefill token数、total context token数、推定attention work、KV cache bytes、requested/resolved executorを保持する。
+- T2はartifact境界を先に作る。`sq-fp8-w8a16-r9700-v0` のmanifest仕様と、safetensors modelからFP8 E4M3 payload + F32 scale metadataを生成するwriterを追加する。
+- T2のruntime load pathとshort prompt guardは未完了として残す。これはpayload/metadataの検証後に、既存package loaderへどう接続するかを決める。
+
+現在のT0-T2状態:
+
+| task | status | artifact |
+| --- | --- | --- |
+| T0 state freeze | done | `benchmarks/results/2026-07-08/sq-r9700-state-freeze-v0.1.json`, `.md` |
+| T1 result schema preservation | partial done | `docs/specs/batch-throughput-workload-v0.1.md`, `docs/specs/inference-benchmark-result-v0.1.md`, `tools/run-external-benchmark.py` |
+| T1 real batch/total throughput runner | not done | next runner work |
+| T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
+| T2 FP8 SQ artifact writer | partial done | `tools/build-sq-fp8-w8a16-artifact.py` |
+| T2 runtime load path | not done | next runtime work |
+| T2 short prompt guard | blocked on runtime load | next runtime work |
+
+次の行動:
+
+1. T1のrunner smokeを行い、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executorが失われないことを確認する。
+2. T2のartifact writerを小さいsafetensors fixtureと実モデルmetadata-onlyで検証し、payload byte数、scale byte数、passthrough理由、checksumがmanifestと一致することを確認する。
+3. runtime load pathでは、まず既存package loaderを壊さずに `sq_manifest.json` を読む入口だけを追加する。
+4. 次に、選択tensorだけFP8 payload + F32 scaleをmaterializeできる最小load pathを作り、short prompt guardでAQ4 baselineと出力品質を比較する。
+5. runtime loadが通った後にT3へ移り、`batch=1/4/8`、cold prefill、cached prefix `L=65536,M=1/16/128/512`、decodeを同じschemaで保存する。
+
 ## Risks
 
 | risk | impact | handling |

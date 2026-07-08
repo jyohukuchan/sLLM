@@ -516,7 +516,13 @@ def enrich_ullm_batch_workload(row: dict[str, Any], report: dict[str, Any]) -> N
     if not isinstance(row_workload, dict):
         return
     for key in (
+        "prefill_mode",
+        "prefill_executor",
+        "resolved_prefill_executor",
         "prompt_tokens_per_request",
+        "cached_prefix_tokens_per_request",
+        "new_prefill_tokens_per_request",
+        "total_context_tokens_after_prefill_per_request",
         "generated_tokens_per_request",
         "fixed_decode_steps",
     ):
@@ -526,6 +532,16 @@ def enrich_ullm_batch_workload(row: dict[str, Any], report: dict[str, Any]) -> N
         value = parse_int(workload.get(key))
         if value is not None:
             row_workload[key] = value
+    metrics = report.get("metrics")
+    if isinstance(metrics, dict):
+        for key in (
+            "cached_prefix_total_tokens",
+            "total_context_tokens_after_prefill",
+            "estimated_prefill_attention_work_tokens",
+        ):
+            value = parse_int(metrics.get(key))
+            if value is not None:
+                row_workload[key] = value
 
 
 def default_metrics(memory: dict[str, Any]) -> dict[str, Any]:
@@ -577,6 +593,10 @@ def main() -> int:
     parser.add_argument("--model-revision")
     parser.add_argument("--model-format", required=True)
     parser.add_argument("--model-quantization", required=True)
+    parser.add_argument("--sq-candidate")
+    parser.add_argument("--candidate-artifact")
+    parser.add_argument("--prefill-executor")
+    parser.add_argument("--resolved-prefill-executor")
     parser.add_argument("--gpu-card", action="append", default=[])
     parser.add_argument("--tensor-parallel", type=int, default=1)
     parser.add_argument("--pipeline-parallel", type=int, default=1)
@@ -746,6 +766,8 @@ def main() -> int:
             "batch_size": args.batch_size,
             "concurrent_requests": args.concurrent_requests,
             "kv_cache_dtype": args.kv_cache_dtype,
+            "prefill_executor": args.prefill_executor,
+            "resolved_prefill_executor": args.resolved_prefill_executor,
         },
         "metrics": metrics,
         "memory": memory,
@@ -760,6 +782,11 @@ def main() -> int:
         "error": error,
         "notes": args.note,
     }
+    if args.sq_candidate or args.candidate_artifact:
+        row["candidate"] = {
+            "id": args.sq_candidate,
+            "artifact": args.candidate_artifact,
+        }
     ullm_correctness = parse_ullm_token_ids_correctness(ullm_report)
     if args.parse == "ullm-package-batch-throughput":
         enrich_ullm_batch_workload(row, ullm_report)

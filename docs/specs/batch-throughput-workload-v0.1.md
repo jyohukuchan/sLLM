@@ -48,6 +48,10 @@ The root object may provide defaults used by every case:
 - `position_offset`
 - `lm_head_mode`
 - `kv_cache_dtype`
+- `sq_candidate`
+- `candidate_artifact`
+- `prefill_executor`
+- `resolved_prefill_executor`
 - `warmup_runs`
 - `measured_runs`
 - `timeout_seconds`
@@ -58,6 +62,21 @@ The root object may provide defaults used by every case:
 
 Each case may override `context_length`, `warmup_runs`, `measured_runs`, `timeout_seconds`,
 `prompt_token_ids_batch`, `generated_tokens_batch`, and `notes`.
+
+For R9700 SQ candidate runs, use:
+
+```json
+{
+  "model_quantization": "SQ-FP8-W8A16",
+  "sq_candidate": "sq-fp8-w8a16-r9700-v0",
+  "candidate_artifact": "artifacts/sq-fp8-w8a16-r9700-v0",
+  "prefill_executor": "cached_prefix_rdna4_fp8_auto",
+  "resolved_prefill_executor": null
+}
+```
+
+`resolved_prefill_executor` may be `null` in the workload manifest. Result rows must preserve the
+runtime-resolved executor when a component runner reports one.
 
 ## Output Layout
 
@@ -88,6 +107,22 @@ OUT/
 
 The workload runner does not make logical batch into real batch. It records and preserves the
 `batching.mode` reported by `ullm-engine package-batch-throughput-bench`.
+
+For SQ comparison rows, converted `inference-benchmark-result-v0.1` JSONL must preserve:
+
+- `workload.prefill_mode`
+- `workload.prefill_executor`
+- `workload.resolved_prefill_executor`
+- `workload.cached_prefix_tokens_per_request`
+- `workload.new_prefill_tokens_per_request`
+- `workload.total_context_tokens_after_prefill_per_request`
+- `workload.cached_prefix_total_tokens`
+- `workload.total_context_tokens_after_prefill`
+- `workload.estimated_prefill_attention_work_tokens`
+- `batching.prefill_executor`
+- `batching.resolved_prefill_executor`
+- `batching.prefill_real_batch`
+- `memory.kv_cache_bytes_total`
 
 For R9700 AQ4 package measurements, set `require_hip_kernels: true`. To select the experimental
 device-resident token-loop prefill path, set:

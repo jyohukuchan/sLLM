@@ -1,0 +1,87 @@
+{
+  "schema_version": "sq-r9700-state-freeze-v0.1",
+  "date": "2026-07-08",
+  "git": {
+    "branch": "main",
+    "base_commit_before_t0_t2": "54aee41"
+  },
+  "hardware": {
+    "host": "WRX80",
+    "runtime_device_index": 2,
+    "runtime_backend": "hip",
+    "runtime_device_name": "AMD Radeon Graphics",
+    "runtime_compute": "12.0",
+    "runtime_total_global_mem_bytes": 34208743424,
+    "rocm_smi_card": "card2",
+    "target": "R9700/RDNA4"
+  },
+  "model": {
+    "name": "Qwen3.5-9B",
+    "tokenizer_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+    "source_model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B"
+  },
+  "aq4_baseline": {
+    "id": "aq4-lmhead-g8-weighted-lmhead-calib32-r9700-2026-07-07",
+    "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+    "summary_json": "benchmarks/results/2026-07-07/engine/prompt-suite-aq4-lmhead-g8-weighted-lmhead-calib32-r9700/summary.json",
+    "summary_md": "benchmarks/results/2026-07-07/engine/prompt-suite-aq4-lmhead-g8-weighted-lmhead-calib32-r9700/summary.md",
+    "decode_tps_mean": 62.24092343434278,
+    "decode_tps_min": 51.249075594463555,
+    "decode_tps_max": 64.46893502668969,
+    "prefill_tps_mean": 54.812211942045224,
+    "verified_all": true,
+    "output_ok_count": 5,
+    "output_warn_count": 1,
+    "output_not_evaluated_count": 1
+  },
+  "sq_candidate": {
+    "id": "sq-fp8-w8a16-r9700-v0",
+    "artifact_dir_pattern": "artifacts/sq-fp8-w8a16-r9700-v0/{run_id}/",
+    "artifact_manifest_name": "sq_manifest.json",
+    "weight_payload_dtype": "fp8_e4m3",
+    "activation_dtype": "bf16_or_f32",
+    "scale_granularity": "row",
+    "scale_dtype": "f32",
+    "initial_target": "language model 2D projection, embedding, and lm_head weights",
+    "deferred_targets": [
+      "visual tower",
+      "MTP",
+      "RDNA2/V620 dequant path",
+      "tensor parallel"
+    ]
+  },
+  "measurement": {
+    "batch_workload_schema": "ullm-batch-throughput-workload-v0.1",
+    "runtime_result_schema": "sq-candidate-runtime-result-v0.1",
+    "generic_result_schema": "inference-benchmark-result-v0.1",
+    "cached_prefix_default_executor": "cached_prefix_rdna4_fp8_auto",
+    "cached_prefix_resolved_executor_required": true,
+    "required_total_throughput_metrics": [
+      "prefill_total_input_tps",
+      "decode_total_generated_tps",
+      "end_to_end_total_tps"
+    ],
+    "required_memory_metrics": [
+      "vram_baseline_bytes",
+      "vram_peak_bytes",
+      "vram_consumed_bytes",
+      "kv_cache_bytes_total",
+      "compact_resident_bytes",
+      "materialized_working_set_bytes"
+    ]
+  },
+  "t0_t2_status": {
+    "t0_state_freeze": "done",
+    "t1_jsonl_schema_preservation": "partial_done",
+    "t1_real_batch_runner": "not_done",
+    "t2_artifact_metadata_path": "partial_done",
+    "t2_runtime_load_path": "not_done",
+    "t2_short_prompt_guard": "blocked_on_runtime_load"
+  },
+  "next_steps": [
+    "T1: verify batch workload JSONL conversion keeps prefill/KV/executor fields",
+    "T2: verify FP8 artifact writer with a tiny payload fixture and real-model metadata-only run",
+    "T2: add runtime sq_manifest.json load support",
+    "T2: run short prompt guard once the runtime can consume the FP8 artifact"
+  ]
+}
