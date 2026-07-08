@@ -186,6 +186,13 @@ families still passes len4. Adding all three five-layer families fails len4. The
 prompt-bundle candidate is `kup6_gate5_down5`, but it is not a promoted SQ policy until the full
 prompt bundle passes.
 
+The `kup6_gate5_down5` prompt bundle later passed len4, case_a, and case_b strict top1. It stores
+`k/up` for layers `3,7,11,15,19,23` and `gate/down` for layers `3,7,11,15,19` as FP8 row-block32,
+while keeping `q/v/o` and layer `23` `gate/down` as fallback. This is the current six-layer
+strict-top1 regression subset. It is still not a promoted full SQ policy because case_a top8 overlap
+is only `2 / 8` and broader coverage is missing. The reproducible policy record is saved as
+`benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json`.
+
 For repeatable guard runs, use:
 
 ```text

@@ -59,7 +59,7 @@
       ],
       "scale_granularity": "row_block",
       "scale_block_cols": 32,
-      "status": "kup6_gate5_down5_passes_6layer_len4_prompt_bundle_pending_not_full_policy"
+      "status": "kup6_gate5_down5_passes_6layer_len4_case_a_case_b_strict_top1_low_case_a_top8_overlap_not_full_policy"
     },
     "deferred_targets": [
       "visual tower",
@@ -97,7 +97,7 @@
     "t2_artifact_metadata_path": "partial_done",
     "t2_runtime_load_path": "partial_done_overlay_package_load_path_with_guard_runner",
     "t2_runtime_load_smoke": "sq-fp8-materialize-smoke cpu0 and r9700-device2 verified",
-    "t2_short_prompt_guard": "partial_done_multi_layer_quality_boundary_found",
+    "t2_short_prompt_guard": "partial_done_six_layer_prompt_bundle_subset_found",
     "t2_short_prompt_guard_artifacts": [
       "benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md",
       "benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md",
@@ -108,20 +108,24 @@
       "benchmarks/results/2026-07-08/sq-fp8-mixed-candidate-layer-scaling-guard-v0.1.md",
       "benchmarks/results/2026-07-08/sq-fp8-mixed-candidate-acceptance-v0.1.md",
       "benchmarks/results/2026-07-08/sq-fp8-six-layer-family-boundary-v0.1.md",
-      "benchmarks/results/2026-07-08/sq-fp8-six-layer-per-layer-combination-boundary-v0.1.md"
+      "benchmarks/results/2026-07-08/sq-fp8-six-layer-per-layer-combination-boundary-v0.1.md",
+      "benchmarks/results/2026-07-08/sq-fp8-six-layer-kup6-gate5-down5-prompt-bundle-v0.1.md",
+      "benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json",
+      "benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.md"
     ],
-    "t2_short_prompt_guard_note": "One selected q_proj tensor and then the layer 3 projection set are loaded from SQ FP8 while the rest falls back to AQ4. The layer 3 projection-set guard matched AQ4 top1 in 3/3 short token-ID cases. Expanding to layers 3,7 changed top1 for attention-only, MLP-only, and attention+MLP overlays, while AQ4 top1 remained inside SQ top8. Family split shows q/v/down are risky for strict top1, while k/o/gate/up preserve top1 individually and as a combined subset across 3/3 short prompts. Expanding k/o/gate/up to layers 3,7,11,15 preserved top1 in 2/3 short prompts and failed case_a. Row-block scale recovers q at block32 and down at block64, but v remains strict-top1 risky for tested block sizes. A mixed candidate with v fallback and q/k/o/gate/up/down row-block32 FP8 passes layers 3,7,11,15 in 3/3 short prompts and layers 3,7,11,15,19 on len4. The same policy fails layers 3,7,11,15,19,23 and all self-attention probe layers. Layer 23 alone is fixed by q/v fallback, but 6-layer q/v fallback still fails, so cumulative drift remains. T2 promotion rule v0.1 is strict_top1; top-k/rank/gap are diagnostic-only. Six-layer family split shows k/up row-block32 passes strict top1 and k/up combined passes 3/3 short prompts, but o/gate/down fail individually at 6 layers. Per-layer combination search shows k/up all 6 plus any one or two of o/gate/down on layers 3,7,11,15,19 pass len4, while adding all three fails len4. The next prompt-bundle candidate is kup6_gate5_down5. Full-target SQ guard is still pending and needs prompt-bundle qualification plus additional fallback, per-layer policy, stronger format decisions, or a formally accepted text-level guard."
+    "t2_short_prompt_guard_note": "One selected q_proj tensor and then the layer 3 projection set are loaded from SQ FP8 while the rest falls back to AQ4. The layer 3 projection-set guard matched AQ4 top1 in 3/3 short token-ID cases. Expanding to layers 3,7 changed top1 for attention-only, MLP-only, and attention+MLP overlays, while AQ4 top1 remained inside SQ top8. Family split shows q/v/down are risky for strict top1, while k/o/gate/up preserve top1 individually and as a combined subset across 3/3 short prompts. Expanding k/o/gate/up to layers 3,7,11,15 preserved top1 in 2/3 short prompts and failed case_a. Row-block scale recovers q at block32 and down at block64, but v remains strict-top1 risky for tested block sizes. A mixed candidate with v fallback and q/k/o/gate/up/down row-block32 FP8 passes layers 3,7,11,15 in 3/3 short prompts and layers 3,7,11,15,19 on len4. The same policy fails layers 3,7,11,15,19,23 and all self-attention probe layers. Layer 23 alone is fixed by q/v fallback, but 6-layer q/v fallback still fails, so cumulative drift remains. T2 promotion rule v0.1 is strict_top1; top-k/rank/gap are diagnostic-only. Six-layer family split shows k/up row-block32 passes strict top1 and k/up combined passes 3/3 short prompts, but o/gate/down fail individually at 6 layers. Per-layer combination search shows k/up all 6 plus any one or two of o/gate/down on layers 3,7,11,15,19 pass len4, while adding all three fails len4. The kup6_gate5_down5 prompt bundle passes len4, case_a, and case_b strict top1; case_a top8 overlap is only 2/8, so it is a six-layer regression subset rather than a full SQ policy. The selected FP8/fallback policy is saved as sq-fp8-kup6-gate5-down5-policy-v0.1. Full-target SQ guard is still pending and needs broader coverage, stronger format decisions, or a formally accepted text-level guard."
   },
   "next_steps": [
     "T2: keep sq-fp8-materialize-smoke as the runtime artifact-boundary guard",
-    "T2: check kup6_gate5_down5 on case_a and case_b as the next 6-layer prompt-bundle candidate",
+    "T2: keep kup6_gate5_down5 as the current six-layer strict-top1 regression subset",
     "T2: keep kup6_ogatedown5 as a near-miss failure guard",
+    "T2: use sq-fp8-kup6-gate5-down5-policy-v0.1.json as the current SQ policy representation for selected FP8 and fallback families",
     "T2: keep strict_top1 as the promotion rule until a text-level guard is implemented and accepted",
     "T2: use top-k overlap, AQ4 top1 rank, and logit gap as diagnostic-only fields",
     "Planning: treat current prefill/cached-prefix attention speed as sufficient to resume SQ candidate evaluation; defer extra FlashAttention2-like work unless SQ comparison exposes a blocker",
     "T1: implement a real batch executor before using total throughput rows for SQ performance decisions",
     "T5: use native FP8 or materialization-aware runtime paths for throughput comparison; do not use SQ overlay load timing as an SQ speed result",
-    "T5: move to AQ4/FP8 throughput comparison after the T2 prompt-bundle guard passes or an explicit accepted quality tolerance is documented",
+    "T5: move to AQ4/FP8 throughput comparison after the T2 prompt-bundle subset is encoded and the accepted quality boundary is documented",
     "T6/T7: run vLLM comparison only after uLLM R9700 batch=1/4/8 AQ4 and FP8 rows share the same schema"
   ]
 }
