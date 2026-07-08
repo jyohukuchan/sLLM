@@ -28,19 +28,24 @@
 - 6層bundleのfamily splitでは、row-block32の `k` と `up` は単独でstrict top1を維持したが、`o/gate/down` は単独でtop1を動かした。
 - row-block16でも `o/gate/down` はstrict top1に戻らなかった。
 - `k/up` row-block32の6層部分候補は短い3 promptでstrict top1一致だったが、case_aのtop8 overlapは `2 / 8` と低い。これは回帰guardであり、full SQ policyではない。
-- したがって現時点では、T2は「品質境界をかなり狭めたがfull-target SQ guard未完了」と扱う。real batch throughput比較へ進む前に、full-target相当のacceptance ruleか追加fallback/別formatを決める必要がある。
+- 追加の組み合わせ探索では、`k/up` 全6層に `o/gate/down` のうち1 familyまたは2 familyを layers `3,7,11,15,19` で足してもlen4 strict top1を維持した。
+- `k/up` 全6層に `o/gate/down` 全3 familyを layers `3,7,11,15,19` で足すとlen4 strict top1が崩れた。
+- len4上の次のprompt-bundle候補は、top8 overlapが最も高い `kup6_gate5_down5` である。
+- したがって現時点では、T2は「品質境界をかなり狭めたがfull-target SQ guard未完了」と扱う。
+- 一方で、prefill/cached-prefix attentionはSQ候補評価の前提速度としては一旦十分と判断する。追加のFlashAttention2-like最適化は有益だが、SQ策定フェーズを止めるblockerにはしない。
+- 以後の主軸は、FP8 SQ候補の品質境界を固定し、real batch total throughputを測り、AQ4 baselineとvLLM参考値へ同じschemaで接続することに移す。
 
 ## 次の行動
 
 1. T2 short guardの昇格条件は、text-level guardが実装・採用されるまではstrict top1一致にする。
-2. top-k overlap、AQ4 top1 rank、logit gapは診断指標として保存するが、strict top1失敗を上書きしない。
-3. 6層bundleの累積driftを、`q/v/o/gate/down` の追加fallback、per-layer policy、またはより強いscale/layoutで縮める。
-4. `k/up` row-block32 FP8は、6層まで通った部分候補として固定し、回帰guardにする。
-5. full-target相当のT2 guardがstrict top1 ruleを満たす、またはtext-level guardを正式採用した段階で、T1 real batch runnerとT5 FP8/AQ4 throughput packへ進む。
-6. T1側ではreal batch executorとVRAM samplingの実測gridを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
-7. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにする。
-8. cold prefillとfull-model prefill接続はT3として継続し、SQ候補比較の前に最低限の長さ別・batch別代表値を保存する。
-9. uLLM側でR9700のFP8/AQ4結果が同じschemaで揃った後、vLLM baselineを同じworkload gridで測る。
+2. `kup6_gate5_down5` を次の6層prompt-bundle候補にし、case_a/case_bでstrict top1が維持されるか確認する。
+3. `kup6_gate5_down5` が通る場合は、これをFP8 SQ候補1の最小品質subsetとして扱い、未選択family/layerはfallback理由付きでmanifestへ残す。
+4. `kup6_gate5_down5` が崩れる場合は、失敗caseをnear-miss guardとして保存し、fallback family追加、per-layer fallback、またはFP8以外の強いscale/layout候補を選ぶ。
+5. top-k overlap、AQ4 top1 rank、logit gapは診断指標として保存するが、strict top1失敗を上書きしない。
+6. T1 real batch runnerとVRAM samplingの実測gridを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
+7. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにし、`resolved_executor` を必ず保存する。
+8. T3の追加FlashAttention2-like最適化は、SQ候補比較の阻害要因になったcaseだけに限定する。現時点ではSQ評価本体へ進む。
+9. T5でAQ4 baselineとFP8 SQ候補を同じworkload gridで比較し、uLLM側のR9700結果が揃った後にvLLM baselineを同じgridで測る。
 
 ## 2026-07-08 cached prefix FP8 KV cache note
 
@@ -1020,6 +1025,29 @@ Exit criteria:
 3. 次のT2は `q/v/o/gate/down` に対するper-layer fallback、別scale/layout、またはstronger formatを試す。
 4. 診断gapだけで順序を付けるなら、`o/down` を `gate` より先に見る。
 
+### T2 current status: six-layer per-layer combination boundary v1
+
+前回の要点:
+
+- `k/up` row-block32は6層3 promptでstrict top1一致だった。
+- `o/gate/down` は6層単独ではstrict top1不一致だった。
+- ただし5層までなら安全なのか、組み合わせで崩れるのかは未確認だった。
+
+今回の変更点:
+
+- layers `3,7,11,15,19` では、`o/gate/down` row-block32がそれぞれstrict top1一致だった。
+- `k/up` 全6層に `o5`、`gate5`、`down5` のどれか1 familyを足した3ケースはすべてlen4でstrict top1一致だった。
+- `k/up` 全6層に `o5/gate5`、`o5/down5`、`gate5/down5` の2 familyを足した3ケースもすべてlen4でstrict top1一致だった。
+- `k/up` 全6層に `o5/gate5/down5` の3 familyをすべて足すとlen4でstrict top1不一致だった。
+- 結果は `benchmarks/results/2026-07-08/sq-fp8-six-layer-per-layer-combination-boundary-v0.1.md` に保存した。
+
+次の行動:
+
+1. len4上の最有力candidateは `kup6_gate5_down5` とする。
+2. `kup6_gate5_down5` をcase_a/case_bへ広げ、6層prompt bundleでstrict top1が維持されるか確認する。
+3. `kup6_ogatedown5` はnear-miss failureとして保持する。
+4. full SQ policyにはまだ昇格しない。
+
 ### T3: Prefill optimization v0.1, 4-7 days
 
 目的:
@@ -1814,15 +1842,17 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done | `tools/build-sq-fp8-w8a16-artifact.py` |
 | T2 runtime load path | partial done | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization |
-| T2 short prompt guard | partial done with boundary found | one-tensor and layer-3 projection-set guards passed top1; layers `3,7` found ranking drift and family split; safe subset layer scaling found 4-layer prompt-dependent drift; row-block scale produced a `v`-fallback mixed candidate: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md` |
+| T2 short prompt guard | partial done with six-layer boundary found | one-tensor and layer-3 projection-set guards passed top1; row-block scale produced a `v`-fallback mixed candidate; later six-layer split narrowed the safe subset to `k/up` over layers `3,7,11,15,19,23` plus at most two of `o/gate/down` over layers `3,7,11,15,19`; current next candidate is `kup6_gate5_down5`: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-family-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-per-layer-combination-boundary-v0.1.md` |
 
 次の行動:
 
-1. T2 short guardは、次に `v` fallback + `q/k/o/gate/up/down` row-block32 FP8を `layers=3,7,11,15` と `4layer_case_a` へ広げる。
-2. `v` については、row-block FP8ではなく高精度fallbackまたは別形式を前提にする。
-3. `4layer_case_a` と `layers=3,7` mixed-candidate bundleを回帰guardとして残す。
-4. T1のrunner smokeを行い、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executorが失われないことを確認する。
-5. T2のfull-target short guardが合格基準を満たした後にT3へ移り、`batch=1/4/8`、cold prefill、cached prefix `L=65536,M=1/16/128/512`、decodeを同じschemaで保存する。
+1. T2 short guardは、次に `kup6_gate5_down5` をcase_a/case_bへ広げ、6層prompt bundleでstrict top1が維持されるか確認する。
+2. `kup6_ogatedown5` はstrict-top1 failureかつnear-miss diagnosticとして残す。
+3. T1 real batch runnerを実装し、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executor、VRAM peakが失われないことを確認する。
+4. FP8 SQ候補のthroughput評価では、overlay load timingを使わない。native FP8、materialization-aware path、または明示的にmaterialized working-setを保存したruntime pathだけを速度比較対象にする。
+5. T3の追加prefill kernel作業は、SQ候補比較で不足が見えたcaseだけに限定する。現時点ではcached-prefix/cold-prefill component速度はSQ評価へ進む前提として十分と扱う。
+6. T5でAQ4 latest baselineとFP8 SQ候補を同じworkload gridで測り、quality、VRAM、resident bytes、working-set bytes、prefill/decode/end-to-end total throughputを比較する。
+7. T6/T7のvLLM比較は、uLLM側でR9700 `batch=1/4/8` のFP8/AQ4結果が揃ってから実施する。
 
 2026-07-08 runtime loader smoke result:
 
@@ -1881,6 +1911,30 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - `v` did not recover top1 for block16/32/64/128.
 - A mixed candidate with `v` fallback and `q/k/o/gate/up/down` row-block32 FP8 passed `3 / 3` short prompts for layers `3,7`.
 - Result: `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md`.
+
+## 2026-07-08 current plan update: SQ evaluation phase
+
+前回の要点:
+
+- FlashAttention2-style cached-prefix/cold-prefill componentは、R9700でSQ候補評価を始める前提速度として一旦十分と判断した。
+- SQ FP8候補は、row-block32とfallbackの組み合わせで品質境界をかなり狭めた。
+- 現在の最有力な短期候補は `kup6_gate5_down5` である。
+
+今回の変更点:
+
+- 追加のFlashAttention2-like最適化を主タスクから外し、SQ候補評価の阻害要因になったcaseだけに限定する。
+- SQ策定フェーズの主順序を、T2品質境界固定、T1 real batch throughput runner、T5 AQ4/FP8比較、T6/T7 vLLM比較に並べ直す。
+- T2では、`kup6_gate5_down5` をcase_a/case_bへ広げる。通れば最小品質subset、崩れればnear-miss failure guardとして扱う。
+- throughput評価では、SQ overlayのhost-side materialize/load timingを使わない。速度比較はnative FP8 path、materialization-aware runtime path、またはworking-setを明示したpathに限定する。
+- SQ候補の採用判断では、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、quality、VRAM、resident bytes、materialized working-set bytesを同じ表で見る。
+
+次の行動:
+
+1. `kup6_gate5_down5` をcase_a/case_bで確認し、strict top1の6層prompt-bundle guardを作る。
+2. real batch runnerをfull package pathへ接続し、`batch=1/4/8` のprefill/decode/end-to-end total throughputを保存する。
+3. FP8 SQ候補1とAQ4 latest baselineを同じworkload gridで測る。
+4. cold prefill、cached prefix、decodeの代表gridを埋める。cached-prefixでは `cached_prefix_rdna4_fp8_auto` と `resolved_executor` を使う。
+5. uLLM側のR9700結果が揃った後、vLLMを同じgridで測る。R9700 FP8がunsupportedなら、unsupported reason付きの比較行として残す。
 
 ## Risks
 

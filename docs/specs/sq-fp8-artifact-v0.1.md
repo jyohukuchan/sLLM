@@ -180,6 +180,12 @@ the tested `3 / 3` short prompts for layers `3,7,11,15,19,23`. `o/gate/down` fai
 individually with row-block32 and still fail with row-block16. The `k/up` subset is a regression
 guard and not a final SQ policy because it leaves `q/v/o/gate/down` as fallback.
 
+A later per-layer combination guard found that `o/gate/down` are strict-top1-safe over layers
+`3,7,11,15,19`, and that `k/up` over all six layers plus any one or two of those five-layer
+families still passes len4. Adding all three five-layer families fails len4. The next partial
+prompt-bundle candidate is `kup6_gate5_down5`, but it is not a promoted SQ policy until the full
+prompt bundle passes.
+
 For repeatable guard runs, use:
 
 ```text
