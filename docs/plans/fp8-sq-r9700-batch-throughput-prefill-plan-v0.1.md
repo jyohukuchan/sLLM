@@ -4,8 +4,9 @@
 
 - AQ4 decodeはR9700で `66-68 tok/s`、V620で約 `41 tok/s` まで改善し、AQ4 decode速度改善はいったん完了扱いにした。
 - SQ候補評価では、single request decode tok/sだけでは不十分で、batch時のtotal throughput、prefill throughput、decode throughputを分けて測る必要がある。
-- 現行prefillは十分に最適化されていないため、今のprefill tok/sをSQ候補のformat性能として読むと判断を誤る。
+- prefillは当初十分に最適化されていなかったため、素のprefill tok/sをSQ候補のformat性能として読むと判断を誤る状態だった。
 - FP8はSQ候補1として扱う。ただし採用決定ではなく、SQ候補評価の基準線として使う。
+- R9700/RDNA4向けcached-prefix attentionは、`cached_prefix_rdna4_fp8_auto` まで進み、SQ候補評価に使う暫定速度としては十分と判断する。
 
 ## 今回の変更点
 
@@ -17,17 +18,19 @@
 - vLLM比較では、R9700でFP8が動くことを前提にせず、backend、dtype、quantization、failure reasonを結果schemaへ残す。
 - 512 tokenまでのcomponent timingだけでは長コンテキストprefillの評価として不足するため、cold prefillとcached prefix付きprefillのworkload gridを追加する。
 - 512 tokenの結果はshort sanityとlocal bottleneck検出には使えるが、SQ候補のprefill性能判断には使わない。prompt長、cached prefix長、新規chunk長、batch幅を変えた探索gridを追加し、結果に合わせてprefill kernelのtiling/blocking方針を更新する。
+- FlashAttention2-style cached-prefix最適化は、SQ候補評価へ進むための前提作業として一旦完了扱いにする。
+- 次の主タスクは、`sq-fp8-w8a16-r9700-v0` のpackage/runtime prototype、result schema固定、AQ4 baselineとの比較準備である。
 
 ## 次の行動
 
-1. R9700向けのbatch throughput result schemaを固定する。
-2. logical batch runnerを先に作り、その後real batch kernelへ広げる。
-3. FP8 SQ候補1のpackage/runtime prototypeを作る。
-4. prefillをtoken-by-token実行からbatched/tiled実行へ移す。
-5. long context向けに、`2^16` token級のcold prefillと、cached prefix `L` に対して新規chunk `M` を追加するcached prefillを測れるようにする。
-6. 512 tokenを超える複数patternの結果から、causal attention、cached prefix attention、projection/MLP batchのどこを次に直すべきかを決める。
-7. uLLM側でR9700のprefill/decodeが比較可能な速度になった後、vLLM baselineを同じworkload gridで測る。
-8. FP8 K/V cacheの長prefix bottleneck解消として、R9700/RDNA4向けFlashAttention2-style tiled attentionを次の主タスクにする。
+1. R9700向けのbatch throughput result schemaとresult path規約を固定する。
+2. AQ4 latest baseline commit、package path、現行decode/prefill代表値をbaseline artifact indexとして記録する。
+3. `sq-fp8-w8a16-r9700-v0` のartifact path、metadata、scale granularityを固定する。
+4. FP8 SQ候補1のpackage/runtime prototypeを作り、short prompt guardを通す。
+5. logical batch runnerのJSONL集約とVRAM/KV cache記録を整備し、FP8/AQ4を同じschemaへ流す。
+6. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにする。
+7. cold prefillとfull-model prefill接続はT3として継続し、SQ候補比較の前に最低限の長さ別・batch別代表値を保存する。
+8. uLLM側でR9700のFP8/AQ4結果が同じschemaで揃った後、vLLM baselineを同じworkload gridで測る。
 
 ## 2026-07-08 cached prefix FP8 KV cache note
 
@@ -74,7 +77,7 @@
 2. K score計算でdecoded Kを再利用するtile設計を検討する。
 3. packed変換はCKのgfx12注意点を踏まえ、単体変換版の正しさと速度を基準にしてから別途検証する。
 
-## 2026-07-08 next task: FlashAttention2 implementation
+## 2026-07-08 prerequisite: FlashAttention2-style cached-prefix implementation
 
 前回の要点:
 
@@ -84,13 +87,13 @@
 
 今回の変更点:
 
-- 次の主タスクを、R9700/RDNA4向けFlashAttention2-style tiled attention実装にする。
+- SQ候補評価へ進む前提作業として、R9700/RDNA4向けFlashAttention2-style tiled attention実装を行う。
 - 対象はまずcached prefix prefillとcold prefillのattention componentに限定する。
 - R9700/RDNA4では、FP8変換命令、BF16/FP16系演算、十分なLDS/波面制御を前提に、そのまま実装できるものとして進める。
 - RDNA2/V620などBF16が使えない、またはFP8変換・scale変換の条件が異なる環境は今回の合否から外す。
 - RDNA2向けには、必要ならFP32へのdequant機構、別accumulator path、またはfallback attention kernelを後続で設計する。今回は保留する。
 
-次の行動:
+当初の行動:
 
 1. `runtime-cached-prefix-attn-smoke` にFlashAttention2 executorを追加する。
    - 例: `cached_prefix_flash2` または `flash2_cached_prefix`
@@ -115,6 +118,13 @@
 - cached-prefix FP8 K/V cacheの保存gridでsampled guardが通る。
 - v2 builtin conversion結果より `L=65536` のFP8 tok/sまたはpair/sが明確に改善する。
 - F32 baselineに対して、kernel構造による改善とFP8 cache byte削減による改善を分けて説明できる。
+
+現状:
+
+- `cached_prefix_flash2`、`cached_prefix_flash2_fp8q`、`cached_prefix_rocwmma_fp8`、`cached_prefix_rdna4_fp8_auto` まで実装済み。
+- `cached_prefix_rdna4_fp8_auto` は `M<64` を `cached_prefix_flash2_fp8q`、`M>=64` を `cached_prefix_rocwmma_fp8` に解決する。
+- R9700 cached-prefix SQ評価では、このauto executorを暫定defaultとして使う。
+- 追加のmulti-query-token tilingは残るが、SQ候補プロトタイプ着手を止める blocker ではない。
 
 ### 2026-07-08 progress: cached-prefix flash2 FP8/F32 v1
 
@@ -783,6 +793,7 @@ Package self-attention layer partial latest:
 目的:
 
 - R9700限定のSQ候補評価条件を固定する。
+- FlashAttention2-style cached-prefix prerequisite完了後の、AQ4/FP8/vLLM比較schemaを固定する。
 
 手順:
 
@@ -791,12 +802,15 @@ Package self-attention layer partial latest:
 3. FP8 candidate artifact path規約を決める。
 4. total throughput schemaの追加項目をdocs/specsへ反映する。
 5. result path規約を決める。
+6. cached-prefix resultには `executor` と `resolved_executor` を必須列として残す。
+7. R9700 FP8 cached-prefixの暫定default executorを `cached_prefix_rdna4_fp8_auto` と明記する。
 
 成果物:
 
 - updated benchmark schema
 - result directory convention
 - baseline artifact index
+- R9700 SQ evaluation state freeze note
 
 Exit criteria:
 
@@ -859,22 +873,28 @@ R9700 schema/control-plane smoke:
 目的:
 
 - FP8をSQ候補1として、R9700で読み込めるruntime pathを作る。
+- 最初の対象を `sq-fp8-w8a16-r9700-v0` に限定し、SQ format策定前の速度・品質基準線を作る。
 
 手順:
 
-1. FP8 payload writerを追加する。
-2. scale granularityをまずtensorまたはrowに固定する。
-3. MLP、attention projection、linear attention projection、lm_head、embeddingをFP8化する。
-4. normや小さいbias/conv/state系はpassthroughのまま残す。
-5. R9700 runtimeでFP8 payloadを読む。
-6. まずはdequant-to-BF16/F32またはnative FP8 readのどちらが最短か確認する。
-7. short prompt guardを通す。
+1. `sq-fp8-w8a16-r9700-v0` のartifact manifestとmetadataを定義する。
+2. FP8 payload writerを追加する。
+3. scale granularityをまずtensorまたはrowに固定する。
+4. scale dtypeとlayoutをmetadataへ保存する。
+5. resident bytes、materialized working-set bytes、passthrough tensor一覧を保存する。
+6. MLP、attention projection、linear attention projection、lm_head、embeddingをFP8化する。
+7. normや小さいbias/conv/state系はpassthroughのまま残す。
+8. R9700 runtimeでFP8 payloadを読む。
+9. まずはdequant-to-BF16/F32またはnative FP8 readのどちらが最短か確認する。
+10. short prompt guardを通す。
+11. guard失敗時は、format不適合、scale granularity不足、runtime変換問題、passthrough不足のどれかに分類して記録する。
 
 成果物:
 
 - FP8 candidate package or runtime artifact
 - FP8 candidate load path
 - short guard result
+- FP8 candidate artifact metadata
 
 Exit criteria:
 
@@ -1620,6 +1640,30 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 1. SQ候補のcached-prefix測定では、まず `cached_prefix_rdna4_fp8_auto` を使い、必要に応じて `resolved_executor` で結果を分解する。
 2. explicit比較やthreshold調整が必要な場合は、`cached_prefix_flash2_fp8q` と `cached_prefix_rocwmma_fp8` を併走させる。
 3. 次のkernel最適化は、短chunkを改善するmulti-query-token tile化として扱う。
+
+## 2026-07-08 current plan update: move to SQ candidate prototype
+
+前回の要点:
+
+- cached-prefix attentionは、FlashAttention2-style scalar pathとRDNA4 FP8 rocWMMA pathを組み合わせるところまで進んだ。
+- `L=65536,M=128` の代表runは約1秒級であり、SQ候補評価を始める暫定速度としては十分と判断する。
+- 追加のmulti-query-token tilingは有用だが、SQ candidate prototypeを止めるほどの未解決事項ではない。
+
+今回の変更点:
+
+- 次の主タスクを、attention kernel追加からSQ候補プロトタイプへ戻す。
+- 最初のSQ候補は `sq-fp8-w8a16-r9700-v0` とする。
+- cached-prefix component測定では `cached_prefix_rdna4_fp8_auto` を暫定defaultにする。
+- `cached_prefix_flash2_fp8q` と `cached_prefix_rocwmma_fp8` は、threshold調整や原因分解用の明示比較軸として残す。
+- T0/T1/T2を先に進め、AQ4 baseline、FP8 SQ候補、vLLM参考結果を同じschemaで比較できる状態を作る。
+
+次の行動:
+
+1. T0として、R9700 device index、AQ4 baseline commit/package、FP8 artifact path、result directory、JSONL schemaを固定する。
+2. T1として、batch throughput runnerのJSONL集約、VRAM/KV cache bytes記録、`resolved_executor` 記録を整える。
+3. T2として、`sq-fp8-w8a16-r9700-v0` のpayload writer、metadata、runtime load path、short prompt guardを実装する。
+4. T3として、FP8候補をprefill/decode runnerへ接続し、cold prefill、cached prefix、decodeの代表gridを保存する。
+5. T5でAQ4 latest baselineとFP8候補を同一schemaで比較し、T6/T7でvLLM比較に進む。
 
 ## Risks
 
