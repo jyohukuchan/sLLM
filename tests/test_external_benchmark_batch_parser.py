@@ -281,6 +281,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_overlay=true sq_candidate=sq-fp8-w8a16-r9700-v0 "
             "sq_artifact=/tmp/sq-artifact sq_schema_version=sq-fp8-artifact-v0.1 "
             "sq_fp8_tensor_count=22 sq_passthrough_tensor_count=753 sq_row_chunk=256 "
+            "request_batch_executor=true fused_request_batch=false throughput_row=false "
             "batching_mode=real "
             "prefill_executor=stack_prefill_request_batch_step decode_executor=stack_ready_batch "
             "prefill_real_batch=true decode_real_batch=true "
@@ -365,6 +366,9 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["batching"]["prefill_batch_request_counts"], [3, 1])
         self.assertTrue(row["batching"]["decode_real_batch"])
         self.assertEqual(row["batching"]["decode_executor_request_parallelism"], 2)
+        self.assertTrue(row["batching"]["request_batch_executor"])
+        self.assertFalse(row["batching"]["fused_request_batch"])
+        self.assertFalse(row["batching"]["throughput_row"])
         self.assertEqual(row["batching"]["component_package"], "/tmp/model.ullm.d")
 
 

@@ -19431,12 +19431,11 @@ fn package_token_ids_mixed_request_state_smoke_impl(
         .max()
         .unwrap_or(0)
     {
-        let mut active_count = 0_usize;
+        let mut batch_items = Vec::new();
         for (request_index, request) in request_plan.requests.iter().enumerate() {
             if timestep >= request.prompt_tokens {
                 continue;
             }
-            active_count += 1;
             let request_position_base = position_offset
                 .checked_add(
                     request_index
@@ -19452,24 +19451,24 @@ fn package_token_ids_mixed_request_state_smoke_impl(
             let residual =
                 mixed_request_state_residual_slice(&request_plan, request_index, timestep, hidden)?
                     .to_vec();
-            package_mixed_request_state_layers_step(
-                &mut stream,
-                &mut layers,
-                request.id,
+            batch_items.push(MixedRequestStateBatchStepItem {
+                request_id: request.id,
                 residual,
-                hidden,
-                rotary_dim_value,
-                rope_base,
                 rope_position,
-                timestep,
-                &format!(
-                    "mixed request-state prefill request={} timestep={timestep}",
-                    request.id.0
-                ),
-            )?;
+                cache_position: timestep,
+            });
         }
-        if active_count > 0 {
-            prefill_batch_request_counts.push(active_count);
+        let count = package_mixed_request_state_layers_batch_step(
+            &mut stream,
+            &mut layers,
+            &batch_items,
+            hidden,
+            rotary_dim_value,
+            rope_base,
+            &format!("mixed request-state prefill batch timestep={timestep}"),
+        )?;
+        if count > 0 {
+            prefill_batch_request_counts.push(count);
         }
     }
     stream
@@ -19486,12 +19485,11 @@ fn package_token_ids_mixed_request_state_smoke_impl(
         .max()
         .unwrap_or(0)
     {
-        let mut active_count = 0_usize;
+        let mut batch_items = Vec::new();
         for (request_index, request) in request_plan.requests.iter().enumerate() {
             if decode_index >= request.max_new_tokens {
                 continue;
             }
-            active_count += 1;
             let token_index = request
                 .prompt_tokens
                 .checked_add(decode_index)
@@ -19515,24 +19513,24 @@ fn package_token_ids_mixed_request_state_smoke_impl(
                 hidden,
             )?
             .to_vec();
-            package_mixed_request_state_layers_step(
-                &mut stream,
-                &mut layers,
-                request.id,
+            batch_items.push(MixedRequestStateBatchStepItem {
+                request_id: request.id,
                 residual,
-                hidden,
-                rotary_dim_value,
-                rope_base,
                 rope_position,
-                token_index,
-                &format!(
-                    "mixed request-state decode request={} decode_index={decode_index}",
-                    request.id.0
-                ),
-            )?;
+                cache_position: token_index,
+            });
         }
-        if active_count > 0 {
-            decode_batch_request_counts.push(active_count);
+        let count = package_mixed_request_state_layers_batch_step(
+            &mut stream,
+            &mut layers,
+            &batch_items,
+            hidden,
+            rotary_dim_value,
+            rope_base,
+            &format!("mixed request-state decode batch decode_index={decode_index}"),
+        )?;
+        if count > 0 {
+            decode_batch_request_counts.push(count);
         }
     }
     stream
@@ -19642,14 +19640,38 @@ fn package_token_ids_mixed_request_state_smoke_impl(
         && layer_kinds.iter().any(|kind| *kind == "self_attention");
     let linear_attn_weight_bundle_shared = request_plan.request_count() > 1
         && layer_kinds.iter().any(|kind| *kind == "linear_attention");
+    let prefill_executor_request_parallelism = prefill_batch_request_counts
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let decode_executor_request_parallelism = decode_batch_request_counts
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let prefill_real_batch = prefill_executor_request_parallelism > 1;
+    let decode_real_batch = decode_executor_request_parallelism > 1;
+    let batching_mode = if prefill_real_batch && decode_real_batch {
+        "real"
+    } else if prefill_real_batch || decode_real_batch {
+        "hybrid"
+    } else {
+        "single"
+    };
 
     Ok(format!(
-        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} full_mixed_request_state=true request_state_dispatch=true throughput_row=false batching_mode=request_state_interleaved prefill_real_batch=false decode_real_batch=false prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=false batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
         path,
         layer_indices,
         usize_csv(&layer_indices),
         layer_kinds,
         request_plan.input_source,
+        batching_mode,
+        prefill_real_batch,
+        decode_real_batch,
+        prefill_executor_request_parallelism,
+        decode_executor_request_parallelism,
         request_plan.prompt_token_ids_by_request,
         request_plan.decode_token_ids_by_request,
         top_k,
@@ -19699,6 +19721,13 @@ fn package_token_ids_mixed_request_state_smoke_impl(
         device_index,
         info.name,
     ))
+}
+
+struct MixedRequestStateBatchStepItem {
+    request_id: RequestId,
+    residual: Vec<f32>,
+    rope_position: usize,
+    cache_position: usize,
 }
 
 fn usize_csv(values: &[usize]) -> String {
@@ -19759,71 +19788,83 @@ fn mixed_request_state_residual_slice<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn package_mixed_request_state_layers_step(
+fn package_mixed_request_state_layers_batch_step(
     stream: &mut ullm_runtime_sys::RuntimeStream,
     layers: &mut [PackageMixedRequestStateLayer],
-    request_id: RequestId,
-    residual: Vec<f32>,
+    items: &[MixedRequestStateBatchStepItem],
     hidden: usize,
     rotary_dim: usize,
     rope_base: f32,
-    rope_position: usize,
-    cache_position: usize,
     label: &str,
 ) -> Result<usize, String> {
+    if items.is_empty() {
+        return Ok(0);
+    }
     if layers.is_empty() {
         return Err(format!(
-            "{label} mixed request-state layer step requires at least one layer"
+            "{label} mixed request-state layer batch requires at least one layer"
         ));
     }
-    if residual.len() != hidden {
-        return Err(format!(
-            "{label} residual length {} does not match hidden {hidden}",
-            residual.len()
-        ));
+    for item in items {
+        if item.residual.len() != hidden {
+            return Err(format!(
+                "{label} request {:?} residual length {} does not match hidden {hidden}",
+                item.request_id,
+                item.residual.len()
+            ));
+        }
     }
 
-    let mut residual_host = Some(residual);
     let mut residual_device_layer: Option<usize> = None;
     for layer_position in 0..layers.len() {
-        let layer_label = format!("{label} layer {layer_position} position {rope_position}");
         if let Some(previous_position) = residual_device_layer {
             let (previous_layers, current_layers) = layers.split_at_mut(layer_position);
             let previous = previous_layers.get(previous_position).ok_or_else(|| {
-                format!(
-                    "{layer_label} previous device residual layer {previous_position} is missing"
-                )
+                format!("{label} previous device residual layer {previous_position} is missing")
             })?;
-            let residual_buffer = previous.output_buffer(request_id)?;
-            current_layers[0].step_from_device_to_device(
-                stream,
-                request_id,
-                residual_buffer,
-                rotary_dim,
-                rope_base,
-                rope_position,
-                cache_position,
-                &layer_label,
-            )?;
+            let current = current_layers
+                .get_mut(0)
+                .ok_or_else(|| format!("{label} current layer {layer_position} is missing"))?;
+            for item in items {
+                let residual_buffer = previous.output_buffer(item.request_id)?;
+                current.step_from_device_to_device(
+                    stream,
+                    item.request_id,
+                    residual_buffer,
+                    rotary_dim,
+                    rope_base,
+                    item.rope_position,
+                    item.cache_position,
+                    &format!(
+                        "{label} layer {layer_position} request={} position={}",
+                        item.request_id.0, item.rope_position
+                    ),
+                )?;
+            }
         } else {
-            let residual = residual_host
-                .take()
-                .ok_or_else(|| format!("{layer_label} missing host residual"))?;
-            layers[layer_position].step_from_host_to_device(
-                stream,
-                request_id,
-                &residual,
-                rotary_dim,
-                rope_base,
-                rope_position,
-                cache_position,
-                &layer_label,
-            )?;
+            let current = layers
+                .get_mut(layer_position)
+                .ok_or_else(|| format!("{label} current layer {layer_position} is missing"))?;
+            for item in items {
+                current.step_from_host_to_device(
+                    stream,
+                    item.request_id,
+                    &item.residual,
+                    rotary_dim,
+                    rope_base,
+                    item.rope_position,
+                    item.cache_position,
+                    &format!(
+                        "{label} layer {layer_position} request={} position={}",
+                        item.request_id.0, item.rope_position
+                    ),
+                )?;
+            }
         }
         residual_device_layer = Some(layer_position);
     }
 
-    residual_device_layer.ok_or_else(|| format!("{label} missing final device residual"))
+    Ok(items.len())
 }
 
 const QWEN3_EMBED_TOKENS_TENSOR: &str = "model.language_model.embed_tokens.weight";

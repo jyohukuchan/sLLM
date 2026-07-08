@@ -69,9 +69,9 @@
     "T1/T2: use package-token-ids-model-loop-smoke as the current selected-layer bridge from token IDs to model-loop scheduler and final lm_head top1 guard",
     "T1/T2: use phase-t1-token-id-model-loop-real-prefill-smoke-v1 as the current selected-layer request-batch prefill bridge; it is still not final full LM throughput",
     "T2: use sq-fp8-token-ids-model-loop-smoke as the current SQ selected-layer bridge for AQ4/SQ top1 and schema comparison; it is still not final full LM throughput",
-    "T1: extend logical full-package rows to real full-package request-batch prefill/decode/end-to-end rows before using total throughput rows for SQ performance decisions",
+    "T1: extend logical full-package rows to resident full mixed request-batch prefill/decode/end-to-end rows before using total throughput rows for SQ performance decisions",
     "T1: use phase-t1-full-mixed-layer-kind-inventory-v1 as the full mixed-attention implementation target; layers are contiguous 0..31, self-attention layers are 3,7,11,15,19,23,27,31, and the other 24 layers are linear-attention",
-    "T1: use phase-t1-linear-attn-request-state-owner-v1, phase-t1-self-attn-request-state-owner-v1, phase-t1-mixed-request-state-layer-enum-smoke-v1, phase-t1-mixed-request-state-manifest-smoke-v1, and phase-t1-mixed-request-state-aq4-payload-sharing-v1 as the current request-state dispatch boundary; next share scale_values_buffer and passthrough weight buffers, then move toward per-layer weight-only resident bundles and real package throughput rows",
+    "T1: use phase-t1-mixed-request-state-layer-batch-executor-v1 as the current full mixed request-batch executor boundary; next split resident load from measured execution and produce AQ4 batch=1/4/8 throughput rows",
     "T5: use native FP8 or materialization-aware runtime paths for throughput comparison; do not use SQ overlay load timing as an SQ speed result",
     "T5: move to AQ4/FP8 throughput comparison after the T1 full package total-throughput runner exists and a T2 model-loop-safe subset is encoded in the runtime path",
     "T6/T7: run vLLM comparison only after uLLM R9700 batch=1/4/8 AQ4 and FP8 rows share the same schema",
@@ -99,7 +99,7 @@
     "T2: keep selected-layer-ko-layer3-down64-layer11-down64-plus-layer15-up32-gate32-plus-layer19-gate32-plus-layer23-gate32-down64 as the current passing branch",
     "T2: keep layer19 down_proj row-block64 as a failure guard",
     "T2: keep layer19 up_proj row-block32 and row-block16 as failure guards",
-    "T1: resume full-package real request-batch prefill/decode/end-to-end throughput runner, or broaden T2 beyond the current selected-layer MLP probe set if quality exploration remains the priority"
+    "T1: split layer load from full mixed resident execution and produce AQ4 batch=1/4/8 request-batch throughput rows before SQ speed comparison"
   ],
   "schema_version": "sq-r9700-state-freeze-v0.1",
   "sq_candidate": {
@@ -406,6 +406,10 @@
     "t1_mixed_request_state_weight_bundle_sharing": "partial_done_layer_weight_only_bundles_shared",
     "t1_mixed_request_state_weight_bundle_sharing_artifact": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-mixed-request-state-weight-bundle-sharing-v1.md",
     "t1_mixed_request_state_weight_bundle_sharing_note": "Self-attn and linear-attn resident layers now split immutable StepWeights from request slot state/workspace, and batch loaders reuse one Arc weights bundle per layer while keeping KV cache, block table, Conv1d history, recurrent state, and workspace per request slot. R9700 AQ4 manifest-all remained verified=true with final_top1_tokens=[44370,5446], self_attn_weight_bundle_shared=true, and linear_attn_weight_bundle_shared=true; layer_load_ms changed from 16240.561131 to 10256.735321. This is still not a real batch throughput row.",
+    "t1_mixed_request_state_layer_batch_executor": "partial_done_full_mixed_request_batch_executor_boundary_added",
+    "t1_mixed_request_state_layer_batch_executor_artifact": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-mixed-request-state-layer-batch-executor-v1.md",
+    "t1_mixed_request_state_layer_batch_executor_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-mixed-request-state-layer-batch-executor-v1/results.jsonl",
+    "t1_mixed_request_state_layer_batch_executor_note": "package-token-ids-mixed-request-state-smoke now groups active requests by layer/step across the full manifest-all mixed stack. R9700 AQ4 manifest-all preserved batching.mode=real, prefill_real_batch=true, decode_real_batch=true, request_batch_executor=true, fused_request_batch=false, final_top1_tokens=[44370,5446], and verified=true. This remains throughput_row=false because total_wall_ms includes layer load and the executor is not fused.",
     "t2_artifact_metadata_path": "partial_done_with_policy_json_input_and_policy_payload_artifact",
     "t2_artifact_metadata_path_note": "build-sq-fp8-w8a16-artifact.py accepts --policy-json for sq-fp8-policy-v0.1; dry-run confirmed kup6_gate5_down5 resolves to 22 FP8 tensors, 753 passthrough tensors, and row_block32 scale. A real payload artifact was generated under /tmp with compact_resident_bytes_estimate=18579553248 and materialized_working_set_bytes_estimate=201326592. The builder now also supports policy scale.overrides[] for per-tensor scale layout probes; mixed artifacts keep per-entry scale metadata authoritative.",
     "t2_candidate_matrix": "done_v0_1_quality_and_throughput_pending",

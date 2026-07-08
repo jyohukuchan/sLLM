@@ -945,6 +945,9 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "decode_executor_request_parallelism": parse_int(
             report.get("decode_executor_request_parallelism")
         ),
+        "request_batch_executor": report.get("request_batch_executor") is True,
+        "fused_request_batch": report.get("fused_request_batch") is True,
+        "throughput_row": report.get("throughput_row") is True,
         "scheduler_policy": "model_loop_ready_batch",
         "component_command": report.get("command"),
         "component_package": report.get("package"),
