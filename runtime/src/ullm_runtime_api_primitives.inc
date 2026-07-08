@@ -261,6 +261,164 @@ ullm_status ullm_runtime_sq_fp8_matvec_f32(
         stream);
 }
 
+ullm_status ullm_runtime_sq_fp8_matvec_batch_f32(
+    const ullm_runtime_buffer *payload_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    uint32_t scale_kind,
+    size_t scale_block_cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (payload_buffer == nullptr || scale_buffer == nullptr || input_buffer == nullptr ||
+        output_buffer == nullptr) {
+        set_error("SQ FP8 matvec batch received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rows == 0 || cols == 0 || batch_count == 0) {
+        set_error("SQ FP8 matvec batch rows, cols, and batch count must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_kind > 2u) {
+        set_error("SQ FP8 matvec batch scale kind must be tensor(0), row(1), or row_block(2)");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_kind == 2u && scale_block_cols == 0) {
+        set_error("SQ FP8 matvec batch row_block scale_block_cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(payload_buffer, scale_buffer) ||
+        !buffers_share_backend(payload_buffer, input_buffer) ||
+        !buffers_share_backend(payload_buffer, output_buffer)) {
+        set_error("SQ FP8 matvec batch buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("SQ FP8 matvec batch stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / rows) {
+        set_error("SQ FP8 matvec batch matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t matrix_elements = rows * cols;
+    size_t scale_values = 1;
+    if (scale_kind == 1u) {
+        scale_values = rows;
+    } else if (scale_kind == 2u) {
+        const size_t blocks_per_row = (cols + scale_block_cols - 1) / scale_block_cols;
+        if (blocks_per_row > max_size / rows) {
+            set_error("SQ FP8 matvec batch row_block scale count overflows");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        scale_values = rows * blocks_per_row;
+    }
+    if (batch_count > max_size / cols) {
+        set_error("SQ FP8 matvec batch input element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t input_elements = batch_count * cols;
+    if (batch_count > max_size / rows) {
+        set_error("SQ FP8 matvec batch output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t output_elements = batch_count * rows;
+    if (input_elements > max_size / sizeof(float) ||
+        output_elements > max_size / sizeof(float) ||
+        scale_values > max_size / sizeof(float)) {
+        set_error("SQ FP8 matvec batch byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_payload_bytes = matrix_elements;
+    const size_t required_scale_bytes = scale_values * sizeof(float);
+    const size_t required_input_bytes = input_elements * sizeof(float);
+    const size_t required_output_bytes = output_elements * sizeof(float);
+    if (payload_buffer->bytes < required_payload_bytes) {
+        set_error("SQ FP8 matvec batch payload buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_buffer->bytes < required_scale_bytes) {
+        set_error("SQ FP8 matvec batch scale buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("SQ FP8 matvec batch input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_output_bytes) {
+        set_error("SQ FP8 matvec batch output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (payload_buffer->backend == BackendKind::Cpu) {
+        const auto *payload = static_cast<const uint8_t *>(payload_buffer->ptr);
+        const auto *scales = static_cast<const float *>(scale_buffer->ptr);
+        const auto *input = static_cast<const float *>(input_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        if (!sq_fp8_matvec_batch_f32_host(
+                payload,
+                scales,
+                input,
+                rows,
+                cols,
+                scale_kind,
+                scale_block_cols,
+                batch_count,
+                output)) {
+            set_error("SQ FP8 matvec batch host path rejected invalid values");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (sq_fp8_matvec_batch_f32_hip_kernel(
+            payload_buffer,
+            scale_buffer,
+            input_buffer,
+            rows,
+            cols,
+            scale_kind,
+            scale_block_cols,
+            batch_count,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_BATCH_KERNEL") != nullptr ||
+        std::getenv("ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "SQ FP8 matvec batch HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return sq_fp8_matvec_batch_f32_hip_staging(
+        payload_buffer,
+        scale_buffer,
+        input_buffer,
+        rows,
+        cols,
+        scale_kind,
+        scale_block_cols,
+        batch_count,
+        required_payload_bytes,
+        required_scale_bytes,
+        required_input_bytes,
+        required_output_bytes,
+        output_buffer,
+        stream);
+}
+
 ullm_status ullm_runtime_matvec_bf16_f32(
     const ullm_runtime_buffer *matrix_buffer,
     const ullm_runtime_buffer *input_buffer,

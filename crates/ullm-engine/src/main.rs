@@ -44316,25 +44316,50 @@ impl PackageAq4ResidentMatvec {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         label: &str,
     ) -> Result<(), String> {
-        let aq4 = self.aq4_storage(label)?;
-        ullm_runtime_sys::aq4_matvec_batch_f32(
-            aq4.index_buffer,
-            aq4.scale_buffer,
-            aq4.codebook_buffer,
-            aq4.scale_values_buffer,
-            input_buffer,
-            aq4.row_scale_buffer,
-            self.scale_count,
-            self.group_size,
-            self.tensor_scale,
-            self.row_scale_count,
-            self.rows,
-            self.cols,
-            batch_count,
-            output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} AQ4 matvec batch: {err}"))
+        match &self.storage {
+            PackageResidentMatvecStorage::Aq4 { .. } => {
+                let aq4 = self.aq4_storage(label)?;
+                ullm_runtime_sys::aq4_matvec_batch_f32(
+                    aq4.index_buffer,
+                    aq4.scale_buffer,
+                    aq4.codebook_buffer,
+                    aq4.scale_values_buffer,
+                    input_buffer,
+                    aq4.row_scale_buffer,
+                    self.scale_count,
+                    self.group_size,
+                    self.tensor_scale,
+                    self.row_scale_count,
+                    self.rows,
+                    self.cols,
+                    batch_count,
+                    output_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} AQ4 matvec batch: {err}"))
+            }
+            PackageResidentMatvecStorage::SqFp8 {
+                payload_buffer,
+                scale_buffer,
+                scale_kind,
+                scale_block_cols,
+            } => ullm_runtime_sys::sq_fp8_matvec_batch_f32(
+                payload_buffer.as_ref(),
+                scale_buffer.as_ref(),
+                input_buffer,
+                self.rows,
+                self.cols,
+                *scale_kind,
+                *scale_block_cols,
+                batch_count,
+                output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run {label} SQ FP8 matvec batch: {err}")),
+            PackageResidentMatvecStorage::F32 { .. } => {
+                Err(format!("{label} F32 matvec batch is not implemented"))
+            }
+        }
     }
 
     fn matvec_top1(

@@ -3712,6 +3712,34 @@ Inventory:
 2. `up_proj` 系はrow-block幅、scale粒度、W8A8/activation scaleを変えて再探索する。
 3. qualityが通るcandidate数が増えた段階で、B=1/4/8と長いprefill/prefix gridを再計測する。
 
+## 2026-07-09 progress: T2 SQ FP8 direct matvec batch
+
+前回の要点:
+
+- SQ FP8 overlayはF32 materialized fallbackから、payload/scale resident bufferを読むdirect dequant matvecへ移った。
+- ただし `SqFp8` storageは単発 `matvec` だけdirect pathで、`matvec_batch` はAQ4専用だった。
+- SQ候補をprefill batch componentや将来のfull package batch runnerへ流すには、AQ4と同じbatch matvec API境界でSQ FP8を実行できる必要がある。
+
+今回の変更点:
+
+- runtimeへ `ullm_runtime_sq_fp8_matvec_batch_f32` を追加した。
+- HIPRTC sourceへ `ullm_sq_fp8_matvec_batch_f32_kernel` を追加し、`grid.x=row`、`grid.y=batch` でbatch-major input/outputを処理する。
+- Rust FFIへ `sq_fp8_matvec_batch_f32` を追加した。
+- `PackageAq4ResidentMatvec::matvec_batch` は、`SqFp8` storageの場合にSQ FP8 batch direct kernelへdispatchする。
+- CPU unit testと、`ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_BATCH_KERNEL=1` 付きHIP unit testでrow-block scaleのbatch出力を確認した。
+
+判断:
+
+- SQ FP8は単発matvecだけでなく、batch matvec API境界でもF32 materializeなしに実行できるようになった。
+- これはpair/triple/fused projectionの完全対応ではないが、T1/T2のbatch throughput評価へSQ tensorを流すための足場になる。
+- full mixed pathの速度改善には、次に `matvec_pair_with`、`matvec_triple_with`、MLP/linear-attn fused boundaryをSQ FP8 direct pathへ広げる必要がある。
+
+次の行動:
+
+1. `SqFp8` storageをpair/triple matvecへ広げ、self-attention Q/K/V projectionで単発kernel連打にならないようにする。
+2. `matvec_silu_mul_with` などMLP fused境界は、qualityが通るSQ tensorが増えてから優先度を上げる。
+3. SQ FP8 batch matvecを使うcomponentまたはpackage-level prefill rowを追加し、AQ4 batch matvecとの比較行を保存する。
+
 ## Risks
 
 | risk | impact | handling |

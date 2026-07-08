@@ -2862,6 +2862,53 @@ extern "C" __global__ void ullm_sq_fp8_matvec_f32_kernel(
         output[row] = partial[0];
     }
 }
+
+extern "C" __global__ void ullm_sq_fp8_matvec_batch_f32_kernel(
+    const unsigned char *payload,
+    const float *scales,
+    const float *input,
+    unsigned long long rows,
+    unsigned long long cols,
+    unsigned int scale_kind,
+    unsigned long long scale_block_cols,
+    unsigned long long batch_count,
+    float *output) {
+    const unsigned int row = blockIdx.x;
+    const unsigned int batch = blockIdx.y;
+    const unsigned int tid = threadIdx.x;
+    __shared__ float partial[256];
+    float sum = 0.0f;
+    if (row < rows && batch < batch_count) {
+        const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
+        const unsigned long long input_offset = static_cast<unsigned long long>(batch) * cols;
+        unsigned long long blocks_per_row = 1ull;
+        if (scale_kind == 2u) {
+            blocks_per_row = (cols + scale_block_cols - 1ull) / scale_block_cols;
+        }
+        for (unsigned long long col = tid; col < cols; col += blockDim.x) {
+            float scale = scales[0];
+            if (scale_kind == 1u) {
+                scale = scales[row];
+            } else if (scale_kind == 2u) {
+                scale = scales[static_cast<unsigned long long>(row) * blocks_per_row +
+                               (col / scale_block_cols)];
+            }
+            const float weight = ullm_sq_fp8_e4m3fn_to_f32(payload[row_offset + col]) * scale;
+            sum += weight * input[input_offset + col];
+        }
+    }
+    partial[tid] = sum;
+    __syncthreads();
+    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            partial[tid] += partial[tid + offset];
+        }
+        __syncthreads();
+    }
+    if (tid == 0 && row < rows && batch < batch_count) {
+        output[static_cast<unsigned long long>(batch) * rows + row] = partial[0];
+    }
+}
 )";
     }
 
