@@ -34,6 +34,55 @@ extern "C" __global__ void ullm_wmma_fp8_probe_kernel(unsigned int *output) {
 )";
     }
 
+    static const char *wmma_fp8_qk_probe_kernel_source() {
+        return R"(
+__device__ int ullm_pack_fp8x4(const unsigned char *values) {
+    const unsigned int packed = static_cast<unsigned int>(values[0]) |
+        (static_cast<unsigned int>(values[1]) << 8) |
+        (static_cast<unsigned int>(values[2]) << 16) |
+        (static_cast<unsigned int>(values[3]) << 24);
+    return static_cast<int>(packed);
+}
+
+extern "C" __global__ void ullm_wmma_fp8_qk_probe_kernel(
+    const unsigned char *q,
+    const unsigned char *k,
+    float *output) {
+    if (blockIdx.x != 0u || threadIdx.x >= 32u) {
+        return;
+    }
+#if defined(__gfx1200__) || defined(__gfx1201__)
+    typedef int int2 __attribute__((ext_vector_type(2)));
+    typedef float float8 __attribute__((ext_vector_type(8)));
+    const unsigned int lane = threadIdx.x;
+    const unsigned int base = lane * 8u;
+    int2 a = {ullm_pack_fp8x4(q + base), ullm_pack_fp8x4(q + base + 4u)};
+    int2 b = {ullm_pack_fp8x4(k + base), ullm_pack_fp8x4(k + base + 4u)};
+    float8 c = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float8 d = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(a, b, c);
+    output[base + 0u] = d[0];
+    output[base + 1u] = d[1];
+    output[base + 2u] = d[2];
+    output[base + 3u] = d[3];
+    output[base + 4u] = d[4];
+    output[base + 5u] = d[5];
+    output[base + 6u] = d[6];
+    output[base + 7u] = d[7];
+#else
+    const unsigned int base = threadIdx.x * 8u;
+    output[base + 0u] = 0.0f;
+    output[base + 1u] = 0.0f;
+    output[base + 2u] = 0.0f;
+    output[base + 3u] = 0.0f;
+    output[base + 4u] = 0.0f;
+    output[base + 5u] = 0.0f;
+    output[base + 6u] = 0.0f;
+    output[base + 7u] = 0.0f;
+#endif
+}
+)";
+    }
+
     static const char *aq4_kernel_source() {
         return R"(
 extern "C" __global__ void ullm_aq4_dequant_f32_kernel(

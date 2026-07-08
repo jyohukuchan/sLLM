@@ -187,6 +187,28 @@
 2. cached-prefix flash2とcausal flash2のscalar dot部分を、RDNA4 FP8 WMMAまたはF32/BF16 MFMA相当のmicrokernelで置き換える候補を作る。
 3. 置き換え後はtok/sだけではなくsampled diffを保存し、出力品質が壊滅的に崩れていないことを確認する。
 
+### 2026-07-08 progress: RDNA4 FP8 WMMA QK probe v1
+
+前回の要点:
+
+- RDNA4ではHIPRTC kernelからFP8 WMMA builtinを直接呼べることを確認した。
+- ただし前回のprobeはmarker確認であり、Q/K tileを入れてaccumulator値を見る段階には達していなかった。
+
+今回の変更点:
+
+- C ABI `ullm_runtime_wmma_fp8_qk_probe`、Rust FFI `wmma_fp8_qk_probe`、CLI `runtime-wmma-fp8-qk-probe-smoke [DEVICE_INDEX]` を追加した。
+- 入力は16x16 FP8 E4M3 byte tileを2枚、出力は16x16 F32 accumulator tileに固定した。
+- HIPRTC kernelはRDNA4/gfx12で `__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12` を使い、32 lane x 8 accumulatorを出力する。
+- 初期sanityとしてQ/KをFP8 1.0相当の `0x38` で埋め、R9700 runtime device index `2` で `max_abs=16.0` を確認した。
+- V620/RDNA2とCPU CLIはこのRDNA4 QK probeでは失敗扱いにした。
+- 結果は `benchmarks/results/2026-07-08/runtime-wmma/phase-c8-rdna4-fp8-wmma-qk-probe-v1.md` に保存した。
+
+次の行動:
+
+1. 任意Q/K tileでCPU row-major Q*K^Tと比較できるように、WMMA accumulatorのlane/register layoutを特定する。
+2. accumulator layoutが確定したら、cached-prefix flash2のQK dot部分を小さい条件で置き換え、sampled diffを保存する。
+3. その後、複数query row/blockでK/V tileを再利用する本命のFlashAttention2-like構造へ進める。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。

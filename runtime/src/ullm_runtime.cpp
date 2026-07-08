@@ -446,6 +446,18 @@ public:
             error);
     }
 
+    bool compile_wmma_fp8_qk_probe_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            wmma_fp8_qk_probe_kernel_source(),
+            "ullm_wmma_fp8_qk_probe.hip",
+            code,
+            error);
+    }
+
     bool compile_aq4_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, aq4_kernel_source(), "ullm_aq4_dequant_f32.hip", code, error);
     }
@@ -1519,6 +1531,129 @@ bool wmma_fp8_probe_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for WMMA FP8 probe";
+        }
+        return false;
+    }
+    return true;
+}
+
+class HipWmmaFp8QkProbeKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_wmma_fp8_qk_probe_kernel(arch, &code, &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_wmma_fp8_qk_probe_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build WMMA FP8 QK probe HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipWmmaFp8QkProbeKernelCache &hip_wmma_fp8_qk_probe_kernel_cache() {
+    static HipWmmaFp8QkProbeKernelCache cache;
+    return cache;
+}
+
+bool wmma_fp8_qk_probe_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = output_buffer->hip_device_id;
+    int major = 0;
+    int minor = 0;
+    hip_runtime().device_compute_capability(device_id, &major, &minor);
+    if (major != 12) {
+        if (error != nullptr) {
+            *error = "WMMA FP8 QK probe requires RDNA4/gfx12 HIP device";
+        }
+        return false;
+    }
+
+    void *function = hip_wmma_fp8_qk_probe_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    const void *q_ptr = q_buffer->ptr;
+    const void *k_ptr = k_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {&q_ptr, &k_ptr, &output_ptr};
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            1u,
+            32u,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for WMMA FP8 QK probe";
         }
         return false;
     }
@@ -6937,6 +7072,24 @@ float fp8_e4m3_to_f32_unscaled(uint8_t value) {
                                static_cast<int>(exponent) - 7);
     }
     return sign == 0u ? magnitude : -magnitude;
+}
+
+void wmma_fp8_qk_probe_host(
+    const uint8_t *q,
+    const uint8_t *k,
+    float *output) {
+    constexpr size_t tile = 16;
+    for (size_t row = 0; row < tile; ++row) {
+        for (size_t col = 0; col < tile; ++col) {
+            float sum = 0.0f;
+            for (size_t dim = 0; dim < tile; ++dim) {
+                const float q_value = fp8_e4m3_to_f32_unscaled(q[row * tile + dim]);
+                const float k_value = fp8_e4m3_to_f32_unscaled(k[col * tile + dim]);
+                sum += q_value * k_value;
+            }
+            output[row * tile + col] = sum;
+        }
+    }
 }
 
 void cached_prefix_attn_fp8_e4m3_host(
