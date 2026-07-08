@@ -4285,9 +4285,9 @@ pub fn cached_prefix_attn_fp8_e4m3_rocwmma(
                 .to_string(),
         );
     }
-    if head_dim != 16 || value_dim != 16 {
+    if !head_dim.is_multiple_of(16) || !value_dim.is_multiple_of(16) {
         return Err(
-            "fp8 e4m3 cached prefix rocWMMA attention currently requires head_dim=value_dim=16"
+            "fp8 e4m3 cached prefix rocWMMA attention currently requires head_dim and value_dim to be multiples of 16"
                 .to_string(),
         );
     }
@@ -7414,8 +7414,8 @@ mod tests {
         let total_context = cached_prefix_len + new_tokens;
         let q_heads = 32_usize;
         let kv_heads = 2_usize;
-        let head_dim = 16_usize;
-        let value_dim = 16_usize;
+        let head_dim = 32_usize;
+        let value_dim = 32_usize;
         let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
         let q_values = (0..new_tokens * q_heads * head_dim)
             .map(|index| (index as f32 - 97.0) / 211.0)
@@ -11954,8 +11954,8 @@ mod tests {
         let total_context = cached_prefix_len + new_tokens;
         let q_heads = 32_usize;
         let kv_heads = 2_usize;
-        let head_dim = 16_usize;
-        let value_dim = 16_usize;
+        let head_dim = 32_usize;
+        let value_dim = 32_usize;
         let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
         let q_values = (0..new_tokens * q_heads * head_dim)
             .map(|index| (index as f32 - 97.0) / 211.0)

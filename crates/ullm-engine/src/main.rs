@@ -2444,9 +2444,9 @@ fn runtime_cached_prefix_attn_smoke_impl(
                     .to_string(),
             );
         }
-        if head_dim != 16 || value_dim != 16 {
+        if !head_dim.is_multiple_of(16) || !value_dim.is_multiple_of(16) {
             return Err(
-                "runtime cached prefix attention rocwmma_fp8 executor currently requires head_dim=value_dim=16"
+                "runtime cached prefix attention rocwmma_fp8 executor currently requires head_dim and value_dim to be multiples of 16"
                     .to_string(),
             );
         }

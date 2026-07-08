@@ -11348,6 +11348,8 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
     size_t new_tokens,
     size_t q_heads,
     size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
     float softmax_scale,
     float q_scale,
     float k_scale,
@@ -11372,8 +11374,22 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
         }
         return false;
     }
+    if ((head_dim % 16u) != 0u || (value_dim % 16u) != 0u) {
+        if (error != nullptr) {
+            *error = "fp8 e4m3 cached prefix rocWMMA attention requires head_dim and value_dim to be multiples of 16";
+        }
+        return false;
+    }
     const size_t q_groups_per_kv = q_per_kv / 16u;
-    const size_t groups_per_token = kv_heads * q_groups_per_kv;
+    const size_t value_tiles = value_dim / 16u;
+    if (kv_heads > std::numeric_limits<size_t>::max() / q_groups_per_kv ||
+        kv_heads * q_groups_per_kv > std::numeric_limits<size_t>::max() / value_tiles) {
+        if (error != nullptr) {
+            *error = "fp8 e4m3 cached prefix rocWMMA attention groups-per-token overflows";
+        }
+        return false;
+    }
+    const size_t groups_per_token = kv_heads * q_groups_per_kv * value_tiles;
     if (new_tokens > std::numeric_limits<size_t>::max() / groups_per_token) {
         if (error != nullptr) {
             *error =
@@ -11404,6 +11420,8 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
     unsigned long long kernel_kv_heads = static_cast<unsigned long long>(kv_heads);
     unsigned long long kernel_q_groups_per_kv =
         static_cast<unsigned long long>(q_groups_per_kv);
+    unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
+    unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
     void *q_ptr = q_buffer->ptr;
     void *k_ptr = k_cache_buffer->ptr;
     void *v_ptr = v_cache_buffer->ptr;
@@ -11417,6 +11435,8 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
         &kernel_q_heads,
         &kernel_kv_heads,
         &kernel_q_groups_per_kv,
+        &kernel_head_dim,
+        &kernel_value_dim,
         &softmax_scale,
         &q_scale,
         &k_scale,

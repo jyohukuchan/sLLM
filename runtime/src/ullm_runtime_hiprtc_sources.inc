@@ -239,6 +239,8 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
     unsigned long long q_heads,
     unsigned long long kv_heads,
     unsigned long long q_groups_per_kv,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
     float softmax_scale,
     float q_scale,
     float k_scale,
@@ -253,15 +255,19 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
     using FragB = fragment<matrix_b, 16, 16, 16, float8_t, col_major>;
     using FragC = fragment<accumulator, 16, 16, 16, float32_t, row_major>;
 
-    const unsigned long long groups_per_token = kv_heads * q_groups_per_kv;
+    const unsigned long long value_tiles = value_dim / 16ull;
+    const unsigned long long groups_per_token = kv_heads * q_groups_per_kv * value_tiles;
     const unsigned long long block = static_cast<unsigned long long>(blockIdx.x);
     if (groups_per_token == 0ull || block >= new_tokens * groups_per_token) {
         return;
     }
     const unsigned long long token_index = block / groups_per_token;
     const unsigned long long group_within_token = block - token_index * groups_per_token;
-    const unsigned long long kv_head = group_within_token / q_groups_per_kv;
-    const unsigned long long q_group_in_kv = group_within_token - kv_head * q_groups_per_kv;
+    const unsigned long long value_tile = group_within_token % value_tiles;
+    const unsigned long long head_group = group_within_token / value_tiles;
+    const unsigned long long kv_head = head_group / q_groups_per_kv;
+    const unsigned long long q_group_in_kv = head_group - kv_head * q_groups_per_kv;
+    const unsigned long long value_base = value_tile * 16ull;
     const unsigned long long q_per_kv = q_heads / kv_heads;
     const unsigned long long q_head_base = kv_head * q_per_kv + q_group_in_kv * 16ull;
     const unsigned long long cache_len = cached_prefix_len + token_index + 1ull;
@@ -285,8 +291,7 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
     FragA a;
     FragB b;
     FragC c;
-    const unsigned long long q_base = (token_index * q_heads + q_head_base) * 16ull;
-    load_matrix_sync(a, reinterpret_cast<const float8_t *>(q + q_base), 16);
+    const unsigned long long q_base = (token_index * q_heads + q_head_base) * head_dim;
     const float score_scale = softmax_scale * q_scale * k_scale;
 
     for (unsigned long long tile_start = 0ull; tile_start < cache_len; tile_start += 16ull) {
@@ -294,23 +299,32 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
         const unsigned int tile_count =
             remaining < 16ull ? static_cast<unsigned int>(remaining) : 16u;
 
-        for (unsigned int index = lane; index < 16u * 16u; index += 32u) {
-            const unsigned int row = index / 16u;
-            const unsigned int col = index - row * 16u;
-            const unsigned long long source_timestep = tile_start + static_cast<unsigned long long>(row);
-            if (row < tile_count) {
-                const unsigned long long k_index = (source_timestep * kv_heads + kv_head) * 16ull +
-                    static_cast<unsigned long long>(col);
-                k_tile[index] = k_cache[k_index];
-            } else {
-                k_tile[index] = 0u;
-            }
-        }
-        __syncthreads();
-
         fill_fragment(c, 0.0f);
-        load_matrix_sync(b, reinterpret_cast<const float8_t *>(k_tile), 16);
-        mma_sync(c, a, b, c);
+        for (unsigned long long dim_start = 0ull; dim_start < head_dim; dim_start += 16ull) {
+            for (unsigned int index = lane; index < 16u * 16u; index += 32u) {
+                const unsigned int row = index / 16u;
+                const unsigned int col = index - row * 16u;
+                const unsigned long long source_timestep =
+                    tile_start + static_cast<unsigned long long>(row);
+                if (row < tile_count) {
+                    const unsigned long long k_index =
+                        (source_timestep * kv_heads + kv_head) * head_dim +
+                        dim_start + static_cast<unsigned long long>(col);
+                    k_tile[index] = k_cache[k_index];
+                } else {
+                    k_tile[index] = 0u;
+                }
+            }
+            __syncthreads();
+
+            load_matrix_sync(
+                a,
+                reinterpret_cast<const float8_t *>(q + q_base + dim_start),
+                static_cast<unsigned int>(head_dim));
+            load_matrix_sync(b, reinterpret_cast<const float8_t *>(k_tile), 16);
+            mma_sync(c, a, b, c);
+            __syncthreads();
+        }
         store_matrix_sync(scores, c, 16);
         __syncthreads();
 
@@ -335,7 +349,8 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
                 tile_sum += weight;
                 const unsigned long long source_timestep =
                     tile_start + static_cast<unsigned long long>(col);
-                const unsigned long long v_base = (source_timestep * kv_heads + kv_head) * 16ull;
+                const unsigned long long v_base =
+                    (source_timestep * kv_heads + kv_head) * value_dim + value_base;
                 for (unsigned int value = 0u; value < 16u; ++value) {
                     row_acc[row * 16u + value] +=
                         weight *
@@ -352,17 +367,18 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
 
     if (lane < 16u) {
         const unsigned int row = lane;
-        const unsigned long long output_base = (token_index * q_heads + q_head_base) * 16ull;
+        const unsigned long long output_base =
+            (token_index * q_heads + q_head_base) * value_dim + value_base;
         const float denominator = row_sum[row];
         for (unsigned int value = 0u; value < 16u; ++value) {
-            output[output_base + static_cast<unsigned long long>(row) * 16ull +
+            output[output_base + static_cast<unsigned long long>(row) * value_dim +
                    static_cast<unsigned long long>(value)] =
                 row_acc[row * 16u + value] / denominator;
         }
     }
 #else
     if (threadIdx.x == 0u) {
-        const unsigned long long output_elements = new_tokens * q_heads * 16ull;
+        const unsigned long long output_elements = new_tokens * q_heads * value_dim;
         for (unsigned long long i = 0ull; i < output_elements; ++i) {
             output[i] = 0.0f;
         }

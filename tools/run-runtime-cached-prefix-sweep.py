@@ -176,6 +176,19 @@ def build_cases(args: argparse.Namespace) -> list[SweepCase]:
         "timeout-seconds",
     ]:
         ensure_positive(getattr(args, label.replace("-", "_")), label)
+    if args.q_heads % args.kv_heads != 0:
+        raise SystemExit("q-heads must be a multiple of kv-heads")
+    if "cached_prefix_rocwmma_fp8" in executors:
+        if dtype != "fp8_e4m3":
+            raise SystemExit("cached_prefix_rocwmma_fp8 executor supports only fp8_e4m3 kv cache")
+        if (args.q_heads // args.kv_heads) % 16 != 0:
+            raise SystemExit(
+                "cached_prefix_rocwmma_fp8 requires q-heads/kv-heads to be a multiple of 16"
+            )
+        if args.head_dim % 16 != 0 or args.value_dim % 16 != 0:
+            raise SystemExit(
+                "cached_prefix_rocwmma_fp8 requires head-dim and value-dim to be multiples of 16"
+            )
 
     cases: list[SweepCase] = []
     for executor in executors:

@@ -1554,9 +1554,9 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_rocwmma(
             "fp8 e4m3 cached prefix rocWMMA attention dimensions must be greater than zero");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
-    if (head_dim != 16 || value_dim != 16) {
+    if ((head_dim % 16) != 0 || (value_dim % 16) != 0) {
         set_error(
-            "fp8 e4m3 cached prefix rocWMMA attention currently requires head_dim=value_dim=16");
+            "fp8 e4m3 cached prefix rocWMMA attention currently requires head_dim and value_dim to be multiples of 16");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
     if ((q_heads % kv_heads) != 0) {
@@ -1684,6 +1684,8 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_rocwmma(
             new_tokens,
             q_heads,
             kv_heads,
+            head_dim,
+            value_dim,
             softmax_scale,
             q_scale,
             k_scale,

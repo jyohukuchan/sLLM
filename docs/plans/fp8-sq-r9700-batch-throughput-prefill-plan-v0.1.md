@@ -279,6 +279,35 @@
 2. 実モデルのhead_dimに近いshapeへ拡張し、QをFP8にする影響とkernel構造改善を分離して測る。
 3. cold-prefill causal attention側へ、causal mask込みのrocWMMA tile方針を展開する。
 
+### 2026-07-08 progress: RDNA4 FP8 rocWMMA cached-prefix 16n dimensions v1
+
+前回の要点:
+
+- `cached_prefix_rocwmma_fp8` はRDNA4上で動いたが、`head_dim=16,value_dim=16` 固定だった。
+- 実モデルのattention headに近づけるには、少なくとも16の倍数dimensionを受けられる必要があった。
+
+今回の変更点:
+
+- `cached_prefix_rocwmma_fp8` の制約を `head_dim=16,value_dim=16` から `head_dim` と `value_dim` が16の倍数へ広げた。
+- QKは `head_dim` 方向を16ずつrocWMMAで累積する。
+- `value_dim` は16列ずつ別blockに分け、`[new token, KV head, Q-head group, value tile]` のgridで出力する。
+- Rust FFI、CLI、sweep toolにも同じ16倍数制約を追加した。
+- R9700で `q_heads=32,kv_heads=2,head_dim=32,value_dim=32` と、`q_heads=16,kv_heads=1,head_dim=256,value_dim=256` のsmokeを通した。
+- 256次元では `cached_prefix_rocwmma_fp8` が `17.222257ms`、既存 `cached_prefix_flash2 fp8_e4m3` が `3.952818ms` だった。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c12-rdna4-fp8-rocwmma-dim16n-v1.md` に保存した。
+
+観察:
+
+- 16倍数dimensionの正しさは確認できた。
+- ただし、現在のvalue tile分割はtileごとにQKとonline softmaxを再計算するため、`value_dim=256` では既存flash2より遅い。
+- 次の最適化は、value tile並列を残しつつQK/softmax再計算を避けるblock設計、または複数laneでfull value accumulationを分担する設計に進む必要がある。
+
+次の行動:
+
+1. QK/softmaxをvalue tile間で再利用できるblock設計を検討する。
+2. `head_dim=256,value_dim=256` で既存flash2を超えることを次の性能gateにする。
+3. その後、cold-prefill causal attention側へ同じrocWMMA tile方針を展開する。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。
