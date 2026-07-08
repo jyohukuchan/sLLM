@@ -146,6 +146,29 @@ pub fn qwen3_decoder_layer_prefill_input_from_sequence<'a>(
     qwen3_decoder_layer_input_from_sequence_at_position(sequence, timestep, layout, label)
 }
 
+pub fn qwen3_decoder_layer_prefill_batch_inputs_from_sequences<'a>(
+    sequences: &[Qwen3DecoderLayerDecodeSequenceView<'a>],
+    timestep: usize,
+    layout: Qwen3DecoderLayerDecodeInputLayout,
+    label: &str,
+) -> Result<Vec<Qwen3DecoderLayerDecodeBatchInput<'a>>, String> {
+    validate_decode_input_layout(layout, label)?;
+    let mut request_ids = BTreeSet::new();
+    let mut inputs = Vec::with_capacity(sequences.len());
+    for sequence in sequences {
+        if !request_ids.insert(sequence.request_id) {
+            return Err(format!(
+                "{label} contains duplicate prefill sequence for {:?}",
+                sequence.request_id
+            ));
+        }
+        inputs.push(qwen3_decoder_layer_input_from_sequence_at_position(
+            *sequence, timestep, layout, label,
+        )?);
+    }
+    Ok(inputs)
+}
+
 fn qwen3_decoder_layer_input_from_sequence_at_position<'a>(
     sequence: Qwen3DecoderLayerDecodeSequenceView<'a>,
     cache_position: usize,
@@ -535,6 +558,41 @@ impl<'weights> Qwen3DecoderLayerRequestDecodeRunner<'weights> {
         Ok(layer_batch_output_from_step(input.request_id, step))
     }
 
+    pub fn run_prefill_batch(
+        &mut self,
+        stream: &mut RuntimeStream,
+        inputs: &[Qwen3DecoderLayerDecodeBatchInput<'_>],
+    ) -> Result<Vec<Qwen3DecoderLayerDecodeBatchOutput>, String> {
+        validate_prefill_layer_batch_inputs(inputs)?;
+        let mut outputs = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let slot = self.states.get_mut(&input.request_id).ok_or_else(|| {
+                format!(
+                    "Qwen3 decoder layer decode runner has no request {:?}",
+                    input.request_id
+                )
+            })?;
+            let step = slot
+                .runtime
+                .step(
+                    stream,
+                    input.q,
+                    input.k,
+                    input.v,
+                    input.output_gate,
+                    input.residual,
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to run Qwen3 decoder layer prefill batch step for {:?}: {err}",
+                        input.request_id
+                    )
+                })?;
+            outputs.push(layer_batch_output_from_step(input.request_id, step));
+        }
+        Ok(outputs)
+    }
+
     pub fn run_ready_batch(
         &mut self,
         stream: &mut RuntimeStream,
@@ -743,6 +801,19 @@ impl<'weights> Qwen3DecoderLayerStackRequestDecodeRunner<'weights> {
         self.layer_mut(layer_index)?
             .run_prefill_step(stream, input)
             .map_err(|err| format!("failed to run decoder layer {layer_index} prefill: {err}"))
+    }
+
+    pub fn run_prefill_batch(
+        &mut self,
+        layer_index: usize,
+        stream: &mut RuntimeStream,
+        inputs: &[Qwen3DecoderLayerDecodeBatchInput<'_>],
+    ) -> Result<Vec<Qwen3DecoderLayerDecodeBatchOutput>, String> {
+        self.layer_mut(layer_index)?
+            .run_prefill_batch(stream, inputs)
+            .map_err(|err| {
+                format!("failed to run decoder layer {layer_index} prefill batch: {err}")
+            })
     }
 
     /// Runs one scheduler ready decode batch through every registered layer.
@@ -1023,6 +1094,21 @@ fn validate_layer_batch_inputs(
     Ok(())
 }
 
+fn validate_prefill_layer_batch_inputs(
+    inputs: &[Qwen3DecoderLayerDecodeBatchInput<'_>],
+) -> Result<(), String> {
+    let mut input_ids = BTreeSet::new();
+    for input in inputs {
+        if !input_ids.insert(input.request_id) {
+            return Err(format!(
+                "prefill batch inputs contain duplicate request {:?}",
+                input.request_id
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1199,6 +1285,98 @@ mod tests {
         assert_eq!(input.v, &[31.0]);
         assert_eq!(input.output_gate, Some(&[42.0, 43.0][..]));
         assert_eq!(input.residual, &[53.0, 54.0, 55.0]);
+    }
+
+    #[test]
+    fn decoder_layer_prefill_batch_inputs_from_sequences_follow_request_order() {
+        let layout = Qwen3DecoderLayerDecodeInputLayout {
+            q_token_elements: 2,
+            k_token_elements: 1,
+            v_token_elements: 1,
+            attention_elements: 2,
+            hidden: 3,
+        };
+        let q0 = vec![10.0, 11.0, 12.0, 13.0];
+        let k0 = vec![20.0, 21.0];
+        let v0 = vec![30.0, 31.0];
+        let gate0 = vec![40.0, 41.0, 42.0, 43.0];
+        let residual0 = vec![50.0, 51.0, 52.0, 53.0, 54.0, 55.0];
+        let q1 = vec![110.0, 111.0, 112.0, 113.0];
+        let k1 = vec![120.0, 121.0];
+        let v1 = vec![130.0, 131.0];
+        let residual1 = vec![150.0, 151.0, 152.0, 153.0, 154.0, 155.0];
+        let sequences = vec![
+            Qwen3DecoderLayerDecodeSequenceView {
+                request_id: RequestId(11),
+                q_sequence: &q0,
+                k_sequence: &k0,
+                v_sequence: &v0,
+                output_gate_sequence: Some(&gate0),
+                residual_sequence: &residual0,
+            },
+            Qwen3DecoderLayerDecodeSequenceView {
+                request_id: RequestId(12),
+                q_sequence: &q1,
+                k_sequence: &k1,
+                v_sequence: &v1,
+                output_gate_sequence: None,
+                residual_sequence: &residual1,
+            },
+        ];
+
+        let inputs = qwen3_decoder_layer_prefill_batch_inputs_from_sequences(
+            &sequences,
+            1,
+            layout,
+            "prefill batch test",
+        )
+        .expect("prefill batch inputs from sequences");
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].request_id, RequestId(11));
+        assert_eq!(inputs[0].q, &[12.0, 13.0]);
+        assert_eq!(inputs[0].k, &[21.0]);
+        assert_eq!(inputs[0].v, &[31.0]);
+        assert_eq!(inputs[0].output_gate, Some(&[42.0, 43.0][..]));
+        assert_eq!(inputs[0].residual, &[53.0, 54.0, 55.0]);
+        assert_eq!(inputs[1].request_id, RequestId(12));
+        assert_eq!(inputs[1].q, &[112.0, 113.0]);
+        assert_eq!(inputs[1].k, &[121.0]);
+        assert_eq!(inputs[1].v, &[131.0]);
+        assert_eq!(inputs[1].output_gate, None);
+        assert_eq!(inputs[1].residual, &[153.0, 154.0, 155.0]);
+    }
+
+    #[test]
+    fn decoder_layer_prefill_batch_inputs_from_sequences_rejects_duplicate_request() {
+        let layout = Qwen3DecoderLayerDecodeInputLayout {
+            q_token_elements: 1,
+            k_token_elements: 1,
+            v_token_elements: 1,
+            attention_elements: 1,
+            hidden: 1,
+        };
+        let values = vec![1.0];
+        let sequence = Qwen3DecoderLayerDecodeSequenceView {
+            request_id: RequestId(11),
+            q_sequence: &values,
+            k_sequence: &values,
+            v_sequence: &values,
+            output_gate_sequence: Some(&values),
+            residual_sequence: &values,
+        };
+        let err = qwen3_decoder_layer_prefill_batch_inputs_from_sequences(
+            &[sequence, sequence],
+            0,
+            layout,
+            "prefill duplicate test",
+        )
+        .expect_err("duplicate request should fail");
+
+        assert!(
+            err.contains("duplicate prefill sequence for RequestId(11)"),
+            "{err}"
+        );
     }
 
     fn f32_buffer(

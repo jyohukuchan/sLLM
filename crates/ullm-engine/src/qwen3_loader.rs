@@ -7,6 +7,7 @@ use crate::decode_runner::{
     Qwen3DecoderLayerDecodeBatchOutput, Qwen3DecoderLayerDecodeInputLayout,
     Qwen3DecoderLayerDecodeSequenceView, Qwen3DecoderLayerStackRequestDecodeRunner,
     qwen3_decoder_layer_decode_batch_inputs_from_sequences,
+    qwen3_decoder_layer_prefill_batch_inputs_from_sequences,
     qwen3_decoder_layer_prefill_input_from_sequence,
 };
 use crate::decoder::{
@@ -187,6 +188,31 @@ pub fn qwen3_package_model_run_prefill_step_from_sequence(
     let input =
         qwen3_decoder_layer_prefill_input_from_sequence(sequence, timestep, input_layout, label)?;
     runner.run_prefill_step(layer_index, stream, input)
+}
+
+pub fn qwen3_package_model_run_prefill_batch_from_sequences<'a>(
+    runner: &mut Qwen3DecoderLayerStackRequestDecodeRunner<'_>,
+    layer_index: usize,
+    stream: &mut RuntimeStream,
+    sequences: &[Qwen3DecoderLayerDecodeSequenceView<'a>],
+    timestep: usize,
+    decode_plan: Qwen3PackageModelDecodePlan,
+    label: &str,
+) -> Result<Vec<Qwen3DecoderLayerDecodeBatchOutput>, String> {
+    let input_layout = Qwen3DecoderLayerDecodeInputLayout {
+        q_token_elements: decode_plan.q_token_elements,
+        k_token_elements: decode_plan.k_token_elements,
+        v_token_elements: decode_plan.v_token_elements,
+        attention_elements: decode_plan.attention_elements,
+        hidden: decode_plan.hidden,
+    };
+    let inputs = qwen3_decoder_layer_prefill_batch_inputs_from_sequences(
+        sequences,
+        timestep,
+        input_layout,
+        label,
+    )?;
+    runner.run_prefill_batch(layer_index, stream, &inputs)
 }
 
 pub fn qwen3_package_model_run_ready_batch_from_sequences<'a>(

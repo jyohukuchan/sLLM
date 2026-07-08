@@ -46,7 +46,7 @@ use ullm_engine::qwen3_loader::{
     Qwen3PackageSqOverlay, qwen3_decoder_layer_runtime_weights_from_package,
     qwen3_package_decoder_layer_runtime_from_package,
     qwen3_package_decoder_layer_runtime_from_package_with_sq_overlay,
-    qwen3_package_model_run_prefill_step_from_sequence,
+    qwen3_package_model_run_prefill_batch_from_sequences,
     qwen3_package_model_run_ready_batch_from_sequences, qwen3_package_model_stack_runner,
     qwen3_self_attn_runtime_weights_from_package,
 };
@@ -4338,31 +4338,66 @@ fn run_scheduler_layer_prefill_step(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_scheduler_layer_stack_prefill_step(
+fn run_scheduler_layer_stack_prefill_batch(
     runner: &mut Qwen3DecoderLayerStackRequestDecodeRunner<'_>,
     layer_index: usize,
     stream: &mut ullm_runtime_sys::RuntimeStream,
-    run: &mut SchedulerLayerDecodeRun,
+    runs: &mut [SchedulerLayerDecodeRun],
     timestep: usize,
     decode: Qwen3PackageModelDecodePlan,
     label: &str,
-) -> Result<(), String> {
-    let step = qwen3_package_model_run_prefill_step_from_sequence(
+) -> Result<usize, String> {
+    let active_indices = runs
+        .iter()
+        .enumerate()
+        .filter_map(|(run_index, run)| (timestep < run.prompt_tokens).then_some(run_index))
+        .collect::<Vec<_>>();
+    if active_indices.is_empty() {
+        return Ok(0);
+    }
+    let sequences = active_indices
+        .iter()
+        .map(|run_index| scheduler_layer_decode_sequence_view(&runs[*run_index]))
+        .collect::<Vec<_>>();
+    let outputs = qwen3_package_model_run_prefill_batch_from_sequences(
         runner,
         layer_index,
         stream,
-        scheduler_layer_decode_sequence_view(run),
+        &sequences,
         timestep,
         decode,
         label,
     )?;
-    if step.cache_position != timestep {
+    if outputs.len() != active_indices.len() {
         return Err(format!(
-            "{label} request {:?} wrote cache_position {}, expected {timestep}",
-            run.request_id, step.cache_position
+            "{label} prefill batch produced {} outputs, expected {}",
+            outputs.len(),
+            active_indices.len()
         ));
     }
-    verify_scheduler_layer_step_output(label, run, &step, decode.hidden, decode.attention_elements)
+
+    for output in outputs {
+        let run = scheduler_layer_decode_run_mut(runs, output.request_id).ok_or_else(|| {
+            format!(
+                "{label} prefill batch returned unknown request {:?}",
+                output.request_id
+            )
+        })?;
+        if output.cache_position != timestep {
+            return Err(format!(
+                "{label} request {:?} wrote cache_position {}, expected {timestep}",
+                output.request_id, output.cache_position
+            ));
+        }
+        verify_scheduler_layer_step_output(
+            label,
+            run,
+            &output,
+            decode.hidden,
+            decode.attention_elements,
+        )?;
+    }
+    Ok(active_indices.len())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -14048,6 +14083,7 @@ struct PackageModelLoopExecutionPlan {
 struct PackageModelLoopExecutionSummary {
     first_batch_ready: usize,
     second_batch_ready: usize,
+    prefill_batch_request_counts: Vec<usize>,
     decode_batch_ready_counts: Vec<usize>,
     final_ready: usize,
     prefill_wall_ms: f64,
@@ -14610,7 +14646,8 @@ impl PackageModelLoopExecutionPlan {
     ) -> Result<PackageModelLoopExecutionSummary, String> {
         let mut layer_runner = self.build_layer_runner(context, stream, model, layer_run_plan)?;
         let prefill_started = Instant::now();
-        self.run_prefill_layers(&mut layer_runner, stream, model, layer_run_plan)?;
+        let prefill_batch_request_counts =
+            self.run_prefill_layers(&mut layer_runner, stream, model, layer_run_plan)?;
         let prefill_wall_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
         request_plan.complete_prefill_all()?;
 
@@ -14624,6 +14661,7 @@ impl PackageModelLoopExecutionPlan {
         Ok(PackageModelLoopExecutionSummary {
             first_batch_ready: decode_batch_ready_counts.first().copied().unwrap_or(0),
             second_batch_ready: decode_batch_ready_counts.get(1).copied().unwrap_or(0),
+            prefill_batch_request_counts,
             decode_batch_ready_counts,
             final_ready,
             prefill_wall_ms,
@@ -14649,26 +14687,33 @@ impl PackageModelLoopExecutionPlan {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         model: &Qwen3PackageModelRuntime,
         layer_run_plan: &mut PackageModelLoopLayerRunPlan,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<usize>, String> {
+        let mut batch_request_counts = Vec::new();
         for layer_position in 0..layer_runner.layer_count() {
-            for run in &mut layer_run_plan.runs_by_layer[layer_position] {
-                for timestep in 0..run.prompt_tokens {
-                    run_scheduler_layer_stack_prefill_step(
-                        layer_runner,
-                        layer_position,
-                        stream,
-                        run,
-                        timestep,
-                        self.decode,
-                        &format!(
-                            "package model-loop layer {} prefill",
-                            model.layers[layer_position].layer_index
-                        ),
-                    )?;
+            let max_prompt_tokens = layer_run_plan.runs_by_layer[layer_position]
+                .iter()
+                .map(|run| run.prompt_tokens)
+                .max()
+                .unwrap_or(0);
+            for timestep in 0..max_prompt_tokens {
+                let count = run_scheduler_layer_stack_prefill_batch(
+                    layer_runner,
+                    layer_position,
+                    stream,
+                    &mut layer_run_plan.runs_by_layer[layer_position],
+                    timestep,
+                    self.decode,
+                    &format!(
+                        "package model-loop layer {} prefill batch timestep {timestep}",
+                        model.layers[layer_position].layer_index
+                    ),
+                )?;
+                if count > 0 {
+                    batch_request_counts.push(count);
                 }
             }
         }
-        Ok(())
+        Ok(batch_request_counts)
     }
 
     fn run_decode_batches(
@@ -15006,6 +15051,23 @@ impl PackageModelLoopSmokeRun {
             .max()
             .unwrap_or(0);
         let decode_real_batch = decode_executor_request_parallelism > 1;
+        let prefill_executor_request_parallelism = execution_summary
+            .prefill_batch_request_counts
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let prefill_real_batch = prefill_executor_request_parallelism > 1;
+        let prefill_executor = if prefill_real_batch {
+            "stack_prefill_request_batch_step"
+        } else {
+            "stack_prefill_step"
+        };
+        let batching_mode = if prefill_real_batch && decode_real_batch {
+            "real"
+        } else {
+            "hybrid"
+        };
         let layer_indices_csv = self
             .model
             .layer_indices()
@@ -15041,6 +15103,12 @@ impl PackageModelLoopSmokeRun {
             .join(",");
         let decode_batch_ready_counts_csv = execution_summary
             .decode_batch_ready_counts
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let prefill_batch_request_counts_csv = execution_summary
+            .prefill_batch_request_counts
             .iter()
             .map(|value| value.to_string())
             .collect::<Vec<_>>()
@@ -15122,14 +15190,18 @@ impl PackageModelLoopSmokeRun {
         let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
 
         Ok(format!(
-            "{} package={} layers={:?} layers_csv={} input_source={} prefill_mode={} batching_mode=hybrid prefill_executor=stack_prefill_step decode_executor=stack_ready_batch prefill_real_batch=false decode_real_batch={} prefill_executor_request_parallelism=1 decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard={} lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_top_logits_source=verified_expected_layer_output input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} decode_batch_ready_counts={:?} decode_batch_ready_counts_csv={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} generated_tokens_csv={} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+            "{} package={} layers={:?} layers_csv={} input_source={} prefill_mode={} batching_mode={} prefill_executor={} decode_executor=stack_ready_batch prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard={} lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_top_logits_source=verified_expected_layer_output input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_ready_counts={:?} decode_batch_ready_counts_csv={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} generated_tokens_csv={} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
             self.command_name,
             path,
             layer_indices,
             layer_indices_csv,
             self.request_plan.input_source,
             prefill_mode,
+            batching_mode,
+            prefill_executor,
+            prefill_real_batch,
             decode_real_batch,
+            prefill_executor_request_parallelism,
             decode_executor_request_parallelism,
             self.request_plan.prompt_token_ids_by_request,
             self.request_plan.decode_token_ids_by_request,
@@ -15186,6 +15258,8 @@ impl PackageModelLoopSmokeRun {
             self.request_plan.block_tables,
             execution_summary.first_batch_ready,
             execution_summary.second_batch_ready,
+            execution_summary.prefill_batch_request_counts,
+            prefill_batch_request_counts_csv,
             execution_summary.decode_batch_ready_counts,
             decode_batch_ready_counts_csv,
             execution_summary.final_ready,

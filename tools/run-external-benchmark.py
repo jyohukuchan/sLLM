@@ -873,6 +873,9 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         row_workload["sequence_len"] = sequence_len
 
     batching_mode = report.get("batching_mode")
+    prefill_batch_request_counts = parse_int_csv(
+        report.get("prefill_batch_request_counts_csv")
+    )
     row["batching"] = {
         "mode": batching_mode if isinstance(batching_mode, str) else "hybrid",
         "prefill_executor": report.get("prefill_executor"),
@@ -891,6 +894,8 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "component_command": report.get("command"),
         "component_package": report.get("package"),
     }
+    if prefill_batch_request_counts:
+        row["batching"]["prefill_batch_request_counts"] = prefill_batch_request_counts
 
 
 def default_metrics(memory: dict[str, Any]) -> dict[str, Any]:

@@ -278,10 +278,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "package-self-attn-mlp-block-model-loop-smoke "
             "package=/tmp/model.ullm.d layers=[3, 7] layers_csv=3,7 "
             "input_source=embedding_token_ids prefill_mode=token_id_layer_stack "
-            "batching_mode=hybrid "
-            "prefill_executor=stack_prefill_step decode_executor=stack_ready_batch "
-            "prefill_real_batch=false decode_real_batch=true "
-            "prefill_executor_request_parallelism=1 decode_executor_request_parallelism=2 "
+            "batching_mode=real "
+            "prefill_executor=stack_prefill_request_batch_step decode_executor=stack_ready_batch "
+            "prefill_real_batch=true decode_real_batch=true "
+            "prefill_executor_request_parallelism=3 decode_executor_request_parallelism=2 "
             "final_lm_head_guard=true final_top1_tokens_csv=42,43,44 "
             "sequence_len=3 request_count=3 concurrent_requests=3 "
             "prompt_tokens=[1, 2, 1] prompt_tokens_csv=1,2,1 "
@@ -293,6 +293,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "prefill_total_input_tps=84.881948 "
             "decode_total_generated_tps=83.746649 "
             "end_to_end_total_tps=84.391644 "
+            "prefill_batch_request_counts=[3, 1] prefill_batch_request_counts_csv=3,1 "
             "decode_batch_ready_counts=[2, 1] decode_batch_ready_counts_csv=2,1 "
             "generated_tokens=[2, 1, 0] generated_tokens_csv=2,1,0 "
             "layer_max_abs_diff=0.000000000 block_max_abs_diff=0.000000000 "
@@ -338,8 +339,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["input_source"], "embedding_token_ids")
         self.assertEqual(row["workload"]["final_top1_tokens"], [42, 43, 44])
         self.assertEqual(row["workload"]["layers_csv"], "3,7")
-        self.assertEqual(row["batching"]["mode"], "hybrid")
-        self.assertFalse(row["batching"]["prefill_real_batch"])
+        self.assertEqual(row["batching"]["mode"], "real")
+        self.assertTrue(row["batching"]["prefill_real_batch"])
+        self.assertEqual(row["batching"]["prefill_executor_request_parallelism"], 3)
+        self.assertEqual(row["batching"]["prefill_batch_request_counts"], [3, 1])
         self.assertTrue(row["batching"]["decode_real_batch"])
         self.assertEqual(row["batching"]["decode_executor_request_parallelism"], 2)
         self.assertEqual(row["batching"]["component_package"], "/tmp/model.ullm.d")
