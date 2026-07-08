@@ -45294,6 +45294,236 @@ impl PackageLinearAttnResidentStepLayer {
 }
 
 #[allow(dead_code)]
+struct PackageSelfAttnResidentStepBatchLayer {
+    layer_index: usize,
+    hidden: usize,
+    block_size: usize,
+    cache_blocks: usize,
+    request_index: std::collections::BTreeMap<RequestId, usize>,
+    request_ids: Vec<RequestId>,
+    layers: Vec<PackageSelfAttnResidentStepLayer>,
+}
+
+#[allow(dead_code)]
+impl PackageSelfAttnResidentStepBatchLayer {
+    #[allow(clippy::too_many_arguments)]
+    fn load(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        layer_index: usize,
+        request_ids: Vec<RequestId>,
+        block_size: usize,
+        cache_blocks: usize,
+    ) -> Result<Self, String> {
+        if block_size == 0 {
+            return Err(format!(
+                "self-attn resident batch layer {layer_index} block_size must be greater than zero"
+            ));
+        }
+        if cache_blocks == 0 {
+            return Err(format!(
+                "self-attn resident batch layer {layer_index} cache_blocks must be greater than zero"
+            ));
+        }
+        if cache_blocks > u32::MAX as usize {
+            return Err(format!(
+                "self-attn resident batch layer {layer_index} cache_blocks {cache_blocks} exceeds u32 range"
+            ));
+        }
+        let request_index =
+            package_self_attn_request_slot_index(&request_ids, "self-attn resident batch")?;
+        let block_table = (0..cache_blocks)
+            .map(|block| {
+                u32::try_from(block).map_err(|_| {
+                    format!("self-attn resident batch block index {block} exceeds u32 range")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut layers = Vec::with_capacity(request_ids.len());
+        let mut hidden = None;
+        for request_id in &request_ids {
+            let layer = PackageSelfAttnResidentStepLayer::load(
+                context,
+                stream,
+                path,
+                chunk_bytes,
+                layer_index,
+                &block_table,
+                block_size,
+                cache_blocks,
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to load self-attn resident batch layer {layer_index} for request {request_id:?}: {err}"
+                )
+            })?;
+            if let Some(previous) = hidden {
+                if previous != layer.hidden {
+                    return Err(format!(
+                        "self-attn resident batch layer {layer_index} hidden changed: previous={previous} current={}",
+                        layer.hidden
+                    ));
+                }
+            } else {
+                hidden = Some(layer.hidden);
+            }
+            if layer.block_size != block_size || layer.cache_blocks != cache_blocks {
+                return Err(format!(
+                    "self-attn resident batch layer {layer_index} cache shape changed: block_size={} cache_blocks={}",
+                    layer.block_size, layer.cache_blocks
+                ));
+            }
+            layers.push(layer);
+        }
+        let hidden = hidden.ok_or_else(|| {
+            format!("self-attn resident batch layer {layer_index} has no request slots")
+        })?;
+        Ok(Self {
+            layer_index,
+            hidden,
+            block_size,
+            cache_blocks,
+            request_index,
+            request_ids,
+            layers,
+        })
+    }
+
+    fn request_ids(&self) -> &[RequestId] {
+        &self.request_ids
+    }
+
+    fn request_count(&self) -> usize {
+        self.request_ids.len()
+    }
+
+    fn layer_index(&self) -> usize {
+        self.layer_index
+    }
+
+    fn hidden(&self) -> usize {
+        self.hidden
+    }
+
+    fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    fn cache_blocks(&self) -> usize {
+        self.cache_blocks
+    }
+
+    fn request_slot(&self, request_id: RequestId) -> Result<usize, String> {
+        self.request_index.get(&request_id).copied().ok_or_else(|| {
+            format!(
+                "self-attn resident batch layer {} has no state slot for request {request_id:?}",
+                self.layer_index
+            )
+        })
+    }
+
+    fn layer_for_request_mut(
+        &mut self,
+        request_id: RequestId,
+    ) -> Result<&mut PackageSelfAttnResidentStepLayer, String> {
+        let slot = self.request_slot(request_id)?;
+        self.layers.get_mut(slot).ok_or_else(|| {
+            format!(
+                "self-attn resident batch layer {} missing state slot {slot} for request {request_id:?}",
+                self.layer_index
+            )
+        })
+    }
+
+    fn layer_for_request(
+        &self,
+        request_id: RequestId,
+    ) -> Result<&PackageSelfAttnResidentStepLayer, String> {
+        let slot = self.request_slot(request_id)?;
+        self.layers.get(slot).ok_or_else(|| {
+            format!(
+                "self-attn resident batch layer {} missing state slot {slot} for request {request_id:?}",
+                self.layer_index
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_from_host_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_id: RequestId,
+        residual: &[f32],
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        self.layer_for_request_mut(request_id)?
+            .step_from_host_to_device(
+                stream,
+                residual,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                label,
+            )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_from_device_to_device(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_id: RequestId,
+        residual_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        label: &str,
+    ) -> Result<(), String> {
+        self.layer_for_request_mut(request_id)?
+            .step_from_device_to_device(
+                stream,
+                residual_buffer,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                label,
+            )
+    }
+
+    fn output_buffer(
+        &self,
+        request_id: RequestId,
+    ) -> Result<&ullm_runtime_sys::RuntimeBuffer, String> {
+        Ok(self.layer_for_request(request_id)?.output_buffer())
+    }
+
+    fn read_output(
+        &self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        request_id: RequestId,
+    ) -> Result<Vec<f32>, String> {
+        self.layer_for_request(request_id)?.read_output(stream)
+    }
+
+    fn take_last_component_step_ms(
+        &mut self,
+        request_id: RequestId,
+    ) -> Result<Option<PackageSelfAttnComponentStepMs>, String> {
+        Ok(self
+            .layer_for_request_mut(request_id)?
+            .take_last_component_step_ms())
+    }
+}
+
+#[allow(dead_code)]
 struct PackageLinearAttnResidentStepBatchLayer {
     layer_index: usize,
     hidden: usize,
@@ -45447,6 +45677,20 @@ impl PackageLinearAttnResidentStepBatchLayer {
 }
 
 fn package_linear_attn_request_slot_index(
+    request_ids: &[RequestId],
+    label: &str,
+) -> Result<std::collections::BTreeMap<RequestId, usize>, String> {
+    package_request_slot_index(request_ids, label)
+}
+
+fn package_self_attn_request_slot_index(
+    request_ids: &[RequestId],
+    label: &str,
+) -> Result<std::collections::BTreeMap<RequestId, usize>, String> {
+    package_request_slot_index(request_ids, label)
+}
+
+fn package_request_slot_index(
     request_ids: &[RequestId],
     label: &str,
 ) -> Result<std::collections::BTreeMap<RequestId, usize>, String> {
@@ -45619,6 +45863,32 @@ mod linear_attn_step_state_tests {
         assert_eq!(index.get(&RequestId(42)), Some(&0));
         assert_eq!(index.get(&RequestId(7)), Some(&1));
         assert_eq!(index.get(&RequestId(99)), Some(&2));
+        assert_eq!(index.len(), 3);
+    }
+
+    #[test]
+    fn self_attn_request_slot_index_rejects_empty_and_duplicate_ids() {
+        assert!(package_self_attn_request_slot_index(&[], "test batch").is_err());
+        assert!(
+            package_self_attn_request_slot_index(
+                &[RequestId(20), RequestId(21), RequestId(20)],
+                "test batch"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn self_attn_request_slot_index_preserves_request_order() {
+        let index = package_self_attn_request_slot_index(
+            &[RequestId(142), RequestId(107), RequestId(199)],
+            "test batch",
+        )
+        .unwrap();
+
+        assert_eq!(index.get(&RequestId(142)), Some(&0));
+        assert_eq!(index.get(&RequestId(107)), Some(&1));
+        assert_eq!(index.get(&RequestId(199)), Some(&2));
         assert_eq!(index.len(), 3);
     }
 

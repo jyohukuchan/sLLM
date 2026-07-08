@@ -3370,6 +3370,34 @@ Inventory:
 2. manifest order `0..31` の小さいB=2 / prompt=2 / generated=1 full mixed path smokeを作る。
 3. full mixed smoke後に、weights共有とactual throughput改善へ進む。
 
+## 2026-07-09 progress: T1 self-attn request state owner
+
+前回の要点:
+
+- linear-attention側のrequest-state ownerは実package smokeまで通った。
+- full mixed-attention runnerではself-attention層とlinear-attention層を同じrequest-id dispatch形へ揃える必要がある。
+- 既存の `PackageSelfAttnResidentStepLayer` はsingle request向けにpaged KV cache、written_len、block tableを内部保持していた。
+
+今回の変更点:
+
+- `PackageSelfAttnResidentStepBatchLayer` を追加した。
+- `RequestId` からself-attn resident layer state slotへ解決するownerにした。
+- 各slotは `PackageSelfAttnResidentStepLayer` を持ち、requestごとのpaged KV cache、written_len、block tableを分離する。
+- request id slot index helperをlinear/selfで共通化し、self-attn側の空request listと重複request idを拒否するunit testを追加した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-self-attn-request-state-owner-v1.md` に保存した。
+
+判断:
+
+- これはthroughput rowではなく、full mixed real-batch runnerへ接続するためのstate ownerである。
+- self-attention側とlinear-attention側のrequest-id dispatch形が揃った。
+- 現時点ではweights共有ではなくrequest slotごとのresident layerを持つため、性能最終形ではshared resident weight + per-request state bufferへ寄せる必要がある。
+
+次の行動:
+
+1. full mixed-attention runnerのlayer enumに `PackageSelfAttnResidentStepBatchLayer` と `PackageLinearAttnResidentStepBatchLayer` を並べる。
+2. 小さいB=2 / prompt=2 / generated=1で、manifest orderのfull mixed path smokeを作る。
+3. full mixed smoke後に、weights共有とactual throughput改善へ進む。
+
 ## Risks
 
 | risk | impact | handling |
