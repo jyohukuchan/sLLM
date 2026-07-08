@@ -1,0 +1,338 @@
+{
+  "schema_version": "ullm-model-loop-mixed-scale-comparison-v0.1",
+  "run_id": "phase-t2-sq-fp8-token-id-model-loop-mixed-scale-v1",
+  "aq4_baseline_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-prompt-bundle-v1/results.jsonl",
+  "aq4_baseline_case_id": "aq4-r9700-token-id-model-loop-prompt-bundle-layers3-7-11-15-19-23-b3",
+  "aq4_top1_tokens": [
+    110784,
+    237950,
+    182949
+  ],
+  "prompt_bundle": [
+    {
+      "case_id": "len4",
+      "token_ids": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "case_id": "case_a",
+      "token_ids": [
+        100,
+        200,
+        300,
+        400,
+        500,
+        600,
+        700,
+        800
+      ]
+    },
+    {
+      "case_id": "case_b",
+      "token_ids": [
+        42,
+        314,
+        2718,
+        1618,
+        12345,
+        23456,
+        34567,
+        45678
+      ]
+    }
+  ],
+  "variants": [
+    {
+      "variant": "kup1-layer3-k16-up32",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-kup1-layer3-k16-up32",
+      "artifact": "/tmp/ullm-sq-fp8-kup1-layer3-k16-up32-policy-v0.1-artifact",
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-kup1-layer3-k16-up32-b3",
+      "fp8_tensor_count": 2,
+      "passthrough_tensor_count": 773,
+      "strict_top1_pass_count": 3,
+      "strict_top1_all_pass": true,
+      "cases": [
+        {
+          "case_id": "len4",
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "aq4_top1": 110784,
+          "sq_top1": 110784,
+          "top1_match": true,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "sq_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            120222,
+            98413,
+            143001,
+            69538,
+            172083
+          ],
+          "top8_common": 7,
+          "top8_width": 8,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "aq4_top1_minus_sq_top1_logit": 0.0
+        },
+        {
+          "case_id": "case_a",
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "aq4_top1": 237950,
+          "sq_top1": 237950,
+          "top1_match": true,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "sq_top8_tokens": [
+            237950,
+            124170,
+            193706,
+            111791,
+            68712,
+            100411,
+            212635,
+            134735
+          ],
+          "top8_common": 5,
+          "top8_width": 8,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "aq4_top1_minus_sq_top1_logit": 0.0
+        },
+        {
+          "case_id": "case_b",
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "aq4_top1": 182949,
+          "sq_top1": 182949,
+          "top1_match": true,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "sq_top8_tokens": [
+            182949,
+            69895,
+            121250,
+            97533,
+            159207,
+            214852,
+            139376,
+            80186
+          ],
+          "top8_common": 7,
+          "top8_width": 8,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "aq4_top1_minus_sq_top1_logit": 0.0
+        }
+      ],
+      "metrics": {
+        "prefill_tps": 28.558735,
+        "decode_tps": 28.202772,
+        "end_to_end_tps": 28.511796,
+        "vram_consumed_bytes": 5885874176,
+        "wrapper_elapsed_seconds": 11.640078871976584
+      }
+    },
+    {
+      "variant": "kup2-k16-up32",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-kup2-k16-up32",
+      "artifact": "/tmp/ullm-sq-fp8-kup2-k16-up32-policy-v0.1-artifact",
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-kup2-k16-up32-b3",
+      "fp8_tensor_count": 4,
+      "passthrough_tensor_count": 771,
+      "strict_top1_pass_count": 2,
+      "strict_top1_all_pass": false,
+      "cases": [
+        {
+          "case_id": "len4",
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "aq4_top1": 110784,
+          "sq_top1": 110784,
+          "top1_match": true,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "sq_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            120222,
+            98413,
+            143001,
+            69538,
+            172083
+          ],
+          "top8_common": 7,
+          "top8_width": 8,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "aq4_top1_minus_sq_top1_logit": 0.0
+        },
+        {
+          "case_id": "case_a",
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "aq4_top1": 237950,
+          "sq_top1": 193706,
+          "top1_match": false,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "sq_top8_tokens": [
+            193706,
+            237950,
+            124170,
+            111791,
+            68712,
+            207459,
+            100411,
+            157398
+          ],
+          "top8_common": 4,
+          "top8_width": 8,
+          "aq4_top1_rank_in_sq_top8": 2,
+          "sq_top1_rank_in_aq4_top8": 5,
+          "sq_top1_minus_aq4_top1_logit": 0.07223900000000061,
+          "aq4_top1_minus_sq_top1_logit": 0.6345150000000004
+        },
+        {
+          "case_id": "case_b",
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "aq4_top1": 182949,
+          "sq_top1": 182949,
+          "top1_match": true,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "sq_top8_tokens": [
+            182949,
+            159207,
+            121250,
+            97533,
+            69895,
+            214852,
+            139376,
+            238270
+          ],
+          "top8_common": 7,
+          "top8_width": 8,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "aq4_top1_minus_sq_top1_logit": 0.0
+        }
+      ],
+      "metrics": {
+        "prefill_tps": 33.122241,
+        "decode_tps": 32.547642,
+        "end_to_end_tps": 33.046146,
+        "vram_consumed_bytes": 5757919232,
+        "wrapper_elapsed_seconds": 17.389121176907793
+      }
+    }
+  ],
+  "findings": [
+    "k row-block16 plus up row-block32 passes strict top1 for layer3-only coverage.",
+    "The same mixed scale layout fails case_a when expanded to layers 3 and 7.",
+    "Per-tensor scale layout is now represented in the artifact manifest as candidate scale_granularity=mixed with per-entry row_block widths.",
+    "The next quality boundary is coverage/layer interaction, not just single-tensor k/up scale width."
+  ]
+}

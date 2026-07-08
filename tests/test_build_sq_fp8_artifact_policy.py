@@ -135,9 +135,99 @@ class BuildSqFp8ArtifactPolicyTest(unittest.TestCase):
         self.assertNotIn("model.language_model.layers.3.self_attn.q_proj.weight", selected_names)
         self.assertNotIn("lm_head.weight", selected_names)
 
+    def test_policy_scale_override_resolves_per_tensor_scale(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            policy_path = self.write_policy(root)
+            payload = json.loads(policy_path.read_text(encoding="utf-8"))
+            payload["scale"]["overrides"] = [
+                {
+                    "id": "k-rowblock16",
+                    "include_regex": r"\.self_attn\.k_proj\.weight$",
+                    "granularity": "row_block",
+                    "block_cols": 16,
+                }
+            ]
+            policy_path.write_text(json.dumps(payload), encoding="utf-8")
+            args = argparse.Namespace(
+                policy_json=policy_path,
+                candidate_id=None,
+                include_regex=[],
+                scale_granularity=None,
+                scale_block_cols=None,
+            )
+            self.builder.resolve_policy_args(args)
+
+        tensors = [
+            self.builder.SourceTensor(
+                name="model.language_model.layers.3.self_attn.k_proj.weight",
+                source_file=Path("model.safetensors"),
+                dtype="BF16",
+                shape=[8, 32],
+            ),
+            self.builder.SourceTensor(
+                name="model.language_model.layers.3.mlp.up_proj.weight",
+                source_file=Path("model.safetensors"),
+                dtype="BF16",
+                shape=[8, 32],
+            ),
+        ]
+        patterns = self.builder.compile_patterns(args.include_regex, "include-regex")
+        selected, _ = self.builder.selected_tensors(
+            tensors,
+            Path("artifact"),
+            patterns,
+            [],
+            0,
+            self.builder.ScaleConfig(args.scale_granularity, args.scale_block_cols),
+            args.scale_overrides,
+        )
+        by_name = {item.source.name: item for item in selected}
+        k_tensor = by_name["model.language_model.layers.3.self_attn.k_proj.weight"]
+        up_tensor = by_name["model.language_model.layers.3.mlp.up_proj.weight"]
+
+        self.assertEqual(k_tensor.scale.granularity, "row_block")
+        self.assertEqual(k_tensor.scale.block_cols, 16)
+        self.assertEqual(k_tensor.scale.override_id, "k-rowblock16")
+        self.assertEqual(up_tensor.scale.granularity, "row_block")
+        self.assertEqual(up_tensor.scale.block_cols, 32)
+        self.assertIsNone(up_tensor.scale.override_id)
+
+        k_entry = self.builder.tensor_manifest_entry(k_tensor, Path("artifact"), True)
+        up_entry = self.builder.tensor_manifest_entry(up_tensor, Path("artifact"), True)
+        self.assertEqual(k_entry["scale_elements"], 16)
+        self.assertEqual(k_entry["scale_block_cols"], 16)
+        self.assertEqual(k_entry["scale_override_id"], "k-rowblock16")
+        self.assertEqual(up_entry["scale_elements"], 8)
+        self.assertEqual(up_entry["scale_block_cols"], 32)
+        self.assertNotIn("scale_override_id", up_entry)
+
     def test_policy_schema_is_checked(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             policy_path = self.write_policy(Path(tmpdir), schema_version="wrong")
+            args = argparse.Namespace(
+                policy_json=policy_path,
+                candidate_id=None,
+                include_regex=[],
+                scale_granularity=None,
+                scale_block_cols=None,
+            )
+
+            with self.assertRaises(SystemExit):
+                self.builder.resolve_policy_args(args)
+
+    def test_policy_scale_override_block_cols_must_be_positive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            policy_path = self.write_policy(Path(tmpdir))
+            payload = json.loads(policy_path.read_text(encoding="utf-8"))
+            payload["scale"]["overrides"] = [
+                {
+                    "include_regex": r"\.self_attn\.k_proj\.weight$",
+                    "granularity": "row_block",
+                    "block_cols": 0,
+                }
+            ]
+            policy_path.write_text(json.dumps(payload), encoding="utf-8")
             args = argparse.Namespace(
                 policy_json=policy_path,
                 candidate_id=None,

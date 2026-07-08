@@ -30,6 +30,7 @@ ARTIFACT/
     "weight_payload_dtype": "fp8_e4m3",
     "activation_dtype": "bf16_or_f32",
     "scale_granularity": "row",
+    "default_scale_granularity": "row",
     "scale_dtype": "f32"
   }
 }
@@ -77,6 +78,14 @@ For row-block scale:
 - `scale_block_cols` is required and must be greater than zero
 - `scale_elements == shape[0] * ceil(shape[1] / scale_block_cols)`
 - scale values are stored row-major by `(row, column_block)`
+
+For mixed per-tensor scale policies:
+
+- candidate-level `scale_granularity == "mixed"`
+- candidate-level `scale_layout == "per_tensor"`
+- each `fp8_tensors[]` entry is authoritative for `scale_granularity`
+- entries with `scale_granularity == "row_block"` carry their own `scale_block_cols`
+- `scale_override_id` may be present when a policy override selected that tensor's scale layout
 
 ## Passthrough Entries
 
@@ -131,10 +140,16 @@ For `schema_version = "sq-fp8-policy-v0.1"`, the policy supplies default values 
 - selected FP8 tensor `include_regex`
 - scale granularity
 - row-block scale width
+- optional scale overrides under `scale.overrides[]`
 
 Explicit CLI values still override policy defaults where applicable. Generated manifests include a
 `policy` block with policy ID, source policy path, selected FP8 rule, fallback policy, and prompt
 bundle result.
+
+`scale.overrides[]` entries use `include_regex` to match selected tensor names. The override may set
+`granularity`, `block_cols`, and an optional `id`; later matching overrides win. This is used by T2
+model-loop guards to test mixed layouts such as `k_proj` row-block16 with `up_proj` row-block32 in
+one SQ artifact.
 
 ## Runtime Path Status
 

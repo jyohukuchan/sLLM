@@ -1,0 +1,72 @@
+{
+  "schema_version": "sq-fp8-policy-v0.1",
+  "date": "2026-07-09",
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-kup1-layer3-k16-up32",
+  "policy_id": "kup1_layer3_k16_up32",
+  "status": "model_loop_mixed_scale_probe_not_promoted",
+  "target_gpu": "R9700/RDNA4",
+  "scale": {
+    "granularity": "row_block",
+    "block_cols": 32,
+    "dtype": "f32",
+    "overrides": [
+      {
+        "id": "k-rowblock16",
+        "include_regex": "^model\\.language_model\\.layers\\.3\\.self_attn\\.k_proj\\.weight$",
+        "granularity": "row_block",
+        "block_cols": 16
+      }
+    ]
+  },
+  "fp8_selection": {
+    "include_regex": "^model\\.language_model\\.layers\\.3\\.(self_attn\\.k_proj|mlp\\.up_proj)\\.weight$",
+    "families": [
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "mlp.up_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 32
+      }
+    ],
+    "expected_fp8_tensor_count": 2
+  },
+  "fallback_policy": [
+    {
+      "family": "all_other_language_model_tensors",
+      "layers": "all",
+      "reason": "not_selected_in_current_mixed_scale_probe"
+    },
+    {
+      "family": "visual_mtp_rdna2_tp_targets",
+      "layers": "all",
+      "reason": "deferred_target"
+    }
+  ],
+  "acceptance_rule": {
+    "promotion_rule": "strict_top1",
+    "diagnostic_only": [
+      "topk_common",
+      "baseline_top1_rank_in_sq_topk",
+      "sq_top1_minus_baseline_top1_logit"
+    ]
+  },
+  "prompt_bundle_result": {
+    "strict_top1_pass_count": null,
+    "case_count": 3,
+    "promoted_full_sq_policy": false
+  },
+  "artifacts": [],
+  "next_steps": [
+    "Build with tools/build-sq-fp8-w8a16-artifact.py --policy-json.",
+    "Run the six-layer token-id model-loop prompt bundle against the generated artifact.",
+    "If this passes, expand coverage cautiously; if it fails, treat k/up interaction as a format boundary."
+  ]
+}

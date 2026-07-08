@@ -2419,6 +2419,43 @@ Quality:
 3. 混合scale policyを作った後、`k_proj` と `up_proj` の組み合わせを最小coverageから再評価する。
 4. full-package real batch throughputは引き続きT1aとして別に進める。
 
+## 2026-07-09 progress: T2 SQ FP8 model-loop mixed scale
+
+前回の要点:
+
+- coverage削減では、k/up row-block32はlayer3だけでも `case_a` が崩れた。
+- `up_proj` layer3 row-block32と `k_proj` layer3 row-block16は単体ではstrict top1を維持した。
+- `k/up` layer3 row-block16は組み合わせると崩れたため、同一artifact内でtensorごとにscale block幅を変える必要があった。
+
+今回の変更点:
+
+- `tools/build-sq-fp8-w8a16-artifact.py` がpolicy `scale.overrides[]` を読み、tensorごとに異なるscale layoutをmanifestへ保存できるようにした。
+- mixed layoutではcandidate-level `scale_granularity=mixed`、`scale_layout=per_tensor` を保存し、各 `fp8_tensors[]` entryの `scale_granularity` と `scale_block_cols` をauthoritativeにした。
+- `docs/specs/sq-fp8-artifact-v0.1.md` と `docs/words.txt` にper-tensor scale layoutを追記した。
+- R9700で `k_proj` row-block16 + `up_proj` row-block32を、layer3とlayers `3,7` の2条件でmodel-loop prompt bundleにかけた。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-mixed-scale-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| variant | FP8 tensors | pass | len4 SQ top1 | case_a SQ top1 | case_a AQ4 rank in SQ top8 | case_b SQ top1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `kup1-layer3-k16-up32` | 2 | 3 / 3 | 110784 | 237950 | 1 | 182949 |
+| `kup2-k16-up32` | 4 | 2 / 3 | 110784 | 193706 | 2 | 182949 |
+
+判断:
+
+- mixed `k16/up32` は、layer3単体では前回の `k/up` row-block16およびrow-block32の崩れを回復した。
+- 同じmixed scaleをlayers `3,7` へ広げると `case_a` が崩れる。AQ4 top1はSQ top8 rank 2に残る。
+- 現在の境界は、単一tensorのscale幅ではなくlayer coverageと累積interaction側に移った。
+- 次はlayer7単体の `k16/up32`、またはlayer7の追加fallback/別scaleを試して、layer3とlayer7のどちらが主因かを分ける。
+
+次の行動:
+
+1. `kup1-layer3-k16-up32` はpassing mixed-scale probeとして保持するが、promoted SQ policyにはしない。
+2. `kup2-k16-up32` をfailure guardとして残し、layer coverage interactionを次のT2対象にする。
+3. 次の候補はlayer7単体 `k16/up32`、またはlayer7 `k_proj` / `up_proj` の片側fallbackである。
+4. full-package real batch throughputは引き続きT1aとして別に進める。
+
 ## Risks
 
 | risk | impact | handling |

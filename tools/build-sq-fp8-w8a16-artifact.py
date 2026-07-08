@@ -23,6 +23,19 @@ FP8_E4M3_MAX = 448.0
 
 
 @dataclass(frozen=True)
+class ScaleConfig:
+    granularity: str
+    block_cols: int
+    override_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ScaleOverride:
+    include_pattern: re.Pattern[str]
+    config: ScaleConfig
+
+
+@dataclass(frozen=True)
 class SourceTensor:
     name: str
     source_file: Path
@@ -43,6 +56,7 @@ class SelectedTensor:
     family: str
     payload_file: Path
     scale_file: Path
+    scale: ScaleConfig
 
 
 def parse_args() -> argparse.Namespace:
@@ -117,6 +131,10 @@ def resolve_policy_args(args: argparse.Namespace) -> dict[str, Any] | None:
     if args.scale_block_cols <= 0:
         raise SystemExit("scale-block-cols must be positive")
 
+    args.scale_overrides = []
+    if policy_scale is not None:
+        args.scale_overrides = parse_scale_overrides(policy_scale)
+
     return policy
 
 
@@ -127,9 +145,59 @@ def policy_manifest_entry(policy_json: Path, policy: dict[str, Any]) -> dict[str
         "policy_id": policy.get("policy_id"),
         "status": policy.get("status"),
         "fp8_selection": policy.get("fp8_selection"),
+        "scale": policy.get("scale"),
         "fallback_policy": policy.get("fallback_policy"),
         "prompt_bundle_result": policy.get("prompt_bundle_result"),
     }
+
+
+def validate_scale_granularity(value: str) -> str:
+    if value not in {"row", "row_block", "tensor"}:
+        raise SystemExit(f"unsupported scale granularity: {value}")
+    return value
+
+
+def parse_scale_overrides(policy_scale: dict[str, Any]) -> list[ScaleOverride]:
+    raw_overrides = policy_scale.get("overrides", [])
+    if raw_overrides is None:
+        return []
+    if not isinstance(raw_overrides, list):
+        raise SystemExit("policy scale.overrides must be a list")
+    overrides: list[ScaleOverride] = []
+    for index, raw in enumerate(raw_overrides):
+        if not isinstance(raw, dict):
+            raise SystemExit(f"policy scale.overrides[{index}] must be an object")
+        include_regex = raw.get("include_regex")
+        if not isinstance(include_regex, str) or not include_regex:
+            raise SystemExit(
+                f"policy scale.overrides[{index}].include_regex must be a non-empty string"
+            )
+        try:
+            include_pattern = re.compile(include_regex)
+        except re.error as err:
+            raise SystemExit(
+                f"invalid policy scale.overrides[{index}].include_regex {include_regex!r}: {err}"
+            ) from err
+        granularity = validate_scale_granularity(
+            str(raw.get("granularity", policy_scale.get("granularity", "row")))
+        )
+        block_cols = int(raw.get("block_cols", policy_scale.get("block_cols", 256)))
+        if block_cols <= 0:
+            raise SystemExit(f"policy scale.overrides[{index}].block_cols must be positive")
+        override_id = raw.get("id")
+        if override_id is not None and not isinstance(override_id, str):
+            raise SystemExit(f"policy scale.overrides[{index}].id must be a string")
+        overrides.append(
+            ScaleOverride(
+                include_pattern=include_pattern,
+                config=ScaleConfig(
+                    granularity=granularity,
+                    block_cols=block_cols,
+                    override_id=override_id,
+                ),
+            )
+        )
+    return overrides
 
 
 def sanitize(name: str) -> str:
@@ -229,13 +297,31 @@ def compile_patterns(values: list[str], label: str) -> list[re.Pattern[str]]:
     return patterns
 
 
+def resolve_tensor_scale(
+    tensor_name: str,
+    default_scale: ScaleConfig,
+    overrides: list[ScaleOverride],
+) -> ScaleConfig:
+    scale = default_scale
+    for override in overrides:
+        if override.include_pattern.search(tensor_name):
+            scale = override.config
+    return scale
+
+
 def selected_tensors(
     tensors: list[SourceTensor],
     output: Path,
     include_patterns: list[re.Pattern[str]],
     exclude_patterns: list[re.Pattern[str]],
     max_tensors: int,
+    default_scale: ScaleConfig | None = None,
+    scale_overrides: list[ScaleOverride] | None = None,
 ) -> tuple[list[SelectedTensor], list[dict[str, Any]]]:
+    if default_scale is None:
+        default_scale = ScaleConfig(granularity="row", block_cols=256)
+    if scale_overrides is None:
+        scale_overrides = []
     selected: list[SelectedTensor] = []
     passthrough: list[dict[str, Any]] = []
     for tensor in tensors:
@@ -255,6 +341,7 @@ def selected_tensors(
                     family=tensor_family(tensor.name) or "custom",
                     payload_file=Path("fp8") / f"{stem}.fp8_e4m3",
                     scale_file=Path("scales") / f"{stem}.scale_f32",
+                    scale=resolve_tensor_scale(tensor.name, default_scale, scale_overrides),
                 )
             )
             continue
@@ -303,14 +390,14 @@ def file_sha256(path: Path) -> str:
 def encode_selected_tensor(
     tensor: SelectedTensor,
     output: Path,
-    scale_granularity: str,
-    scale_block_cols: int,
     row_chunk: int,
 ) -> dict[str, Any]:
     if not hasattr(torch, "float8_e4m3fn"):
         raise SystemExit("this PyTorch build does not provide torch.float8_e4m3fn")
     if row_chunk <= 0:
         raise SystemExit("row-chunk must be positive")
+    scale_granularity = tensor.scale.granularity
+    scale_block_cols = tensor.scale.block_cols
     if scale_block_cols <= 0:
         raise SystemExit("scale-block-cols must be positive")
     source = tensor.source
@@ -377,13 +464,13 @@ def encode_selected_tensor(
 def tensor_manifest_entry(
     tensor: SelectedTensor,
     output: Path,
-    scale_granularity: str,
-    scale_block_cols: int,
     metadata_only: bool,
 ) -> dict[str, Any]:
     source = tensor.source
     rows = source.shape[0] if len(source.shape) >= 1 else 1
     cols = source.shape[1] if len(source.shape) >= 2 else 1
+    scale_granularity = tensor.scale.granularity
+    scale_block_cols = tensor.scale.block_cols
     if scale_granularity == "tensor":
         scale_elements = 1
     elif scale_granularity == "row_block":
@@ -410,6 +497,8 @@ def tensor_manifest_entry(
     }
     if scale_granularity == "row_block":
         entry["scale_block_cols"] = scale_block_cols
+    if tensor.scale.override_id is not None:
+        entry["scale_override_id"] = tensor.scale.override_id
     if not metadata_only:
         payload_path = output / tensor.payload_file
         scale_path = output / tensor.scale_file
@@ -427,12 +516,18 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     tensors = collect_tensors(model_dir)
     include_patterns = compile_patterns(args.include_regex, "include-regex")
     exclude_patterns = compile_patterns(args.exclude_regex, "exclude-regex")
+    default_scale = ScaleConfig(
+        granularity=args.scale_granularity,
+        block_cols=args.scale_block_cols,
+    )
     selected, passthrough = selected_tensors(
         tensors,
         args.output_artifact,
         include_patterns,
         exclude_patterns,
         args.max_tensors,
+        default_scale,
+        getattr(args, "scale_overrides", []),
     )
 
     if not args.dry_run:
@@ -448,8 +543,6 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
             encoded_by_name[tensor.source.name] = encode_selected_tensor(
                 tensor,
                 args.output_artifact,
-                args.scale_granularity,
-                args.scale_block_cols,
                 args.row_chunk,
             )
 
@@ -458,8 +551,6 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         entry = tensor_manifest_entry(
             tensor,
             args.output_artifact,
-            args.scale_granularity,
-            args.scale_block_cols,
             args.metadata_only or args.dry_run,
         )
         entry.update(encoded_by_name.get(tensor.source.name, {}))
@@ -474,14 +565,25 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         (int(entry["elements"]) * 4 for entry in fp8_entries),
         default=0,
     )
+    tensor_scale_layouts = {
+        (
+            str(entry["scale_granularity"]),
+            int(entry["scale_block_cols"]) if "scale_block_cols" in entry else None,
+        )
+        for entry in fp8_entries
+    }
+    candidate_scale_granularity = (
+        args.scale_granularity if len(tensor_scale_layouts) <= 1 else "mixed"
+    )
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "candidate": {
             "id": args.candidate_id,
             "weight_payload_dtype": "fp8_e4m3",
             "activation_dtype": args.activation_dtype,
-            "scale_granularity": args.scale_granularity,
+            "scale_granularity": candidate_scale_granularity,
             "scale_dtype": "f32",
+            "default_scale_granularity": args.scale_granularity,
         },
         "source": {
             "model_dir": str(model_dir),
@@ -505,6 +607,10 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "Runtime execution support is staged after metadata and payload generation are verified.",
         ],
     }
+    if candidate_scale_granularity == "mixed":
+        manifest["candidate"]["scale_layout"] = "per_tensor"
+    if args.scale_granularity == "row_block":
+        manifest["candidate"]["default_scale_block_cols"] = args.scale_block_cols
     if getattr(args, "policy_payload", None) is not None and args.policy_json is not None:
         manifest["policy"] = policy_manifest_entry(args.policy_json, args.policy_payload)
     return manifest
