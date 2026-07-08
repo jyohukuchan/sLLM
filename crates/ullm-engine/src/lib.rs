@@ -10,3 +10,4 @@ pub mod loader;
 pub mod package;
 pub mod qwen3_loader;
 pub mod scheduler;
+pub mod sq;

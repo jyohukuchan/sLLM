@@ -75,13 +75,14 @@
     "t1_jsonl_schema_preservation": "partial_done",
     "t1_real_batch_runner": "not_done",
     "t2_artifact_metadata_path": "partial_done",
-    "t2_runtime_load_path": "not_done",
-    "t2_short_prompt_guard": "blocked_on_runtime_load"
+    "t2_runtime_load_path": "partial_done",
+    "t2_runtime_load_smoke": "sq-fp8-materialize-smoke cpu0 and r9700-device2 verified",
+    "t2_short_prompt_guard": "blocked_on_full_sq_model_load"
   },
   "next_steps": [
-    "T1: verify batch workload JSONL conversion keeps prefill/KV/executor fields",
-    "T2: verify FP8 artifact writer with a tiny payload fixture and real-model metadata-only run",
-    "T2: add runtime sq_manifest.json load support",
-    "T2: run short prompt guard once the runtime can consume the FP8 artifact"
+    "T2: keep sq-fp8-materialize-smoke as the runtime artifact-boundary guard",
+    "T2: connect SQ FP8 materialization to the existing package model load path",
+    "T2: run short prompt guard once the model path can consume selected FP8 tensors",
+    "T3: move to batch/cold/cached-prefix/decode grid after short guard passes"
   ]
 }

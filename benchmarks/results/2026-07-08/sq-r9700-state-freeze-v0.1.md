@@ -68,11 +68,12 @@ Required artifact metadata:
 | T1 JSONL/schema preservation | partial done | Converted rows must retain prefill, KV, and executor accounting. |
 | T1 real batch runner | not done | Needed before SQ throughput comparison. |
 | T2 artifact metadata path | partial done | `sq-fp8-w8a16-r9700-v0` manifest and writer are staged. |
-| T2 runtime load path | not done | Required before short prompt guard. |
+| T2 runtime load path | partial done | `sq-fp8-materialize-smoke` validates manifest read and selected FP8 row materialization. |
+| T2 short prompt guard | not done | Requires full SQ model load integration. |
 
 ## Next Action
 
-1. Verify the batch workload JSONL conversion smoke keeps prefill/KV/executor fields.
-2. Verify the FP8 artifact writer with a tiny payload fixture and real-model metadata-only run.
-3. Add runtime `sq_manifest.json` load support.
-4. Run short prompt guard after the runtime can consume the FP8 artifact.
+1. Keep `sq-fp8-materialize-smoke` as the runtime artifact-boundary guard.
+2. Connect SQ FP8 materialization to the existing package model load path.
+3. Run short prompt guard after the model path can consume selected FP8 tensors.
+4. Move to T3 after the guard can compare AQ4 baseline and SQ FP8 candidate quality.

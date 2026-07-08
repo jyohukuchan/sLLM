@@ -53,6 +53,10 @@ use ullm_engine::scheduler::{
     KvBlockAllocator, KvBlockAllocatorStats, Request, RequestId, SchedulerDecodeRequest,
     SchedulerState,
 };
+use ullm_engine::sq::{
+    materialize_sq_fp8_tensor_rows_to_runtime_f32, read_sq_fp8_artifact,
+    select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
+};
 
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
@@ -158,6 +162,13 @@ fn main() -> ExitCode {
             env::args().nth(3),
             env::args().nth(4),
             env::args().nth(5),
+        ),
+        Some("sq-fp8-materialize-smoke") => sq_fp8_materialize_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
         ),
         Some("package-mlp-smoke") => package_mlp_smoke(
             env::args().nth(2),
@@ -7625,6 +7636,170 @@ fn package_materialize_smoke(
         device_index,
         info.name,
         format_f32_preview(&preview)
+    );
+    ExitCode::SUCCESS
+}
+
+fn sq_fp8_materialize_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    tensor_selector: Option<String>,
+    row_count: Option<String>,
+    start_row: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("sq-fp8-materialize-smoke requires an SQ FP8 artifact directory");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let artifact = match read_sq_fp8_artifact(&path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read SQ FP8 artifact: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let selector = TensorSelector::parse(tensor_selector.as_deref());
+    let tensor_index = match select_sq_fp8_tensor_index(&artifact.manifest, &selector) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("failed to select SQ FP8 tensor: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let tensor = &artifact.manifest.fp8_tensors[tensor_index];
+    let (rows, cols) = match sq_fp8_tensor_rows_cols(tensor) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("invalid SQ FP8 tensor entry: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let start_row = match parse_optional_usize(start_row, 0, "start row") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let row_count = match row_count {
+        Some(value) => match parse_optional_usize(Some(value), 0, "row count") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("row count must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        },
+        None => rows.saturating_sub(start_row).min(4),
+    };
+    if row_count == 0 {
+        eprintln!("SQ FP8 row range is empty: start_row={start_row} rows={rows}");
+        return ExitCode::from(2);
+    }
+
+    let mut context = match ullm_runtime_sys::RuntimeContext::create(device_index) {
+        Ok(context) => context,
+        Err(err) => {
+            eprintln!("failed to create runtime context: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let info = match context.device_info() {
+        Ok(info) => info,
+        Err(err) => {
+            eprintln!("failed to query runtime context device: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut stream = match context.create_stream() {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("failed to create runtime stream: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let materialized = match materialize_sq_fp8_tensor_rows_to_runtime_f32(
+        &mut context,
+        &mut stream,
+        &artifact,
+        &selector,
+        start_row,
+        row_count,
+    ) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to materialize SQ FP8 tensor rows: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let output_bytes = match materialized
+        .values
+        .len()
+        .checked_mul(std::mem::size_of::<f32>())
+    {
+        Some(bytes) => bytes,
+        None => {
+            eprintln!("SQ FP8 materialized output byte size overflows");
+            return ExitCode::from(1);
+        }
+    };
+    let mut roundtrip_bytes = vec![0_u8; output_bytes];
+    if let Err(err) = materialized
+        .buffer
+        .copy_to_host(0, &mut roundtrip_bytes, Some(&mut stream))
+    {
+        eprintln!("failed to copy SQ FP8 materialized rows back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after SQ FP8 readback: {err}");
+        return ExitCode::from(1);
+    }
+    let roundtrip = decode_f32_le_values(&roundtrip_bytes);
+    if roundtrip.len() != materialized.values.len() {
+        eprintln!(
+            "SQ FP8 readback element count mismatch: expected {} got {}",
+            materialized.values.len(),
+            roundtrip.len()
+        );
+        return ExitCode::from(1);
+    }
+    let roundtrip_max_abs_diff = materialized
+        .values
+        .iter()
+        .zip(roundtrip.iter())
+        .map(|(lhs, rhs)| (lhs - rhs).abs())
+        .fold(0.0_f32, f32::max);
+    if roundtrip_max_abs_diff != 0.0 {
+        eprintln!("SQ FP8 runtime roundtrip mismatch: max_abs_diff={roundtrip_max_abs_diff:.9}");
+        return ExitCode::from(1);
+    }
+    let preview_count = roundtrip.len().min(8);
+    println!(
+        "sq-fp8-materialize-smoke artifact={} schema={} candidate={} tensor_index={} tensor=\"{}\" family={} source_dtype={} shape=[{},{}] rows={} cols={} start_row={} row_count={} materialized_elements={} output_bytes={} payload_dtype={} scale_granularity={} scale_dtype={} backend={} device_index={} name=\"{}\" preview={} roundtrip_max_abs_diff={roundtrip_max_abs_diff:.9} verified=true",
+        path,
+        artifact.manifest.schema_version,
+        artifact.manifest.candidate.id,
+        materialized.tensor_index,
+        materialized.tensor_name,
+        tensor.family,
+        tensor.source_dtype,
+        materialized.rows,
+        materialized.cols,
+        rows,
+        cols,
+        materialized.start_row,
+        materialized.row_count,
+        materialized.values.len(),
+        output_bytes,
+        tensor.payload_dtype,
+        tensor.scale_granularity,
+        tensor.scale_dtype,
+        info.backend,
+        device_index,
+        info.name,
+        format_f32_preview(&roundtrip[..preview_count])
     );
     ExitCode::SUCCESS
 }
@@ -39435,6 +39610,9 @@ fn print_help() {
     );
     eprintln!(
         "package-batch-throughput-bench: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
+    );
+    eprintln!(
+        "sq-fp8-materialize-smoke: ARTIFACT_DIR [DEVICE_INDEX] [TENSOR_SELECTOR] [ROW_COUNT] [START_ROW]"
     );
     eprintln!(
         "package-prefill-rmsnorm-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"

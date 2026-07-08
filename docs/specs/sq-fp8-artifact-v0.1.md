@@ -114,7 +114,20 @@ Later runtime paths may reduce this with native FP8 matmul or smaller materializ
 
 The v0.1 artifact is the payload and metadata boundary for T2. Runtime execution support is staged:
 
-1. Build and validate `sq_manifest.json`.
-2. Generate a small FP8 payload artifact and verify file sizes/checksums.
-3. Add a runtime loader that can resolve FP8 payload plus scale files for selected tensors.
-4. Connect the loader to short prompt guard.
+1. Build and validate `sq_manifest.json`. Done for the first smoke path.
+2. Generate a small FP8 payload artifact and verify file sizes/checksums. Done for the first smoke path.
+3. Add a runtime loader that can resolve FP8 payload plus scale files for selected tensors. Partially done.
+4. Connect the loader to short prompt guard. Not done.
+
+The first runtime loader entrypoint is:
+
+```text
+ullm-engine sq-fp8-materialize-smoke ARTIFACT_DIR [DEVICE_INDEX] [TENSOR_SELECTOR] [ROW_COUNT] [START_ROW]
+```
+
+It validates `sq_manifest.json`, selects an FP8 tensor by index, exact name, or unique substring,
+decodes selected rows from FP8 E4M3 plus F32 scales into F32, copies the materialized rows into a
+runtime buffer, then reads the buffer back to verify the runtime transfer.
+
+This is not yet the short prompt guard. It proves the runtime can consume the FP8 artifact boundary
+without expanding the full model at once.
