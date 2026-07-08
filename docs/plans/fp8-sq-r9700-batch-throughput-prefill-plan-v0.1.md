@@ -200,6 +200,7 @@
 - 入力は16x16 FP8 E4M3 byte tileを2枚、出力は16x16 F32 accumulator tileに固定した。
 - HIPRTC kernelはRDNA4/gfx12で `__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12` を使い、32 lane x 8 accumulatorを出力する。
 - 初期sanityとしてQ/KをFP8 1.0相当の `0x38` で埋め、R9700 runtime device index `2` で `max_abs=16.0` を確認した。
+- `layout` patternを追加し、非一様Q/K入力でraw accumulator previewを見られるようにした。現時点のpreviewはCPU row-major Q*K^Tとは一致せず、input packingとoutput accumulator orderの特定が次の課題である。
 - V620/RDNA2とCPU CLIはこのRDNA4 QK probeでは失敗扱いにした。
 - 結果は `benchmarks/results/2026-07-08/runtime-wmma/phase-c8-rdna4-fp8-wmma-qk-probe-v1.md` に保存した。
 

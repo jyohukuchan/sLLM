@@ -32,7 +32,12 @@ test tests::first_hip_wmma_fp8_qk_probe_outputs_finite_nonzero_values_when_avail
 
 ```text
 target/release/ullm-engine runtime-wmma-fp8-qk-probe-smoke 2
-runtime-wmma-fp8-qk-probe-smoke backend=hip device=AMD Radeon Graphics compute=12.0 arch= max_abs=16.000000000 finite=true nonzero=true verified=true
+runtime-wmma-fp8-qk-probe-smoke backend=hip device=AMD Radeon Graphics compute=12.0 arch= pattern=ones max_abs=16.000000000 preview=[16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000,16.0000000] finite=true nonzero=true verified=true
+```
+
+```text
+target/release/ullm-engine runtime-wmma-fp8-qk-probe-smoke 2 layout
+runtime-wmma-fp8-qk-probe-smoke backend=hip device=AMD Radeon Graphics compute=12.0 arch= pattern=layout max_abs=374.000000000 preview=[136.0000000,0.0000000,168.0000000,0.0000000,200.0000000,0.0000000,232.0000000,0.0000000,0.0000000,0.0000000,0.0000000,0.0000000,0.0000000,0.0000000,0.0000000,0.0000000] finite=true nonzero=true verified=true
 ```
 
 ```text
@@ -49,7 +54,8 @@ runtime wmma fp8 qk probe smoke requires a HIP device: backend=cpu device=host C
 
 - R9700 can run a 16x16x16 FP8 WMMA operation through uLLM HIPRTC and produce the expected all-ones QK accumulator magnitude.
 - This is stronger than the marker-only probe because the output value depends on FP8 WMMA arithmetic.
-- This is still not a complete QK microkernel for attention because the HIP output is raw accumulator order, not verified row-major Q*K^T order.
+- The `layout` pattern is intentionally non-uniform. CPU row-major Q*K^T would produce values `16*row+col`, but the current HIP preview does not match row-major order.
+- This is still not a complete QK microkernel for attention because both input register packing and output accumulator order must be mapped before arbitrary Q/K tiles can be compared to row-major Q*K^T.
 - The next required step is to identify lane/register output layout with non-uniform Q/K input and compare against CPU row-major Q*K^T.
 
 ## Verification
