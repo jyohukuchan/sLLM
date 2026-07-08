@@ -2236,12 +2236,15 @@ fn runtime_decode_attn_smoke(device_index: Option<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+const RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD: usize = 64;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeCachedPrefixAttnExecutor {
     Chunked,
     Flash2,
     Flash2Fp8Q,
     RocwmmaFp8,
+    Rdna4Fp8Auto,
     DecodeLoop,
 }
 
@@ -2254,9 +2257,12 @@ impl RuntimeCachedPrefixAttnExecutor {
             "cached_prefix_rocwmma_fp8" | "rocwmma_fp8" | "cached_prefix_rocwmma" | "rocwmma" => {
                 Ok(Self::RocwmmaFp8)
             }
+            "cached_prefix_rdna4_fp8_auto" | "rdna4_fp8_auto" | "fp8_auto" => {
+                Ok(Self::Rdna4Fp8Auto)
+            }
             "decode_attn_f32_loop" | "decode_loop" => Ok(Self::DecodeLoop),
             other => Err(format!(
-                "runtime cached prefix attention executor must be cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|cached_prefix_flash2_fp8q|flash2_fp8q|cached_prefix_rocwmma_fp8|rocwmma_fp8|decode_loop, got {other}"
+                "runtime cached prefix attention executor must be cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|cached_prefix_flash2_fp8q|flash2_fp8q|cached_prefix_rocwmma_fp8|rocwmma_fp8|cached_prefix_rdna4_fp8_auto|rdna4_fp8_auto|decode_loop, got {other}"
             )),
         }
     }
@@ -2267,8 +2273,45 @@ impl RuntimeCachedPrefixAttnExecutor {
             Self::Flash2 => "cached_prefix_flash2",
             Self::Flash2Fp8Q => "cached_prefix_flash2_fp8q",
             Self::RocwmmaFp8 => "cached_prefix_rocwmma_fp8",
+            Self::Rdna4Fp8Auto => "cached_prefix_rdna4_fp8_auto",
             Self::DecodeLoop => "decode_attn_f32_loop",
         }
+    }
+
+    fn resolved_label(self, new_tokens: usize) -> &'static str {
+        match self {
+            Self::Rdna4Fp8Auto if new_tokens < RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD => {
+                Self::Flash2Fp8Q.label()
+            }
+            Self::Rdna4Fp8Auto => Self::RocwmmaFp8.label(),
+            other => other.label(),
+        }
+    }
+
+    fn uses_fp8_q(self) -> bool {
+        matches!(
+            self,
+            Self::Flash2Fp8Q | Self::RocwmmaFp8 | Self::Rdna4Fp8Auto
+        )
+    }
+
+    fn requires_fp8_kv(self) -> bool {
+        matches!(
+            self,
+            Self::Flash2Fp8Q | Self::RocwmmaFp8 | Self::Rdna4Fp8Auto
+        )
+    }
+
+    fn resolves_to_flash2_fp8q(self, new_tokens: usize) -> bool {
+        matches!(self, Self::Flash2Fp8Q)
+            || matches!(self, Self::Rdna4Fp8Auto)
+                && new_tokens < RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD
+    }
+
+    fn resolves_to_rocwmma_fp8(self, new_tokens: usize) -> bool {
+        matches!(self, Self::RocwmmaFp8)
+            || matches!(self, Self::Rdna4Fp8Auto)
+                && new_tokens >= RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD
     }
 }
 
@@ -2440,7 +2483,13 @@ fn runtime_cached_prefix_attn_smoke_impl(
                 .to_string(),
         );
     }
-    if executor == RuntimeCachedPrefixAttnExecutor::Flash2Fp8Q {
+    if executor.requires_fp8_kv() && kv_cache_dtype != RuntimeCachedPrefixKvCacheDtype::Fp8E4m3 {
+        return Err(format!(
+            "runtime cached prefix attention {} executor requires fp8_e4m3 kv cache",
+            executor.label()
+        ));
+    }
+    if executor.resolves_to_flash2_fp8q(new_tokens) {
         if kv_cache_dtype != RuntimeCachedPrefixKvCacheDtype::Fp8E4m3 {
             return Err(
                 "runtime cached prefix attention flash2_fp8q executor requires fp8_e4m3 kv cache"
@@ -2454,13 +2503,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
             );
         }
     }
-    if executor == RuntimeCachedPrefixAttnExecutor::RocwmmaFp8 {
-        if kv_cache_dtype != RuntimeCachedPrefixKvCacheDtype::Fp8E4m3 {
-            return Err(
-                "runtime cached prefix attention rocwmma_fp8 executor requires fp8_e4m3 kv cache"
-                    .to_string(),
-            );
-        }
+    if executor.resolves_to_rocwmma_fp8(new_tokens) {
         if !head_dim.is_multiple_of(16) || !value_dim.is_multiple_of(16) {
             return Err(
                 "runtime cached prefix attention rocwmma_fp8 executor currently requires head_dim and value_dim to be multiples of 16"
@@ -2531,10 +2574,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
     let mut q_sequence_fp8 = Vec::new();
     let mut q_sequence_reference_storage = Vec::new();
     let mut q_sequence_scale = 1.0_f32;
-    let executor_uses_fp8_q = matches!(
-        executor,
-        RuntimeCachedPrefixAttnExecutor::Flash2Fp8Q | RuntimeCachedPrefixAttnExecutor::RocwmmaFp8
-    );
+    let executor_uses_fp8_q = executor.uses_fp8_q();
     if executor_uses_fp8_q {
         let quantized = fp8_e4m3_quantize(&q_sequence);
         q_sequence_fp8 = quantized.encoded;
@@ -2849,6 +2889,55 @@ fn runtime_cached_prefix_attn_smoke_impl(
                             )
                         })?;
                     }
+                    RuntimeCachedPrefixAttnExecutor::Rdna4Fp8Auto => {
+                        if new_tokens < RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD {
+                            ullm_runtime_sys::cached_prefix_attn_fp8_e4m3_flash2_fp8q(
+                                &q_sequence_buffer,
+                                &k_cache_buffer,
+                                &v_cache_buffer,
+                                cached_prefix_tokens,
+                                new_tokens,
+                                q_heads,
+                                kv_heads,
+                                head_dim,
+                                value_dim,
+                                softmax_scale,
+                                q_sequence_scale,
+                                k_cache_scale,
+                                v_cache_scale,
+                                &mut output_sequence_buffer,
+                                Some(stream),
+                            )
+                            .map_err(|err| {
+                                format!(
+                                    "failed to run runtime fp8 e4m3 cached prefix rdna4 auto flash2 fp8q attention: {err}"
+                                )
+                            })?;
+                        } else {
+                            ullm_runtime_sys::cached_prefix_attn_fp8_e4m3_rocwmma(
+                                &q_sequence_buffer,
+                                &k_cache_buffer,
+                                &v_cache_buffer,
+                                cached_prefix_tokens,
+                                new_tokens,
+                                q_heads,
+                                kv_heads,
+                                head_dim,
+                                value_dim,
+                                softmax_scale,
+                                q_sequence_scale,
+                                k_cache_scale,
+                                v_cache_scale,
+                                &mut output_sequence_buffer,
+                                Some(stream),
+                            )
+                            .map_err(|err| {
+                                format!(
+                                    "failed to run runtime fp8 e4m3 cached prefix rdna4 auto rocwmma attention: {err}"
+                                )
+                            })?;
+                        }
+                    }
                     RuntimeCachedPrefixAttnExecutor::DecodeLoop => {
                         for (token_index, (q_buffer, output_buffer)) in
                             q_buffers.iter().zip(output_buffers.iter_mut()).enumerate()
@@ -2923,6 +3012,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
             | RuntimeCachedPrefixAttnExecutor::Flash2
             | RuntimeCachedPrefixAttnExecutor::Flash2Fp8Q
             | RuntimeCachedPrefixAttnExecutor::RocwmmaFp8
+            | RuntimeCachedPrefixAttnExecutor::Rdna4Fp8Auto
     ) {
         Some(read_runtime_buffer_f32(
             &output_sequence_buffer,
@@ -2933,6 +3023,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
     } else {
         None
     };
+    let resolved_executor = executor.resolved_label(new_tokens);
     for (sample_index, token_index) in sample_steps.iter().copied().enumerate() {
         let output = if let Some(output_sequence) = chunked_output_sequence.as_ref() {
             let output_start = token_index.checked_mul(output_elements).ok_or_else(|| {
@@ -3053,11 +3144,12 @@ fn runtime_cached_prefix_attn_smoke_impl(
     };
 
     Ok(format!(
-        "runtime-cached-prefix-attn-smoke backend={} device_index={} name=\"{}\" prefill_mode=cached_prefix executor={} kv_cache_dtype={} cached_prefix_tokens={} new_prefill_tokens={} total_context_tokens_after_prefill={} q_heads={} kv_heads={} head_dim={} value_dim={} softmax_scale={softmax_scale:.9} q_sequence_scale={q_sequence_scale:.9} k_cache_scale={k_cache_scale:.9} v_cache_scale={v_cache_scale:.9} estimated_prefill_attention_work_tokens={} cache_kv_bytes_total={} q_bytes_total={} output_bytes_total={} warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} prefill_total_input_tps={} attention_pair_tps_mean={} verification=sampled sample_count={} sampled_max_abs_diff={max_abs_diff:.9} output_preview={} verified=true",
+        "runtime-cached-prefix-attn-smoke backend={} device_index={} name=\"{}\" prefill_mode=cached_prefix executor={} resolved_executor={} kv_cache_dtype={} cached_prefix_tokens={} new_prefill_tokens={} total_context_tokens_after_prefill={} q_heads={} kv_heads={} head_dim={} value_dim={} softmax_scale={softmax_scale:.9} q_sequence_scale={q_sequence_scale:.9} k_cache_scale={k_cache_scale:.9} v_cache_scale={v_cache_scale:.9} estimated_prefill_attention_work_tokens={} cache_kv_bytes_total={} q_bytes_total={} output_bytes_total={} warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} prefill_total_input_tps={} attention_pair_tps_mean={} verification=sampled sample_count={} sampled_max_abs_diff={max_abs_diff:.9} output_preview={} verified=true",
         info.backend,
         device_index,
         info.name,
         executor.label(),
+        resolved_executor,
         kv_cache_dtype.label(),
         cached_prefix_tokens,
         new_tokens,
@@ -39320,7 +39412,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-causal-attn-batch-smoke [DEVICE_INDEX] [BATCH_COUNT] [SEQUENCE_LEN] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=causal_attn_batch_f32|default|flash2|causal_attn_batch_f32_flash2]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-cached-prefix-attn-smoke [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|cached_prefix_rocwmma_fp8|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-wmma-fp8-probe-smoke [DEVICE_INDEX]|runtime-wmma-fp8-qk-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]|runtime-rocwmma-fp8-qk-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]|runtime-rocwmma-fp8-attn-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-qkv-rope-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-block-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-layer-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-causal-attn-batch-smoke [DEVICE_INDEX] [BATCH_COUNT] [SEQUENCE_LEN] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=causal_attn_batch_f32|default|flash2|causal_attn_batch_f32_flash2]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-cached-prefix-attn-smoke [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|cached_prefix_flash2_fp8q|cached_prefix_rocwmma_fp8|cached_prefix_rdna4_fp8_auto|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-wmma-fp8-probe-smoke [DEVICE_INDEX]|runtime-wmma-fp8-qk-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]|runtime-rocwmma-fp8-qk-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]|runtime-rocwmma-fp8-attn-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-qkv-rope-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-block-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-layer-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
     );
     eprintln!(
         "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
@@ -39329,7 +39421,7 @@ fn print_help() {
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
     );
     eprintln!(
-        "runtime-cached-prefix-attn-smoke: [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|cached_prefix_flash2_fp8q|cached_prefix_rocwmma_fp8|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]"
+        "runtime-cached-prefix-attn-smoke: [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|cached_prefix_flash2_fp8q|cached_prefix_rocwmma_fp8|cached_prefix_rdna4_fp8_auto|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]"
     );
     eprintln!(
         "runtime-wmma-fp8-qk-probe-smoke: [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]"

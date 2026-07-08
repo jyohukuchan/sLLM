@@ -24,8 +24,10 @@ SUPPORTED_EXECUTORS = {
     "cached_prefix_flash2",
     "cached_prefix_flash2_fp8q",
     "cached_prefix_rocwmma_fp8",
+    "cached_prefix_rdna4_fp8_auto",
     "decode_loop",
 }
+RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD = 64
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rocwmma-value-group-widths",
         default="auto",
-        help="CSV of auto|16|32|64|128|256 for cached_prefix_rocwmma_fp8 only",
+        help="CSV of auto|16|32|64|128|256 for cached_prefix_rocwmma_fp8 and cached_prefix_rdna4_fp8_auto when M>=64",
     )
     parser.add_argument("--measured-repeats", type=int, default=3)
     parser.add_argument("--long-measured-repeats", type=int, default=1)
@@ -123,11 +125,13 @@ def executor_csv(value: str) -> list[str]:
             item = "cached_prefix_flash2_fp8q"
         if item in {"rocwmma", "rocwmma_fp8", "cached_prefix_rocwmma"}:
             item = "cached_prefix_rocwmma_fp8"
+        if item in {"rdna4_fp8_auto", "fp8_auto"}:
+            item = "cached_prefix_rdna4_fp8_auto"
         if item == "decode_attn_f32_loop":
             item = "decode_loop"
         if item not in SUPPORTED_EXECUTORS:
             raise SystemExit(
-                "executors must contain cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|cached_prefix_flash2_fp8q|flash2_fp8q|cached_prefix_rocwmma_fp8|rocwmma_fp8|decode_loop"
+                "executors must contain cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|cached_prefix_flash2_fp8q|flash2_fp8q|cached_prefix_rocwmma_fp8|rocwmma_fp8|cached_prefix_rdna4_fp8_auto|rdna4_fp8_auto|decode_loop"
             )
         executors.append(item)
     if not executors:
@@ -168,6 +172,18 @@ def required_env_for_case(case: SweepCase) -> dict[str, str]:
     if executor == "cached_prefix_rocwmma_fp8":
         if dtype != "fp8_e4m3":
             raise SystemExit("cached_prefix_rocwmma_fp8 executor supports only fp8_e4m3 kv cache")
+        if case.rocwmma_value_group_width is None:
+            return {}
+        return {
+            "ULLM_ROCWMMA_CACHED_PREFIX_VALUE_GROUP_WIDTH": str(
+                case.rocwmma_value_group_width
+            )
+        }
+    if executor == "cached_prefix_rdna4_fp8_auto":
+        if dtype != "fp8_e4m3":
+            raise SystemExit("cached_prefix_rdna4_fp8_auto executor supports only fp8_e4m3 kv cache")
+        if case.new_prefill_tokens < RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD:
+            return {"ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_FLASH2_KERNEL": "1"}
         if case.rocwmma_value_group_width is None:
             return {}
         return {
@@ -228,27 +244,53 @@ def build_cases(args: argparse.Namespace) -> list[SweepCase]:
         ensure_positive(getattr(args, label.replace("-", "_")), label)
     if args.q_heads % args.kv_heads != 0:
         raise SystemExit("q-heads must be a multiple of kv-heads")
-    if "cached_prefix_rocwmma_fp8" in executors:
+    if "cached_prefix_flash2_fp8q" in executors and dtype != "fp8_e4m3":
+        raise SystemExit("cached_prefix_flash2_fp8q executor supports only fp8_e4m3 kv cache")
+    if "cached_prefix_rdna4_fp8_auto" in executors and dtype != "fp8_e4m3":
+        raise SystemExit("cached_prefix_rdna4_fp8_auto executor supports only fp8_e4m3 kv cache")
+    if (
+        "cached_prefix_flash2_fp8q" in executors
+        or (
+            "cached_prefix_rdna4_fp8_auto" in executors
+            and any(
+                new_tokens < RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD
+                for new_tokens in new_tokens_values
+            )
+        )
+    ) and args.value_dim > 256:
+        raise SystemExit(
+            "cached_prefix_flash2_fp8q and cached_prefix_rdna4_fp8_auto M<64 require value-dim <= 256"
+        )
+    needs_rocwmma_shape = "cached_prefix_rocwmma_fp8" in executors or (
+        "cached_prefix_rdna4_fp8_auto" in executors
+        and any(
+            new_tokens >= RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD
+            for new_tokens in new_tokens_values
+        )
+    )
+    if needs_rocwmma_shape:
         if dtype != "fp8_e4m3":
-            raise SystemExit("cached_prefix_rocwmma_fp8 executor supports only fp8_e4m3 kv cache")
+            raise SystemExit("rocWMMA fp8 executors support only fp8_e4m3 kv cache")
         if (args.q_heads // args.kv_heads) % 16 != 0:
             raise SystemExit(
-                "cached_prefix_rocwmma_fp8 requires q-heads/kv-heads to be a multiple of 16"
+                "rocWMMA fp8 executors require q-heads/kv-heads to be a multiple of 16"
             )
         if args.head_dim % 16 != 0 or args.value_dim % 16 != 0:
             raise SystemExit(
-                "cached_prefix_rocwmma_fp8 requires head-dim and value-dim to be multiples of 16"
+                "rocWMMA fp8 executors require head-dim and value-dim to be multiples of 16"
             )
 
     cases: list[SweepCase] = []
     for executor in executors:
-        value_group_widths = (
-            rocwmma_value_group_widths
-            if executor == "cached_prefix_rocwmma_fp8"
-            else [None]
-        )
         for cached_prefix_tokens in prefixes:
             for new_tokens in new_tokens_values:
+                uses_rocwmma_value_group = executor == "cached_prefix_rocwmma_fp8" or (
+                    executor == "cached_prefix_rdna4_fp8_auto"
+                    and new_tokens >= RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD
+                )
+                value_group_widths = (
+                    rocwmma_value_group_widths if uses_rocwmma_value_group else [None]
+                )
                 for rocwmma_value_group_width in value_group_widths:
                     attention_work = estimated_attention_pairs(cached_prefix_tokens, new_tokens)
                     if (
@@ -265,7 +307,7 @@ def build_cases(args: argparse.Namespace) -> list[SweepCase]:
                         args.long_new_token_threshold,
                     )
                     case_id = f"{executor}-{dtype}-l{cached_prefix_tokens}-m{new_tokens}"
-                    if executor == "cached_prefix_rocwmma_fp8":
+                    if uses_rocwmma_value_group:
                         case_id += (
                             "-vgwauto"
                             if rocwmma_value_group_width is None
@@ -344,6 +386,14 @@ def output_executor(case: SweepCase) -> str:
     return case.executor
 
 
+def resolved_executor(case: SweepCase) -> str:
+    if case.executor == "cached_prefix_rdna4_fp8_auto":
+        if case.new_prefill_tokens < RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD:
+            return "cached_prefix_flash2_fp8q"
+        return "cached_prefix_rocwmma_fp8"
+    return output_executor(case)
+
+
 def run_case(args: argparse.Namespace, run_id: str, case: SweepCase) -> dict[str, Any]:
     command = command_for_case(args, case)
     env = os.environ.copy()
@@ -358,6 +408,7 @@ def run_case(args: argparse.Namespace, run_id: str, case: SweepCase) -> dict[str
         "workload": {
             "prefill_mode": "cached_prefix",
             "executor": output_executor(case),
+            "resolved_executor": resolved_executor(case),
             "kv_cache_dtype": case.kv_cache_dtype,
             "cached_prefix_tokens": case.cached_prefix_tokens,
             "new_prefill_tokens": case.new_prefill_tokens,
@@ -439,6 +490,10 @@ def run_case(args: argparse.Namespace, run_id: str, case: SweepCase) -> dict[str
                 "sample_count": parsed.get("sample_count"),
                 "sampled_max_abs_diff": parsed.get("sampled_max_abs_diff"),
             },
+            "parsed_executor": {
+                "executor": parsed.get("executor"),
+                "resolved_executor": parsed.get("resolved_executor"),
+            },
         }
     )
     return row
@@ -468,8 +523,8 @@ def write_summary(path: Path, rows: list[dict[str, Any]]) -> None:
         f"- schema: `{SCHEMA_VERSION}`",
         f"- rows: {len(rows)}",
         "",
-        "| status | executor | dtype | L | M | rocWMMA value group | repeats | mean ms | new tok/s | pair/s | diff |",
-        "| --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| status | executor | resolved | dtype | L | M | rocWMMA value group | repeats | mean ms | new tok/s | pair/s | diff |",
+        "| --- | --- | --- | --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         workload = row.get("workload", {})
@@ -481,12 +536,13 @@ def write_summary(path: Path, rows: list[dict[str, Any]]) -> None:
                 [
                     str(row.get("status", "")),
                     str(workload.get("executor", "")),
+                    str(workload.get("resolved_executor", "")),
                     str(workload.get("kv_cache_dtype", "")),
                     format_value(workload.get("cached_prefix_tokens"), 0),
                     format_value(workload.get("new_prefill_tokens"), 0),
                     (
                         "auto"
-                        if workload.get("executor") == "cached_prefix_rocwmma_fp8"
+                        if workload.get("resolved_executor") == "cached_prefix_rocwmma_fp8"
                         and workload.get("rocwmma_value_group_width") is None
                         else format_value(workload.get("rocwmma_value_group_width"), 0)
                     ),

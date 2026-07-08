@@ -1593,6 +1593,34 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 1. SQ cached-prefix評価では、短chunk/decode-likeは `cached_prefix_flash2_fp8q`、`M>=128` は `cached_prefix_rocwmma_fp8` を主要baselineとして扱う。
 2. 次のkernel変更は、`M=16` の弱さを埋めるためのmulti-query-token tile化を検討する。
 
+### 2026-07-08 progress: RDNA4 FP8 cached-prefix auto executor v1
+
+前回の要点:
+
+- 長prefix gridでは、`M=16` はscalar `cached_prefix_flash2_fp8q` が有利で、`M=128/512` は `cached_prefix_rocwmma_fp8` が有利だった。
+- SQ候補評価では、この分岐を毎回手で選ぶより、単一executorとして扱える方が測定が安定する。
+
+今回の変更点:
+
+- `runtime-cached-prefix-attn-smoke` に `cached_prefix_rdna4_fp8_auto` を追加した。
+- `new_prefill_tokens < 64` は `cached_prefix_flash2_fp8q`、`new_prefill_tokens >= 64` は `cached_prefix_rocwmma_fp8` に解決する。
+- smoke出力に `resolved_executor` を追加し、autoが実際にどちらを使ったかを見えるようにした。
+- `tools/run-runtime-cached-prefix-sweep.py` もauto executorに対応し、JSONLの `workload.resolved_executor` とsummaryの `resolved` 列に保存する。
+- autoの `M<64` はvalue-group sweepを展開せず、`M>=64` のときだけ `--rocwmma-value-group-widths` を適用する。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c18-rdna4-fp8-auto-executor-v1.md` に保存した。
+
+観察:
+
+- R9700の `L=4096,q_heads=16,kv_heads=1,head_dim=256,value_dim=256` smokeで、`M=16` はautoが `cached_prefix_flash2_fp8q` に解決し、明示flash2_fp8qと同等だった。
+- `M=64` と `M=128` はautoが `cached_prefix_rocwmma_fp8` に解決し、scalar FP8-Q flash2より速かった。
+- これにより、SQ候補測定では `cached_prefix_rdna4_fp8_auto` をR9700 FP8 cached-prefixの暫定default executorとして使える。
+
+次の行動:
+
+1. SQ候補のcached-prefix測定では、まず `cached_prefix_rdna4_fp8_auto` を使い、必要に応じて `resolved_executor` で結果を分解する。
+2. explicit比較やthreshold調整が必要な場合は、`cached_prefix_flash2_fp8q` と `cached_prefix_rocwmma_fp8` を併走させる。
+3. 次のkernel最適化は、短chunkを改善するmulti-query-token tile化として扱う。
+
 ## Risks
 
 | risk | impact | handling |
