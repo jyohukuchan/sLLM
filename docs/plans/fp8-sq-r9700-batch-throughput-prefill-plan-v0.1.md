@@ -1682,6 +1682,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - short prompt guardは、1 tensorの `q_proj` SQ FP8 overlay + AQ4 fallbackではtop1一致まで通った。
 - その後、同一layerのself-attention `q/k/v/o_proj` とMLP `gate/up/down_proj` の7 tensor overlayでも、短い3ケースでtop1がAQ4 baselineと一致した。ただしfull FP8 SQ候補ではないため、T2全体はまだ完了扱いにしない。
 - 複数self-attention layerへ広げた `layers=3,7` では、attention-only、MLP-only、attention+MLPのいずれもtop1がAQ4 baselineから入れ替わった。AQ4 top1はSQ top8内に残るため壊滅的崩壊ではないが、full-targetへ進む前にfamily/scale/許容基準の切り分けが必要である。
+- family別切り分けでは、`q`、`v`、`down` が単独でtop1を動かし、`k`、`o`、`gate`、`up` は単独ではtop1を保った。さらに `k/o/gate/up` を同時にFP8化したsafe subsetは短い3 promptでtop1一致、`q/v/down` のrisk subsetはtop1不一致だった。
 
 現在のT0-T2状態:
 
@@ -1692,14 +1693,14 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | T1 real batch/total throughput runner | not done | next runner work |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done | `tools/build-sq-fp8-w8a16-artifact.py` |
-| T2 runtime load path | partial done | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke` |
-| T2 short prompt guard | partial done with boundary found | one-tensor and layer-3 projection-set guards passed top1; layers `3,7` found ranking drift: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md` |
+| T2 runtime load path | partial done | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py` |
+| T2 short prompt guard | partial done with boundary found | one-tensor and layer-3 projection-set guards passed top1; layers `3,7` found ranking drift and family split: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md` |
 
 次の行動:
 
-1. T2 short guardは、複数layerで観測したranking driftをfamily別に切り分ける。最初に `q/k/v/o`、`gate/up`、`down` を分ける。
-2. full SQ候補に近いartifactへ進む前に、top1 matchだけを合格条件にするか、top-k overlapやtext-level guardも許容するかを決めるための比較表を作る。
-3. scale granularityやscale dtypeを変えられる範囲で試し、row-F32 scaleのまま進めるべきかを判断する。
+1. T2 short guardは、strict-top1基準では `k/o/gate/up` を先に拡張し、`q/v/down` はscale/formatを変えるか一時fallbackにする。
+2. `q/v/down` について、row-F32 scale以外のscale方針または高精度fallbackを試す。
+3. full SQ候補に近いartifactへ進む前に、top1 matchだけを合格条件にするか、top-k overlapやtext-level guardも許容するかを決めるための比較表を作る。
 4. T1のrunner smokeを行い、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executorが失われないことを確認する。
 5. T2のfull-target short guardが合格基準を満たした後にT3へ移り、`batch=1/4/8`、cold prefill、cached prefix `L=65536,M=1/16/128/512`、decodeを同じschemaで保存する。
 
@@ -1735,6 +1736,14 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - With layers `3,7` together, attention-only, MLP-only, and attention+MLP overlays all changed top1.
 - AQ4 top1 remained inside the SQ top8 in all three multi-layer overlays, so the issue is ranking drift, not total logits collapse.
 - Result: `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`.
+
+2026-07-08 SQ FP8 family split guard:
+
+- Added `tools/run-sq-fp8-overlay-logits-guard.py` to automate artifact generation, AQ4/SQ logits smoke runs, and top-k comparison JSON.
+- In layers `3,7`, individual `q`, `v`, and `down` overlays changed top1.
+- Individual `k`, `o`, `gate`, and `up` overlays preserved top1.
+- Combined `k/o/gate/up` preserved top1 in `3 / 3` short prompts, while combined `q/v/down` changed top1 and moved AQ4 top1 to rank `5`.
+- Result: `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`.
 
 ## Risks
 

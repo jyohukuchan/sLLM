@@ -142,5 +142,15 @@ It loads exact-name SQ FP8 tensors from the artifact and falls back to the exist
 tensors for names not present in the artifact. The first R9700 guard covered only
 `model.language_model.layers.3.self_attn.q_proj.weight`. The second guard covered all layer 3
 self-attention and MLP projection tensors. A later layers `3,7` guard found top1 ranking drift while
-keeping the AQ4 top1 inside SQ top8. These are runtime boundary and short-quality guards, not full
-SQ candidate quality results.
+keeping the AQ4 top1 inside SQ top8. A family split guard then identified `q/v/down` as the first
+risky row-scale FP8 families and `k/o/gate/up` as the first strict-top1-safe subset in that small
+guard. These are runtime boundary and short-quality guards, not full SQ candidate quality results.
+
+For repeatable guard runs, use:
+
+```text
+tools/run-sq-fp8-overlay-logits-guard.py
+```
+
+The script generates case-specific SQ FP8 artifacts, runs AQ4 and SQ logits smokes, and writes a
+top-k comparison JSON.
