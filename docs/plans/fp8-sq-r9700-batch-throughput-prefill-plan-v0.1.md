@@ -1548,6 +1548,26 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 2. rocWMMA側はvalue group調整だけではなく、複数query token tileへ拡張してFlashAttention2-likeなK/V tile再利用に寄せる。
 3. SQ候補評価では、`M=128/512` 以上のcached prefix prefillを必ず含める。
 
+### 2026-07-08 progress: rocWMMA value group sweep axis v1
+
+前回の要点:
+
+- `cached_prefix_rocwmma_fp8` は短いchunkと大きいprefill chunkで有利なvalue group幅が違った。
+- 手書きshell loopでは再現性と結果schemaが弱いため、SQ候補評価のgridへ混ぜにくかった。
+
+今回の変更点:
+
+- `tools/run-runtime-cached-prefix-sweep.py` に `--rocwmma-value-group-widths auto|16|32|64|128|256` を追加した。
+- `auto` はenv未指定のruntime heuristic、数値指定は `ULLM_ROCWMMA_CACHED_PREFIX_VALUE_GROUP_WIDTH` をcaseごとに設定する。
+- JSONLの `required_env` と `workload.rocwmma_value_group_width` に設定を保存する。
+- summary markdownへ `rocWMMA value group` 列を追加した。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c16-rocwmma-value-group-sweep-axis-v1.md` に保存した。
+
+次の行動:
+
+1. 長prefix gridで `cached_prefix_rocwmma_fp8` を測るときは、少なくとも `auto,16,64` を比較できるようにする。
+2. 次のkernel構造変更では、このsweep結果をbaselineとして使う。
+
 ## Risks
 
 | risk | impact | handling |
