@@ -931,13 +931,22 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "sq_artifact",
         "sq_schema_version",
         "sq_execution_mode",
+        "sq_projection_boundary",
     ):
         value = report.get(key)
         if isinstance(value, str) and value != "none":
             row_workload[key] = value
-    for key in ("sq_fp8_tensor_count", "sq_passthrough_tensor_count", "sq_row_chunk"):
+    for key in (
+        "sq_fp8_tensor_count",
+        "sq_passthrough_tensor_count",
+        "sq_row_chunk",
+        "sq_fp8_single_matvec_count",
+        "sq_fp8_batch_matvec_count",
+        "sq_fp8_pair_matvec_count",
+        "sq_fp8_triple_matvec_count",
+    ):
         value = parse_int(report.get(key))
-        if value is not None and value > 0:
+        if value is not None and (value > 0 or key.startswith("sq_fp8_")):
             row_workload[key] = value
     final_top1_tokens = parse_int_csv(report.get("final_top1_tokens_csv"))
     if final_top1_tokens:

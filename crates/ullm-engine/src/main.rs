@@ -59,6 +59,56 @@ use ullm_engine::sq::{
     read_sq_fp8_artifact, select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
 };
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SqFp8ProjectionTelemetry {
+    single_matvec_count: u64,
+    batch_matvec_count: u64,
+    pair_matvec_count: u64,
+    triple_matvec_count: u64,
+}
+
+static SQ_FP8_SINGLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
+static SQ_FP8_BATCH_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
+static SQ_FP8_PAIR_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
+static SQ_FP8_TRIPLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn reset_sq_fp8_projection_telemetry() {
+    SQ_FP8_SINGLE_MATVEC_COUNT.store(0, Ordering::Relaxed);
+    SQ_FP8_BATCH_MATVEC_COUNT.store(0, Ordering::Relaxed);
+    SQ_FP8_PAIR_MATVEC_COUNT.store(0, Ordering::Relaxed);
+    SQ_FP8_TRIPLE_MATVEC_COUNT.store(0, Ordering::Relaxed);
+}
+
+fn snapshot_sq_fp8_projection_telemetry() -> SqFp8ProjectionTelemetry {
+    SqFp8ProjectionTelemetry {
+        single_matvec_count: SQ_FP8_SINGLE_MATVEC_COUNT.load(Ordering::Relaxed),
+        batch_matvec_count: SQ_FP8_BATCH_MATVEC_COUNT.load(Ordering::Relaxed),
+        pair_matvec_count: SQ_FP8_PAIR_MATVEC_COUNT.load(Ordering::Relaxed),
+        triple_matvec_count: SQ_FP8_TRIPLE_MATVEC_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+fn sq_fp8_projection_boundary(telemetry: SqFp8ProjectionTelemetry) -> String {
+    let mut boundaries = Vec::new();
+    if telemetry.single_matvec_count > 0 {
+        boundaries.push("single");
+    }
+    if telemetry.batch_matvec_count > 0 {
+        boundaries.push("batch");
+    }
+    if telemetry.pair_matvec_count > 0 {
+        boundaries.push("pair");
+    }
+    if telemetry.triple_matvec_count > 0 {
+        boundaries.push("triple");
+    }
+    if boundaries.is_empty() {
+        "none".to_string()
+    } else {
+        boundaries.join("+")
+    }
+}
+
 fn main() -> ExitCode {
     match env::args().nth(1).as_deref() {
         Some("inspect-devices") => inspect_devices(),
@@ -19588,6 +19638,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         }
     }
     let layer_load_ms = layer_load_started.elapsed().as_secs_f64() * 1000.0;
+    reset_sq_fp8_projection_telemetry();
 
     let rotary_dim_value = if let Some(head_dim) = layers
         .iter()
@@ -19806,6 +19857,8 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         );
     }
     let final_logits_wall_ms = final_logits_started.elapsed().as_secs_f64() * 1000.0;
+    let sq_fp8_projection_telemetry = snapshot_sq_fp8_projection_telemetry();
+    let sq_projection_boundary = sq_fp8_projection_boundary(sq_fp8_projection_telemetry);
     let total_wall_ms = prefill_wall_ms + decode_wall_ms + final_logits_wall_ms;
     let outer_wall_ms = run_started.elapsed().as_secs_f64() * 1000.0;
     let prefill_total_input_tokens = request_plan.prompt_tokens.iter().sum::<usize>();
@@ -19868,7 +19921,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     };
 
     Ok(format!(
-        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true sq_overlay={} sq_candidate={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true sq_overlay={} sq_candidate={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
         command_name,
         path,
         layer_indices,
@@ -19883,6 +19936,11 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         sq_passthrough_tensor_count,
         sq_row_chunk_value,
         sq_execution_mode,
+        sq_projection_boundary,
+        sq_fp8_projection_telemetry.single_matvec_count,
+        sq_fp8_projection_telemetry.batch_matvec_count,
+        sq_fp8_projection_telemetry.pair_matvec_count,
+        sq_fp8_projection_telemetry.triple_matvec_count,
         batching_mode,
         prefill_real_batch,
         decode_real_batch,
@@ -44319,18 +44377,22 @@ impl PackageAq4ResidentMatvec {
                 scale_buffer,
                 scale_kind,
                 scale_block_cols,
-            } => ullm_runtime_sys::sq_fp8_matvec_f32(
-                payload_buffer.as_ref(),
-                scale_buffer.as_ref(),
-                input_buffer,
-                self.rows,
-                self.cols,
-                *scale_kind,
-                *scale_block_cols,
-                output_buffer,
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to run {label} SQ FP8 matvec: {err}")),
+            } => {
+                ullm_runtime_sys::sq_fp8_matvec_f32(
+                    payload_buffer.as_ref(),
+                    scale_buffer.as_ref(),
+                    input_buffer,
+                    self.rows,
+                    self.cols,
+                    *scale_kind,
+                    *scale_block_cols,
+                    output_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} SQ FP8 matvec: {err}"))?;
+                SQ_FP8_SINGLE_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
         }
     }
 
@@ -44369,19 +44431,23 @@ impl PackageAq4ResidentMatvec {
                 scale_buffer,
                 scale_kind,
                 scale_block_cols,
-            } => ullm_runtime_sys::sq_fp8_matvec_batch_f32(
-                payload_buffer.as_ref(),
-                scale_buffer.as_ref(),
-                input_buffer,
-                self.rows,
-                self.cols,
-                *scale_kind,
-                *scale_block_cols,
-                batch_count,
-                output_buffer,
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to run {label} SQ FP8 matvec batch: {err}")),
+            } => {
+                ullm_runtime_sys::sq_fp8_matvec_batch_f32(
+                    payload_buffer.as_ref(),
+                    scale_buffer.as_ref(),
+                    input_buffer,
+                    self.rows,
+                    self.cols,
+                    *scale_kind,
+                    *scale_block_cols,
+                    batch_count,
+                    output_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} SQ FP8 matvec batch: {err}"))?;
+                SQ_FP8_BATCH_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
             PackageResidentMatvecStorage::F32 { .. } => {
                 Err(format!("{label} F32 matvec batch is not implemented"))
             }
@@ -44479,7 +44545,7 @@ impl PackageAq4ResidentMatvec {
             ));
         }
         if let (Some(left_sq), Some(right_sq)) = (self.sq_fp8_storage(), right.sq_fp8_storage()) {
-            return ullm_runtime_sys::sq_fp8_matvec_pair_f32(
+            ullm_runtime_sys::sq_fp8_matvec_pair_f32(
                 left_sq.payload_buffer,
                 left_sq.scale_buffer,
                 left_sq.scale_kind,
@@ -44496,7 +44562,9 @@ impl PackageAq4ResidentMatvec {
                 right_output_buffer,
                 Some(stream),
             )
-            .map_err(|err| format!("failed to run {label} SQ FP8 matvec pair: {err}"));
+            .map_err(|err| format!("failed to run {label} SQ FP8 matvec pair: {err}"))?;
+            SQ_FP8_PAIR_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
         }
         if self.is_f32() || right.is_f32() {
             self.matvec(input_buffer, left_output_buffer, stream, label)?;
@@ -44566,7 +44634,7 @@ impl PackageAq4ResidentMatvec {
             second.sq_fp8_storage(),
             third.sq_fp8_storage(),
         ) {
-            return ullm_runtime_sys::sq_fp8_matvec_triple_f32(
+            ullm_runtime_sys::sq_fp8_matvec_triple_f32(
                 first_sq.payload_buffer,
                 first_sq.scale_buffer,
                 first_sq.scale_kind,
@@ -44589,7 +44657,9 @@ impl PackageAq4ResidentMatvec {
                 third_output_buffer,
                 Some(stream),
             )
-            .map_err(|err| format!("failed to run {label} SQ FP8 matvec triple: {err}"));
+            .map_err(|err| format!("failed to run {label} SQ FP8 matvec triple: {err}"))?;
+            SQ_FP8_TRIPLE_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
         }
         if self.is_f32() || second.is_f32() || third.is_f32() {
             self.matvec(input_buffer, first_output_buffer, stream, label)?;

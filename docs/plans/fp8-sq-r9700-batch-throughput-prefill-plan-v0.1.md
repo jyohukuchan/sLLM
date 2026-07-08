@@ -3808,6 +3808,34 @@ Inventory:
 2. stdout/JSONLにSQ pair/triple境界の実行モードを明示し、単発/pair/tripleを混同しないようにする。
 3. layer7以降の `q/k/v`、または既存の `k/o/down` branchへtriple候補を安全に足せるかを見る。
 
+## 2026-07-09 progress: T2 SQ FP8 pair/triple telemetry
+
+前回の要点:
+
+- layer3 `q/k` pair候補とlayer3 `q/k/v` triple候補はB=1/4/8のfull mixed pathでAQ4 final top1と一致した。
+- ただしstdout/JSONL上では `sq_execution_mode=direct_fp8_dequant_matvec` までしか分からず、single/pair/tripleのどの境界を踏んだかを列として確認できなかった。
+
+今回の変更点:
+
+- engine側にSQ FP8 direct projection telemetryを追加した。
+- layer load/prewarm後にtelemetryをresetし、prefill/decode/final logits測定区間で成功したSQ FP8 direct kernel呼び出しだけを数えるようにした。
+- stdoutへ `sq_projection_boundary`、`sq_fp8_single_matvec_count`、`sq_fp8_batch_matvec_count`、`sq_fp8_pair_matvec_count`、`sq_fp8_triple_matvec_count` を追加した。
+- `tools/run-external-benchmark.py --parse ullm-model-loop-throughput` がそれらを `workload` に保存するようにした。
+- R9700 B=4でpair候補とtriple候補を再測定し、結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-pair-triple-telemetry-v1.md` に保存した。
+
+実測値:
+
+| candidate | boundary | single | batch | pair | triple | prefill tok/s | decode tok/s | end-to-end tok/s | top1 match |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `qk-layer3-q32-k16` | `pair` | 0 | 0 | 12 | 0 | 46.261368 | 78.439366 | 24.154962 | `true` |
+| `qkv-layer3-q32-k16-v32` | `triple` | 0 | 0 | 0 | 12 | 48.522139 | 79.902139 | 25.686824 | `true` |
+
+判断:
+
+- pair/triple境界は、実行条件だけでなくstdout/JSONL telemetryでも検証できるようになった。
+- countはlayer load/prewarmを含まず、B=4のprefill 2 token + decode 1 tokenの測定区間で12回になっている。
+- 次は `q/k/v` layer3 triple候補をprompt bundleまたは長めのprefill gridへ広げる。
+
 ## Risks
 
 | risk | impact | handling |
