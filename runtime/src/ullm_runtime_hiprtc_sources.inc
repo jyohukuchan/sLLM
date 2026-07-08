@@ -4682,7 +4682,7 @@ __device__ float ullm_flash2_fp8_e4m3_to_f32(unsigned char value) {
 }
 
 extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel(
-    const float *q,
+    const void *q_raw,
     const unsigned char *k_cache,
     const unsigned char *v_cache,
     unsigned long long cached_prefix_len,
@@ -4692,8 +4692,10 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel(
     unsigned long long head_dim,
     unsigned long long value_dim,
     float softmax_scale,
+    float q_scale,
     float k_scale,
     float v_scale,
+    unsigned int q_is_fp8,
     float *output) {
     constexpr unsigned int kTileTokens = 64u;
     const unsigned long long q_head_index = static_cast<unsigned long long>(blockIdx.x);
@@ -4712,6 +4714,8 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel(
     const unsigned long long q_per_kv = q_heads / kv_heads;
     const unsigned long long kv_head = q_head / q_per_kv;
     const unsigned long long q_base = (token_index * q_heads + q_head) * head_dim;
+    const float *q_f32 = reinterpret_cast<const float *>(q_raw);
+    const unsigned char *q_fp8 = reinterpret_cast<const unsigned char *>(q_raw);
     const unsigned long long value = static_cast<unsigned long long>(tid);
     const bool value_active = value < value_dim;
 
@@ -4739,7 +4743,10 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel(
             const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
             float partial = 0.0f;
             for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
-                partial += q[q_base + dim] *
+                const float q_value = q_is_fp8 == 0u ?
+                    q_f32[q_base + dim] :
+                    (ullm_flash2_fp8_e4m3_to_f32(q_fp8[q_base + dim]) * q_scale);
+                partial += q_value *
                     (ullm_flash2_fp8_e4m3_to_f32(k_cache[k_base + dim]) * k_scale);
             }
             reduce[tid] = partial;

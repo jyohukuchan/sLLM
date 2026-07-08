@@ -2240,6 +2240,7 @@ fn runtime_decode_attn_smoke(device_index: Option<String>) -> ExitCode {
 enum RuntimeCachedPrefixAttnExecutor {
     Chunked,
     Flash2,
+    Flash2Fp8Q,
     RocwmmaFp8,
     DecodeLoop,
 }
@@ -2249,12 +2250,13 @@ impl RuntimeCachedPrefixAttnExecutor {
         match value.as_deref().unwrap_or("cached_prefix_chunked") {
             "cached_prefix_chunked" | "chunked" => Ok(Self::Chunked),
             "cached_prefix_flash2" | "flash2" => Ok(Self::Flash2),
+            "cached_prefix_flash2_fp8q" | "flash2_fp8q" | "fp8q_flash2" => Ok(Self::Flash2Fp8Q),
             "cached_prefix_rocwmma_fp8" | "rocwmma_fp8" | "cached_prefix_rocwmma" | "rocwmma" => {
                 Ok(Self::RocwmmaFp8)
             }
             "decode_attn_f32_loop" | "decode_loop" => Ok(Self::DecodeLoop),
             other => Err(format!(
-                "runtime cached prefix attention executor must be cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|cached_prefix_rocwmma_fp8|rocwmma_fp8|decode_loop, got {other}"
+                "runtime cached prefix attention executor must be cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|cached_prefix_flash2_fp8q|flash2_fp8q|cached_prefix_rocwmma_fp8|rocwmma_fp8|decode_loop, got {other}"
             )),
         }
     }
@@ -2263,6 +2265,7 @@ impl RuntimeCachedPrefixAttnExecutor {
         match self {
             Self::Chunked => "cached_prefix_chunked",
             Self::Flash2 => "cached_prefix_flash2",
+            Self::Flash2Fp8Q => "cached_prefix_flash2_fp8q",
             Self::RocwmmaFp8 => "cached_prefix_rocwmma_fp8",
             Self::DecodeLoop => "decode_attn_f32_loop",
         }
@@ -2437,6 +2440,20 @@ fn runtime_cached_prefix_attn_smoke_impl(
                 .to_string(),
         );
     }
+    if executor == RuntimeCachedPrefixAttnExecutor::Flash2Fp8Q {
+        if kv_cache_dtype != RuntimeCachedPrefixKvCacheDtype::Fp8E4m3 {
+            return Err(
+                "runtime cached prefix attention flash2_fp8q executor requires fp8_e4m3 kv cache"
+                    .to_string(),
+            );
+        }
+        if value_dim > 256 {
+            return Err(
+                "runtime cached prefix attention flash2_fp8q executor currently requires value_dim <= 256"
+                    .to_string(),
+            );
+        }
+    }
     if executor == RuntimeCachedPrefixAttnExecutor::RocwmmaFp8 {
         if kv_cache_dtype != RuntimeCachedPrefixKvCacheDtype::Fp8E4m3 {
             return Err(
@@ -2514,13 +2531,17 @@ fn runtime_cached_prefix_attn_smoke_impl(
     let mut q_sequence_fp8 = Vec::new();
     let mut q_sequence_reference_storage = Vec::new();
     let mut q_sequence_scale = 1.0_f32;
-    if executor == RuntimeCachedPrefixAttnExecutor::RocwmmaFp8 {
+    let executor_uses_fp8_q = matches!(
+        executor,
+        RuntimeCachedPrefixAttnExecutor::Flash2Fp8Q | RuntimeCachedPrefixAttnExecutor::RocwmmaFp8
+    );
+    if executor_uses_fp8_q {
         let quantized = fp8_e4m3_quantize(&q_sequence);
         q_sequence_fp8 = quantized.encoded;
         q_sequence_scale = quantized.scale;
         q_sequence_reference_storage = quantized.decoded;
     }
-    let q_sequence_reference = if executor == RuntimeCachedPrefixAttnExecutor::RocwmmaFp8 {
+    let q_sequence_reference = if executor_uses_fp8_q {
         q_sequence_reference_storage.as_slice()
     } else {
         q_sequence.as_slice()
@@ -2611,7 +2632,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
 
     let q_token_f32_bytes =
         checked_f32_byte_len(q_elements, "runtime cached prefix attention q token")?;
-    let q_sequence_buffer_bytes = if executor == RuntimeCachedPrefixAttnExecutor::RocwmmaFp8 {
+    let q_sequence_buffer_bytes = if executor_uses_fp8_q {
         q_sequence_elements
     } else {
         checked_f32_byte_len(
@@ -2635,7 +2656,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
         .map_err(|err| {
             format!("failed to allocate runtime cached prefix attention q sequence: {err}")
         })?;
-    if executor == RuntimeCachedPrefixAttnExecutor::RocwmmaFp8 {
+    if executor_uses_fp8_q {
         q_sequence_buffer
             .copy_from_host(0, &q_sequence_fp8, Some(&mut stream))
             .map_err(|err| {
@@ -2780,6 +2801,30 @@ fn runtime_cached_prefix_attn_smoke_impl(
                             })?;
                         }
                     },
+                    RuntimeCachedPrefixAttnExecutor::Flash2Fp8Q => {
+                        ullm_runtime_sys::cached_prefix_attn_fp8_e4m3_flash2_fp8q(
+                            &q_sequence_buffer,
+                            &k_cache_buffer,
+                            &v_cache_buffer,
+                            cached_prefix_tokens,
+                            new_tokens,
+                            q_heads,
+                            kv_heads,
+                            head_dim,
+                            value_dim,
+                            softmax_scale,
+                            q_sequence_scale,
+                            k_cache_scale,
+                            v_cache_scale,
+                            &mut output_sequence_buffer,
+                            Some(stream),
+                        )
+                        .map_err(|err| {
+                            format!(
+                                "failed to run runtime fp8 e4m3 cached prefix flash2 fp8q attention: {err}"
+                            )
+                        })?;
+                    }
                     RuntimeCachedPrefixAttnExecutor::RocwmmaFp8 => {
                         ullm_runtime_sys::cached_prefix_attn_fp8_e4m3_rocwmma(
                             &q_sequence_buffer,
@@ -2876,6 +2921,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
         executor,
         RuntimeCachedPrefixAttnExecutor::Chunked
             | RuntimeCachedPrefixAttnExecutor::Flash2
+            | RuntimeCachedPrefixAttnExecutor::Flash2Fp8Q
             | RuntimeCachedPrefixAttnExecutor::RocwmmaFp8
     ) {
         Some(read_runtime_buffer_f32(
@@ -2986,7 +3032,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
         )?,
         RuntimeCachedPrefixKvCacheDtype::Fp8E4m3 => cache_kv_elements_total,
     };
-    let q_bytes_total = if executor == RuntimeCachedPrefixAttnExecutor::RocwmmaFp8 {
+    let q_bytes_total = if executor_uses_fp8_q {
         q_sequence_elements
     } else {
         checked_f32_byte_len(
@@ -39283,7 +39329,7 @@ fn print_help() {
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
     );
     eprintln!(
-        "runtime-cached-prefix-attn-smoke: [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|cached_prefix_rocwmma_fp8|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]"
+        "runtime-cached-prefix-attn-smoke: [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|cached_prefix_flash2_fp8q|cached_prefix_rocwmma_fp8|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]"
     );
     eprintln!(
         "runtime-wmma-fp8-qk-probe-smoke: [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]"

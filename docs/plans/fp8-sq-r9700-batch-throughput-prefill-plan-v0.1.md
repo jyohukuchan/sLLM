@@ -1484,6 +1484,42 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - vLLM docs: FP8 W8A8
   - https://docs.vllm.ai/en/latest/features/quantization/llm_compressor/fp8/
 
+### 2026-07-08 progress: cached-prefix flash2 FP8 Q baseline v1
+
+前回の要点:
+
+- `cached_prefix_rocwmma_fp8` はRDNA4 FP8 WMMA/rocWMMAを使う方向で進めたが、`head_dim=value_dim=256` では既存scalar `cached_prefix_flash2` よりかなり遅かった。
+- rocWMMA版はQ/K/VをすべてFP8として読む一方、既存 `cached_prefix_flash2` はQだけF32だった。
+- そのため、rocWMMA版の遅さが「FP8 Q復号そのもの」なのか「rocWMMA kernel構造」なのかを切り分ける必要があった。
+
+今回の変更点:
+
+- C ABI `ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2_fp8q` を追加した。
+- Rust FFI `cached_prefix_attn_fp8_e4m3_flash2_fp8q` とCPU/HIPテストを追加した。
+- `runtime-cached-prefix-attn-smoke` に `cached_prefix_flash2_fp8q` executorを追加した。
+- `tools/run-runtime-cached-prefix-sweep.py` に `cached_prefix_flash2_fp8q` を追加した。
+- 既存 `cached_prefix_flash2` のHIPRTC kernelを、f32 QとFP8 Qの両方を受け取れる形に拡張した。
+- R9700で `L=4096,M=16,q_heads=16,kv_heads=1,head_dim=256,value_dim=256` を比較した。
+
+| executor | Q dtype | q bytes | wall ms mean | input tok/s | sampled max abs diff |
+| --- | --- | ---: | ---: | ---: | ---: |
+| cached_prefix_flash2 | F32 | 262144 | 3.856106 | 4149.263890 | 0.000000611 |
+| cached_prefix_flash2_fp8q | FP8 E4M3 | 65536 | 4.123693 | 3880.016943 | 0.000002176 |
+| cached_prefix_rocwmma_fp8 | FP8 E4M3 | 65536 | 20.403873 | 784.164837 | 0.000000719 |
+
+観察:
+
+- FP8 Q化だけなら、scalar flash2では約 `1.07x` の遅化に留まった。
+- rocWMMA版は同じFP8 Q/K/V入力でも `cached_prefix_flash2_fp8q` より約 `4.95x` 遅い。
+- したがって現時点のrocWMMA版の主因はFP8 Q復号ではなく、value groupごとのQK/softmax再計算とK/V tile再利用不足を含むkernel構造側だと考える。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c14-fp8q-flash2-baseline-v1.md` に保存した。
+
+次の行動:
+
+1. `cached_prefix_flash2_fp8q` をFP8 Q入力の短期baselineとして使う。
+2. rocWMMA版は、QK/softmax再計算を減らすだけでなく、複数query row/blockでK/V tileを再利用するFlashAttention2-like構造へ寄せる。
+3. SQ候補評価では、FP8 Q復号単体を主ボトルネック扱いせず、attention kernel構造の未成熟と分けて評価する。
+
 ## Risks
 
 | risk | impact | handling |

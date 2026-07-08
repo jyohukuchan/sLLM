@@ -1345,7 +1345,7 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3(
         stream);
 }
 
-ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
+static ullm_status cached_prefix_attn_fp8_e4m3_flash2_impl(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_cache_buffer,
     const ullm_runtime_buffer *v_cache_buffer,
@@ -1356,8 +1356,10 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
     size_t head_dim,
     size_t value_dim,
     float softmax_scale,
+    float q_scale,
     float k_scale,
     float v_scale,
+    bool q_is_fp8,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream) {
     if (q_buffer == nullptr || k_cache_buffer == nullptr || v_cache_buffer == nullptr ||
@@ -1378,9 +1380,14 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
             "fp8 e4m3 cached prefix flash2 attention softmax scale must be finite and greater than zero");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
-    if (!std::isfinite(k_scale) || k_scale <= 0.0f ||
+    if ((q_is_fp8 && (!std::isfinite(q_scale) || q_scale <= 0.0f)) ||
+        !std::isfinite(k_scale) || k_scale <= 0.0f ||
         !std::isfinite(v_scale) || v_scale <= 0.0f) {
         set_error("fp8 e4m3 cached prefix flash2 attention scales must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (q_is_fp8 && value_dim > 256) {
+        set_error("fp8 e4m3 cached prefix flash2 fp8q attention value_dim exceeds 256");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
     if (!buffers_share_backend(q_buffer, k_cache_buffer) ||
@@ -1428,12 +1435,12 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
     const size_t k_elements = kv_head_context * head_dim;
     const size_t v_elements = kv_head_context * value_dim;
 
-    if (q_elements > max_size / sizeof(float) ||
+    if ((!q_is_fp8 && q_elements > max_size / sizeof(float)) ||
         output_elements > max_size / sizeof(float)) {
         set_error("fp8 e4m3 cached prefix flash2 attention byte size overflows");
         return ULLM_STATUS_INVALID_ARGUMENT;
     }
-    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t q_bytes = q_is_fp8 ? q_elements : q_elements * sizeof(float);
     const size_t k_bytes = k_elements;
     const size_t v_bytes = v_elements;
     const size_t output_bytes = output_elements * sizeof(float);
@@ -1455,24 +1462,38 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
     }
 
     if (q_buffer->backend == BackendKind::Cpu) {
-        const auto *q = static_cast<const float *>(q_buffer->ptr);
-        const auto *k_cache = static_cast<const uint8_t *>(k_cache_buffer->ptr);
-        const auto *v_cache = static_cast<const uint8_t *>(v_cache_buffer->ptr);
-        auto *output = static_cast<float *>(output_buffer->ptr);
-        cached_prefix_attn_fp8_e4m3_host(
-            q,
-            k_cache,
-            v_cache,
-            cached_prefix_len,
-            new_tokens,
-            q_heads,
-            kv_heads,
-            head_dim,
-            value_dim,
-            softmax_scale,
-            k_scale,
-            v_scale,
-            output);
+        if (q_is_fp8) {
+            cached_prefix_attn_fp8_e4m3_rocwmma_host(
+                static_cast<const uint8_t *>(q_buffer->ptr),
+                static_cast<const uint8_t *>(k_cache_buffer->ptr),
+                static_cast<const uint8_t *>(v_cache_buffer->ptr),
+                cached_prefix_len,
+                new_tokens,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                q_scale,
+                k_scale,
+                v_scale,
+                static_cast<float *>(output_buffer->ptr));
+        } else {
+            cached_prefix_attn_fp8_e4m3_host(
+                static_cast<const float *>(q_buffer->ptr),
+                static_cast<const uint8_t *>(k_cache_buffer->ptr),
+                static_cast<const uint8_t *>(v_cache_buffer->ptr),
+                cached_prefix_len,
+                new_tokens,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                k_scale,
+                v_scale,
+                static_cast<float *>(output_buffer->ptr));
+        }
         set_error("");
         return ULLM_STATUS_OK;
     }
@@ -1489,8 +1510,10 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
             head_dim,
             value_dim,
             softmax_scale,
+            q_scale,
             k_scale,
             v_scale,
+            q_is_fp8,
             output_buffer,
             stream,
             &hip_kernel_error)) {
@@ -1499,6 +1522,7 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
     }
 
     const bool require_hip_kernel =
+        q_is_fp8 ||
         std::getenv("ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_FLASH2_KERNEL") != nullptr;
     if (require_hip_kernel) {
         set_error(
@@ -1524,6 +1548,75 @@ ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
         k_bytes,
         v_bytes,
         output_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    float k_scale,
+    float v_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    return cached_prefix_attn_fp8_e4m3_flash2_impl(
+        q_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
+        cached_prefix_len,
+        new_tokens,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        1.0f,
+        k_scale,
+        v_scale,
+        false,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2_fp8q(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_cache_buffer,
+    const ullm_runtime_buffer *v_cache_buffer,
+    size_t cached_prefix_len,
+    size_t new_tokens,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    float q_scale,
+    float k_scale,
+    float v_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    return cached_prefix_attn_fp8_e4m3_flash2_impl(
+        q_buffer,
+        k_cache_buffer,
+        v_cache_buffer,
+        cached_prefix_len,
+        new_tokens,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_scale,
+        k_scale,
+        v_scale,
+        true,
         output_buffer,
         stream);
 }

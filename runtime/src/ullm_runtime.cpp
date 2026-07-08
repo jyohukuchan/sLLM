@@ -11271,8 +11271,10 @@ bool cached_prefix_attn_fp8_e4m3_flash2_hip_kernel(
     size_t head_dim,
     size_t value_dim,
     float softmax_scale,
+    float q_scale,
     float k_scale,
     float v_scale,
+    bool q_is_fp8,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream,
     std::string *error) {
@@ -11310,6 +11312,7 @@ bool cached_prefix_attn_fp8_e4m3_flash2_hip_kernel(
     void *k_ptr = k_cache_buffer->ptr;
     void *v_ptr = v_cache_buffer->ptr;
     void *output_ptr = output_buffer->ptr;
+    unsigned int kernel_q_is_fp8 = q_is_fp8 ? 1u : 0u;
     void *kernel_params[] = {
         &q_ptr,
         &k_ptr,
@@ -11321,8 +11324,10 @@ bool cached_prefix_attn_fp8_e4m3_flash2_hip_kernel(
         &kernel_head_dim,
         &kernel_value_dim,
         &softmax_scale,
+        &q_scale,
         &k_scale,
         &v_scale,
+        &kernel_q_is_fp8,
         &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;

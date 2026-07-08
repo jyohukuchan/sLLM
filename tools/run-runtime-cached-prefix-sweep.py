@@ -21,6 +21,7 @@ SUPPORTED_KV_CACHE_DTYPES = {"f32", "fp8_e4m3"}
 SUPPORTED_EXECUTORS = {
     "cached_prefix_chunked",
     "cached_prefix_flash2",
+    "cached_prefix_flash2_fp8q",
     "cached_prefix_rocwmma_fp8",
     "decode_loop",
 }
@@ -86,13 +87,15 @@ def executor_csv(value: str) -> list[str]:
             item = "cached_prefix_chunked"
         if item == "flash2":
             item = "cached_prefix_flash2"
+        if item in {"flash2_fp8q", "fp8q_flash2"}:
+            item = "cached_prefix_flash2_fp8q"
         if item in {"rocwmma", "rocwmma_fp8", "cached_prefix_rocwmma"}:
             item = "cached_prefix_rocwmma_fp8"
         if item == "decode_attn_f32_loop":
             item = "decode_loop"
         if item not in SUPPORTED_EXECUTORS:
             raise SystemExit(
-                "executors must contain cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|cached_prefix_rocwmma_fp8|rocwmma_fp8|decode_loop"
+                "executors must contain cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|cached_prefix_flash2_fp8q|flash2_fp8q|cached_prefix_rocwmma_fp8|rocwmma_fp8|decode_loop"
             )
         executors.append(item)
     if not executors:
@@ -123,6 +126,10 @@ def required_env_for_case(executor: str, dtype: str) -> dict[str, str]:
     if executor == "cached_prefix_flash2":
         if dtype == "f32":
             return {"ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL": "1"}
+        return {"ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_FLASH2_KERNEL": "1"}
+    if executor == "cached_prefix_flash2_fp8q":
+        if dtype != "fp8_e4m3":
+            raise SystemExit("cached_prefix_flash2_fp8q executor supports only fp8_e4m3 kv cache")
         return {"ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_FLASH2_KERNEL": "1"}
     if executor == "cached_prefix_rocwmma_fp8":
         if dtype != "fp8_e4m3":
