@@ -281,7 +281,8 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_overlay=true sq_candidate=sq-fp8-w8a16-r9700-v0 "
             "sq_artifact=/tmp/sq-artifact sq_schema_version=sq-fp8-artifact-v0.1 "
             "sq_fp8_tensor_count=22 sq_passthrough_tensor_count=753 sq_row_chunk=256 "
-            "request_batch_executor=true fused_request_batch=false throughput_row=false "
+            "request_batch_executor=true fused_request_batch=false throughput_row=true "
+            "load_excluded_from_total=true final_logits_in_total=true "
             "batching_mode=real "
             "prefill_executor=stack_prefill_request_batch_step decode_executor=stack_ready_batch "
             "prefill_real_batch=true decode_real_batch=true "
@@ -295,10 +296,11 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "total_tokens=[3, 3, 1] total_tokens_csv=3,3,1 "
             "prefill_total_input_tokens=4 decode_total_generated_tokens=3 "
             "end_to_end_total_tokens=7 prefill_wall_ms=47.124272 "
-            "decode_wall_ms=35.822329 total_wall_ms=82.946601 "
+            "decode_wall_ms=35.822329 final_logits_wall_ms=12.000000 "
+            "layer_load_ms=34.000000 total_wall_ms=94.946601 outer_wall_ms=128.946601 "
             "prefill_total_input_tps=84.881948 "
             "decode_total_generated_tps=83.746649 "
-            "end_to_end_total_tps=84.391644 "
+            "end_to_end_total_tps=73.725646 "
             "prefill_batch_request_counts=[3, 1] prefill_batch_request_counts_csv=3,1 "
             "decode_batch_ready_counts=[2, 1] decode_batch_ready_counts_csv=2,1 "
             "generated_tokens=[2, 1, 0] generated_tokens_csv=2,1,0 "
@@ -332,7 +334,11 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(metrics["end_to_end_total_tokens"], 7)
         self.assertEqual(metrics["prefill_total_input_tokens_per_second"], 84.881948)
         self.assertEqual(metrics["decode_total_generated_tokens_per_second"], 83.746649)
-        self.assertEqual(metrics["end_to_end_total_tokens_per_second"], 84.391644)
+        self.assertEqual(metrics["end_to_end_total_tokens_per_second"], 73.725646)
+        self.assertEqual(metrics["final_logits_wall_time_seconds"], 0.012)
+        self.assertEqual(metrics["layer_load_wall_time_seconds"], 0.034)
+        self.assertEqual(metrics["total_wall_time_seconds"], 0.094946601)
+        self.assertEqual(metrics["outer_wall_time_seconds"], 0.128946601)
         self.assertEqual(row["workload"]["batch_size"], 3)
         self.assertEqual(row["workload"]["concurrent_requests"], 3)
         self.assertEqual(row["workload"]["prompt_tokens_per_request"], [1, 2, 1])
@@ -368,8 +374,64 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["batching"]["decode_executor_request_parallelism"], 2)
         self.assertTrue(row["batching"]["request_batch_executor"])
         self.assertFalse(row["batching"]["fused_request_batch"])
-        self.assertFalse(row["batching"]["throughput_row"])
+        self.assertTrue(row["batching"]["throughput_row"])
+        self.assertTrue(row["batching"]["load_excluded_from_total"])
+        self.assertTrue(row["batching"]["final_logits_in_total"])
         self.assertEqual(row["batching"]["component_package"], "/tmp/model.ullm.d")
+
+    def test_parses_model_loop_single_request_csv_fields(self) -> None:
+        stdout = (
+            "package-token-ids-mixed-request-state-smoke "
+            "package=/tmp/model.ullm.d layers_csv=0,1,2 input_source=embedding_token_ids "
+            "prefill_mode=token_id_full_mixed_request_state "
+            "request_batch_executor=true fused_request_batch=false throughput_row=true "
+            "load_excluded_from_total=true final_logits_in_total=true "
+            "batching_mode=single "
+            "prefill_executor=mixed_request_state_layer_batch_step "
+            "decode_executor=mixed_request_state_layer_batch_step "
+            "prefill_real_batch=false decode_real_batch=false "
+            "prefill_executor_request_parallelism=1 decode_executor_request_parallelism=1 "
+            "final_top1_tokens_csv=151353 final_topk_tokens_csv=151353 "
+            "final_topk_logits_csv=6.250000 "
+            "sequence_len=3 request_count=1 concurrent_requests=1 "
+            "prompt_tokens_csv=2 max_new_tokens_csv=1 total_tokens_csv=3 "
+            "prefill_total_input_tokens=2 decode_total_generated_tokens=1 "
+            "end_to_end_total_tokens=3 prefill_wall_ms=88.0 decode_wall_ms=12.0 "
+            "final_logits_wall_ms=200.0 layer_load_ms=9000.0 total_wall_ms=300.0 "
+            "outer_wall_ms=9300.0 prefill_total_input_tps=22.727273 "
+            "decode_total_generated_tps=83.333333 end_to_end_total_tps=10.000000 "
+            "prefill_batch_request_counts_csv=1 decode_batch_request_counts_csv=1 "
+            "backend=hip device_index=2 name=\"AMD Radeon Graphics\" verified=true"
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_model_loop_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 1,
+                "concurrent_requests": 1,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+        TOOL.enrich_ullm_model_loop_row(row, report)
+
+        self.assertEqual(row["workload"]["prompt_tokens_per_request"], [2])
+        self.assertEqual(row["workload"]["generated_tokens_per_request"], [1])
+        self.assertEqual(row["workload"]["total_context_tokens_after_prefill_per_request"], [3])
+        self.assertEqual(row["workload"]["final_top1_tokens"], [151353])
+        self.assertEqual(row["workload"]["final_topk_tokens"], [[151353]])
+        self.assertEqual(row["workload"]["final_topk_logits"], [[6.25]])
+        self.assertEqual(row["batching"]["prefill_batch_request_counts"], [1])
+        self.assertTrue(row["batching"]["throughput_row"])
 
 
 if __name__ == "__main__":

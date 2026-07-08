@@ -363,6 +363,8 @@ def parse_scalar_text(value: str) -> Any:
 
 
 def parse_int_csv(value: Any) -> list[int]:
+    if isinstance(value, int):
+        return [value]
     if not isinstance(value, str) or not value.strip():
         return []
     parsed: list[int] = []
@@ -378,6 +380,8 @@ def parse_int_csv(value: Any) -> list[int]:
 
 
 def parse_float_csv(value: Any) -> list[float]:
+    if isinstance(value, int | float):
+        return [float(value)]
     if not isinstance(value, str) or not value.strip():
         return []
     parsed: list[float] = []
@@ -393,6 +397,8 @@ def parse_float_csv(value: Any) -> list[float]:
 
 
 def parse_int_matrix_csv(value: Any) -> list[list[int]]:
+    if isinstance(value, int):
+        return [[value]]
     if not isinstance(value, str) or not value.strip():
         return []
     rows: list[list[int]] = []
@@ -405,6 +411,8 @@ def parse_int_matrix_csv(value: Any) -> list[list[int]]:
 
 
 def parse_float_matrix_csv(value: Any) -> list[list[float]]:
+    if isinstance(value, int | float):
+        return [[float(value)]]
     if not isinstance(value, str) or not value.strip():
         return []
     rows: list[list[float]] = []
@@ -628,7 +636,10 @@ def parse_ullm_model_loop_metrics(
     end_to_end_total_tps = parse_float(report.get("end_to_end_total_tps"))
     prefill_ms = parse_float(report.get("prefill_wall_ms"))
     decode_ms = parse_float(report.get("decode_wall_ms"))
+    final_logits_ms = parse_float(report.get("final_logits_wall_ms"))
+    layer_load_ms = parse_float(report.get("layer_load_ms"))
     total_ms = parse_float(report.get("total_wall_ms"))
+    outer_ms = parse_float(report.get("outer_wall_ms"))
     consumed_bytes = memory.get("consumed_total_bytes")
     consumed_gib = consumed_bytes / 1024**3 if isinstance(consumed_bytes, int) else None
     product = None
@@ -648,7 +659,14 @@ def parse_ullm_model_loop_metrics(
         "end_to_end_total_tokens_per_second": end_to_end_total_tps,
         "prefill_wall_time_seconds": prefill_ms / 1000.0 if prefill_ms is not None else None,
         "decode_wall_time_seconds": decode_ms / 1000.0 if decode_ms is not None else None,
+        "final_logits_wall_time_seconds": (
+            final_logits_ms / 1000.0 if final_logits_ms is not None else None
+        ),
+        "layer_load_wall_time_seconds": (
+            layer_load_ms / 1000.0 if layer_load_ms is not None else None
+        ),
         "total_wall_time_seconds": total_ms / 1000.0 if total_ms is not None else None,
+        "outer_wall_time_seconds": outer_ms / 1000.0 if outer_ms is not None else None,
         "time_to_first_token_ms": prefill_ms,
         "time_per_output_token_ms": (
             (1000.0 / decode_total_tps) if decode_total_tps else None
@@ -871,6 +889,8 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
     )
     prompt_tokens_per_request = parse_int_csv(report.get("prompt_tokens_csv"))
     generated_tokens_per_request = parse_int_csv(report.get("generated_tokens_csv"))
+    if not generated_tokens_per_request:
+        generated_tokens_per_request = parse_int_csv(report.get("max_new_tokens_csv"))
     total_context_tokens_per_request = parse_int_csv(report.get("total_tokens_csv"))
     layers_csv = report.get("layers_csv")
     if request_count is not None:
@@ -948,6 +968,8 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "request_batch_executor": report.get("request_batch_executor") is True,
         "fused_request_batch": report.get("fused_request_batch") is True,
         "throughput_row": report.get("throughput_row") is True,
+        "load_excluded_from_total": report.get("load_excluded_from_total") is True,
+        "final_logits_in_total": report.get("final_logits_in_total") is True,
         "scheduler_policy": "model_loop_ready_batch",
         "component_command": report.get("command"),
         "component_package": report.get("package"),
