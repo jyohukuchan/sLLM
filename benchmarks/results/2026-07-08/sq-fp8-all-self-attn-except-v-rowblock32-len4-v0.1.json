@@ -1,0 +1,66 @@
+{
+  "baseline_raw_report_json": "/tmp/ullm-sq-fp8-all-self-attn-except-v-rowblock32-len4-v0.1/raw/baseline.json",
+  "baseline_top1": 140864,
+  "baseline_top_tokens": [
+    140864,
+    180678,
+    95132,
+    248050,
+    222957,
+    222017,
+    69988,
+    68451
+  ],
+  "baseline_verified": true,
+  "case_count": 1,
+  "cases": [
+    {
+      "artifact_dir": "/tmp/ullm-sq-fp8-all-self-attn-except-v-rowblock32-len4-v0.1/artifacts/except_v",
+      "baseline_top1": 140864,
+      "baseline_top1_rank_in_sq_topk": null,
+      "baseline_top_tokens": [
+        140864,
+        180678,
+        95132,
+        248050,
+        222957,
+        222017,
+        69988,
+        68451
+      ],
+      "fp8_tensor_count": 48,
+      "layer_load_ms": 172027.882207,
+      "name": "except_v",
+      "passthrough_tensor_count": 727,
+      "raw_report_json": "/tmp/ullm-sq-fp8-all-self-attn-except-v-rowblock32-len4-v0.1/raw/except_v.sq.json",
+      "sq_top1": 222957,
+      "sq_top1_minus_baseline_top1_logit": null,
+      "sq_top_tokens": [
+        222957,
+        78211,
+        69988,
+        222017,
+        83879,
+        9707,
+        36368,
+        68451
+      ],
+      "top1_match": false,
+      "topk_common": 4,
+      "total_ms": 173143.25901,
+      "verified": true
+    }
+  ],
+  "device_index": 2,
+  "engine": "target/debug/ullm-engine",
+  "layers": "3,7,11,15,19,23,27,31",
+  "lm_head_chunk_rows": 4096,
+  "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+  "scale_block_cols": 32,
+  "scale_granularity": "row_block",
+  "schema_version": "sq-fp8-overlay-logits-guard-result-v0.1",
+  "source_model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "token_ids": "1,2,3,4",
+  "top1_match_count": 0,
+  "top_k": 8
+}

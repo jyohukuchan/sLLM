@@ -20,14 +20,20 @@
 - 512 tokenの結果はshort sanityとlocal bottleneck検出には使えるが、SQ候補のprefill性能判断には使わない。prompt長、cached prefix長、新規chunk長、batch幅を変えた探索gridを追加し、結果に合わせてprefill kernelのtiling/blocking方針を更新する。
 - FlashAttention2-style cached-prefix最適化は、SQ候補評価へ進むための前提作業として一旦完了扱いにする。
 - 次の主タスクは、`sq-fp8-w8a16-r9700-v0` のpackage/runtime prototype、result schema固定、AQ4 baselineとの比較準備である。
+- `sq-fp8-w8a16-r9700-v0` のT2 guardでは、row scaleのsafe subsetが4層で崩れたため、row-block scaleとfallback policyを追加した。
+- 現在の最有力な部分候補は、`v` fallback + `q/k/o/gate/up/down` row-block32 FP8である。
+- この混合候補は layers `3,7,11,15` の短い3ケースと layers `3,7,11,15,19` のlen4 caseではstrict top1を維持した。
+- 同じ混合候補は layers `3,7,11,15,19,23` と all self-attention probe layers `3,7,11,15,19,23,27,31` ではstrict top1を維持できなかった。
+- layer `23` は境界層であり、`q/v` fallbackでlayer `23` 単体は回復するが、6層bundleではまだ累積driftが残る。
+- したがって現時点では、T2は「品質境界をかなり狭めたがfull-target SQ guard未完了」と扱う。real batch throughput比較へ進む前に、full-target相当のacceptance ruleか追加fallback/別formatを決める必要がある。
 
 ## 次の行動
 
-1. R9700向けのbatch throughput result schemaとresult path規約を固定する。
-2. AQ4 latest baseline commit、package path、現行decode/prefill代表値をbaseline artifact indexとして記録する。
-3. `sq-fp8-w8a16-r9700-v0` のartifact path、metadata、scale granularityを固定する。
-4. FP8 SQ候補1のpackage/runtime prototypeを作り、short prompt guardを通す。
-5. logical batch runnerのJSONL集約とVRAM/KV cache記録を整備し、FP8/AQ4を同じschemaへ流す。
+1. T2 short guardの正式なacceptance ruleを決める。候補はstrict top1一致、top-k overlapしきい値、短文生成のtext-level guardである。
+2. 6層bundleの累積driftを追加fallback、per-layer policy、またはより強いscale/layoutで縮める。
+3. `v` fallback + `q/k/o/gate/up/down` row-block32 FP8は、4-5層まで通った部分候補として固定し、回帰guardにする。
+4. full-target相当のT2 guardが通る、または失敗を許容する明確な品質基準が決まった段階で、T1 real batch runnerとT5 FP8/AQ4 throughput packへ進む。
+5. T1側ではJSONL集約、VRAM/KV cache記録、real batch executorを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
 6. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにする。
 7. cold prefillとfull-model prefill接続はT3として継続し、SQ候補比較の前に最低限の長さ別・batch別代表値を保存する。
 8. uLLM側でR9700のFP8/AQ4結果が同じschemaで揃った後、vLLM baselineを同じworkload gridで測る。
@@ -901,6 +907,34 @@ Exit criteria:
 - R9700でshort promptが完走する。
 - NaN/Infが出ない。
 - AQ4 baselineまたはBF16 referenceに対するoutput guardが通る、または失敗原因が記録される。
+
+### T2 current status: mixed row-block candidate boundary v1
+
+前回の要点:
+
+- `sq-fp8-w8a16-r9700-v0` は、artifact manifest、FP8 payload writer、runtime materialize smoke、package overlay guardまで進んだ。
+- row-scale FP8では、layer 3のprojection setは通るが、layers `3,7` 以上でtop1 ranking driftが出た。
+- family splitでは `q/v/down` がstrict top1上のrisk family、`k/o/gate/up` が相対的に安全なfamilyだった。
+- row-block scaleは `q` と `down` を回復できたが、`v` はblock16/32/64/128でもstrict top1を維持できなかった。
+
+今回の変更点:
+
+- `v` fallback + `q/k/o/gate/up/down` row-block32 FP8を混合候補としてlayer scaling guardへ広げた。
+- layers `3,7,11,15` は、len4、case_a、case_bの `3 / 3` short promptでstrict top1一致だった。
+- layers `3,7,11,15,19` はlen4でstrict top1一致だった。
+- layers `3,7,11,15,19,23` はlen4でstrict top1不一致になった。
+- all self-attention probe layers `3,7,11,15,19,23,27,31` もstrict top1不一致だった。
+- layer `23` 単体では `q` row-block32がriskで、`q/v` fallbackなら回復した。
+- ただし6層bundleでは、layer `23` の `q` だけ、または全6層の `q/v` をfallbackしてもstrict top1は回復しなかった。
+- 結果は `benchmarks/results/2026-07-08/sq-fp8-mixed-candidate-layer-scaling-guard-v0.1.md` に保存した。
+
+次の行動:
+
+1. 混合row-block32候補は「4-5層まで通った部分候補」として保持し、full SQ policyには昇格しない。
+2. T2 short guardの合格条件を先に固定する。strict top1だけで進めるか、top-k overlapやtext-level guardを使うかを決める。
+3. strict top1を維持する方針なら、6層bundleの累積driftを、追加fallback family、per-layer sensitivity policy、または強いscale/layoutで潰す。
+4. strict top1を緩める方針なら、短文生成品質、logit drift、top-k overlapを同じresult schemaで記録して、速度評価へ進める条件を明文化する。
+5. overlay load timingはSQ runtime速度ではないため、T5のthroughput比較には使わない。速度評価はT1 real batch runnerとnative/materialization-aware runtime pathで行う。
 
 ### T3: Prefill optimization v0.1, 4-7 days
 

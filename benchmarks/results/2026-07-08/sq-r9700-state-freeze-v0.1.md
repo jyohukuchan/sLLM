@@ -69,12 +69,13 @@ Required artifact metadata:
 | T1 real batch runner | not done | Needed before SQ throughput comparison. |
 | T2 artifact metadata path | partial done | `sq-fp8-w8a16-r9700-v0` manifest and writer are staged. |
 | T2 runtime load path | partial done | `sq-fp8-materialize-smoke` validates the artifact boundary; `sq-fp8-token-ids-logits-smoke` validates one selected tensor overlay in the package path. |
-| T2 short prompt guard | partial done with boundary found | One `q_proj` overlay and layer 3 projection set passed top1 guards; layers `3,7` changed top1. Family split points to `q/v/down` as risky. Row-block scale recovers `q` and `down`, but not `v`; `v` fallback + `q/k/o/gate/up/down` row-block32 passes layers `3,7` short bundle. Full-target SQ guard is still pending. |
+| T2 short prompt guard | partial done with narrower boundary found | One `q_proj` overlay and layer 3 projection set passed top1 guards; layers `3,7` changed top1. Family split points to `q/v/down` as risky. Row-block scale recovers `q` and `down`, but not `v`. `v` fallback + `q/k/o/gate/up/down` row-block32 passes layers `3,7,11,15` on 3/3 short prompts and layers `3,7,11,15,19` on len4, but fails layers `3,7,11,15,19,23` and all self-attention probe layers. Full-target SQ guard is still pending. |
 
 ## Next Action
 
 1. Keep `sq-fp8-materialize-smoke` as the runtime artifact-boundary guard.
-2. Expand `v` fallback + `q/k/o/gate/up/down` row-block32 to layers `3,7,11,15`.
-3. Keep `4layer_case_a` as a regression guard for expanded mixed candidates.
+2. Keep `v` fallback + `q/k/o/gate/up/down` row-block32 as the current partial-quality candidate and regression guard.
+3. Treat the layers `3,7,11,15,19,23` failure as the next T2 boundary.
 4. Define the T2 short-guard acceptance rule: strict top1 match, top-k overlap, or text-level tolerance.
-5. Move to T3 only after the full-target guard satisfies that acceptance rule.
+5. If strict top1 remains required, test additional fallback families, per-layer fallback, or stronger scale/layout for the 6-layer cumulative drift.
+6. Move to T5 throughput comparison only after the full-target guard satisfies the acceptance rule or the accepted quality tolerance is documented.

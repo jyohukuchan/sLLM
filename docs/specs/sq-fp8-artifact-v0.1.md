@@ -160,6 +160,14 @@ row-block32 recovers `q`, row-block64 recovers `down`, but `v` still fails stric
 candidate that keeps `v` as fallback and stores `q/k/o/gate/up/down` as row-block32 FP8 passes
 `3 / 3` short prompts for layers `3,7`.
 
+The same mixed candidate was expanded further in
+`benchmarks/results/2026-07-08/sq-fp8-mixed-candidate-layer-scaling-guard-v0.1.md`.
+It passes strict top1 for layers `3,7,11,15` across `3 / 3` short prompts and passes layers
+`3,7,11,15,19` for the len4 case. It fails strict top1 for layers `3,7,11,15,19,23` and for all
+self-attention probe layers `3,7,11,15,19,23,27,31`. Layer `23` alone can be recovered with `q/v`
+fallback, but `q/v` fallback across all six tested layers still leaves cumulative drift. Therefore
+the row-block32 mixed candidate is a partial T2 quality policy, not a final SQ artifact policy.
+
 For repeatable guard runs, use:
 
 ```text
