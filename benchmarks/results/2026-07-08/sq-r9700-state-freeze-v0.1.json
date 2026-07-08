@@ -76,6 +76,20 @@
       "materialize_smoke_verified": true,
       "status": "runtime_boundary_verified_not_throughput_not_full_policy"
     },
+    "current_candidate_matrix": {
+      "schema_version": "sq-fp8-format-candidate-matrix-v0.1",
+      "result_json": "benchmarks/results/2026-07-08/sq-fp8-format-candidate-matrix-v0.1.json",
+      "result_md": "benchmarks/results/2026-07-08/sq-fp8-format-candidate-matrix-v0.1.md",
+      "builder": "tools/build-sq-fp8-candidate-matrix.py",
+      "candidate_ids": [
+        "sq-fp8-w8a16-r9700-v0",
+        "sq-fp8-w8a16-r9700-v1-scale16",
+        "sq-fp8-w8a16-r9700-v1-scale8",
+        "sq-fp8-w8a8-r9700-v0",
+        "sq-fp8-hybrid-r9700-v0"
+      ],
+      "status": "format_candidate_axes_fixed_quality_and_throughput_pending"
+    },
     "deferred_targets": [
       "visual tower",
       "MTP",
@@ -126,6 +140,10 @@
     "t1_full_package_logical_grid_note": "AQ4 full-package package-batch-throughput-bench rows are saved for batch=1/4/8. All rows are status=ok and verified_all=true, and preserve prefill/decode/end-to-end total throughput, KV cache bytes, VRAM, and correctness. These rows are logical batch only: batching.mode=logical, prefill_real_batch=false, decode_real_batch=false, runtime_reused_across_requests=false, and weights_reloaded_per_request=true. Real request-batch prefill/decode/end-to-end full-package rows are still required before SQ throughput comparison.",
     "t2_artifact_metadata_path": "partial_done_with_policy_json_input_and_policy_payload_artifact",
     "t2_artifact_metadata_path_note": "build-sq-fp8-w8a16-artifact.py accepts --policy-json for sq-fp8-policy-v0.1; dry-run confirmed kup6_gate5_down5 resolves to 22 FP8 tensors, 753 passthrough tensors, and row_block32 scale. A real payload artifact was generated under /tmp with compact_resident_bytes_estimate=18579553248 and materialized_working_set_bytes_estimate=201326592.",
+    "t2_candidate_matrix": "done_v0_1_quality_and_throughput_pending",
+    "t2_candidate_matrix_json": "benchmarks/results/2026-07-08/sq-fp8-format-candidate-matrix-v0.1.json",
+    "t2_candidate_matrix_md": "benchmarks/results/2026-07-08/sq-fp8-format-candidate-matrix-v0.1.md",
+    "t2_candidate_matrix_note": "tools/build-sq-fp8-candidate-matrix.py builds a machine-readable candidate matrix from the current kup6_gate5_down5 policy and policy artifact result. It fixes W8A16 F32-scale, scale16, scale8, W8A8, and hybrid fallback candidate axes; strict top1 remains the promotion rule and overlay load timing remains excluded from speed results.",
     "t2_policy_artifact_result_json": "benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-artifact-v0.1.json",
     "t2_policy_artifact_result_md": "benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-artifact-v0.1.md",
     "t2_policy_artifact_dir": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact",
@@ -157,6 +175,7 @@
     "T2: keep kup6_gate5_down5 as the current six-layer strict-top1 regression subset",
     "T2: keep kup6_ogatedown5 as a near-miss failure guard",
     "T2: use sq-fp8-kup6-gate5-down5-policy-v0.1.json through --policy-json as the current SQ policy representation for selected FP8 and fallback families",
+    "T2: use sq-fp8-format-candidate-matrix-v0.1.json as the current machine-readable SQ format candidate matrix",
     "T2: treat /tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact as a reproducible boundary-check artifact, not a committed package or throughput artifact",
     "T2: keep strict_top1 as the promotion rule until a text-level guard is implemented and accepted",
     "T2: use top-k overlap, AQ4 top1 rank, and logit gap as diagnostic-only fields",

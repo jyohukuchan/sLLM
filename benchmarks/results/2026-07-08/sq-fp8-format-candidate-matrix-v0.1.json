@@ -1,0 +1,884 @@
+{
+  "candidates": [
+    {
+      "activation_dtype": "bf16_or_f32",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0",
+      "fallback_policy": [
+        {
+          "family": "self_attn.q_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_under_row_block32"
+        },
+        {
+          "family": "self_attn.v_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_not_recovered_by_tested_row_block_sizes"
+        },
+        {
+          "family": "self_attn.o_proj",
+          "layers": "all_tested",
+          "reason": "six_layer_cumulative_drift_boundary"
+        },
+        {
+          "family": "mlp.gate_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "mlp.down_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "all_other_language_model_tensors",
+          "layers": "all",
+          "reason": "not_selected_in_current_six_layer_regression_subset"
+        },
+        {
+          "family": "visual_mtp_rdna2_tp_targets",
+          "layers": "all",
+          "reason": "deferred_target"
+        }
+      ],
+      "fp8_selection": {
+        "expected_fp8_tensor_count": 22,
+        "families": [
+          {
+            "family": "self_attn.k_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.up_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.gate_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          },
+          {
+            "family": "mlp.down_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          }
+        ],
+        "include_regex": "^model\\.language_model\\.layers\\.((3|7|11|15|19|23)\\.(self_attn\\.k_proj|mlp\\.up_proj)|(3|7|11|15|19)\\.mlp\\.(gate_proj|down_proj))\\.weight$"
+      },
+      "implementation": {
+        "artifact_builder_support": "supported",
+        "native_fp8_compute": "not_yet_connected_for_package_throughput",
+        "runtime_support": "materialize_smoke_supported_overlay_quality_partial"
+      },
+      "next_action": "broaden quality coverage or connect this policy to selected-layer throughput guard",
+      "priority": 1,
+      "purpose": "baseline FP8 weight candidate with F32 row-block scale",
+      "quality_gate": {
+        "diagnostic_only": [
+          "topk_common",
+          "baseline_top1_rank_in_sq_topk",
+          "sq_top1_minus_baseline_top1_logit",
+          "short_text_generation_health"
+        ],
+        "promotion_rule": "strict_top1",
+        "source_policy_acceptance_rule": {
+          "diagnostic_only": [
+            "topk_common",
+            "baseline_top1_rank_in_sq_topk",
+            "sq_top1_minus_baseline_top1_logit"
+          ],
+          "promotion_rule": "strict_top1"
+        },
+        "source_prompt_bundle_result": {
+          "case_count": 3,
+          "lowest_top8_common": 2,
+          "lowest_top8_common_case": "case_a",
+          "promoted_full_sq_policy": false,
+          "strict_top1_pass_count": 3
+        }
+      },
+      "risks": [
+        "current policy covers only a six-layer regression subset",
+        "case_a top8 overlap is low even though strict top1 passes"
+      ],
+      "scale": {
+        "block_cols": 32,
+        "dtype": "f32",
+        "granularity": "row_block"
+      },
+      "status": "current_regression_subset_not_full_policy",
+      "storage": {
+        "artifact_dir": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact",
+        "artifact_disk_usage_bytes_approx": 935329792,
+        "artifact_file_count": 45,
+        "artifact_manifest": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact/sq_manifest.json",
+        "compact_resident_bytes_estimate": 18579553248,
+        "fp8_payload_bytes": 830472192,
+        "fp8_scale_bytes": 103809024,
+        "fp8_tensor_count": 22,
+        "materialized_working_set_bytes_estimate": 201326592,
+        "passthrough_source_bytes_estimate": 17645272032,
+        "passthrough_tensor_count": 753,
+        "source": "measured_policy_artifact_result"
+      },
+      "throughput_gate": {
+        "allowed_speed_paths": [
+          "native_fp8_runtime",
+          "materialization_aware_runtime_path",
+          "explicit_materialized_working_set_path"
+        ],
+        "comparison_baseline": "AQ4 latest R9700 baseline in the same workload grid",
+        "overlay_load_timing_is_speed_result": false,
+        "required_metrics": [
+          "prefill_total_input_tps",
+          "decode_total_generated_tps",
+          "end_to_end_total_tps",
+          "vram_peak_bytes",
+          "compact_resident_bytes",
+          "materialized_working_set_bytes"
+        ]
+      },
+      "weight_payload_dtype": "fp8_e4m3"
+    },
+    {
+      "activation_dtype": "bf16_or_f32",
+      "candidate_id": "sq-fp8-w8a16-r9700-v1-scale16",
+      "fallback_policy": [
+        {
+          "family": "self_attn.q_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_under_row_block32"
+        },
+        {
+          "family": "self_attn.v_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_not_recovered_by_tested_row_block_sizes"
+        },
+        {
+          "family": "self_attn.o_proj",
+          "layers": "all_tested",
+          "reason": "six_layer_cumulative_drift_boundary"
+        },
+        {
+          "family": "mlp.gate_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "mlp.down_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "all_other_language_model_tensors",
+          "layers": "all",
+          "reason": "not_selected_in_current_six_layer_regression_subset"
+        },
+        {
+          "family": "visual_mtp_rdna2_tp_targets",
+          "layers": "all",
+          "reason": "deferred_target"
+        }
+      ],
+      "fp8_selection": {
+        "expected_fp8_tensor_count": 22,
+        "families": [
+          {
+            "family": "self_attn.k_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.up_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.gate_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          },
+          {
+            "family": "mlp.down_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          }
+        ],
+        "include_regex": "^model\\.language_model\\.layers\\.((3|7|11|15|19|23)\\.(self_attn\\.k_proj|mlp\\.up_proj)|(3|7|11|15|19)\\.mlp\\.(gate_proj|down_proj))\\.weight$"
+      },
+      "implementation": {
+        "artifact_builder_support": "missing_scale_dtype_option",
+        "native_fp8_compute": "not_yet_connected",
+        "runtime_support": "missing_scale16_materialization"
+      },
+      "next_action": "add scale dtype option to artifact builder and rerun strict top1 prompt bundle",
+      "priority": 2,
+      "purpose": "reduce F32 scale bytes while keeping W8A16 compute shape",
+      "quality_gate": {
+        "diagnostic_only": [
+          "topk_common",
+          "baseline_top1_rank_in_sq_topk",
+          "sq_top1_minus_baseline_top1_logit",
+          "short_text_generation_health"
+        ],
+        "promotion_rule": "strict_top1",
+        "source_policy_acceptance_rule": {
+          "diagnostic_only": [
+            "topk_common",
+            "baseline_top1_rank_in_sq_topk",
+            "sq_top1_minus_baseline_top1_logit"
+          ],
+          "promotion_rule": "strict_top1"
+        },
+        "source_prompt_bundle_result": {
+          "case_count": 3,
+          "lowest_top8_common": 2,
+          "lowest_top8_common_case": "case_a",
+          "promoted_full_sq_policy": false,
+          "strict_top1_pass_count": 3
+        }
+      },
+      "risks": [
+        "scale quantization may move top1 for the current tight guard",
+        "scale conversion overhead must not dominate decode"
+      ],
+      "scale": {
+        "block_cols": 32,
+        "dtype": "fp16_or_bf16",
+        "granularity": "row_block"
+      },
+      "status": "planned_experiment",
+      "storage": {
+        "delta_compact_resident_bytes_vs_current": -51904512,
+        "estimated_compact_resident_bytes": 18527648736,
+        "estimated_fp8_scale_bytes": 51904512,
+        "note": "estimate changes only scale bytes for the current partial policy tensor set",
+        "scale_dtype": "fp16_or_bf16",
+        "source": "estimated_from_current_policy_artifact"
+      },
+      "throughput_gate": {
+        "allowed_speed_paths": [
+          "native_fp8_runtime",
+          "materialization_aware_runtime_path",
+          "explicit_materialized_working_set_path"
+        ],
+        "comparison_baseline": "AQ4 latest R9700 baseline in the same workload grid",
+        "overlay_load_timing_is_speed_result": false,
+        "required_metrics": [
+          "prefill_total_input_tps",
+          "decode_total_generated_tps",
+          "end_to_end_total_tps",
+          "vram_peak_bytes",
+          "compact_resident_bytes",
+          "materialized_working_set_bytes"
+        ]
+      },
+      "weight_payload_dtype": "fp8_e4m3"
+    },
+    {
+      "activation_dtype": "bf16_or_f32",
+      "candidate_id": "sq-fp8-w8a16-r9700-v1-scale8",
+      "fallback_policy": [
+        {
+          "family": "self_attn.q_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_under_row_block32"
+        },
+        {
+          "family": "self_attn.v_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_not_recovered_by_tested_row_block_sizes"
+        },
+        {
+          "family": "self_attn.o_proj",
+          "layers": "all_tested",
+          "reason": "six_layer_cumulative_drift_boundary"
+        },
+        {
+          "family": "mlp.gate_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "mlp.down_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "all_other_language_model_tensors",
+          "layers": "all",
+          "reason": "not_selected_in_current_six_layer_regression_subset"
+        },
+        {
+          "family": "visual_mtp_rdna2_tp_targets",
+          "layers": "all",
+          "reason": "deferred_target"
+        }
+      ],
+      "fp8_selection": {
+        "expected_fp8_tensor_count": 22,
+        "families": [
+          {
+            "family": "self_attn.k_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.up_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.gate_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          },
+          {
+            "family": "mlp.down_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          }
+        ],
+        "include_regex": "^model\\.language_model\\.layers\\.((3|7|11|15|19|23)\\.(self_attn\\.k_proj|mlp\\.up_proj)|(3|7|11|15|19)\\.mlp\\.(gate_proj|down_proj))\\.weight$"
+      },
+      "implementation": {
+        "artifact_builder_support": "missing_scale_dtype_option",
+        "native_fp8_compute": "not_yet_connected",
+        "runtime_support": "missing_scale8_materialization"
+      },
+      "next_action": "only run after scale16 clarifies quality and runtime overhead",
+      "priority": 3,
+      "purpose": "test whether FP8 scale is viable enough to reduce scale bandwidth",
+      "quality_gate": {
+        "diagnostic_only": [
+          "topk_common",
+          "baseline_top1_rank_in_sq_topk",
+          "sq_top1_minus_baseline_top1_logit",
+          "short_text_generation_health"
+        ],
+        "promotion_rule": "strict_top1",
+        "source_policy_acceptance_rule": {
+          "diagnostic_only": [
+            "topk_common",
+            "baseline_top1_rank_in_sq_topk",
+            "sq_top1_minus_baseline_top1_logit"
+          ],
+          "promotion_rule": "strict_top1"
+        },
+        "source_prompt_bundle_result": {
+          "case_count": 3,
+          "lowest_top8_common": 2,
+          "lowest_top8_common_case": "case_a",
+          "promoted_full_sq_policy": false,
+          "strict_top1_pass_count": 3
+        }
+      },
+      "risks": [
+        "scale quantization may be too coarse for strict top1",
+        "FP8 value plus FP8 scale may need separate raw-value and scale math"
+      ],
+      "scale": {
+        "block_cols": 32,
+        "dtype": "fp8_e4m3_or_e5m2",
+        "granularity": "row_block"
+      },
+      "status": "planned_risk_probe",
+      "storage": {
+        "delta_compact_resident_bytes_vs_current": -77856768,
+        "estimated_compact_resident_bytes": 18501696480,
+        "estimated_fp8_scale_bytes": 25952256,
+        "note": "estimate changes only scale bytes for the current partial policy tensor set",
+        "scale_dtype": "fp8_e4m3_or_e5m2",
+        "source": "estimated_from_current_policy_artifact"
+      },
+      "throughput_gate": {
+        "allowed_speed_paths": [
+          "native_fp8_runtime",
+          "materialization_aware_runtime_path",
+          "explicit_materialized_working_set_path"
+        ],
+        "comparison_baseline": "AQ4 latest R9700 baseline in the same workload grid",
+        "overlay_load_timing_is_speed_result": false,
+        "required_metrics": [
+          "prefill_total_input_tps",
+          "decode_total_generated_tps",
+          "end_to_end_total_tps",
+          "vram_peak_bytes",
+          "compact_resident_bytes",
+          "materialized_working_set_bytes"
+        ]
+      },
+      "weight_payload_dtype": "fp8_e4m3"
+    },
+    {
+      "activation_dtype": "fp8_e4m3",
+      "candidate_id": "sq-fp8-w8a8-r9700-v0",
+      "fallback_policy": [
+        {
+          "family": "self_attn.q_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_under_row_block32"
+        },
+        {
+          "family": "self_attn.v_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_not_recovered_by_tested_row_block_sizes"
+        },
+        {
+          "family": "self_attn.o_proj",
+          "layers": "all_tested",
+          "reason": "six_layer_cumulative_drift_boundary"
+        },
+        {
+          "family": "mlp.gate_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "mlp.down_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "all_other_language_model_tensors",
+          "layers": "all",
+          "reason": "not_selected_in_current_six_layer_regression_subset"
+        },
+        {
+          "family": "visual_mtp_rdna2_tp_targets",
+          "layers": "all",
+          "reason": "deferred_target"
+        }
+      ],
+      "fp8_selection": {
+        "expected_fp8_tensor_count": 22,
+        "families": [
+          {
+            "family": "self_attn.k_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.up_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.gate_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          },
+          {
+            "family": "mlp.down_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          }
+        ],
+        "include_regex": "^model\\.language_model\\.layers\\.((3|7|11|15|19|23)\\.(self_attn\\.k_proj|mlp\\.up_proj)|(3|7|11|15|19)\\.mlp\\.(gate_proj|down_proj))\\.weight$"
+      },
+      "implementation": {
+        "artifact_builder_support": "partial_weight_payload_only",
+        "native_fp8_compute": "planned_rdna4_only",
+        "runtime_support": "missing_activation_fp8_path"
+      },
+      "next_action": "defer until W8A16 quality guard and selected-layer throughput path are stable",
+      "priority": 4,
+      "purpose": "measure whether R9700 native FP8 activation path improves total throughput",
+      "quality_gate": {
+        "diagnostic_only": [
+          "topk_common",
+          "baseline_top1_rank_in_sq_topk",
+          "sq_top1_minus_baseline_top1_logit",
+          "short_text_generation_health"
+        ],
+        "promotion_rule": "strict_top1",
+        "source_policy_acceptance_rule": {
+          "diagnostic_only": [
+            "topk_common",
+            "baseline_top1_rank_in_sq_topk",
+            "sq_top1_minus_baseline_top1_logit"
+          ],
+          "promotion_rule": "strict_top1"
+        },
+        "source_prompt_bundle_result": {
+          "case_count": 3,
+          "lowest_top8_common": 2,
+          "lowest_top8_common_case": "case_a",
+          "promoted_full_sq_policy": false,
+          "strict_top1_pass_count": 3
+        }
+      },
+      "risks": [
+        "activation FP8 can break quality even if weight-only guard passes",
+        "full FP8 compute path may expose unsupported tensor shapes"
+      ],
+      "scale": {
+        "block_cols": 32,
+        "dtype": "f32",
+        "granularity": "row_block"
+      },
+      "status": "planned_after_w8a16_baseline",
+      "storage": {
+        "activation_storage": "not_measured",
+        "note": "W8A8 requires runtime activation quantization metadata beyond the weight artifact",
+        "source": "weight_storage_estimated_from_current_policy_artifact",
+        "weight_storage": {
+          "artifact_dir": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact",
+          "artifact_disk_usage_bytes_approx": 935329792,
+          "artifact_file_count": 45,
+          "artifact_manifest": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact/sq_manifest.json",
+          "compact_resident_bytes_estimate": 18579553248,
+          "fp8_payload_bytes": 830472192,
+          "fp8_scale_bytes": 103809024,
+          "fp8_tensor_count": 22,
+          "materialized_working_set_bytes_estimate": 201326592,
+          "passthrough_source_bytes_estimate": 17645272032,
+          "passthrough_tensor_count": 753,
+          "source": "measured_policy_artifact_result"
+        }
+      },
+      "throughput_gate": {
+        "allowed_speed_paths": [
+          "native_fp8_runtime",
+          "materialization_aware_runtime_path",
+          "explicit_materialized_working_set_path"
+        ],
+        "comparison_baseline": "AQ4 latest R9700 baseline in the same workload grid",
+        "overlay_load_timing_is_speed_result": false,
+        "required_metrics": [
+          "prefill_total_input_tps",
+          "decode_total_generated_tps",
+          "end_to_end_total_tps",
+          "vram_peak_bytes",
+          "compact_resident_bytes",
+          "materialized_working_set_bytes"
+        ]
+      },
+      "weight_payload_dtype": "fp8_e4m3"
+    },
+    {
+      "activation_dtype": "bf16_or_f32",
+      "candidate_id": "sq-fp8-hybrid-r9700-v0",
+      "fallback_policy": [
+        {
+          "family": "self_attn.q_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_under_row_block32"
+        },
+        {
+          "family": "self_attn.v_proj",
+          "layers": "all_tested",
+          "reason": "strict_top1_risk_not_recovered_by_tested_row_block_sizes"
+        },
+        {
+          "family": "self_attn.o_proj",
+          "layers": "all_tested",
+          "reason": "six_layer_cumulative_drift_boundary"
+        },
+        {
+          "family": "mlp.gate_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "mlp.down_proj",
+          "layers": [
+            23
+          ],
+          "reason": "layer23_six_layer_boundary"
+        },
+        {
+          "family": "all_other_language_model_tensors",
+          "layers": "all",
+          "reason": "not_selected_in_current_six_layer_regression_subset"
+        },
+        {
+          "family": "visual_mtp_rdna2_tp_targets",
+          "layers": "all",
+          "reason": "deferred_target"
+        }
+      ],
+      "fp8_selection": {
+        "expected_fp8_tensor_count": 22,
+        "families": [
+          {
+            "family": "self_attn.k_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.up_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19,
+              23
+            ]
+          },
+          {
+            "family": "mlp.gate_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          },
+          {
+            "family": "mlp.down_proj",
+            "layers": [
+              3,
+              7,
+              11,
+              15,
+              19
+            ]
+          }
+        ],
+        "include_regex": "^model\\.language_model\\.layers\\.((3|7|11|15|19|23)\\.(self_attn\\.k_proj|mlp\\.up_proj)|(3|7|11|15|19)\\.mlp\\.(gate_proj|down_proj))\\.weight$"
+      },
+      "implementation": {
+        "artifact_builder_support": "supported_for_policy_json",
+        "native_fp8_compute": "not_yet_connected_for_package_throughput",
+        "runtime_support": "materialize_smoke_supported_overlay_quality_partial"
+      },
+      "next_action": "use as fallback direction if broader W8A16 strict top1 fails",
+      "priority": 5,
+      "purpose": "increase FP8 coverage only where strict top1 remains stable and fallback risky families",
+      "quality_gate": {
+        "diagnostic_only": [
+          "topk_common",
+          "baseline_top1_rank_in_sq_topk",
+          "sq_top1_minus_baseline_top1_logit",
+          "short_text_generation_health"
+        ],
+        "promotion_rule": "strict_top1",
+        "source_policy_acceptance_rule": {
+          "diagnostic_only": [
+            "topk_common",
+            "baseline_top1_rank_in_sq_topk",
+            "sq_top1_minus_baseline_top1_logit"
+          ],
+          "promotion_rule": "strict_top1"
+        },
+        "source_prompt_bundle_result": {
+          "case_count": 3,
+          "lowest_top8_common": 2,
+          "lowest_top8_common_case": "case_a",
+          "promoted_full_sq_policy": false,
+          "strict_top1_pass_count": 3
+        }
+      },
+      "risks": [
+        "too much fallback can erase memory and throughput benefit",
+        "per-layer policy can overfit short guards"
+      ],
+      "scale": {
+        "block_cols": 32,
+        "dtype": "f32",
+        "granularity": "row_block"
+      },
+      "status": "planned_conservative_policy_family",
+      "storage": {
+        "current_policy_storage": {
+          "artifact_dir": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact",
+          "artifact_disk_usage_bytes_approx": 935329792,
+          "artifact_file_count": 45,
+          "artifact_manifest": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact/sq_manifest.json",
+          "compact_resident_bytes_estimate": 18579553248,
+          "fp8_payload_bytes": 830472192,
+          "fp8_scale_bytes": 103809024,
+          "fp8_tensor_count": 22,
+          "materialized_working_set_bytes_estimate": 201326592,
+          "passthrough_source_bytes_estimate": 17645272032,
+          "passthrough_tensor_count": 753,
+          "source": "measured_policy_artifact_result"
+        },
+        "note": "storage must be regenerated for each expanded hybrid policy",
+        "source": "policy_dependent"
+      },
+      "throughput_gate": {
+        "allowed_speed_paths": [
+          "native_fp8_runtime",
+          "materialization_aware_runtime_path",
+          "explicit_materialized_working_set_path"
+        ],
+        "comparison_baseline": "AQ4 latest R9700 baseline in the same workload grid",
+        "overlay_load_timing_is_speed_result": false,
+        "required_metrics": [
+          "prefill_total_input_tps",
+          "decode_total_generated_tps",
+          "end_to_end_total_tps",
+          "vram_peak_bytes",
+          "compact_resident_bytes",
+          "materialized_working_set_bytes"
+        ]
+      },
+      "weight_payload_dtype": "fp8_e4m3_plus_fallback"
+    }
+  ],
+  "date": "2026-07-08",
+  "decision_rules": {
+    "diagnostic_fields_do_not_override_strict_top1": true,
+    "full_package_real_batch_blocks_candidate_exploration": false,
+    "full_package_real_batch_required_for_final_comparison": true,
+    "overlay_load_timing_is_speed_result": false,
+    "quality_promotion_rule": "strict_top1"
+  },
+  "measurement_contract": {
+    "allowed_intermediate_paths": [
+      "component",
+      "selected_layer_stack",
+      "materialization_aware_runtime_path"
+    ],
+    "required_memory_metrics": [
+      "vram_peak_bytes",
+      "compact_resident_bytes",
+      "materialized_working_set_bytes"
+    ],
+    "required_throughput_metrics": [
+      "prefill_total_input_tps",
+      "decode_total_generated_tps",
+      "end_to_end_total_tps"
+    ]
+  },
+  "next_steps": [
+    "Generate and track candidate artifacts from this matrix.",
+    "Run strict top1 prompt bundle before treating any candidate as promoted.",
+    "Connect selected-layer stack to token-id embedding plus final norm/lm_head quality guard.",
+    "Continue T1a full-package real batch runner for final AQ4/SQ comparison rows."
+  ],
+  "schema_version": "sq-fp8-format-candidate-matrix-v0.1",
+  "source_artifact_result": {
+    "artifact_dir": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact",
+    "path": "benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-artifact-v0.1.json",
+    "schema_version": "sq-fp8-policy-artifact-result-v0.1"
+  },
+  "source_policy": {
+    "candidate_id": "sq-fp8-w8a16-r9700-v0",
+    "path": "benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json",
+    "policy_id": "kup6_gate5_down5",
+    "status": "six_layer_strict_top1_regression_subset_not_full_sq_policy"
+  },
+  "target": {
+    "gpu": "R9700/RDNA4",
+    "runtime_device_index": 2,
+    "scope": "single_gpu_sq_candidate_evaluation"
+  }
+}

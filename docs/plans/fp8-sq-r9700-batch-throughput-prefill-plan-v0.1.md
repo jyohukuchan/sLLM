@@ -2213,6 +2213,36 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 6. throughput比較表は、AQ4、SQ候補、必要ならvLLM参考行を同じ列で並べる。列はquality、resident bytes、working-set bytes、VRAM peak、prefill total input tok/s、decode total generated tok/s、end-to-end tok/s、batching mode、executor/resolved executorにする。
 7. SQ候補1の採否は、AQ4比でVRAM/working-set削減が説明でき、quality guardが通り、decode/prefill throughputが大きく悪化しないことを条件にする。満たせない場合は、FP8 scale、fallback増加、row-block幅変更、または別SQ候補へ進む。
 
+## 2026-07-08 progress: SQ FP8 format candidate matrix v0.1
+
+前回の要点:
+
+- SQ format design phaseでは、`kup6_gate5_down5` を起点に候補matrixを機械可読manifestへ落とす必要があった。
+- full-package real batch runnerは最終性能比較には必要だが、SQ候補探索の開始blockerにはしない方針にした。
+- overlay host materialize/load timingはSQ速度として読まない方針にした。
+
+今回の変更点:
+
+- `tools/build-sq-fp8-candidate-matrix.py` を追加した。
+- 現在の `sq-fp8-kup6-gate5-down5-policy-v0.1.json` と `sq-fp8-kup6-gate5-down5-policy-artifact-v0.1.json` から、候補matrixを再生成できるようにした。
+- 生成物は `benchmarks/results/2026-07-08/sq-fp8-format-candidate-matrix-v0.1.json` と `.md` に保存した。
+- matrixには次の候補を入れた。
+  - `sq-fp8-w8a16-r9700-v0`
+  - `sq-fp8-w8a16-r9700-v1-scale16`
+  - `sq-fp8-w8a16-r9700-v1-scale8`
+  - `sq-fp8-w8a8-r9700-v0`
+  - `sq-fp8-hybrid-r9700-v0`
+- matrixは、strict top1をquality promotion ruleとして保存し、top-k overlap、AQ4 top1 rank、logit gap、短文生成healthを診断専用にした。
+- matrixは、`full_package_real_batch_required_for_final_comparison=true` と `full_package_real_batch_blocks_candidate_exploration=false` を同時に保存する。
+- `sq-r9700-state-freeze-v0.1.{json,md}` に現在の候補matrixとして追記した。
+
+次の行動:
+
+1. `scale16` を実験する場合は、artifact builderへscale dtype optionを追加し、同じstrict top1 prompt bundleを再実行する。
+2. `scale8` はscale16の品質とruntime overheadが見えてから、risk probeとして実施する。
+3. `W8A8` はW8A16のquality guardとselected-layer throughput pathが安定してから進める。
+4. 先にselected-layer stackへtoken-id embedding、final norm/lm_head、quality guardを接続し、SQ候補のdriftとthroughputを同じscheduler pathで見る。
+
 ## Risks
 
 | risk | impact | handling |
