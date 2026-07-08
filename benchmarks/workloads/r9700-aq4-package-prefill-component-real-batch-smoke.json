@@ -31,6 +31,21 @@
         "len:2",
         "1"
       ]
+    },
+    {
+      "case_id": "aq4-r9700-package-kproj-batch-prefill-b4-pp2",
+      "command": "package-prefill-aq4-matvec-batch-smoke",
+      "prompt_tokens": 2,
+      "concurrent_requests": 4,
+      "context_length": 2,
+      "component_args_template": [
+        "model.language_model.layers.3.self_attn.k_proj.weight",
+        "len:{component_total_prompt_tokens}",
+        "1"
+      ],
+      "notes": [
+        "flattened token-parallel package component: workload batch=4, component tokens=8"
+      ]
     }
   ]
 }

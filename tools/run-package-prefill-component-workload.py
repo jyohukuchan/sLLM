@@ -35,6 +35,7 @@ class WorkloadCase:
     component_args: list[str]
     prompt_tokens: int
     concurrent_requests: int
+    component_total_prompt_tokens: int
     context_length: int
     warmup_runs: int
     measured_runs: int
@@ -123,6 +124,13 @@ def string_list(value: Any, label: str) -> list[str]:
     return value
 
 
+def render_template(value: str, variables: dict[str, int | str]) -> str:
+    try:
+        return value.format(**variables)
+    except KeyError as exc:
+        raise SystemExit(f"unknown component arg template variable: {exc}") from exc
+
+
 def string_env(value: Any, label: str) -> dict[str, str]:
     if value is None:
         return {}
@@ -197,16 +205,45 @@ def load_cases(root: dict[str, Any], only_case: set[str], skip_warmup: bool) -> 
         case_id = optional_string(case.get("case_id"), f"cases[{index}].case_id")
         command = as_string(case.get("command"), f"cases[{index}].command")
         prompt_tokens = positive_int(case.get("prompt_tokens"), f"cases[{index}].prompt_tokens")
+        concurrent_requests = positive_int(
+            case.get("concurrent_requests", 1),
+            f"{case_id}.concurrent_requests",
+        )
+        component_total_prompt_tokens = positive_int(
+            case.get("component_total_prompt_tokens", prompt_tokens * concurrent_requests),
+            f"{case_id}.component_total_prompt_tokens",
+        )
         if case_id is None:
-            case_id = f"{command}-pp{prompt_tokens}"
+            case_id = f"{command}-pp{prompt_tokens}-b{concurrent_requests}"
         if case_id in seen:
             raise SystemExit(f"duplicate case_id: {case_id}")
         seen.add(case_id)
         if only_case and case_id not in only_case:
             continue
         component_args = string_list(case.get("component_args"), f"{case_id}.component_args")
+        component_args_template = string_list(
+            case.get("component_args_template"),
+            f"{case_id}.component_args_template",
+        )
+        if component_args and component_args_template:
+            raise SystemExit(
+                f"{case_id} must use either component_args or component_args_template, not both"
+            )
+        if component_args_template:
+            variables = {
+                "prompt_tokens": prompt_tokens,
+                "concurrent_requests": concurrent_requests,
+                "batch_size": concurrent_requests,
+                "component_total_prompt_tokens": component_total_prompt_tokens,
+                "total_prompt_tokens": component_total_prompt_tokens,
+            }
+            component_args = [
+                render_template(template, variables) for template in component_args_template
+            ]
         if not component_args:
-            raise SystemExit(f"{case_id}.component_args must not be empty")
+            raise SystemExit(
+                f"{case_id} must provide component_args or component_args_template"
+            )
         warmup_runs = non_negative_int(
             case.get("warmup_runs", default_warmup),
             f"{case_id}.warmup_runs",
@@ -219,10 +256,8 @@ def load_cases(root: dict[str, Any], only_case: set[str], skip_warmup: bool) -> 
                 command=command,
                 component_args=component_args,
                 prompt_tokens=prompt_tokens,
-                concurrent_requests=positive_int(
-                    case.get("concurrent_requests", 1),
-                    f"{case_id}.concurrent_requests",
-                ),
+                concurrent_requests=concurrent_requests,
+                component_total_prompt_tokens=component_total_prompt_tokens,
                 context_length=positive_int(
                     case.get("context_length", prompt_tokens),
                     f"{case_id}.context_length",
@@ -400,6 +435,9 @@ def prepare_output(
             "stage": run.stage,
             "case_id": run.case.case_id,
             "iteration": run.iteration,
+            "prompt_tokens": run.case.prompt_tokens,
+            "concurrent_requests": run.case.concurrent_requests,
+            "component_total_prompt_tokens": run.case.component_total_prompt_tokens,
             "run_dir": str(run.run_dir),
             "output_jsonl": str(run.output_jsonl),
             "command": run.command,

@@ -271,6 +271,12 @@ stdout does not emit the package-batch field name directly. These rows prove tha
 component path is connected to a `.ullm.d` package, but they are still not whole-model package total
 throughput rows.
 
+For package-backed component rows that flatten a workload batch into token parallelism, preserve the
+requested workload batch and the executor's actual parallelism separately. A row may therefore have
+`workload.batch_size=4`, `workload.prompt_tokens_per_request=[2,2,2,2]`, and
+`workload.component_total_input_tokens=8`, while `batching.prefill_executor_request_parallelism=1`
+and `batching.prefill_executor_token_parallelism=8`.
+
 SQ candidate rows may also carry a top-level `candidate` object:
 
 - `candidate.id`: e.g. `sq-fp8-w8a16-r9700-v0`

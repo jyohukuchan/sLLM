@@ -684,22 +684,34 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
     if not isinstance(row_workload, dict):
         return
     request_parallelism = first_non_null(parse_int(report.get("request_parallelism")), 1)
+    reported_batch_count = parse_int(report.get("batch_count"))
+    reported_concurrent_requests = parse_int(report.get("concurrent_requests"))
+    existing_batch_count = parse_int(row_workload.get("batch_size"))
+    existing_concurrent_requests = parse_int(row_workload.get("concurrent_requests"))
     batch_count = first_non_null(
-        parse_int(report.get("batch_count")),
-        parse_int(report.get("concurrent_requests")),
+        reported_batch_count,
+        reported_concurrent_requests,
+        existing_batch_count,
         request_parallelism,
     )
     concurrent_requests = first_non_null(
-        parse_int(report.get("concurrent_requests")),
+        reported_concurrent_requests,
+        existing_concurrent_requests,
         batch_count,
     )
+    reported_prompt_tokens_per_request = parse_int(report.get("prompt_tokens_per_request"))
+    component_prompt_tokens = parse_int(report.get("prompt_tokens"))
     prompt_tokens = first_non_null(
-        parse_int(report.get("prompt_tokens_per_request")),
-        parse_int(report.get("prompt_tokens")),
+        reported_prompt_tokens_per_request,
+        parse_int(row_workload.get("prompt_tokens")),
+        component_prompt_tokens,
     )
     prefill_tokens = parse_int(report.get("prefill_total_input_tokens"))
-    if prefill_tokens is None and prompt_tokens is not None and concurrent_requests is not None:
-        prefill_tokens = prompt_tokens * concurrent_requests
+    if prefill_tokens is None:
+        if component_prompt_tokens is not None:
+            prefill_tokens = component_prompt_tokens
+        elif prompt_tokens is not None and concurrent_requests is not None:
+            prefill_tokens = prompt_tokens * concurrent_requests
     estimated_work = parse_int(report.get("estimated_prefill_attention_work_tokens"))
     executor = report.get("executor")
     batching_mode = report.get("batching_mode")
@@ -721,6 +733,7 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
         row_workload["total_context_tokens_after_prefill_per_request"] = per_request
     if prefill_tokens is not None:
         row_workload["total_context_tokens_after_prefill"] = prefill_tokens
+        row_workload["component_total_input_tokens"] = prefill_tokens
     if estimated_work is not None:
         row_workload["estimated_prefill_attention_work_tokens"] = estimated_work
     row["batching"] = {

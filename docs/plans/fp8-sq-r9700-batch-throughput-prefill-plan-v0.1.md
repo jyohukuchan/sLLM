@@ -957,6 +957,28 @@ R9700 schema/control-plane smoke:
 2. full package throughput判断にはまだ使わない。
 3. 次はrequest batch `batch=1/4/8` とdecode/end-to-end total throughputへ広げる。
 
+### T1 current status: package prefill component batch grid v1
+
+前回の要点:
+
+- `.ullm.d` package由来のprefill component rowはJSONLへ保存できるようになった。
+- ただし、最初のsmokeは`batch_size=1`の単一caseだった。
+
+今回の変更点:
+
+- `tools/run-package-prefill-component-workload.py` に `component_args_template` を追加した。
+- `prompt_tokens * concurrent_requests` から `component_total_prompt_tokens` を計算し、projection componentでは `len:{component_total_prompt_tokens}` としてflattened token-parallel実行できるようにした。
+- `run-external-benchmark.py --parse ullm-component-prefill` は、reportに明示的な`batch_count`がないpackage component rowでは、CLI/workload側の`batch_size`と`concurrent_requests`を保持するようにした。
+- R9700 AQ4 package `k_proj` componentで、`batch=1, prompt=2` と `batch=4, prompt=2` を測った。
+- B=4 caseでは `workload.batch_size=4`、`prompt_tokens_per_request=[2,2,2,2]`、`component_total_input_tokens=8`、`prefill_executor_token_parallelism=8`、`prefill_executor_request_parallelism=1` として保存された。
+- 結果は `benchmarks/results/2026-07-08/package-batch-throughput/phase-t1-package-prefill-component-batch-grid-v1.md` に保存した。
+
+次の行動:
+
+1. この結果はpackage-backed component batch gridとして保持する。
+2. request boundaryが効くself-attention layer componentへ広げる。
+3. full package throughput判断には、decode/end-to-endを含むpackage total-throughput runnerが必要。
+
 ### T2: FP8 SQ candidate package/runtime prototype, 3-5 days
 
 目的:
@@ -1950,7 +1972,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | --- | --- | --- |
 | T0 state freeze | done | `benchmarks/results/2026-07-08/sq-r9700-state-freeze-v0.1.json`, `.md` |
 | T1 result schema preservation | partial done | `docs/specs/batch-throughput-workload-v0.1.md`, `docs/specs/inference-benchmark-result-v0.1.md`, `tools/run-external-benchmark.py` |
-| T1 real batch/total throughput runner | partial done with package-backed component runner | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`; full package decode/end-to-end total throughput is still not done. |
+| T1 real batch/total throughput runner | partial done with package-backed component batch grid | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`, `phase-t1-package-prefill-component-batch-grid-v1.md`; full package decode/end-to-end total throughput is still not done. |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done with policy artifact verified | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; actual `kup6_gate5_down5` payload artifact generated under `/tmp` with `22` FP8 tensors and `753` passthrough tensors. |
 | T2 runtime load path | partial done with policy artifact materialize verified | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization; policy artifact materialize smoke verified on R9700. |

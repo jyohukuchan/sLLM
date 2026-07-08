@@ -229,6 +229,50 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["batching"]["prefill_executor_token_parallelism"], 2)
         self.assertEqual(row["batching"]["component_package"], "/tmp/model.ullm.d")
 
+    def test_preserves_requested_batch_for_flattened_package_component(self) -> None:
+        stdout = (
+            "package-prefill-aq4-matvec-batch-smoke "
+            "package=/tmp/model.ullm.d "
+            'tensor="model.language_model.layers.3.self_attn.k_proj.weight" '
+            "prompt_tokens=8 hidden=4096 rows=1024 cols=4096 "
+            "executor=aq4_matvec_batch_f32 real_batch=true token_parallelism=8 "
+            "request_parallelism=1 wall_ms_mean=0.200000 token_tps_mean=40000.000000 "
+            "max_abs_diff=0.000000100 verified=true"
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_component_prefill_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 4,
+                "concurrent_requests": 4,
+                "prompt_tokens": 2,
+                "generated_tokens": 0,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+        TOOL.enrich_ullm_component_prefill_row(row, report)
+
+        self.assertEqual(metrics["prefill_total_input_tokens"], 8)
+        self.assertEqual(row["workload"]["batch_size"], 4)
+        self.assertEqual(row["workload"]["concurrent_requests"], 4)
+        self.assertEqual(row["workload"]["prompt_tokens_per_request"], [2, 2, 2, 2])
+        self.assertEqual(row["workload"]["total_context_tokens_after_prefill"], 8)
+        self.assertEqual(row["workload"]["component_total_input_tokens"], 8)
+        self.assertEqual(row["batching"]["mode"], "real")
+        self.assertTrue(row["batching"]["prefill_real_batch"])
+        self.assertEqual(row["batching"]["prefill_executor_request_parallelism"], 1)
+        self.assertEqual(row["batching"]["prefill_executor_token_parallelism"], 8)
+
 
 if __name__ == "__main__":
     unittest.main()

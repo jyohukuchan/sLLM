@@ -191,5 +191,19 @@ Example:
 }
 ```
 
+`component_args_template` may be used instead of `component_args`. Supported variables are:
+
+- `{prompt_tokens}`
+- `{concurrent_requests}`
+- `{batch_size}`
+- `{component_total_prompt_tokens}`
+- `{total_prompt_tokens}`
+
+For projection-like components, a request batch can be represented as flattened token parallelism by
+setting an argument such as `len:{component_total_prompt_tokens}`. Result rows must still preserve
+the requested workload batch separately from executor parallelism. For example, a workload may have
+`batch_size=4` and `prompt_tokens_per_request=[2,2,2,2]` while the executor reports
+`prefill_executor_token_parallelism=8` and `prefill_executor_request_parallelism=1`.
+
 This runner does not replace `package-batch-throughput-bench`. Its rows are package-backed
 component rows, not end-to-end total throughput rows.
