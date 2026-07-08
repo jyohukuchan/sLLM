@@ -3277,6 +3277,45 @@ Quality:
 - これはmanifest self-attention層だけの中間rowであり、linear-attention層を含むQwen3.5-9B full mixed-attention LM throughputではない。
 - 次のT1本命は、linear-attention層を含むfull mixed-attention package real-batch runnerである。
 
+## 2026-07-09 progress: T1 full mixed layer kind inventory
+
+前回の要点:
+
+- self-attention stack real-batch rowは得られたが、full packageにはlinear-attention層が含まれる。
+- full mixed-attention runnerを実装するには、manifest由来のlayer orderとlayer kindを先に固定する必要があった。
+- logical full-package rowは既にあるが、`prefill_real_batch=false` / `decode_real_batch=false` のためSQ throughput比較には使えない。
+
+今回の変更点:
+
+- `package-layer-kind-inventory-smoke` を追加した。
+- `manifest-all` aliasで、`.ullm.d` manifestからsupported layer indexを昇順に抽出できるようにした。
+- `package-token-ids-logits-smoke`、`sq-fp8-token-ids-logits-smoke`、`package-token-ids-generate-smoke`、`package-batch-throughput-bench` も `manifest-all` を受け取れるようにした。
+- R9700 AQ4 packageで32層連続、self-attention 8層、linear-attention 24層を確認した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-full-mixed-layer-kind-inventory-v1.md` に保存した。
+
+Inventory:
+
+| field | value |
+| --- | --- |
+| layers | `0..31` |
+| contiguous | true |
+| self-attention layers | `3,7,11,15,19,23,27,31` |
+| linear-attention layers | `0,1,2,4,5,6,8,9,10,12,13,14,16,17,18,20,21,22,24,25,26,28,29,30` |
+| verified | true |
+
+判断:
+
+- `manifest-all` はfull mixed-attention runnerのlayer order入力として使える。
+- 次の実装対象は、linear-attention層のper-request recurrent stateとcausal Conv1d historyを持つreal request-batch ownerである。
+- このinventoryはthroughput rowではないため、SQ性能比較には直接使わない。
+
+次の行動:
+
+1. full mixed-attention runnerではmanifest orderをそのまま使う。
+2. self-attention層では既存のpaged KV state / ready-batch decode入力を使う。
+3. linear-attention層ではrequestごとのrecurrent stateとConv1d historyを保持する。
+4. full packageで `batching.mode=real`、`prefill_real_batch=true`、`decode_real_batch=true` のAQ4 baseline rowを保存してからSQ候補比較へ進む。
+
 ## Risks
 
 | risk | impact | handling |

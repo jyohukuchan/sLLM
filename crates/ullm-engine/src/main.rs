@@ -134,6 +134,9 @@ fn main() -> ExitCode {
         }
         Some("runtime-mlp-smoke") => runtime_mlp_smoke(env::args().nth(2)),
         Some("inspect-package") => inspect_package(env::args().nth(2)),
+        Some("package-layer-kind-inventory-smoke") => {
+            package_layer_kind_inventory_smoke(env::args().nth(2), env::args().nth(3))
+        }
         Some("package-load-smoke") => package_load_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -7152,6 +7155,72 @@ fn inspect_package(path: Option<String>) -> ExitCode {
         summary.declared_passthrough_payload_bytes
     );
     ExitCode::SUCCESS
+}
+
+fn package_layer_kind_inventory_smoke(
+    path: Option<String>,
+    layer_indices: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-layer-kind-inventory-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let layer_indices = match parse_package_token_ids_layer_indices_for_package(
+        &path,
+        layer_indices.or_else(|| Some("manifest-all".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let entries = match package_layer_entries_for_indices(&path, &layer_indices) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{err}");
+            return ExitCode::from(1);
+        }
+    };
+    let self_attention_count = entries
+        .iter()
+        .filter(|entry| entry.kind == PackageDecoderLayerKind::SelfAttention)
+        .count();
+    let linear_attention_count = entries.len().saturating_sub(self_attention_count);
+    let contiguous = package_layer_entries_are_contiguous(&entries);
+    let layers = entries
+        .iter()
+        .map(|entry| entry.layer_index)
+        .collect::<Vec<_>>();
+    let layer_kinds = entries
+        .iter()
+        .map(|entry| entry.kind.as_str())
+        .collect::<Vec<_>>();
+    let report = serde_json::json!({
+        "schema_version": "package-layer-kind-inventory-smoke-v0.1",
+        "package": path,
+        "layers": layers,
+        "layer_kinds": layer_kinds,
+        "layer_count": entries.len(),
+        "self_attention_count": self_attention_count,
+        "linear_attention_count": linear_attention_count,
+        "mixed_attention": self_attention_count > 0 && linear_attention_count > 0,
+        "contiguous_layer_indices": contiguous,
+        "real_batch_requirements": [
+            "self_attention requires per-request paged KV state and ready-batch decode inputs",
+            "linear_attention requires per-request recurrent state and Conv1d history",
+            "full mixed-attention runner must preserve manifest layer order across both layer kinds",
+            "result rows must not be promoted to SQ throughput decisions until prefill/decode are real request-batch"
+        ],
+        "verified": true,
+    });
+    match serde_json::to_string_pretty(&report) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("failed to encode package layer kind inventory: {err}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn package_load_smoke(
@@ -16500,6 +16569,79 @@ impl PackageDecoderLayerKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackageManifestLayerEntry {
+    layer_index: usize,
+    kind: PackageDecoderLayerKind,
+}
+
+fn package_manifest_layer_entries(path: &str) -> Result<Vec<PackageManifestLayerEntry>, String> {
+    let bundles = list_tensor_payload_bundles(path)?;
+    let mut layers =
+        std::collections::BTreeMap::<usize, std::collections::BTreeSet<&'static str>>::new();
+    for bundle in bundles {
+        if let Some(layer_index) = parse_language_model_layer_tensor_suffix(
+            &bundle.tensor_name,
+            ".self_attn.q_proj.weight",
+        ) {
+            layers
+                .entry(layer_index)
+                .or_default()
+                .insert("self_attention");
+        }
+        if let Some(layer_index) = parse_language_model_layer_tensor_suffix(
+            &bundle.tensor_name,
+            ".linear_attn.in_proj_qkv.weight",
+        ) {
+            layers
+                .entry(layer_index)
+                .or_default()
+                .insert("linear_attention");
+        }
+    }
+    if layers.is_empty() {
+        return Err(format!(
+            "package {path} has no supported self_attn or linear_attn layer tensors"
+        ));
+    }
+
+    let mut entries = Vec::with_capacity(layers.len());
+    for (layer_index, kinds) in layers {
+        let kind = if kinds.len() == 1 && kinds.contains("self_attention") {
+            PackageDecoderLayerKind::SelfAttention
+        } else if kinds.len() == 1 && kinds.contains("linear_attention") {
+            PackageDecoderLayerKind::LinearAttention
+        } else {
+            return Err(format!(
+                "package {path} layer {layer_index} has ambiguous layer kinds: {:?}",
+                kinds
+            ));
+        };
+        entries.push(PackageManifestLayerEntry { layer_index, kind });
+    }
+    Ok(entries)
+}
+
+fn package_layer_entries_for_indices(
+    path: &str,
+    layer_indices: &[usize],
+) -> Result<Vec<PackageManifestLayerEntry>, String> {
+    layer_indices
+        .iter()
+        .copied()
+        .map(|layer_index| {
+            package_decoder_layer_kind(path, layer_index)
+                .map(|kind| PackageManifestLayerEntry { layer_index, kind })
+        })
+        .collect()
+}
+
+fn package_layer_entries_are_contiguous(entries: &[PackageManifestLayerEntry]) -> bool {
+    entries
+        .windows(2)
+        .all(|window| window[0].layer_index + 1 == window[1].layer_index)
+}
+
 fn package_decoder_layer_kind(
     path: &str,
     layer_index: usize,
@@ -19080,6 +19222,27 @@ fn parse_package_token_ids_layer_indices(value: Option<String>) -> Result<Vec<us
     }
 }
 
+fn parse_package_token_ids_layer_indices_for_package(
+    path: &str,
+    value: Option<String>,
+) -> Result<Vec<usize>, ExitCode> {
+    match value.as_deref() {
+        Some("manifest-all") | Some("manifest_all") | Some("all-manifest")
+        | Some("all_manifest") => package_manifest_layer_entries(path)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| entry.layer_index)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|err| {
+                eprintln!("{err}");
+                ExitCode::from(2)
+            }),
+        _ => parse_package_token_ids_layer_indices(value),
+    }
+}
+
 fn parse_package_token_ids(value: Option<String>) -> Result<Vec<usize>, ExitCode> {
     match value {
         Some(raw) => parse_usize_csv(&raw, "token IDs"),
@@ -19220,10 +19383,11 @@ fn package_token_ids_logits_smoke(
         }
         Err(code) => return code,
     };
-    let layer_indices = match parse_package_token_ids_layer_indices(layer_indices) {
-        Ok(value) => value,
-        Err(code) => return code,
-    };
+    let layer_indices =
+        match parse_package_token_ids_layer_indices_for_package(&path, layer_indices) {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
     let token_ids = match parse_package_token_ids(token_ids) {
         Ok(value) => value,
         Err(code) => return code,
@@ -19311,10 +19475,11 @@ fn sq_fp8_token_ids_logits_smoke(
         }
         Err(code) => return code,
     };
-    let layer_indices = match parse_package_token_ids_layer_indices(layer_indices) {
-        Ok(value) => value,
-        Err(code) => return code,
-    };
+    let layer_indices =
+        match parse_package_token_ids_layer_indices_for_package(&path, layer_indices) {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
     let token_ids = match parse_package_token_ids(token_ids) {
         Ok(value) => value,
         Err(code) => return code,
@@ -19409,10 +19574,11 @@ fn package_token_ids_generate_smoke(
         }
         Err(code) => return code,
     };
-    let layer_indices = match parse_package_token_ids_layer_indices(layer_indices) {
-        Ok(value) => value,
-        Err(code) => return code,
-    };
+    let layer_indices =
+        match parse_package_token_ids_layer_indices_for_package(&path, layer_indices) {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
     let prompt_token_ids = match parse_package_prompt_token_ids(prompt_token_ids) {
         Ok(value) => value,
         Err(code) => return code,
@@ -19519,10 +19685,11 @@ fn package_batch_throughput_bench(
         }
         Err(code) => return code,
     };
-    let layer_indices = match parse_package_token_ids_layer_indices(layer_indices) {
-        Ok(value) => value,
-        Err(code) => return code,
-    };
+    let layer_indices =
+        match parse_package_token_ids_layer_indices_for_package(&path, layer_indices) {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
     let prompt_token_ids_batch = match parse_package_prompt_token_ids_batch(prompt_token_ids_batch)
     {
         Ok(value) => value,
@@ -30936,6 +31103,86 @@ mod package_token_ids_logits_tests {
     }
 
     #[test]
+    fn package_manifest_layer_entries_detects_mixed_layer_order() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-manifest-layer-entries-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("payload")).unwrap();
+        for name in ["idx.bin", "scale.bin", "codebook.bin"] {
+            std::fs::write(root.join("payload").join(name), [0_u8; 4]).unwrap();
+        }
+        std::fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "schema_version": "test",
+              "tensors": [
+                {
+                  "name": "model.language_model.layers.2.linear_attn.in_proj_qkv.weight",
+                  "shape": [1, 1],
+                  "elements": 1,
+                  "groups": 1,
+                  "index_file": "payload/idx.bin",
+                  "scale_file": "payload/scale.bin",
+                  "codebook_file": "payload/codebook.bin"
+                },
+                {
+                  "name": "model.language_model.layers.0.self_attn.q_proj.weight",
+                  "shape": [1, 1],
+                  "elements": 1,
+                  "groups": 1,
+                  "index_file": "payload/idx.bin",
+                  "scale_file": "payload/scale.bin",
+                  "codebook_file": "payload/codebook.bin"
+                },
+                {
+                  "name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+                  "shape": [1, 1],
+                  "elements": 1,
+                  "groups": 1,
+                  "index_file": "payload/idx.bin",
+                  "scale_file": "payload/scale.bin",
+                  "codebook_file": "payload/codebook.bin"
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let entries = package_manifest_layer_entries(root.to_str().unwrap()).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                PackageManifestLayerEntry {
+                    layer_index: 0,
+                    kind: PackageDecoderLayerKind::SelfAttention,
+                },
+                PackageManifestLayerEntry {
+                    layer_index: 1,
+                    kind: PackageDecoderLayerKind::LinearAttention,
+                },
+                PackageManifestLayerEntry {
+                    layer_index: 2,
+                    kind: PackageDecoderLayerKind::LinearAttention,
+                },
+            ]
+        );
+        assert!(package_layer_entries_are_contiguous(&entries));
+
+        let layers = parse_package_token_ids_layer_indices_for_package(
+            root.to_str().unwrap(),
+            Some("manifest-all".to_string()),
+        )
+        .unwrap();
+        assert_eq!(layers, vec![0, 1, 2]);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn package_generated_tokens_batch_accepts_scalar_or_csv() {
         assert_eq!(
             parse_package_generated_tokens_batch(Some("8".to_string()), 3).unwrap(),
@@ -40920,17 +41167,21 @@ fn print_help() {
     eprintln!(
         "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
     );
+    eprintln!("package-layer-kind-inventory-smoke: PACKAGE_DIR [LAYERS_CSV|manifest-all|all]");
     eprintln!(
-        "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
+        "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all|manifest-all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
     );
     eprintln!(
-        "package-token-ids-model-loop-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+        "package-token-ids-logits-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all|manifest-all] [TOKEN_IDS_CSV|len:N] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
-        "sq-fp8-token-ids-model-loop-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+        "package-token-ids-model-loop-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn|manifest-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
-        "sq-fp8-token-ids-logits-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+        "sq-fp8-token-ids-model-loop-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn|manifest-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+    );
+    eprintln!(
+        "sq-fp8-token-ids-logits-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all|manifest-all] [TOKEN_IDS_CSV|len:N] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "runtime-cached-prefix-attn-smoke: [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|cached_prefix_flash2_fp8q|cached_prefix_rocwmma_fp8|cached_prefix_rdna4_fp8_auto|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]"
@@ -40946,7 +41197,7 @@ fn print_help() {
         "package-token-ids-bench: same arguments as package-token-ids-generate-smoke; writes the same measured JSON report"
     );
     eprintln!(
-        "package-batch-throughput-bench: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
+        "package-batch-throughput-bench: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all|manifest-all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
     );
     eprintln!(
         "sq-fp8-materialize-smoke: ARTIFACT_DIR [DEVICE_INDEX] [TENSOR_SELECTOR] [ROW_COUNT] [START_ROW]"
