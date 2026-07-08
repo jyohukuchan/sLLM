@@ -1,0 +1,79 @@
+{
+  "schema_version": "sq-fp8-policy-v0.1",
+  "date": "2026-07-09",
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-qkv-layer3-q32-k16-v32",
+  "policy_id": "qkv_layer3_q32_k16_v32",
+  "status": "full_mixed_triple_boundary_probe_not_promoted",
+  "target_gpu": "R9700/RDNA4",
+  "scale": {
+    "granularity": "row_block",
+    "block_cols": 32,
+    "dtype": "f32",
+    "overrides": [
+      {
+        "id": "k-rowblock16",
+        "include_regex": "^model\\.language_model\\.layers\\.3\\.self_attn\\.k_proj\\.weight$",
+        "granularity": "row_block",
+        "block_cols": 16
+      }
+    ]
+  },
+  "fp8_selection": {
+    "include_regex": "^model\\.language_model\\.layers\\.3\\.self_attn\\.(q_proj|k_proj|v_proj)\\.weight$",
+    "families": [
+      {
+        "family": "self_attn.q_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 32
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.v_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 32
+      }
+    ],
+    "expected_fp8_tensor_count": 3
+  },
+  "fallback_policy": [
+    {
+      "family": "all_other_language_model_tensors",
+      "layers": "all",
+      "reason": "not_selected_in_current_triple_boundary_probe"
+    },
+    {
+      "family": "visual_mtp_rdna2_tp_targets",
+      "layers": "all",
+      "reason": "deferred_target"
+    }
+  ],
+  "acceptance_rule": {
+    "promotion_rule": "strict_top1",
+    "diagnostic_only": [
+      "topk_common",
+      "baseline_top1_rank_in_sq_topk",
+      "sq_top1_minus_baseline_top1_logit"
+    ]
+  },
+  "prompt_bundle_result": {
+    "strict_top1_pass_count": null,
+    "case_count": null,
+    "promoted_full_sq_policy": false
+  },
+  "artifacts": [],
+  "next_steps": [
+    "Build with tools/build-sq-fp8-w8a16-artifact.py --policy-json.",
+    "Run full mixed request-state smoke with default self-attention q/k/v triple dispatch.",
+    "Promote only if full mixed final top1 matches AQ4 on the measured batch grid."
+  ]
+}

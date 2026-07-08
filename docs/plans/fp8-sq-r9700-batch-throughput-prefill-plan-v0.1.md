@@ -3769,6 +3769,45 @@ Inventory:
 2. `up_proj` 系はrow-block幅、scale粒度、W8A8/activation scaleを変えて再探索する。
 3. MLP fused境界は、qualityが通る `gate/up` 候補が出た段階でSQ FP8 direct fused pathへ進める。
 
+## 2026-07-09 progress: T2 SQ FP8 pair/triple boundary probe
+
+前回の要点:
+
+- SQ FP8 direct pathは単発、batch、pair、triple matvec API境界でF32 materializeなしに実行できるようになった。
+- ただしfull mixed strict-top1候補はlayer3 `k_proj` 1 tensorだけで、pair/triple境界を実ベンチで踏めていなかった。
+
+今回の変更点:
+
+- layer3 `q/k` 候補 `sq-fp8-w8a16-r9700-v0-qk-layer3-q32-k16` を追加し、`q_proj` row-block32 + `k_proj` row-block16でartifactを生成した。
+- layer3 `q/k/v` 候補 `sq-fp8-w8a16-r9700-v0-qkv-layer3-q32-k16-v32` を追加し、`q_proj`/`v_proj` row-block32 + `k_proj` row-block16でartifactを生成した。
+- `q/k` 候補は `ULLM_DISABLE_AQ4_MATVEC_TRIPLE_SELF_ATTN_QKV=1` と `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_PAIR_KERNEL=1` でpair境界を踏ませた。
+- `q/k/v` 候補は `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL=1` でtriple境界を踏ませた。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-pair-triple-boundary-probe-v1.md` と `results.jsonl` / `results.schema.jsonl` に保存した。
+
+実測値:
+
+| boundary | batch | SQ prefill tok/s | SQ decode tok/s | SQ end-to-end tok/s | AQ4 end-to-end tok/s | final top1 | top1 match |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| q/k pair | 1 | 20.093980 | 77.380772 | 9.324354 | 8.926325 | `44370` | `true` |
+| q/k pair | 4 | 16.546983 | 78.429273 | 15.277466 | 24.096096 | `44370,5446,10701,25411` | `true` |
+| q/k pair | 8 | 58.769493 | 78.645271 | 34.187742 | 34.577530 | `44370,5446,10701,25411,21901,685,279,27973` | `true` |
+| q/k/v triple | 1 | 17.564031 | 78.859963 | 8.414481 | 8.926325 | `44370` | `true` |
+| q/k/v triple | 4 | 48.433379 | 80.057414 | 25.402500 | 24.096096 | `44370,5446,10701,25411` | `true` |
+| q/k/v triple | 8 | 63.183079 | 79.943546 | 35.980289 | 34.577530 | `44370,5446,10701,25411,21901,685,279,27973` | `true` |
+
+判断:
+
+- `q/k` pair候補はB=1/4/8でAQ4 final top1と一致した。ただしpair検証ではq/k/v tripleを無効化してvをAQ4単発にしているため、速度比較は通常self-attention pathそのものではない。
+- `q/k/v` triple候補はB=1/4/8でAQ4 final top1と一致し、最小triple boundary候補として扱える。
+- B=4/B=8では `q/k/v` triple候補のend-to-end tok/sがAQ4 baselineを少し上回った。ただしFP8 tensorは3個だけ、promptは `len:2xB` の短いsmokeなので、SQ format性能の結論にはまだ使わない。
+- stdout上の `sq_execution_mode` はpair/tripleを区別せず `direct_fp8_dequant_matvec` と出るため、次はpair/triple境界を明示するtelemetryを追加する。
+
+次の行動:
+
+1. `q/k/v` layer3を最小triple boundary候補として固定し、prompt bundleまたは長めのprefill gridでqualityを再確認する。
+2. stdout/JSONLにSQ pair/triple境界の実行モードを明示し、単発/pair/tripleを混同しないようにする。
+3. layer7以降の `q/k/v`、または既存の `k/o/down` branchへtriple候補を安全に足せるかを見る。
+
 ## Risks
 
 | risk | impact | handling |
