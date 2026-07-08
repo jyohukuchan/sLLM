@@ -19640,7 +19640,7 @@ fn package_token_ids_mixed_request_state_smoke_impl(
         .ok_or_else(|| "mixed request-state total token count overflows".to_string())?;
 
     Ok(format!(
-        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} full_mixed_request_state=true request_state_dispatch=true throughput_row=false batching_mode=request_state_interleaved prefill_real_batch=false decode_real_batch=false prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} full_mixed_request_state=true request_state_dispatch=true throughput_row=false batching_mode=request_state_interleaved prefill_real_batch=false decode_real_batch=false prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
         path,
         layer_indices,
         usize_csv(&layer_indices),
@@ -43008,8 +43008,63 @@ struct PackageAq4ResidentMatvec {
     index_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     scale_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     codebook_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
-    scale_values_buffer: ullm_runtime_sys::RuntimeBuffer,
-    row_scale_buffer: Option<ullm_runtime_sys::RuntimeBuffer>,
+    scale_values_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    row_scale_buffer: Option<std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>>,
+}
+
+#[derive(Default)]
+struct PackageResidentSharedBufferRegistry {
+    buffers: std::collections::BTreeMap<String, std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>>,
+}
+
+impl PackageResidentSharedBufferRegistry {
+    fn new() -> Self {
+        Self {
+            buffers: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn f32_buffer(
+        &mut self,
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        key: String,
+        values: &[f32],
+        label: &str,
+    ) -> Result<std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>, String> {
+        if let Some(buffer) = self.buffers.get(&key) {
+            return Ok(buffer.clone());
+        }
+        let mut buffer = context
+            .alloc_buffer(checked_f32_byte_len(values.len(), label)?)
+            .map_err(|err| format!("failed to allocate shared {label}: {err}"))?;
+        buffer
+            .copy_from_host(0, &encode_f32_to_bytes(values), Some(stream))
+            .map_err(|err| format!("failed to copy shared {label}: {err}"))?;
+        let buffer = std::sync::Arc::new(buffer);
+        self.buffers.insert(key, buffer.clone());
+        Ok(buffer)
+    }
+}
+
+fn package_resident_f32_buffer(
+    context: &mut ullm_runtime_sys::RuntimeContext,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    shared_buffers: &mut Option<&mut PackageResidentSharedBufferRegistry>,
+    key: String,
+    values: &[f32],
+    label: &str,
+) -> Result<std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>, String> {
+    if let Some(shared) = shared_buffers.as_mut() {
+        return shared.f32_buffer(context, stream, key, values, label);
+    }
+    let mut buffer = context
+        .alloc_buffer(checked_f32_byte_len(values.len(), label)?)
+        .map_err(|err| format!("failed to allocate {label}: {err}"))?;
+    buffer
+        .copy_from_host(0, &encode_f32_to_bytes(values), Some(stream))
+        .map_err(|err| format!("failed to copy {label}: {err}"))?;
+    Ok(std::sync::Arc::new(buffer))
 }
 
 static AQ4_MATVEC_PREWARMED: AtomicBool = AtomicBool::new(false);
@@ -43579,6 +43634,26 @@ impl PackageAq4ResidentMatvec {
         tensor_name: &str,
         chunk_bytes: usize,
     ) -> Result<Self, String> {
+        Self::load_with_shared_buffers(
+            context,
+            stream,
+            registry,
+            None,
+            path,
+            tensor_name,
+            chunk_bytes,
+        )
+    }
+
+    fn load_with_shared_buffers(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        mut shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        path: &str,
+        tensor_name: &str,
+        chunk_bytes: usize,
+    ) -> Result<Self, String> {
         let selector = TensorSelector::Name(tensor_name.to_string());
         let bundle = select_tensor_payload_bundle(path, &selector)
             .map_err(|err| format!("failed to select tensor payloads for {tensor_name}: {err}"))?;
@@ -43613,18 +43688,31 @@ impl PackageAq4ResidentMatvec {
         })?;
         let (rows, cols) = matrix_shape_rows_cols(&loaded.shape, materialize.elements)
             .map_err(|err| format!("invalid shape for {tensor_name}: {err}"))?;
-        let mut scale_values_buffer = context
-            .alloc_buffer(materialize.scale_values.len() * std::mem::size_of::<f32>())
-            .map_err(|err| {
-                format!("failed to allocate AQ4 scale values for {tensor_name}: {err}")
-            })?;
-        scale_values_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&materialize.scale_values),
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to copy AQ4 scale values for {tensor_name}: {err}"))?;
+        let scale_values_buffer = if let Some(shared) = shared_buffers.as_mut() {
+            shared.f32_buffer(
+                context,
+                stream,
+                format!("aq4-scale-values:{tensor_name}"),
+                &materialize.scale_values,
+                &format!("AQ4 scale values for {tensor_name}"),
+            )?
+        } else {
+            let mut buffer = context
+                .alloc_buffer(materialize.scale_values.len() * std::mem::size_of::<f32>())
+                .map_err(|err| {
+                    format!("failed to allocate AQ4 scale values for {tensor_name}: {err}")
+                })?;
+            buffer
+                .copy_from_host(
+                    0,
+                    &encode_f32_to_bytes(&materialize.scale_values),
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!("failed to copy AQ4 scale values for {tensor_name}: {err}")
+                })?;
+            std::sync::Arc::new(buffer)
+        };
 
         let mut row_scale_buffer = None;
         if !bundle.row_scale_overrides.is_empty() {
@@ -43638,15 +43726,25 @@ impl PackageAq4ResidentMatvec {
                 }
                 row_scales[entry.row_index] *= entry.scale;
             }
-            let mut buffer = context
-                .alloc_buffer(rows * std::mem::size_of::<f32>())
-                .map_err(|err| {
-                    format!("failed to allocate row scale buffer for {tensor_name}: {err}")
-                })?;
-            buffer
-                .copy_from_host(0, &encode_f32_to_bytes(&row_scales), Some(stream))
-                .map_err(|err| format!("failed to copy row scales for {tensor_name}: {err}"))?;
-            row_scale_buffer = Some(buffer);
+            row_scale_buffer = Some(if let Some(shared) = shared_buffers.as_mut() {
+                shared.f32_buffer(
+                    context,
+                    stream,
+                    format!("aq4-row-scale:{tensor_name}"),
+                    &row_scales,
+                    &format!("AQ4 row scales for {tensor_name}"),
+                )?
+            } else {
+                let mut buffer = context
+                    .alloc_buffer(rows * std::mem::size_of::<f32>())
+                    .map_err(|err| {
+                        format!("failed to allocate row scale buffer for {tensor_name}: {err}")
+                    })?;
+                buffer
+                    .copy_from_host(0, &encode_f32_to_bytes(&row_scales), Some(stream))
+                    .map_err(|err| format!("failed to copy row scales for {tensor_name}: {err}"))?;
+                std::sync::Arc::new(buffer)
+            });
         }
 
         Ok(Self {
@@ -43664,6 +43762,14 @@ impl PackageAq4ResidentMatvec {
         })
     }
 
+    fn scale_values_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
+        self.scale_values_buffer.as_ref()
+    }
+
+    fn row_scale_buffer(&self) -> Option<&ullm_runtime_sys::RuntimeBuffer> {
+        self.row_scale_buffer.as_deref()
+    }
+
     fn row_f32(
         &self,
         row_index: usize,
@@ -43675,8 +43781,8 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.scale_values_buffer(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43701,9 +43807,9 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
+            self.scale_values_buffer(),
             input_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43728,9 +43834,9 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
+            self.scale_values_buffer(),
             input_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43756,9 +43862,9 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
+            self.scale_values_buffer(),
             input_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43784,10 +43890,10 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
+            self.scale_values_buffer(),
             input_buffer,
             residual_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43819,8 +43925,8 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.scale_values_buffer(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43828,8 +43934,8 @@ impl PackageAq4ResidentMatvec {
             right.index_buffer.as_ref(),
             right.scale_buffer.as_ref(),
             right.codebook_buffer.as_ref(),
-            &right.scale_values_buffer,
-            right.row_scale_buffer.as_ref(),
+            right.scale_values_buffer(),
+            right.row_scale_buffer(),
             right.scale_count,
             right.group_size,
             right.tensor_scale,
@@ -43876,8 +43982,8 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.scale_values_buffer(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43885,8 +43991,8 @@ impl PackageAq4ResidentMatvec {
             second.index_buffer.as_ref(),
             second.scale_buffer.as_ref(),
             second.codebook_buffer.as_ref(),
-            &second.scale_values_buffer,
-            second.row_scale_buffer.as_ref(),
+            second.scale_values_buffer(),
+            second.row_scale_buffer(),
             second.scale_count,
             second.group_size,
             second.tensor_scale,
@@ -43894,8 +44000,8 @@ impl PackageAq4ResidentMatvec {
             third.index_buffer.as_ref(),
             third.scale_buffer.as_ref(),
             third.codebook_buffer.as_ref(),
-            &third.scale_values_buffer,
-            third.row_scale_buffer.as_ref(),
+            third.scale_values_buffer(),
+            third.row_scale_buffer(),
             third.scale_count,
             third.group_size,
             third.tensor_scale,
@@ -43961,8 +44067,8 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.scale_values_buffer(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43970,8 +44076,8 @@ impl PackageAq4ResidentMatvec {
             z.index_buffer.as_ref(),
             z.scale_buffer.as_ref(),
             z.codebook_buffer.as_ref(),
-            &z.scale_values_buffer,
-            z.row_scale_buffer.as_ref(),
+            z.scale_values_buffer(),
+            z.row_scale_buffer(),
             z.scale_count,
             z.group_size,
             z.tensor_scale,
@@ -43979,8 +44085,8 @@ impl PackageAq4ResidentMatvec {
             a.index_buffer.as_ref(),
             a.scale_buffer.as_ref(),
             a.codebook_buffer.as_ref(),
-            &a.scale_values_buffer,
-            a.row_scale_buffer.as_ref(),
+            a.scale_values_buffer(),
+            a.row_scale_buffer(),
             a.scale_count,
             a.group_size,
             a.tensor_scale,
@@ -43988,8 +44094,8 @@ impl PackageAq4ResidentMatvec {
             b.index_buffer.as_ref(),
             b.scale_buffer.as_ref(),
             b.codebook_buffer.as_ref(),
-            &b.scale_values_buffer,
-            b.row_scale_buffer.as_ref(),
+            b.scale_values_buffer(),
+            b.row_scale_buffer(),
             b.scale_count,
             b.group_size,
             b.tensor_scale,
@@ -44053,8 +44159,8 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.scale_values_buffer(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -44062,8 +44168,8 @@ impl PackageAq4ResidentMatvec {
             up.index_buffer.as_ref(),
             up.scale_buffer.as_ref(),
             up.codebook_buffer.as_ref(),
-            &up.scale_values_buffer,
-            up.row_scale_buffer.as_ref(),
+            up.scale_values_buffer(),
+            up.row_scale_buffer(),
             up.scale_count,
             up.group_size,
             up.tensor_scale,
@@ -44099,8 +44205,8 @@ impl PackageAq4ResidentMatvec {
             self.index_buffer.as_ref(),
             self.scale_buffer.as_ref(),
             self.codebook_buffer.as_ref(),
-            &self.scale_values_buffer,
-            self.row_scale_buffer.as_ref(),
+            self.scale_values_buffer(),
+            self.row_scale_buffer(),
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -44108,8 +44214,8 @@ impl PackageAq4ResidentMatvec {
             b.index_buffer.as_ref(),
             b.scale_buffer.as_ref(),
             b.codebook_buffer.as_ref(),
-            &b.scale_values_buffer,
-            b.row_scale_buffer.as_ref(),
+            b.scale_values_buffer(),
+            b.row_scale_buffer(),
             b.scale_count,
             b.group_size,
             b.tensor_scale,
@@ -44162,10 +44268,10 @@ struct PackageSelfAttnResidentStepLayer {
     cache_blocks: usize,
     written_len: usize,
     q_projection_layout: PackageSelfAttnQProjectionLayout,
-    input_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
-    q_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
-    k_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
-    post_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    input_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    q_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    k_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    post_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     block_table_buffer: ullm_runtime_sys::RuntimeBuffer,
     q_matrix: PackageAq4ResidentMatvec,
     k_matrix: PackageAq4ResidentMatvec,
@@ -44211,6 +44317,7 @@ impl PackageSelfAttnResidentStepLayer {
             context,
             stream,
             &mut registry,
+            None,
             path,
             chunk_bytes,
             layer_index,
@@ -44225,6 +44332,7 @@ impl PackageSelfAttnResidentStepLayer {
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         registry: &mut WeightRegistry,
+        mut shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
         path: &str,
         chunk_bytes: usize,
         layer_index: usize,
@@ -44263,58 +44371,65 @@ impl PackageSelfAttnResidentStepLayer {
         let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
         post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
 
-        let q_matrix = PackageAq4ResidentMatvec::load(
+        let q_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &q_tensor,
             chunk_bytes,
         )?;
-        let k_matrix = PackageAq4ResidentMatvec::load(
+        let k_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &k_tensor,
             chunk_bytes,
         )?;
-        let v_matrix = PackageAq4ResidentMatvec::load(
+        let v_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &v_tensor,
             chunk_bytes,
         )?;
-        let o_matrix = PackageAq4ResidentMatvec::load(
+        let o_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &o_tensor,
             chunk_bytes,
         )?;
-        let mlp_gate_matrix = PackageAq4ResidentMatvec::load(
+        let mlp_gate_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &gate_tensor,
             chunk_bytes,
         )?;
-        let mlp_up_matrix = PackageAq4ResidentMatvec::load(
+        let mlp_up_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &up_tensor,
             chunk_bytes,
         )?;
-        let mlp_down_matrix = PackageAq4ResidentMatvec::load(
+        let mlp_down_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &down_tensor,
             chunk_bytes,
@@ -44436,18 +44551,38 @@ impl PackageSelfAttnResidentStepLayer {
         let intermediate_bytes =
             checked_f32_byte_len(intermediate, "self-attn resident intermediate")?;
 
-        let mut input_norm_weight_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate self-attn resident input norm weight: {err}")
-        })?;
-        let mut q_norm_weight_buffer = context
-            .alloc_buffer(checked_f32_byte_len(head_dim, "self-attn q norm")?)
-            .map_err(|err| format!("failed to allocate self-attn resident q norm weight: {err}"))?;
-        let mut k_norm_weight_buffer = context
-            .alloc_buffer(checked_f32_byte_len(head_dim, "self-attn k norm")?)
-            .map_err(|err| format!("failed to allocate self-attn resident k norm weight: {err}"))?;
-        let mut post_norm_weight_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
-            format!("failed to allocate self-attn resident post norm weight: {err}")
-        })?;
+        let input_norm_weight_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("self-attn-input-norm:{input_norm_tensor}"),
+            &input_norm.values,
+            "self-attn resident input norm weight",
+        )?;
+        let q_norm_weight_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("self-attn-q-norm:{q_norm_tensor}"),
+            &q_norm.values,
+            "self-attn resident q norm weight",
+        )?;
+        let k_norm_weight_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("self-attn-k-norm:{k_norm_tensor}"),
+            &k_norm.values,
+            "self-attn resident k norm weight",
+        )?;
+        let post_norm_weight_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("self-attn-post-norm:{post_norm_tensor}"),
+            &post_norm.values,
+            "self-attn resident post norm weight",
+        )?;
         let mut block_table_buffer = context
             .alloc_buffer(block_table.len() * std::mem::size_of::<u32>())
             .map_err(|err| format!("failed to allocate self-attn resident block table: {err}"))?;
@@ -44515,18 +44650,6 @@ impl PackageSelfAttnResidentStepLayer {
             .alloc_buffer(hidden_bytes)
             .map_err(|err| format!("failed to allocate self-attn resident layer output: {err}"))?;
 
-        input_norm_weight_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&input_norm.values), Some(stream))
-            .map_err(|err| format!("failed to copy self-attn resident input norm: {err}"))?;
-        q_norm_weight_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&q_norm.values), Some(stream))
-            .map_err(|err| format!("failed to copy self-attn resident q norm: {err}"))?;
-        k_norm_weight_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&k_norm.values), Some(stream))
-            .map_err(|err| format!("failed to copy self-attn resident k norm: {err}"))?;
-        post_norm_weight_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&post_norm.values), Some(stream))
-            .map_err(|err| format!("failed to copy self-attn resident post norm: {err}"))?;
         block_table_buffer
             .copy_from_host(0, &encode_u32_to_bytes(block_table), Some(stream))
             .map_err(|err| format!("failed to copy self-attn resident block table: {err}"))?;
@@ -45098,13 +45221,13 @@ struct PackageLinearAttnResidentStepLayer {
     q_scale: f32,
     qk_l2_norm: bool,
     kernel_size: usize,
-    input_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
-    conv_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    input_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    conv_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
-    a_log_buffer: ullm_runtime_sys::RuntimeBuffer,
-    dt_bias_buffer: ullm_runtime_sys::RuntimeBuffer,
-    attn_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
-    post_norm_weight_buffer: ullm_runtime_sys::RuntimeBuffer,
+    a_log_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    dt_bias_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    attn_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    post_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     qkv_matrix: PackageAq4ResidentMatvec,
     a_matrix: PackageAq4ResidentMatvec,
     b_matrix: PackageAq4ResidentMatvec,
@@ -45151,6 +45274,7 @@ impl PackageLinearAttnResidentStepLayer {
             context,
             stream,
             &mut registry,
+            None,
             path,
             chunk_bytes,
             layer_index,
@@ -45161,6 +45285,7 @@ impl PackageLinearAttnResidentStepLayer {
         context: &mut ullm_runtime_sys::RuntimeContext,
         stream: &mut ullm_runtime_sys::RuntimeStream,
         registry: &mut WeightRegistry,
+        mut shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
         path: &str,
         chunk_bytes: usize,
         layer_index: usize,
@@ -45269,66 +45394,74 @@ impl PackageLinearAttnResidentStepLayer {
         let post_norm_weight_values =
             effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
 
-        let qkv_matrix = PackageAq4ResidentMatvec::load(
+        let qkv_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &qkv_tensor,
             chunk_bytes,
         )?;
-        let a_matrix = PackageAq4ResidentMatvec::load(
+        let a_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &a_tensor,
             chunk_bytes,
         )?;
-        let b_matrix = PackageAq4ResidentMatvec::load(
+        let b_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &b_tensor,
             chunk_bytes,
         )?;
-        let z_matrix = PackageAq4ResidentMatvec::load(
+        let z_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &z_tensor,
             chunk_bytes,
         )?;
-        let out_matrix = PackageAq4ResidentMatvec::load(
+        let out_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &out_tensor,
             chunk_bytes,
         )?;
-        let mlp_gate_matrix = PackageAq4ResidentMatvec::load(
+        let mlp_gate_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &gate_tensor,
             chunk_bytes,
         )?;
-        let mlp_up_matrix = PackageAq4ResidentMatvec::load(
+        let mlp_up_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &up_tensor,
             chunk_bytes,
         )?;
-        let mlp_down_matrix = PackageAq4ResidentMatvec::load(
+        let mlp_down_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
             context,
             stream,
             registry,
+            shared_buffers.as_deref_mut(),
             path,
             &down_tensor,
             chunk_bytes,
@@ -45397,45 +45530,54 @@ impl PackageLinearAttnResidentStepLayer {
             })?;
         let state_bytes = checked_f32_byte_len(state_elements, "linear-attn resident state")?;
 
-        let mut a_log_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                a_log.values.len(),
-                "linear-attn resident A_log",
-            )?)
-            .map_err(|err| format!("failed to allocate linear-attn resident A_log: {err}"))?;
-        let mut dt_bias_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                dt_bias.values.len(),
-                "linear-attn resident dt_bias",
-            )?)
-            .map_err(|err| format!("failed to allocate linear-attn resident dt_bias: {err}"))?;
-        let mut input_norm_weight_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                input_norm_weight_values.len(),
-                "linear-attn resident input norm weight",
-            )?)
-            .map_err(|err| {
-                format!("failed to allocate linear-attn resident input norm weight: {err}")
-            })?;
-        let mut post_norm_weight_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                post_norm_weight_values.len(),
-                "linear-attn resident post norm weight",
-            )?)
-            .map_err(|err| {
-                format!("failed to allocate linear-attn resident post norm weight: {err}")
-            })?;
-        let mut attn_norm_weight_buffer = context
-            .alloc_buffer(checked_f32_byte_len(
-                attn_norm.values.len(),
-                "linear-attn resident attention norm weight",
-            )?)
-            .map_err(|err| {
-                format!("failed to allocate linear-attn resident attention norm weight: {err}")
-            })?;
-        let mut conv_weight_buffer = context
-            .alloc_buffer(conv_history_bytes)
-            .map_err(|err| format!("failed to allocate linear-attn resident conv weight: {err}"))?;
+        let a_log_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("linear-attn-a-log:{a_log_tensor}"),
+            &a_log.values,
+            "linear-attn resident A_log",
+        )?;
+        let dt_bias_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("linear-attn-dt-bias:{dt_bias_tensor}"),
+            &dt_bias.values,
+            "linear-attn resident dt_bias",
+        )?;
+        let input_norm_weight_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("linear-attn-input-norm:{input_norm_tensor}"),
+            &input_norm_weight_values,
+            "linear-attn resident input norm weight",
+        )?;
+        let post_norm_weight_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("linear-attn-post-norm:{post_norm_tensor}"),
+            &post_norm_weight_values,
+            "linear-attn resident post norm weight",
+        )?;
+        let attn_norm_weight_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("linear-attn-attn-norm:{norm_tensor}"),
+            &attn_norm.values,
+            "linear-attn resident attention norm weight",
+        )?;
+        let conv_weight_buffer = package_resident_f32_buffer(
+            context,
+            stream,
+            &mut shared_buffers,
+            format!("linear-attn-conv-weight:{conv_tensor}"),
+            &conv.values,
+            "linear-attn resident conv weight",
+        )?;
         let mut conv_history_buffer = context.alloc_buffer(conv_history_bytes).map_err(|err| {
             format!("failed to allocate linear-attn resident conv history: {err}")
         })?;
@@ -45500,34 +45642,6 @@ impl PackageLinearAttnResidentStepLayer {
             format!("failed to allocate linear-attn resident layer output: {err}")
         })?;
 
-        a_log_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&a_log.values), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident A_log: {err}"))?;
-        dt_bias_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&dt_bias.values), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident dt_bias: {err}"))?;
-        input_norm_weight_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&input_norm_weight_values),
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to copy linear-attn resident input norm: {err}"))?;
-        post_norm_weight_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&post_norm_weight_values),
-                Some(stream),
-            )
-            .map_err(|err| format!("failed to copy linear-attn resident post norm: {err}"))?;
-        attn_norm_weight_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&attn_norm.values), Some(stream))
-            .map_err(|err| {
-                format!("failed to copy linear-attn resident attention norm weight: {err}")
-            })?;
-        conv_weight_buffer
-            .copy_from_host(0, &encode_f32_to_bytes(&conv.values), Some(stream))
-            .map_err(|err| format!("failed to copy linear-attn resident conv weight: {err}"))?;
         conv_history_buffer
             .copy_from_host(
                 0,
@@ -46064,11 +46178,13 @@ impl PackageSelfAttnResidentStepBatchLayer {
         let mut head_dim = None;
         let mut value_dim = None;
         let mut registry = WeightRegistry::new();
+        let mut shared_buffers = PackageResidentSharedBufferRegistry::new();
         for request_id in &request_ids {
             let layer = PackageSelfAttnResidentStepLayer::load_with_registry(
                 context,
                 stream,
                 &mut registry,
+                Some(&mut shared_buffers),
                 path,
                 chunk_bytes,
                 layer_index,
@@ -46337,11 +46453,13 @@ impl PackageLinearAttnResidentStepBatchLayer {
         let mut layers = Vec::with_capacity(request_ids.len());
         let mut hidden = None;
         let mut registry = WeightRegistry::new();
+        let mut shared_buffers = PackageResidentSharedBufferRegistry::new();
         for request_id in &request_ids {
             let layer = PackageLinearAttnResidentStepLayer::load_with_registry(
                 context,
                 stream,
                 &mut registry,
+                Some(&mut shared_buffers),
                 path,
                 chunk_bytes,
                 layer_index,

@@ -3524,6 +3524,47 @@ Inventory:
 2. workspace/state/cacheを分離したまま、weight-only resident bundleをlayerごとに1つへ寄せる。
 3. request-batch stepをreal batch executorへ置き換えてfull package throughput rowを作る。
 
+## 2026-07-09 progress: T1 mixed request-state scale/passthrough sharing
+
+前回の要点:
+
+- `manifest-all` full mixed request-state smokeは、AQ4 index/scale/codebook payload bufferのslot間共有まで通っていた。
+- ただしAQ4 `scale_values_buffer`、row-scale buffer、RMSNorm/Conv1d/A_log/dt_biasなどのpassthrough weight bufferはまだslotごとに確保していた。
+- full package real throughputへ進む前に、少なくとも不変weight bufferとrequest別state/cache/workspaceの境界を分ける必要があった。
+
+今回の変更点:
+
+- `PackageResidentSharedBufferRegistry` を追加し、同一batch layer内のrequest slot間でf32 runtime bufferを共有するようにした。
+- `PackageAq4ResidentMatvec::load_with_shared_buffers` をbatch loaderから使い、AQ4 `scale_values_buffer` とrow-scale bufferもslot間共有へ寄せた。
+- self-attention側はinput/q/k/post RMSNorm weight bufferを共有する。
+- linear-attention側はinput/post RMSNorm、linear-attn norm、Conv1d weight、A_log、dt_bias bufferを共有する。
+- smoke出力に `slot_aq4_scale_values_shared=true` と `slot_passthrough_weight_buffers_shared=true` を追加した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-mixed-request-state-scale-passthrough-sharing-v1.md` に保存した。
+
+実測値:
+
+| field | payload shared | scale/passthrough shared |
+| --- | ---: | ---: |
+| final top1 tokens | `44370,5446` | `44370,5446` |
+| layer load ms | 17828.586114 | 16240.561131 |
+| total wall ms | 18452.035174 | 16859.363507 |
+| slot AQ4 payload registry shared | `true` | `true` |
+| slot AQ4 scale values shared | n/a | `true` |
+| slot passthrough weight buffers shared | n/a | `true` |
+| verified | `true` | `true` |
+
+判断:
+
+- 同一layer内のrequest slot間でAQ4 payload、AQ4 scale/row-scale、主要passthrough weight bufferを共有する境界は通った。
+- これはまだ完全なweight-only resident bundleではない。workspace、Conv1d history、recurrent state、paged KV cache、block tableはrequest slot別である。
+- `prefill_real_batch=false` / `decode_real_batch=false` のままなので、SQ/vLLM throughput比較には使わない。
+
+次の行動:
+
+1. weight-only resident bundleをlayerごとに1つへ寄せ、slot別state/cache/workspaceとの境界を明示する。
+2. request-batch stepをreal batch executorへ置き換えてfull package throughput rowを作る。
+3. SQ候補をfull mixed pathへ接続する準備を続ける。
+
 ## Risks
 
 | risk | impact | handling |
