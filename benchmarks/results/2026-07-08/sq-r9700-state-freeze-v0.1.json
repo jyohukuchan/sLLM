@@ -89,7 +89,8 @@
     "T2: keep layer19 down_proj row-block64 as a failure guard; current passing branch remains selected-layer-ko-layer3-down64-plus-layer11-down64",
     "T2: keep selected-layer-ko-layer3-down64-layer11-down64-plus-layer23-down64 as the current passing branch",
     "T2: keep layer23 up_proj row-block32 and row-block16 as failure guards",
-    "T2: probe layer23 gate_proj row-block32 on top of the current passing branch"
+    "T2: keep selected-layer-ko-layer3-down64-layer11-down64-plus-layer23-gate32-down64 as the current passing branch",
+    "T2: probe layer11 gate_proj row-block32 on top of the current passing branch"
   ],
   "schema_version": "sq-r9700-state-freeze-v0.1",
   "sq_candidate": {
@@ -691,6 +692,17 @@
       "benchmarks/results/2026-07-09/sq-fp8-selected-layer-ko-plus-layer3-o32-down64-plus-layer11-down64-plus-layer23-down64-up32-policy-artifact-v0.1.json",
       "benchmarks/results/2026-07-09/sq-fp8-selected-layer-ko-plus-layer3-o32-down64-plus-layer11-down64-plus-layer23-down64-up16-policy-artifact-v0.1.json"
     ],
-    "t2_sq_selected_layer_ko_layer23_up_scale_note": "R9700 model-loop prompt bundle shows selected-layer-ko-layer23-up32 and selected-layer-ko-layer23-up16 both pass only 2/3 strict top1. len4 changes from AQ4 110784 to SQ 102446, with AQ4 top1 at SQ top8 rank 2. Keep selected-layer-ko-layer3-down64-layer11-down64-plus-layer23-down64 as the current passing branch and keep layer23 up_proj row-block32/16 as failure guards. These are selected-layer model-loop guards, not final full LM throughput."
+    "t2_sq_selected_layer_ko_layer23_up_scale_note": "R9700 model-loop prompt bundle shows selected-layer-ko-layer23-up32 and selected-layer-ko-layer23-up16 both pass only 2/3 strict top1. len4 changes from AQ4 110784 to SQ 102446, with AQ4 top1 at SQ top8 rank 2. Keep selected-layer-ko-layer3-down64-layer11-down64-plus-layer23-down64 as the current passing branch and keep layer23 up_proj row-block32/16 as failure guards. These are selected-layer model-loop guards, not final full LM throughput.",
+    "t2_sq_selected_layer_ko_layer23_gate32": "partial_done_layer23_gate32_joins_current_branch",
+    "t2_sq_selected_layer_ko_layer23_gate32_artifact": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer23-gate-scale-v1.md",
+    "t2_sq_selected_layer_ko_layer23_gate32_comparison_json": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer23-gate-scale-v1/comparison.json",
+    "t2_sq_selected_layer_ko_layer23_gate32_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-selected-layer-ko-layer23-gate-scale-v1/results.jsonl",
+    "t2_sq_selected_layer_ko_layer23_gate32_policy_jsons": [
+      "benchmarks/results/2026-07-09/sq-fp8-selected-layer-ko-plus-layer3-o32-down64-plus-layer11-down64-plus-layer23-down64-gate32-policy-v0.1.json"
+    ],
+    "t2_sq_selected_layer_ko_layer23_gate32_policy_artifact_jsons": [
+      "benchmarks/results/2026-07-09/sq-fp8-selected-layer-ko-plus-layer3-o32-down64-plus-layer11-down64-plus-layer23-down64-gate32-policy-artifact-v0.1.json"
+    ],
+    "t2_sq_selected_layer_ko_layer23_gate32_note": "R9700 model-loop prompt bundle shows selected-layer-ko-layer23-gate32 passes 3/3 strict top1 with final_top1_tokens=[110784,237950,182949]. The 17-tensor branch becomes the current passing branch: layer3 k16/o32/up32/down64 plus layer11 k16/o32/down64 plus layer23 k16/o32/gate32/down64 plus layers 7/15/19 k16/o32. Layer23 up_proj row-block32/16 remains a failure guard. These are selected-layer model-loop guards, not final full LM throughput."
   }
 }
