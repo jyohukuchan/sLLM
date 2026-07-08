@@ -3247,6 +3247,36 @@ Quality:
 2. layer19 `up_proj` row-block32/16とlayer19 `down_proj` row-block64をfailure guardとして残す。
 3. 現在のselected-layer MLP probe setでは、追加でpromoteできる候補がほぼ尽きたため、次はT1 full-package real request-batch throughput runnerへ戻るか、T2をselected layer外へ広げる。
 
+## 2026-07-09 progress: T1 self-attn stack real-batch small grid
+
+前回の要点:
+
+- T1のtoken-id model-loopはselected-layer bridgeとして動いていたが、full packageにはself-attention層とlinear-attention層が混在している。
+- 既存runnerはmixed-attention full layer orderを推定できず、`all` をfull packageとして扱うことはできなかった。
+- SQ throughput比較の前には、少なくともreal request-batch prefill/decode/end-to-end rowを増やす必要があった。
+
+今回の変更点:
+
+- `package-token-ids-model-loop-smoke` と `sq-fp8-token-ids-model-loop-smoke` に `all-self-attn` / `manifest-self-attn` aliasを追加した。
+- aliasはmanifest内のself-attention `q_norm` / `k_norm` passthrough tensor集合からlayer indexを抽出する。
+- R9700 AQ4 packageでmanifest self-attention 8層 `3,7,11,15,19,23,27,31` を `batch=1/4/8`、`prompt=4`、`generated=1` で測定した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-self-attn-stack-real-batch-small-grid-v1.md` に保存した。
+
+実測値:
+
+| batch | batching | prefill real batch | decode real batch | prefill tok/s | decode tok/s | end-to-end tok/s | VRAM consumed bytes |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | `hybrid` | false | false | 74.066673 | 70.654751 | 73.358179 | 7435599872 |
+| 4 | `real` | true | true | 73.537780 | 71.298348 | 73.078709 | 7435612160 |
+| 8 | `real` | true | true | 73.326934 | 71.010893 | 72.851718 | 7563571200 |
+
+判断:
+
+- Self-attention stack上では、`batch=4/8` で `prefill_real_batch=true` と `decode_real_batch=true` を保存できた。
+- この短い `prompt=4` 条件ではbatchを増やしてもtotal tok/sは伸びず、B=1からB=8までほぼ横ばいだった。
+- これはmanifest self-attention層だけの中間rowであり、linear-attention層を含むQwen3.5-9B full mixed-attention LM throughputではない。
+- 次のT1本命は、linear-attention層を含むfull mixed-attention package real-batch runnerである。
+
 ## Risks
 
 | risk | impact | handling |

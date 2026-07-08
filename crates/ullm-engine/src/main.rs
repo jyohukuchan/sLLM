@@ -38,8 +38,8 @@ use ullm_engine::loader::{
     validate_passthrough_shape_elements,
 };
 use ullm_engine::package::{
-    ReferencedFile, ReferencedFileRole, TensorSelector, list_tensor_payload_bundles,
-    select_passthrough_payload_bundle, select_tensor_payload_bundle,
+    ReferencedFile, ReferencedFileRole, TensorSelector, list_passthrough_payload_bundles,
+    list_tensor_payload_bundles, select_passthrough_payload_bundle, select_tensor_payload_bundle,
 };
 use ullm_engine::qwen3_loader::{
     Qwen3PackageModelDecodePlan, Qwen3PackageModelRuntime, Qwen3PackageModelStackRequest,
@@ -18536,6 +18536,75 @@ mod package_model_loop_cli_tail_tests {
     fn package_model_loop_cli_tail_rejects_empty_layer_csv_entry() {
         assert!(parse_tail([Some("3,,7"), None, None, None, None, None]).is_err());
     }
+
+    #[test]
+    fn package_model_loop_self_attn_layers_from_manifest_are_sorted() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-model-loop-self-attn-layers-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("passthrough")).unwrap();
+        for name in ["q3.raw", "k3.raw", "q7.raw", "k7.raw", "linear.raw"] {
+            std::fs::write(root.join("passthrough").join(name), [0_u8; 4]).unwrap();
+        }
+        std::fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "schema_version": "test",
+              "passthrough_tensors": [
+                {
+                  "name": "model.language_model.layers.7.self_attn.q_norm.weight",
+                  "dtype": "F32",
+                  "shape": [1],
+                  "elements": 1,
+                  "payload_bytes": 4,
+                  "payload_file": "passthrough/q7.raw"
+                },
+                {
+                  "name": "model.language_model.layers.3.self_attn.q_norm.weight",
+                  "dtype": "F32",
+                  "shape": [1],
+                  "elements": 1,
+                  "payload_bytes": 4,
+                  "payload_file": "passthrough/q3.raw"
+                },
+                {
+                  "name": "model.language_model.layers.7.self_attn.k_norm.weight",
+                  "dtype": "F32",
+                  "shape": [1],
+                  "elements": 1,
+                  "payload_bytes": 4,
+                  "payload_file": "passthrough/k7.raw"
+                },
+                {
+                  "name": "model.language_model.layers.3.self_attn.k_norm.weight",
+                  "dtype": "F32",
+                  "shape": [1],
+                  "elements": 1,
+                  "payload_bytes": 4,
+                  "payload_file": "passthrough/k3.raw"
+                },
+                {
+                  "name": "model.language_model.layers.0.linear_attn.norm.weight",
+                  "dtype": "F32",
+                  "shape": [1],
+                  "elements": 1,
+                  "payload_bytes": 4,
+                  "payload_file": "passthrough/linear.raw"
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let layers = package_model_loop_self_attn_layer_indices(root.to_str().unwrap()).unwrap();
+        assert_eq!(layers, vec![3, 7]);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -18603,7 +18672,8 @@ fn package_token_ids_model_loop_smoke(
         }
         Err(code) => return code,
     };
-    let layer_indices = match parse_package_token_ids_model_loop_layer_indices(layer_indices) {
+    let layer_indices = match parse_package_token_ids_model_loop_layer_indices(&path, layer_indices)
+    {
         Ok(value) => value,
         Err(code) => return code,
     };
@@ -18709,7 +18779,8 @@ fn sq_fp8_token_ids_model_loop_smoke(
         }
         Err(code) => return code,
     };
-    let layer_indices = match parse_package_token_ids_model_loop_layer_indices(layer_indices) {
+    let layer_indices = match parse_package_token_ids_model_loop_layer_indices(&path, layer_indices)
+    {
         Ok(value) => value,
         Err(code) => return code,
     };
@@ -18790,6 +18861,7 @@ fn sq_fp8_token_ids_model_loop_smoke(
 }
 
 fn parse_package_token_ids_model_loop_layer_indices(
+    path: &str,
     value: Option<String>,
 ) -> Result<Vec<usize>, ExitCode> {
     let Some(raw) = value else {
@@ -18799,13 +18871,61 @@ fn parse_package_token_ids_model_loop_layer_indices(
     if raw.eq_ignore_ascii_case("default") {
         return Ok(vec![3, 7]);
     }
+    if matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "self-attn" | "self_attn" | "all-self-attn" | "all_self_attn" | "manifest-self-attn"
+    ) {
+        return package_model_loop_self_attn_layer_indices(path).map_err(|err| {
+            eprintln!("{err}");
+            ExitCode::from(2)
+        });
+    }
     if raw.eq_ignore_ascii_case("all") {
         eprintln!(
-            "package-token-ids-model-loop-smoke requires explicit self-attention layer indices; use default or a CSV such as 3,7"
+            "package-token-ids-model-loop-smoke cannot infer full mixed-attention layer order from all; use all-self-attn for manifest self-attention layers or a CSV such as 3,7"
         );
         return Err(ExitCode::from(2));
     }
     parse_usize_csv(raw, "model-loop token-id layer list")
+}
+
+fn package_model_loop_self_attn_layer_indices(path: &str) -> Result<Vec<usize>, String> {
+    let bundles = list_passthrough_payload_bundles(path)?;
+    let mut q_norm_layers = std::collections::BTreeSet::new();
+    let mut k_norm_layers = std::collections::BTreeSet::new();
+    for bundle in bundles {
+        if let Some(layer_index) = parse_language_model_layer_tensor_suffix(
+            &bundle.tensor_name,
+            ".self_attn.q_norm.weight",
+        ) {
+            q_norm_layers.insert(layer_index);
+        }
+        if let Some(layer_index) = parse_language_model_layer_tensor_suffix(
+            &bundle.tensor_name,
+            ".self_attn.k_norm.weight",
+        ) {
+            k_norm_layers.insert(layer_index);
+        }
+    }
+    if q_norm_layers.is_empty() {
+        return Err(format!(
+            "package {path} has no manifest self-attention q_norm layers"
+        ));
+    }
+    if q_norm_layers != k_norm_layers {
+        return Err(format!(
+            "package {path} has mismatched self-attention q_norm/k_norm layer sets: q_norm={:?} k_norm={:?}",
+            q_norm_layers, k_norm_layers
+        ));
+    }
+    Ok(q_norm_layers.into_iter().collect())
+}
+
+fn parse_language_model_layer_tensor_suffix(tensor_name: &str, suffix: &str) -> Option<usize> {
+    let layer = tensor_name
+        .strip_prefix("model.language_model.layers.")?
+        .strip_suffix(suffix)?;
+    layer.parse::<usize>().ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -40804,10 +40924,10 @@ fn print_help() {
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
     );
     eprintln!(
-        "package-token-ids-model-loop-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+        "package-token-ids-model-loop-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
-        "sq-fp8-token-ids-model-loop-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+        "sq-fp8-token-ids-model-loop-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "sq-fp8-token-ids-logits-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
