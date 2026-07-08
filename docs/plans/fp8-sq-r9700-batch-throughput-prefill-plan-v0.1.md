@@ -2603,6 +2603,41 @@ Quality:
 3. `o+gate` 同時追加を回復する場合は、row-block幅ではなく別scale layout、別dtype、またはtext-level acceptance guardの導入後に再評価する。
 4. full-package real batch throughputは引き続きT1aとして別に進める。
 
+## 2026-07-09 progress: T2 SQ FP8 model-loop layer7 o32 branch layer11
+
+前回の要点:
+
+- layer7 add-family probeでは、layer7 `o_proj` row-block32と `gate_proj` row-block32は個別に `3 / 3` strict top1を維持した。
+- `o32+gate32` は、row-block16化しても `case_a` のranking driftを回復しなかった。
+- `case_a` のtop1 marginは `o32` branchの方が `gate32` branchより広かったため、coverage拡張は `o32` branchから進める判断だった。
+
+今回の変更点:
+
+- layer3 `k_proj` row-block16 + layer3 `up_proj` row-block32 + layer7 `k_proj` row-block16 + layer7 `o_proj` row-block32を固定した。
+- layer11 `k_proj` row-block16を追加した5 tensor policyと、layer11 `k_proj` row-block16 + `o_proj` row-block32を追加した6 tensor policyを作成した。
+- R9700のsix-layer token-id model-loop prompt bundleで評価し、結果を `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-o32-branch-layer11-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| variant | FP8 tensors | pass | len4 SQ top1 | case_a SQ top1 | case_a AQ4 rank in SQ top8 | case_b SQ top1 | prefill tok/s | decode tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `layer7-o32-plus-layer11-k16` | 5 | 3 / 3 | 110784 | 237950 | 1 | 182949 | 33.188099 | 32.853465 |
+| `layer7-o32-plus-layer11-k16-o32` | 6 | 3 / 3 | 110784 | 237950 | 1 | 182949 | 31.492675 | 32.453352 |
+
+判断:
+
+- layer7 `o32` branchにlayer11 `k_proj` row-block16を足した5 tensor policyは、3 promptすべてでAQ4 top1を維持した。
+- layer11 `o_proj` row-block32も追加した6 tensor policyも、3 promptすべてでAQ4 top1を維持した。
+- 現在のpassing boundaryは、layer3 `k16/up32` + layer7 `k16/o32` + layer11 `k16/o32` まで広げられる。
+- この結果はselected-layer model-loop guardであり、full LM throughputや最終SQ性能とは扱わない。
+
+次の行動:
+
+1. 6 tensor版をpassing branchとして保持し、5 tensor版はrollback guardとして残す。
+2. 次は同じ `o32` branchでlayer15の `k_proj` row-block16、必要なら `o_proj` row-block32を追加して、どこでstrict top1が崩れるかを見る。
+3. layer7 `gate32` branchや `o32+gate32` 回復は、layer方向の広がりを一度見た後に戻る。
+4. full-package real batch throughputは引き続きT1aとして別に進める。
+
 ## Risks
 
 | risk | impact | handling |

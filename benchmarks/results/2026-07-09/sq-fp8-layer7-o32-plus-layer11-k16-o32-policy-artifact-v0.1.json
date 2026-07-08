@@ -1,0 +1,82 @@
+{
+  "schema_version": "sq-fp8-policy-artifact-result-v0.1",
+  "date": "2026-07-09",
+  "artifact_dir": "/tmp/ullm-sq-fp8-layer7-o32-plus-layer11-k16-o32-policy-v0.1-artifact",
+  "artifact_manifest": "/tmp/ullm-sq-fp8-layer7-o32-plus-layer11-k16-o32-policy-v0.1-artifact/sq_manifest.json",
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-layer7-o32-plus-layer11-k16-o32",
+  "policy_id": "layer7_o32_plus_layer11_k16_o32",
+  "source_policy_json": "benchmarks/results/2026-07-09/sq-fp8-layer7-o32-plus-layer11-k16-o32-policy-v0.1.json",
+  "source_model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "base_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+  "candidate": {
+    "activation_dtype": "bf16_or_f32",
+    "default_scale_block_cols": 32,
+    "default_scale_granularity": "row_block",
+    "id": "sq-fp8-w8a16-r9700-v0-layer7-o32-plus-layer11-k16-o32",
+    "scale_dtype": "f32",
+    "scale_granularity": "mixed",
+    "scale_layout": "per_tensor",
+    "weight_payload_dtype": "fp8_e4m3"
+  },
+  "storage": {
+    "artifact_disk_usage_bytes_approx": 110372057,
+    "artifact_file_count": 13,
+    "compact_resident_bytes_estimate": 19223378912,
+    "fp8_payload_bytes": 96468992,
+    "fp8_scale_bytes": 13631488,
+    "fp8_tensor_count": 6,
+    "materialized_working_set_bytes_estimate": 201326592,
+    "passthrough_source_bytes_estimate": 19113278432,
+    "passthrough_tensor_count": 769
+  },
+  "manifest_policy_block_present": true,
+  "fp8_tensor_scales": [
+    {
+      "name": "model.language_model.layers.11.self_attn.k_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 16,
+      "scale_elements": 262144,
+      "scale_override_id": "k-rowblock16"
+    },
+    {
+      "name": "model.language_model.layers.11.self_attn.o_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 32,
+      "scale_elements": 524288,
+      "scale_override_id": null
+    },
+    {
+      "name": "model.language_model.layers.3.mlp.up_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 32,
+      "scale_elements": 1572864,
+      "scale_override_id": null
+    },
+    {
+      "name": "model.language_model.layers.3.self_attn.k_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 16,
+      "scale_elements": 262144,
+      "scale_override_id": "k-rowblock16"
+    },
+    {
+      "name": "model.language_model.layers.7.self_attn.k_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 16,
+      "scale_elements": 262144,
+      "scale_override_id": "k-rowblock16"
+    },
+    {
+      "name": "model.language_model.layers.7.self_attn.o_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 32,
+      "scale_elements": 524288,
+      "scale_override_id": null
+    }
+  ],
+  "notes": [
+    "FP8 payload files are stored under /tmp and are not committed to git.",
+    "This compact result records policy-json to manifest generation for a layer7 o32 branch layer11 probe.",
+    "Throughput and quality are recorded in phase-t2-sq-fp8-token-id-model-loop-layer7-o32-branch-layer11-v1."
+  ]
+}
