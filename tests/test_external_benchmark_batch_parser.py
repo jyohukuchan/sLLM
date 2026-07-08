@@ -129,6 +129,58 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertIsNotNone(correctness)
         self.assertTrue(correctness["verified_all"])
 
+    def test_parses_component_prefill_real_batch_key_value_output(self) -> None:
+        stdout = (
+            'runtime-causal-attn-batch-smoke backend=hip device_index=2 '
+            'name="AMD Radeon Graphics" prefill_mode=cold '
+            'executor=causal_attn_batch_f32_flash2 batching_mode=real '
+            'batch_count=2 concurrent_requests=2 prompt_tokens_per_request=32 '
+            'prefill_total_input_tokens=64 q_heads=4 kv_heads=1 head_dim=16 value_dim=16 '
+            'estimated_prefill_attention_work_tokens=1056 measured_repeats=1 '
+            'wall_ms_mean=0.076391 wall_ms_min=0.076391 wall_ms_max=0.076391 '
+            'prefill_total_input_tps=837795.028210 attention_pair_tps_mean=13823617.965467 '
+            'request_parallelism=2 token_parallelism=32 verification=sampled sample_count=30 '
+            'sampled_max_abs_diff=0.000000008 verified=true'
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_component_prefill_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 1,
+                "concurrent_requests": 1,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+        TOOL.enrich_ullm_component_prefill_row(row, report)
+
+        self.assertEqual(report["command"], "runtime-causal-attn-batch-smoke")
+        self.assertEqual(report["name"], "AMD Radeon Graphics")
+        self.assertTrue(report["verified"])
+        self.assertEqual(metrics["prefill_total_input_tokens"], 64)
+        self.assertEqual(metrics["prefill_total_input_tokens_per_second"], 837795.028210)
+        self.assertEqual(metrics["attention_pair_tps_mean"], 13823617.965467)
+        self.assertEqual(metrics["decode_total_generated_tokens"], 0)
+        self.assertEqual(row["workload"]["batch_size"], 2)
+        self.assertEqual(row["workload"]["concurrent_requests"], 2)
+        self.assertEqual(row["workload"]["prefill_mode"], "cold")
+        self.assertEqual(row["workload"]["prompt_tokens_per_request"], [32, 32])
+        self.assertEqual(row["workload"]["new_prefill_tokens_per_request"], [32, 32])
+        self.assertEqual(row["workload"]["estimated_prefill_attention_work_tokens"], 1056)
+        self.assertEqual(row["batching"]["mode"], "real")
+        self.assertTrue(row["batching"]["prefill_real_batch"])
+        self.assertEqual(row["batching"]["prefill_executor_request_parallelism"], 2)
+        self.assertEqual(row["batching"]["prefill_executor_token_parallelism"], 32)
+
 
 if __name__ == "__main__":
     unittest.main()

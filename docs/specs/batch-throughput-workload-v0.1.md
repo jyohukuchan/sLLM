@@ -136,3 +136,22 @@ device-resident token-loop prefill path, set:
 ```
 
 This path reduces host boundaries but is still not real batch prefill.
+
+## Component Real-Batch Rows
+
+`tools/run-external-benchmark.py --parse ullm-component-prefill` can convert uLLM component prefill
+smoke output, such as `runtime-causal-attn-batch-smoke`, into the same
+`inference-benchmark-result-v0.1` JSONL schema.
+
+These rows may report:
+
+- `batching.mode = "real"`
+- `batching.prefill_real_batch = true`
+- `batching.prefill_executor_request_parallelism`
+- `batching.prefill_executor_token_parallelism`
+- `metrics.prefill_total_input_tokens_per_second`
+- `metrics.attention_pair_tps_mean`
+
+Component real-batch rows are useful for validating kernel-level request/token parallelism and
+schema preservation. They are not full package throughput rows until a package prefill/decode runner
+uses the same real-batch executor path.

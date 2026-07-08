@@ -248,6 +248,22 @@ For cached-prefix component-derived SQ rows, record both `executor` and `resolve
 source report has an auto executor. `executor` names the requested policy, while
 `resolved_executor` names the concrete kernel path used for that case.
 
+For uLLM component prefill real-batch rows parsed with `--parse ullm-component-prefill`, preserve:
+
+- `metrics.prefill_total_input_tokens_per_second`
+- `metrics.attention_pair_tps_mean`
+- `workload.prompt_tokens_per_request`
+- `workload.new_prefill_tokens_per_request`
+- `workload.estimated_prefill_attention_work_tokens`
+- `batching.mode`
+- `batching.prefill_real_batch`
+- `batching.prefill_executor_request_parallelism`
+- `batching.prefill_executor_token_parallelism`
+
+These rows are real-batch component rows, not full package throughput rows. They can prove a kernel
+or component is using request/token parallelism, but they must not be used as final SQ package
+throughput until connected to the package runner.
+
 SQ candidate rows may also carry a top-level `candidate` object:
 
 - `candidate.id`: e.g. `sq-fp8-w8a16-r9700-v0`

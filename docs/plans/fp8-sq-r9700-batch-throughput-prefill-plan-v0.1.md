@@ -913,6 +913,27 @@ R9700 schema/control-plane smoke:
 2. T1 real batch runnerは未完了のまま残す。
 3. 次のT1実装は、logical batchではなく、prefillまたはdecodeのreal batch executorをfull package pathへ接続することに集中する。
 
+### T1 current status: component prefill real-batch parser v1
+
+前回の要点:
+
+- `package-batch-throughput-bench` のlogical batch JSONL preservationは完了した。
+- ただし、既存のreal-batch component smokeはkey-value stdoutであり、`inference-benchmark-result-v0.1` JSONLへ流せなかった。
+
+今回の変更点:
+
+- `tools/run-external-benchmark.py` に `--parse ullm-component-prefill` を追加した。
+- `runtime-causal-attn-batch-smoke` のようなcomponent prefill real-batch outputをkey-value parseし、`inference-benchmark-result-v0.1` rowへ変換できるようにした。
+- `batching.mode=real`、`batching.prefill_real_batch=true`、request/token parallelism、`prefill_total_input_tokens_per_second`、`attention_pair_tps_mean`、sampled correctnessを保存する。
+- R9700で `runtime-causal-attn-batch-smoke` のB=2/N=32 smokeをJSONLへ変換し、`prefill_total_input_tokens_per_second=850713.136872`、`prefill_real_batch=true` を確認した。
+- 結果は `benchmarks/results/2026-07-08/package-batch-throughput/phase-t1-component-prefill-real-batch-parser-v1.md` に保存した。
+
+次の行動:
+
+1. component real-batch rowsはkernel/schema検証に使う。
+2. full package throughput判断にはまだ使わない。
+3. 次はpackage prefillまたはdecode runnerをこのreal-batch executor pathへ接続する。
+
 ### T2: FP8 SQ candidate package/runtime prototype, 3-5 days
 
 目的:
@@ -1973,6 +1994,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - 追加のFlashAttention2-like最適化を主タスクから外し、SQ候補評価の阻害要因になったcaseだけに限定する。
 - SQ策定フェーズの主順序を、T2品質境界固定、T1 real batch throughput runner、T5 AQ4/FP8比較、T6/T7 vLLM比較に並べ直す。
 - T2では、`kup6_gate5_down5` を6層strict-top1 regression subsetとして扱う。ただしcase_aのtop8 overlapは低いため、full SQ policyには昇格しない。選択FP8/fallback方針は `sq-fp8-policy-v0.1` として保存した。
+- T1では、component prefill real-batch smoke outputを `inference-benchmark-result-v0.1` JSONLへ変換できる `ullm-component-prefill` parserを追加した。
 - throughput評価では、SQ overlayのhost-side materialize/load timingを使わない。速度比較はnative FP8 path、materialization-aware runtime path、またはworking-setを明示したpathに限定する。
 - SQ候補の採用判断では、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、quality、VRAM、resident bytes、materialized working-set bytesを同じ表で見る。
 

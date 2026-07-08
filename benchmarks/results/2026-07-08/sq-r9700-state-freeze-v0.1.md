@@ -66,7 +66,8 @@ Required artifact metadata:
 | --- | --- | --- |
 | T0 state freeze | done | This file and the paired JSON are the frozen anchor. |
 | T1 JSONL/schema preservation | done for v0.1 package batch rows | `run-external-benchmark.py` preserves total-throughput, prefix/chunk/context, executor, and KV cache accounting for `package-batch-throughput-bench-v0.1`; guarded by `phase-t1-jsonl-preservation-v1.md`. |
-| T1 real batch runner | not done | Needed before SQ throughput comparison. |
+| T1 component real-batch JSONL parser | done for prefill component rows | `run-external-benchmark.py --parse ullm-component-prefill` preserves `batching.mode=real`, `prefill_real_batch=true`, request/token parallelism, total input tok/s, attention pair/s, and sampled correctness for component prefill rows; guarded by `phase-t1-component-prefill-real-batch-parser-v1.md`. |
+| T1 full package real batch runner | not done | Needed before SQ throughput comparison. |
 | T2 artifact metadata path | partial done with policy input | `sq-fp8-w8a16-r9700-v0` manifest and writer are staged. `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; dry-run confirmed `kup6_gate5_down5` selects `22` FP8 tensors and `753` passthrough tensors. |
 | T2 runtime load path | partial done | `sq-fp8-materialize-smoke` validates the artifact boundary; `sq-fp8-token-ids-logits-smoke` validates one selected tensor overlay in the package path. |
 | T2 short prompt guard | partial done with six-layer prompt bundle subset found | One `q_proj` overlay and layer 3 projection set passed top1 guards; layers `3,7` changed top1. Family split points to `q/v/down` as risky. Row-block scale recovers `q` and `down`, but not `v`. `v` fallback + `q/k/o/gate/up/down` row-block32 passes layers `3,7,11,15` on 3/3 short prompts and layers `3,7,11,15,19` on len4, but fails layers `3,7,11,15,19,23` and all self-attention probe layers. Six-layer split shows `k/up` row-block32 passes 3/3 short prompts, while `o/gate/down` fail individually at 6 layers. Per-layer combination search found `kup6_gate5_down5`, which passes len4/case_a/case_b strict top1. Case_a top8 overlap is only `2 / 8`, so this remains a regression subset, not full SQ policy. The selected FP8/fallback policy is saved as `sq-fp8-kup6-gate5-down5-policy-v0.1.json`. T2 promotion rule v0.1 is strict top1; full-target SQ guard is still pending. |
@@ -80,7 +81,8 @@ Required artifact metadata:
 5. Keep T2 promotion rule v0.1 as strict top1 until a text-level guard is implemented and accepted.
 6. Use top-k overlap, AQ4 top1 rank, and logit gap as diagnostic-only fields.
 7. Treat the current prefill/cached-prefix attention speed as sufficient to resume SQ candidate evaluation; defer extra FlashAttention2-like work unless SQ comparison exposes a blocker.
-8. Implement T1 real batch executor before using total throughput rows for SQ performance decisions.
-9. Use native FP8 or materialization-aware runtime paths for throughput comparison; do not use SQ overlay load timing as an SQ speed result.
-10. Move to T5 AQ4/FP8 throughput comparison after the T2 prompt-bundle subset is encoded and the accepted quality boundary is documented.
-11. Run vLLM comparison only after uLLM R9700 `batch=1/4/8` AQ4 and FP8 rows share the same schema.
+8. Use component real-batch rows only for kernel/schema validation, not final SQ package throughput.
+9. Implement T1 full package real batch executor before using total throughput rows for SQ performance decisions.
+10. Use native FP8 or materialization-aware runtime paths for throughput comparison; do not use SQ overlay load timing as an SQ speed result.
+11. Move to T5 AQ4/FP8 throughput comparison after the T2 prompt-bundle subset is encoded and the accepted quality boundary is documented.
+12. Run vLLM comparison only after uLLM R9700 `batch=1/4/8` AQ4 and FP8 rows share the same schema.

@@ -338,6 +338,41 @@ def parse_json_object_text(text: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def parse_scalar_text(value: str) -> Any:
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered == "null":
+        return None
+    parsed_int = parse_int(value)
+    if parsed_int is not None and str(parsed_int) == value:
+        return parsed_int
+    parsed_float = parse_float(value)
+    if parsed_float is not None:
+        return parsed_float
+    return value
+
+
+def parse_key_value_stdout(stdout: str) -> dict[str, Any]:
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        return {}
+    parts = shlex.split(lines[-1])
+    if not parts:
+        return {}
+    report: dict[str, Any] = {"command": parts[0]}
+    for part in parts[1:]:
+        if "=" not in part:
+            continue
+        key, raw_value = part.split("=", 1)
+        if not key:
+            continue
+        report[key] = parse_scalar_text(raw_value)
+    return report
+
+
 def percentile(values: list[float], pct: float) -> float | None:
     if not values:
         return None
@@ -353,6 +388,16 @@ def percentile(values: list[float], pct: float) -> float | None:
 
 def parse_ullm_token_ids_report(stdout: str, output_json: Path | None) -> dict[str, Any]:
     report = parse_json_object_text(stdout)
+    if report and output_json:
+        output_json.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return report
+
+
+def parse_ullm_key_value_report(stdout: str, output_json: Path | None) -> dict[str, Any]:
+    report = parse_key_value_stdout(stdout)
     if report and output_json:
         output_json.write_text(
             json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -454,6 +499,47 @@ def parse_ullm_batch_throughput_metrics(
         "vram_peak_bytes": memory.get("peak_total_bytes"),
         "vram_consumed_bytes": consumed_bytes,
         "decode_tokens_per_second_times_vram_consumed_gib": product,
+        "power_watts_avg": None,
+    }
+
+
+def parse_ullm_component_prefill_metrics(
+    report: dict[str, Any], memory: dict[str, Any]
+) -> dict[str, Any]:
+    prefill_tokens = parse_int(report.get("prefill_total_input_tokens"))
+    prefill_tps = parse_float(report.get("prefill_total_input_tps"))
+    wall_ms = parse_float(report.get("wall_ms_mean"))
+    consumed_bytes = memory.get("consumed_total_bytes")
+    return {
+        "prefill_tokens_per_second": prefill_tps,
+        "decode_tokens_per_second": None,
+        "total_tokens_per_second": prefill_tps,
+        "prefill_total_input_tokens": prefill_tokens,
+        "decode_total_generated_tokens": 0,
+        "generated_tokens_total": 0,
+        "end_to_end_total_tokens": prefill_tokens,
+        "prefill_total_input_tokens_per_second": prefill_tps,
+        "decode_total_generated_tokens_per_second": None,
+        "end_to_end_total_tokens_per_second": prefill_tps,
+        "prefill_wall_time_seconds": wall_ms / 1000.0 if wall_ms is not None else None,
+        "decode_wall_time_seconds": 0.0,
+        "total_wall_time_seconds": wall_ms / 1000.0 if wall_ms is not None else None,
+        "time_to_first_token_ms": wall_ms,
+        "time_per_output_token_ms": None,
+        "latency_p50_ms": wall_ms,
+        "latency_p95_ms": wall_ms,
+        "time_to_first_token_ms_p50": wall_ms,
+        "time_to_first_token_ms_p95": wall_ms,
+        "request_latency_ms_p50": wall_ms,
+        "request_latency_ms_p95": wall_ms,
+        "time_per_output_token_ms_p50": None,
+        "time_per_output_token_ms_p95": None,
+        "per_request_decode_tps_mean": None,
+        "attention_pair_tps_mean": parse_float(report.get("attention_pair_tps_mean")),
+        "vram_baseline_bytes": memory.get("baseline_total_bytes"),
+        "vram_peak_bytes": memory.get("peak_total_bytes"),
+        "vram_consumed_bytes": consumed_bytes,
+        "decode_tokens_per_second_times_vram_consumed_gib": None,
         "power_watts_avg": None,
     }
 
@@ -571,6 +657,49 @@ def enrich_ullm_batch_memory(row: dict[str, Any], report: dict[str, Any]) -> Non
     )
 
 
+def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any]) -> None:
+    row_workload = row.get("workload")
+    if not isinstance(row_workload, dict):
+        return
+    batch_count = parse_int(report.get("batch_count"))
+    concurrent_requests = parse_int(report.get("concurrent_requests")) or batch_count
+    prompt_tokens = parse_int(report.get("prompt_tokens_per_request"))
+    prefill_tokens = parse_int(report.get("prefill_total_input_tokens"))
+    estimated_work = parse_int(report.get("estimated_prefill_attention_work_tokens"))
+    executor = report.get("executor")
+    if batch_count is not None:
+        row_workload["batch_size"] = batch_count
+    if concurrent_requests is not None:
+        row_workload["concurrent_requests"] = concurrent_requests
+    row_workload["prefill_mode"] = report.get("prefill_mode")
+    if isinstance(executor, str):
+        row_workload["prefill_executor"] = executor
+        row_workload["resolved_prefill_executor"] = executor
+    if prompt_tokens is not None and concurrent_requests is not None:
+        per_request = [prompt_tokens for _ in range(concurrent_requests)]
+        row_workload["prompt_tokens_per_request"] = per_request
+        row_workload["cached_prefix_tokens_per_request"] = [0 for _ in range(concurrent_requests)]
+        row_workload["new_prefill_tokens_per_request"] = per_request
+        row_workload["total_context_tokens_after_prefill_per_request"] = per_request
+    if prefill_tokens is not None:
+        row_workload["total_context_tokens_after_prefill"] = prefill_tokens
+    if estimated_work is not None:
+        row_workload["estimated_prefill_attention_work_tokens"] = estimated_work
+    row["batching"] = {
+        "mode": report.get("batching_mode"),
+        "prefill_executor": executor,
+        "resolved_prefill_executor": executor,
+        "prefill_real_batch": report.get("batching_mode") == "real",
+        "prefill_executor_token_parallelism": parse_int(report.get("token_parallelism")),
+        "prefill_executor_request_parallelism": parse_int(report.get("request_parallelism")),
+        "decode_executor": None,
+        "decode_real_batch": False,
+        "decode_executor_request_parallelism": 0,
+        "scheduler_policy": "component_fixed_batch",
+        "component_command": report.get("command"),
+    }
+
+
 def default_metrics(memory: dict[str, Any]) -> dict[str, Any]:
     return {
         "prefill_tokens_per_second": None,
@@ -642,6 +771,7 @@ def main() -> int:
             "sglang-serving",
             "ullm-token-ids-generate",
             "ullm-package-batch-throughput",
+            "ullm-component-prefill",
         ],
         default="none",
     )
@@ -703,6 +833,9 @@ def main() -> int:
     elif args.parse == "ullm-package-batch-throughput" and status == "ok":
         ullm_report = parse_ullm_token_ids_report(stdout_text, args.result_json)
         metrics = parse_ullm_batch_throughput_metrics(ullm_report, memory)
+    elif args.parse == "ullm-component-prefill" and status == "ok":
+        ullm_report = parse_ullm_key_value_report(stdout_text, args.result_json)
+        metrics = parse_ullm_component_prefill_metrics(ullm_report, memory)
     elif args.parse == "vllm-throughput" and status == "ok":
         metrics = parse_vllm_metrics(stdout_text, args.result_json, memory)
     elif args.parse == "sglang-serving" and status == "ok":
@@ -821,6 +954,24 @@ def main() -> int:
         if isinstance(batching, dict):
             row["batching"] = batching
         ullm_correctness = parse_ullm_batch_throughput_correctness(ullm_report)
+    elif args.parse == "ullm-component-prefill":
+        enrich_ullm_component_prefill_row(row, ullm_report)
+        verified = ullm_report.get("verified")
+        row["correctness"] = {
+            "reference": "sampled",
+            "reference_artifact": None,
+            "logits_relative_mse": None,
+            "logits_max_abs_diff": None,
+            "top_k": None,
+            "top_k_agreement": None,
+            "generated_prefix_matches_reference": verified if isinstance(verified, bool) else None,
+            "nan_count": None,
+            "inf_count": None,
+            "verified_all": verified if isinstance(verified, bool) else None,
+            "sample_count": parse_int(ullm_report.get("sample_count")),
+            "sampled_max_abs_diff": parse_float(ullm_report.get("sampled_max_abs_diff")),
+        }
+        ullm_correctness = None
     if ullm_correctness is not None:
         row["correctness"] = ullm_correctness
         if args.parse == "ullm-package-batch-throughput":
