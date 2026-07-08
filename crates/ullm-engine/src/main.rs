@@ -19638,9 +19638,13 @@ fn package_token_ids_mixed_request_state_smoke_impl(
     let end_to_end_total_tokens = prefill_total_input_tokens
         .checked_add(decode_total_generated_tokens)
         .ok_or_else(|| "mixed request-state total token count overflows".to_string())?;
+    let self_attn_weight_bundle_shared = request_plan.request_count() > 1
+        && layer_kinds.iter().any(|kind| *kind == "self_attention");
+    let linear_attn_weight_bundle_shared = request_plan.request_count() > 1
+        && layer_kinds.iter().any(|kind| *kind == "linear_attention");
 
     Ok(format!(
-        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} full_mixed_request_state=true request_state_dispatch=true throughput_row=false batching_mode=request_state_interleaved prefill_real_batch=false decode_real_batch=false prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} full_mixed_request_state=true request_state_dispatch=true throughput_row=false batching_mode=request_state_interleaved prefill_real_batch=false decode_real_batch=false prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
         path,
         layer_indices,
         usize_csv(&layer_indices),
@@ -19678,6 +19682,8 @@ fn package_token_ids_mixed_request_state_smoke_impl(
         optional_f64_string(tps(end_to_end_total_tokens, total_wall_ms)),
         request_plan.block_size,
         request_plan.cache_blocks,
+        self_attn_weight_bundle_shared,
+        linear_attn_weight_bundle_shared,
         request_plan.block_tables,
         prefill_batch_request_counts,
         usize_csv(&prefill_batch_request_counts),
@@ -44254,9 +44260,8 @@ enum PackageSelfAttnResidentStepInput<'a> {
     ExternalBuffer(&'a ullm_runtime_sys::RuntimeBuffer),
 }
 
-struct PackageSelfAttnResidentStepLayer {
+struct PackageSelfAttnResidentStepWeights {
     sync_component_timing: bool,
-    last_component_step_ms: Option<PackageSelfAttnComponentStepMs>,
     use_paged_decode_sigmoid_gate: bool,
     hidden: usize,
     q_heads: usize,
@@ -44266,13 +44271,11 @@ struct PackageSelfAttnResidentStepLayer {
     attention_elements: usize,
     block_size: usize,
     cache_blocks: usize,
-    written_len: usize,
     q_projection_layout: PackageSelfAttnQProjectionLayout,
     input_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     q_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     k_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     post_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
-    block_table_buffer: ullm_runtime_sys::RuntimeBuffer,
     q_matrix: PackageAq4ResidentMatvec,
     k_matrix: PackageAq4ResidentMatvec,
     v_matrix: PackageAq4ResidentMatvec,
@@ -44280,6 +44283,13 @@ struct PackageSelfAttnResidentStepLayer {
     mlp_gate_matrix: PackageAq4ResidentMatvec,
     mlp_up_matrix: PackageAq4ResidentMatvec,
     mlp_down_matrix: PackageAq4ResidentMatvec,
+}
+
+struct PackageSelfAttnResidentStepLayer {
+    weights: std::sync::Arc<PackageSelfAttnResidentStepWeights>,
+    last_component_step_ms: Option<PackageSelfAttnComponentStepMs>,
+    written_len: usize,
+    block_table_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     q_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -44298,6 +44308,14 @@ struct PackageSelfAttnResidentStepLayer {
     post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
     layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+}
+
+impl std::ops::Deref for PackageSelfAttnResidentStepLayer {
+    type Target = PackageSelfAttnResidentStepWeights;
+
+    fn deref(&self) -> &Self::Target {
+        self.weights.as_ref()
+    }
 }
 
 impl PackageSelfAttnResidentStepLayer {
@@ -44727,9 +44745,8 @@ impl PackageSelfAttnResidentStepLayer {
             )?;
         }
 
-        Ok(Self {
+        let weights = std::sync::Arc::new(PackageSelfAttnResidentStepWeights {
             sync_component_timing: env_flag_enabled("ULLM_SYNC_SELF_ATTN_COMPONENTS_FOR_TIMING"),
-            last_component_step_ms: None,
             use_paged_decode_sigmoid_gate: matches!(
                 q_projection_layout,
                 PackageSelfAttnQProjectionLayout::Qwen35Gated
@@ -44744,13 +44761,11 @@ impl PackageSelfAttnResidentStepLayer {
             attention_elements,
             block_size,
             cache_blocks,
-            written_len: 0,
             q_projection_layout,
             input_norm_weight_buffer,
             q_norm_weight_buffer,
             k_norm_weight_buffer,
             post_norm_weight_buffer,
-            block_table_buffer,
             q_matrix,
             k_matrix,
             v_matrix,
@@ -44758,6 +44773,170 @@ impl PackageSelfAttnResidentStepLayer {
             mlp_gate_matrix,
             mlp_up_matrix,
             mlp_down_matrix,
+        });
+
+        Ok(Self {
+            weights,
+            last_component_step_ms: None,
+            written_len: 0,
+            block_table_buffer,
+            input_buffer,
+            input_normed_buffer,
+            q_projected_buffer,
+            q_gate_buffer,
+            k_projected_buffer,
+            v_projected_buffer,
+            q_normed_buffer,
+            k_normed_buffer,
+            q_rope_buffer,
+            k_rope_buffer,
+            k_cache_buffer,
+            v_cache_buffer,
+            attention_output_buffer,
+            attention_projection_input_buffer,
+            attention_block_output_buffer,
+            post_normed_buffer,
+            mlp_activation_buffer,
+            layer_output_buffer,
+        })
+    }
+
+    fn load_state_with_weights(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        weights: std::sync::Arc<PackageSelfAttnResidentStepWeights>,
+        block_table: &[u32],
+    ) -> Result<Self, String> {
+        if block_table.len() != weights.cache_blocks {
+            return Err(format!(
+                "self-attn resident shared-weight block table length {} does not match cache blocks {}",
+                block_table.len(),
+                weights.cache_blocks
+            ));
+        }
+        let decode_shape = PagedDecodeShape {
+            block_size: weights.block_size,
+            cache_blocks: weights.cache_blocks,
+            q_heads: weights.q_heads,
+            kv_heads: weights.kv_heads,
+            head_dim: weights.head_dim,
+            value_dim: weights.value_dim,
+        };
+        decode_shape.validate()?;
+
+        let hidden_bytes = checked_f32_byte_len(weights.hidden, "self-attn resident hidden")?;
+        let q_projected_bytes =
+            checked_f32_byte_len(weights.q_matrix.rows, "self-attn resident q projected")?;
+        let q_elements = decode_shape.q_elements()?;
+        let q_bytes = checked_f32_byte_len(q_elements, "self-attn resident q")?;
+        let k_bytes =
+            checked_f32_byte_len(decode_shape.k_token_elements()?, "self-attn resident k")?;
+        let v_bytes =
+            checked_f32_byte_len(decode_shape.v_token_elements()?, "self-attn resident v")?;
+        let attention_bytes =
+            checked_f32_byte_len(weights.attention_elements, "self-attn resident attention")?;
+        let k_cache_elements = decode_shape.k_cache_elements()?;
+        let v_cache_elements = decode_shape.v_cache_elements()?;
+        let intermediate_bytes = checked_f32_byte_len(
+            weights.mlp_gate_matrix.rows,
+            "self-attn resident intermediate",
+        )?;
+
+        let mut block_table_buffer = context
+            .alloc_buffer(block_table.len() * std::mem::size_of::<u32>())
+            .map_err(|err| {
+                format!("failed to allocate self-attn resident shared-weight block table: {err}")
+            })?;
+        let input_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident input: {err}"))?;
+        let input_normed_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident input normed: {err}"))?;
+        let q_projected_buffer = context
+            .alloc_buffer(q_projected_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident q projected: {err}"))?;
+        let q_gate_buffer = context
+            .alloc_buffer(q_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident q gate: {err}"))?;
+        let k_projected_buffer = context
+            .alloc_buffer(k_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident k projected: {err}"))?;
+        let v_projected_buffer = context
+            .alloc_buffer(v_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident v projected: {err}"))?;
+        let q_normed_buffer = context
+            .alloc_buffer(q_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident q normed: {err}"))?;
+        let k_normed_buffer = context
+            .alloc_buffer(k_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident k normed: {err}"))?;
+        let q_rope_buffer = context
+            .alloc_buffer(q_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident q RoPE: {err}"))?;
+        let k_rope_buffer = context
+            .alloc_buffer(k_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident k RoPE: {err}"))?;
+        let mut k_cache_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                k_cache_elements,
+                "self-attn resident k cache",
+            )?)
+            .map_err(|err| format!("failed to allocate self-attn resident k cache: {err}"))?;
+        let mut v_cache_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                v_cache_elements,
+                "self-attn resident v cache",
+            )?)
+            .map_err(|err| format!("failed to allocate self-attn resident v cache: {err}"))?;
+        let attention_output_buffer = context.alloc_buffer(attention_bytes).map_err(|err| {
+            format!("failed to allocate self-attn resident attention output: {err}")
+        })?;
+        let attention_projection_input_buffer =
+            context.alloc_buffer(attention_bytes).map_err(|err| {
+                format!("failed to allocate self-attn resident attention projection input: {err}")
+            })?;
+        let attention_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate self-attn resident attention block output: {err}")
+        })?;
+        let post_normed_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident post normed: {err}"))?;
+        let mlp_activation_buffer = context.alloc_buffer(intermediate_bytes).map_err(|err| {
+            format!("failed to allocate self-attn resident MLP activation: {err}")
+        })?;
+        let layer_output_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate self-attn resident layer output: {err}"))?;
+
+        block_table_buffer
+            .copy_from_host(0, &encode_u32_to_bytes(block_table), Some(stream))
+            .map_err(|err| {
+                format!("failed to copy self-attn resident shared-weight block table: {err}")
+            })?;
+        k_cache_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; k_cache_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to initialize self-attn resident k cache: {err}"))?;
+        v_cache_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; v_cache_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to initialize self-attn resident v cache: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize self-attn resident shared-weight state setup: {err}")
+        })?;
+
+        Ok(Self {
+            weights,
+            last_component_step_ms: None,
+            written_len: 0,
+            block_table_buffer,
             input_buffer,
             input_normed_buffer,
             q_projected_buffer,
@@ -44877,9 +45056,18 @@ impl PackageSelfAttnResidentStepLayer {
                 self.written_len
             ));
         }
+        let weights = self.weights.as_ref();
+        let hidden = weights.hidden;
+        let q_heads = weights.q_heads;
+        let kv_heads = weights.kv_heads;
+        let head_dim = weights.head_dim;
+        let value_dim = weights.value_dim;
+        let attention_elements = weights.attention_elements;
+        let block_size = weights.block_size;
+        let cache_blocks = weights.cache_blocks;
         self.last_component_step_ms = None;
         let mut component_step_ms = PackageSelfAttnComponentStepMs::default();
-        let sync_component_timing = self.sync_component_timing;
+        let sync_component_timing = weights.sync_component_timing;
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
                                 started: Instant,
                                 component_label: &str|
@@ -44898,8 +45086,8 @@ impl PackageSelfAttnResidentStepLayer {
         match input {
             PackageSelfAttnResidentStepInput::InternalInputBuffer => ullm_runtime_sys::rmsnorm_f32(
                 &self.input_buffer,
-                &self.input_norm_weight_buffer,
-                self.hidden,
+                weights.input_norm_weight_buffer.as_ref(),
+                hidden,
                 1e-6_f32,
                 &mut self.input_normed_buffer,
                 Some(stream),
@@ -44907,8 +45095,8 @@ impl PackageSelfAttnResidentStepLayer {
             PackageSelfAttnResidentStepInput::ExternalBuffer(buffer) => {
                 ullm_runtime_sys::rmsnorm_f32(
                     buffer,
-                    &self.input_norm_weight_buffer,
-                    self.hidden,
+                    weights.input_norm_weight_buffer.as_ref(),
+                    hidden,
                     1e-6_f32,
                     &mut self.input_normed_buffer,
                     Some(stream),
@@ -44921,9 +45109,9 @@ impl PackageSelfAttnResidentStepLayer {
 
         let component_started = Instant::now();
         if !env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_TRIPLE_SELF_ATTN_QKV") {
-            self.q_matrix.matvec_triple_with(
-                &self.k_matrix,
-                &self.v_matrix,
+            weights.q_matrix.matvec_triple_with(
+                &weights.k_matrix,
+                &weights.v_matrix,
                 &self.input_normed_buffer,
                 &mut self.q_projected_buffer,
                 &mut self.k_projected_buffer,
@@ -44932,34 +45120,34 @@ impl PackageSelfAttnResidentStepLayer {
                 "self-attn resident q/k/v projection",
             )?;
         } else if env_flag_enabled("ULLM_DISABLE_AQ4_MATVEC_PAIR_SELF_ATTN_QK") {
-            self.q_matrix.matvec(
+            weights.q_matrix.matvec(
                 &self.input_normed_buffer,
                 &mut self.q_projected_buffer,
                 stream,
                 "self-attn resident q projection",
             )?;
-            self.k_matrix.matvec(
+            weights.k_matrix.matvec(
                 &self.input_normed_buffer,
                 &mut self.k_projected_buffer,
                 stream,
                 "self-attn resident k projection",
             )?;
-            self.v_matrix.matvec(
+            weights.v_matrix.matvec(
                 &self.input_normed_buffer,
                 &mut self.v_projected_buffer,
                 stream,
                 "self-attn resident v projection",
             )?;
         } else {
-            self.q_matrix.matvec_pair_with(
-                &self.k_matrix,
+            weights.q_matrix.matvec_pair_with(
+                &weights.k_matrix,
                 &self.input_normed_buffer,
                 &mut self.q_projected_buffer,
                 &mut self.k_projected_buffer,
                 stream,
                 "self-attn resident q/k projection",
             )?;
-            self.v_matrix.matvec(
+            weights.v_matrix.matvec(
                 &self.input_normed_buffer,
                 &mut self.v_projected_buffer,
                 stream,
@@ -44970,13 +45158,13 @@ impl PackageSelfAttnResidentStepLayer {
             finish_component(stream, component_started, "q/k/v projection")?;
 
         let component_started = Instant::now();
-        match self.q_projection_layout {
+        match weights.q_projection_layout {
             PackageSelfAttnQProjectionLayout::Plain => {
                 ullm_runtime_sys::segmented_rmsnorm_f32(
                     &self.q_projected_buffer,
-                    &self.q_norm_weight_buffer,
-                    self.q_heads,
-                    self.head_dim,
+                    weights.q_norm_weight_buffer.as_ref(),
+                    q_heads,
+                    head_dim,
                     1e-5_f32,
                     &mut self.q_normed_buffer,
                     Some(stream),
@@ -44984,9 +45172,9 @@ impl PackageSelfAttnResidentStepLayer {
                 .map_err(|err| format!("failed to run {label} self-attn q RMSNorm: {err}"))?;
                 ullm_runtime_sys::segmented_rmsnorm_f32(
                     &self.k_projected_buffer,
-                    &self.k_norm_weight_buffer,
-                    self.kv_heads,
-                    self.head_dim,
+                    weights.k_norm_weight_buffer.as_ref(),
+                    kv_heads,
+                    head_dim,
                     1e-5_f32,
                     &mut self.k_normed_buffer,
                     Some(stream),
@@ -44995,8 +45183,8 @@ impl PackageSelfAttnResidentStepLayer {
                 ullm_runtime_sys::rope_f32(
                     &self.q_normed_buffer,
                     1,
-                    self.q_heads,
-                    self.head_dim,
+                    q_heads,
+                    head_dim,
                     rotary_dim,
                     rope_position,
                     rope_base,
@@ -45007,8 +45195,8 @@ impl PackageSelfAttnResidentStepLayer {
                 ullm_runtime_sys::rope_f32(
                     &self.k_normed_buffer,
                     1,
-                    self.kv_heads,
-                    self.head_dim,
+                    kv_heads,
+                    head_dim,
                     rotary_dim,
                     rope_position,
                     rope_base,
@@ -45021,11 +45209,11 @@ impl PackageSelfAttnResidentStepLayer {
                     &self.v_projected_buffer,
                     &self.block_table_buffer,
                     cache_position,
-                    self.block_size,
-                    self.cache_blocks,
-                    self.kv_heads,
-                    self.head_dim,
-                    self.value_dim,
+                    block_size,
+                    cache_blocks,
+                    kv_heads,
+                    head_dim,
+                    value_dim,
                     &mut self.k_cache_buffer,
                     &mut self.v_cache_buffer,
                     Some(stream),
@@ -45037,20 +45225,20 @@ impl PackageSelfAttnResidentStepLayer {
                     &self.q_projected_buffer,
                     &self.k_projected_buffer,
                     &self.v_projected_buffer,
-                    &self.q_norm_weight_buffer,
-                    &self.k_norm_weight_buffer,
+                    weights.q_norm_weight_buffer.as_ref(),
+                    weights.k_norm_weight_buffer.as_ref(),
                     &self.block_table_buffer,
-                    self.q_heads,
-                    self.kv_heads,
-                    self.head_dim,
-                    self.value_dim,
+                    q_heads,
+                    kv_heads,
+                    head_dim,
+                    value_dim,
                     rotary_dim,
                     rope_position,
                     rope_base,
                     1e-5_f32,
                     cache_position,
-                    self.block_size,
-                    self.cache_blocks,
+                    block_size,
+                    cache_blocks,
                     &mut self.q_gate_buffer,
                     &mut self.q_rope_buffer,
                     &mut self.k_cache_buffer,
@@ -45071,7 +45259,7 @@ impl PackageSelfAttnResidentStepLayer {
             .ok_or_else(|| format!("{label} self-attn written length overflows"))?;
 
         let component_started = Instant::now();
-        if self.use_paged_decode_sigmoid_gate {
+        if weights.use_paged_decode_sigmoid_gate {
             ullm_runtime_sys::paged_decode_attn_sigmoid_gate_f32(
                 &self.q_rope_buffer,
                 &self.q_gate_buffer,
@@ -45079,13 +45267,13 @@ impl PackageSelfAttnResidentStepLayer {
                 &self.v_cache_buffer,
                 &self.block_table_buffer,
                 self.written_len,
-                self.block_size,
-                self.cache_blocks,
-                self.q_heads,
-                self.kv_heads,
-                self.head_dim,
-                self.value_dim,
-                1.0_f32 / (self.head_dim as f32).sqrt(),
+                block_size,
+                cache_blocks,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                1.0_f32 / (head_dim as f32).sqrt(),
                 &mut self.attention_output_buffer,
                 Some(stream),
             )
@@ -45096,13 +45284,13 @@ impl PackageSelfAttnResidentStepLayer {
                 &self.v_cache_buffer,
                 &self.block_table_buffer,
                 self.written_len,
-                self.block_size,
-                self.cache_blocks,
-                self.q_heads,
-                self.kv_heads,
-                self.head_dim,
-                self.value_dim,
-                1.0_f32 / (self.head_dim as f32).sqrt(),
+                block_size,
+                cache_blocks,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                1.0_f32 / (head_dim as f32).sqrt(),
                 &mut self.attention_output_buffer,
                 Some(stream),
             )
@@ -45112,9 +45300,11 @@ impl PackageSelfAttnResidentStepLayer {
             finish_component(stream, component_started, "paged decode")?;
 
         let component_started = Instant::now();
-        let projection_input_buffer = match self.q_projection_layout {
+        let projection_input_buffer = match weights.q_projection_layout {
             PackageSelfAttnQProjectionLayout::Plain => &self.attention_output_buffer,
-            PackageSelfAttnQProjectionLayout::Qwen35Gated if self.use_paged_decode_sigmoid_gate => {
+            PackageSelfAttnQProjectionLayout::Qwen35Gated
+                if weights.use_paged_decode_sigmoid_gate =>
+            {
                 &self.attention_output_buffer
             }
             PackageSelfAttnQProjectionLayout::Qwen35Gated
@@ -45123,7 +45313,7 @@ impl PackageSelfAttnResidentStepLayer {
                 ullm_runtime_sys::sigmoid_mul_f32_in_place(
                     &self.q_gate_buffer,
                     &mut self.attention_output_buffer,
-                    self.attention_elements,
+                    attention_elements,
                     Some(stream),
                 )
                 .map_err(|err| {
@@ -45135,7 +45325,7 @@ impl PackageSelfAttnResidentStepLayer {
                 ullm_runtime_sys::sigmoid_mul_f32(
                     &self.q_gate_buffer,
                     &self.attention_output_buffer,
-                    self.attention_elements,
+                    attention_elements,
                     &mut self.attention_projection_input_buffer,
                     Some(stream),
                 )
@@ -45147,7 +45337,8 @@ impl PackageSelfAttnResidentStepLayer {
             finish_component(stream, component_started, "output gate")?;
 
         let component_started = Instant::now();
-        self.o_matrix
+        weights
+            .o_matrix
             .matvec_add(
                 projection_input_buffer,
                 match input {
@@ -45167,8 +45358,8 @@ impl PackageSelfAttnResidentStepLayer {
         let component_started = Instant::now();
         ullm_runtime_sys::rmsnorm_f32(
             &self.attention_block_output_buffer,
-            &self.post_norm_weight_buffer,
-            self.hidden,
+            weights.post_norm_weight_buffer.as_ref(),
+            hidden,
             1e-5_f32,
             &mut self.post_normed_buffer,
             Some(stream),
@@ -45178,8 +45369,8 @@ impl PackageSelfAttnResidentStepLayer {
             finish_component(stream, component_started, "post RMSNorm")?;
 
         let component_started = Instant::now();
-        self.mlp_gate_matrix.matvec_silu_mul_with(
-            &self.mlp_up_matrix,
+        weights.mlp_gate_matrix.matvec_silu_mul_with(
+            &weights.mlp_up_matrix,
             &self.post_normed_buffer,
             &mut self.mlp_activation_buffer,
             stream,
@@ -45189,7 +45380,8 @@ impl PackageSelfAttnResidentStepLayer {
             finish_component(stream, component_started, "MLP gate/up activation")?;
 
         let component_started = Instant::now();
-        self.mlp_down_matrix
+        weights
+            .mlp_down_matrix
             .matvec_add(
                 &self.mlp_activation_buffer,
                 &self.attention_block_output_buffer,
@@ -45207,10 +45399,9 @@ impl PackageSelfAttnResidentStepLayer {
     }
 }
 
-struct PackageLinearAttnResidentStepLayer {
+struct PackageLinearAttnResidentStepWeights {
     layer_index: usize,
     sync_component_timing: bool,
-    last_component_step_ms: Option<PackageLinearAttnComponentStepMs>,
     use_qkv_z_gate_beta_fusion: bool,
     use_qkv_z_pair: bool,
     key_heads: usize,
@@ -45223,7 +45414,6 @@ struct PackageLinearAttnResidentStepLayer {
     kernel_size: usize,
     input_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     conv_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
-    conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
     a_log_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     dt_bias_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
     attn_norm_weight_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
@@ -45236,6 +45426,13 @@ struct PackageLinearAttnResidentStepLayer {
     mlp_gate_matrix: PackageAq4ResidentMatvec,
     mlp_up_matrix: PackageAq4ResidentMatvec,
     mlp_down_matrix: PackageAq4ResidentMatvec,
+}
+
+struct PackageLinearAttnResidentStepLayer {
+    weights: std::sync::Arc<PackageLinearAttnResidentStepWeights>,
+    last_component_step_ms: Option<PackageLinearAttnComponentStepMs>,
+    conv_history_buffer: ullm_runtime_sys::RuntimeBuffer,
+    recurrent_state_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_buffer: ullm_runtime_sys::RuntimeBuffer,
     input_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     qkv_buffer: ullm_runtime_sys::RuntimeBuffer,
@@ -45246,13 +45443,20 @@ struct PackageLinearAttnResidentStepLayer {
     recurrent_v_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_gate_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_beta_buffer: ullm_runtime_sys::RuntimeBuffer,
-    recurrent_state_buffer: ullm_runtime_sys::RuntimeBuffer,
     recurrent_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_projection_input_buffer: ullm_runtime_sys::RuntimeBuffer,
     attn_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
     layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+}
+
+impl std::ops::Deref for PackageLinearAttnResidentStepLayer {
+    type Target = PackageLinearAttnResidentStepWeights;
+
+    fn deref(&self) -> &Self::Target {
+        self.weights.as_ref()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -45761,10 +45965,9 @@ impl PackageLinearAttnResidentStepLayer {
             "linear-attn resident AQ4 matvec add",
         )?;
 
-        Ok(Self {
+        let weights = std::sync::Arc::new(PackageLinearAttnResidentStepWeights {
             layer_index,
             sync_component_timing,
-            last_component_step_ms: None,
             use_qkv_z_gate_beta_fusion,
             use_qkv_z_pair,
             key_heads,
@@ -45777,7 +45980,6 @@ impl PackageLinearAttnResidentStepLayer {
             kernel_size,
             input_norm_weight_buffer,
             conv_weight_buffer,
-            conv_history_buffer,
             a_log_buffer,
             dt_bias_buffer,
             attn_norm_weight_buffer,
@@ -45790,6 +45992,13 @@ impl PackageLinearAttnResidentStepLayer {
             mlp_gate_matrix,
             mlp_up_matrix,
             mlp_down_matrix,
+        });
+
+        Ok(Self {
+            weights,
+            last_component_step_ms: None,
+            conv_history_buffer,
+            recurrent_state_buffer,
             input_buffer,
             input_normed_buffer,
             qkv_buffer,
@@ -45800,7 +46009,151 @@ impl PackageLinearAttnResidentStepLayer {
             recurrent_v_buffer,
             recurrent_gate_buffer,
             recurrent_beta_buffer,
+            recurrent_output_buffer,
+            attn_projection_input_buffer,
+            attn_block_output_buffer,
+            post_normed_buffer,
+            mlp_activation_buffer,
+            layer_output_buffer,
+        })
+    }
+
+    fn load_state_with_weights(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        weights: std::sync::Arc<PackageLinearAttnResidentStepWeights>,
+    ) -> Result<Self, String> {
+        let q_elements_per_step = weights
+            .key_heads
+            .checked_mul(weights.key_dim)
+            .ok_or_else(|| "linear-attn resident q element count overflows".to_string())?;
+        let k_elements_per_step = q_elements_per_step;
+        let v_elements_per_step = weights.hidden;
+        let qkv_step_elements = q_elements_per_step
+            .checked_add(k_elements_per_step)
+            .and_then(|value| value.checked_add(v_elements_per_step))
+            .ok_or_else(|| "linear-attn resident qkv step element count overflows".to_string())?;
+        let hidden_bytes = checked_f32_byte_len(weights.hidden, "linear-attn resident hidden")?;
+        let qkv_step_bytes =
+            checked_f32_byte_len(qkv_step_elements, "linear-attn resident qkv step")?;
+        let gate_beta_step_bytes =
+            checked_f32_byte_len(weights.value_heads, "linear-attn resident gate/beta step")?;
+        let intermediate_bytes = checked_f32_byte_len(
+            weights.mlp_gate_matrix.rows,
+            "linear-attn resident intermediate",
+        )?;
+        let conv_history_elements = qkv_step_elements
+            .checked_mul(weights.kernel_size)
+            .ok_or_else(|| {
+                "linear-attn resident conv history element count overflows".to_string()
+            })?;
+        let conv_history_bytes =
+            checked_f32_byte_len(conv_history_elements, "linear-attn resident conv history")?;
+        let state_elements = weights
+            .value_heads
+            .checked_mul(weights.key_dim)
+            .and_then(|value| value.checked_mul(weights.value_dim))
+            .ok_or_else(|| {
+                "linear-attn resident recurrent state element count overflows".to_string()
+            })?;
+        let state_bytes = checked_f32_byte_len(state_elements, "linear-attn resident state")?;
+
+        let mut conv_history_buffer = context.alloc_buffer(conv_history_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident conv history: {err}")
+        })?;
+        let input_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident input: {err}"))?;
+        let input_normed_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident input normed: {err}")
+        })?;
+        let qkv_buffer = context
+            .alloc_buffer(qkv_step_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident qkv: {err}"))?;
+        let qkv_conv_output_buffer = context.alloc_buffer(qkv_step_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident qkv conv output: {err}")
+        })?;
+        let z_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident z: {err}"))?;
+        let recurrent_q_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                q_elements_per_step,
+                "linear-attn resident recurrent q",
+            )?)
+            .map_err(|err| format!("failed to allocate linear-attn resident q: {err}"))?;
+        let recurrent_k_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                k_elements_per_step,
+                "linear-attn resident recurrent k",
+            )?)
+            .map_err(|err| format!("failed to allocate linear-attn resident k: {err}"))?;
+        let recurrent_v_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident v: {err}"))?;
+        let recurrent_gate_buffer = context
+            .alloc_buffer(gate_beta_step_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident gate: {err}"))?;
+        let recurrent_beta_buffer = context
+            .alloc_buffer(gate_beta_step_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident beta: {err}"))?;
+        let mut recurrent_state_buffer = context
+            .alloc_buffer(state_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident state: {err}"))?;
+        let recurrent_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident recurrent output: {err}")
+        })?;
+        let attn_projection_input_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident attention projection input: {err}")
+        })?;
+        let attn_block_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident attention block: {err}")
+        })?;
+        let post_normed_buffer = context
+            .alloc_buffer(hidden_bytes)
+            .map_err(|err| format!("failed to allocate linear-attn resident post normed: {err}"))?;
+        let mlp_activation_buffer = context.alloc_buffer(intermediate_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident MLP activation: {err}")
+        })?;
+        let layer_output_buffer = context.alloc_buffer(hidden_bytes).map_err(|err| {
+            format!("failed to allocate linear-attn resident layer output: {err}")
+        })?;
+
+        conv_history_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; conv_history_elements]),
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to initialize linear-attn resident conv history: {err}")
+            })?;
+        recurrent_state_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&vec![0.0_f32; state_elements]),
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to initialize linear-attn resident state: {err}"))?;
+        stream.synchronize().map_err(|err| {
+            format!("failed to synchronize linear-attn resident shared-weight state setup: {err}")
+        })?;
+
+        Ok(Self {
+            weights,
+            last_component_step_ms: None,
+            conv_history_buffer,
             recurrent_state_buffer,
+            input_buffer,
+            input_normed_buffer,
+            qkv_buffer,
+            qkv_conv_output_buffer,
+            z_buffer,
+            recurrent_q_buffer,
+            recurrent_k_buffer,
+            recurrent_v_buffer,
+            recurrent_gate_buffer,
+            recurrent_beta_buffer,
             recurrent_output_buffer,
             attn_projection_input_buffer,
             attn_block_output_buffer,
@@ -45892,7 +46245,13 @@ impl PackageLinearAttnResidentStepLayer {
         label: &str,
     ) -> Result<(), String> {
         self.last_component_step_ms = None;
-        let sync_component_timing = self.sync_component_timing;
+        let weights = self.weights.as_ref();
+        let hidden = weights.hidden;
+        let key_heads = weights.key_heads;
+        let value_heads = weights.value_heads;
+        let key_dim = weights.key_dim;
+        let value_dim = weights.value_dim;
+        let sync_component_timing = weights.sync_component_timing;
         let mut component_step_ms = PackageLinearAttnComponentStepMs::default();
         macro_rules! component_started {
             () => {
@@ -45919,8 +46278,8 @@ impl PackageLinearAttnResidentStepLayer {
             PackageLinearAttnResidentStepInput::InternalInputBuffer => {
                 ullm_runtime_sys::rmsnorm_f32(
                     &self.input_buffer,
-                    &self.input_norm_weight_buffer,
-                    self.hidden,
+                    weights.input_norm_weight_buffer.as_ref(),
+                    hidden,
                     1e-6_f32,
                     &mut self.input_normed_buffer,
                     Some(stream),
@@ -45929,8 +46288,8 @@ impl PackageLinearAttnResidentStepLayer {
             PackageLinearAttnResidentStepInput::ExternalBuffer(buffer) => {
                 ullm_runtime_sys::rmsnorm_f32(
                     buffer,
-                    &self.input_norm_weight_buffer,
-                    self.hidden,
+                    weights.input_norm_weight_buffer.as_ref(),
+                    hidden,
                     1e-6_f32,
                     &mut self.input_normed_buffer,
                     Some(stream),
@@ -45940,15 +46299,16 @@ impl PackageLinearAttnResidentStepLayer {
         .map_err(|err| format!("failed to run {label} input RMSNorm: {err}"))?;
         finish_component!(component_started, input_rmsnorm_ms, "input RMSNorm");
 
-        let use_qkv_z_gate_beta_fusion = self.use_qkv_z_gate_beta_fusion && !sync_component_timing;
+        let use_qkv_z_gate_beta_fusion =
+            weights.use_qkv_z_gate_beta_fusion && !sync_component_timing;
         if use_qkv_z_gate_beta_fusion {
-            self.qkv_matrix.matvec_qkv_z_gate_beta_with(
-                &self.z_matrix,
-                &self.a_matrix,
-                &self.b_matrix,
+            weights.qkv_matrix.matvec_qkv_z_gate_beta_with(
+                &weights.z_matrix,
+                &weights.a_matrix,
+                &weights.b_matrix,
                 &self.input_normed_buffer,
-                &self.a_log_buffer,
-                &self.dt_bias_buffer,
+                weights.a_log_buffer.as_ref(),
+                weights.dt_bias_buffer.as_ref(),
                 &mut self.qkv_buffer,
                 &mut self.z_buffer,
                 &mut self.recurrent_gate_buffer,
@@ -45956,9 +46316,9 @@ impl PackageLinearAttnResidentStepLayer {
                 stream,
                 "linear-attn resident qkv/z gate-beta projection",
             )?;
-        } else if self.use_qkv_z_pair && !sync_component_timing {
-            self.qkv_matrix.matvec_pair_with(
-                &self.z_matrix,
+        } else if weights.use_qkv_z_pair && !sync_component_timing {
+            weights.qkv_matrix.matvec_pair_with(
+                &weights.z_matrix,
                 &self.input_normed_buffer,
                 &mut self.qkv_buffer,
                 &mut self.z_buffer,
@@ -45967,7 +46327,7 @@ impl PackageLinearAttnResidentStepLayer {
             )?;
         } else {
             let component_started = component_started!();
-            self.qkv_matrix.matvec(
+            weights.qkv_matrix.matvec(
                 &self.input_normed_buffer,
                 &mut self.qkv_buffer,
                 stream,
@@ -45975,7 +46335,7 @@ impl PackageLinearAttnResidentStepLayer {
             )?;
             finish_component!(component_started, qkv_projection_ms, "qkv projection");
             let component_started = component_started!();
-            self.z_matrix.matvec(
+            weights.z_matrix.matvec(
                 &self.input_normed_buffer,
                 &mut self.z_buffer,
                 stream,
@@ -45987,15 +46347,15 @@ impl PackageLinearAttnResidentStepLayer {
         let component_started = component_started!();
         ullm_runtime_sys::linear_attn_qkv_prepare_f32(
             &self.qkv_buffer,
-            &self.conv_weight_buffer,
+            weights.conv_weight_buffer.as_ref(),
             &mut self.conv_history_buffer,
-            self.key_heads,
-            self.value_heads,
-            self.key_dim,
-            self.value_dim,
-            self.kernel_size,
-            self.q_scale,
-            self.qk_l2_norm,
+            key_heads,
+            value_heads,
+            key_dim,
+            value_dim,
+            weights.kernel_size,
+            weights.q_scale,
+            weights.qk_l2_norm,
             &mut self.qkv_conv_output_buffer,
             &mut self.recurrent_q_buffer,
             &mut self.recurrent_k_buffer,
@@ -46006,11 +46366,11 @@ impl PackageLinearAttnResidentStepLayer {
         finish_component!(component_started, qkv_prepare_ms, "qkv prepare");
         if !use_qkv_z_gate_beta_fusion {
             let component_started = component_started!();
-            self.a_matrix.matvec_gate_beta_with(
-                &self.b_matrix,
+            weights.a_matrix.matvec_gate_beta_with(
+                &weights.b_matrix,
                 &self.input_normed_buffer,
-                &self.a_log_buffer,
-                &self.dt_bias_buffer,
+                weights.a_log_buffer.as_ref(),
+                weights.dt_bias_buffer.as_ref(),
                 &mut self.recurrent_gate_buffer,
                 &mut self.recurrent_beta_buffer,
                 stream,
@@ -46025,11 +46385,11 @@ impl PackageLinearAttnResidentStepLayer {
             &self.recurrent_v_buffer,
             &self.recurrent_gate_buffer,
             &self.recurrent_beta_buffer,
-            self.key_heads,
-            self.value_heads,
+            key_heads,
+            value_heads,
             1,
-            self.key_dim,
-            self.value_dim,
+            key_dim,
+            value_dim,
             &mut self.recurrent_state_buffer,
             &mut self.recurrent_output_buffer,
             Some(stream),
@@ -46040,10 +46400,10 @@ impl PackageLinearAttnResidentStepLayer {
         let component_started = component_started!();
         ullm_runtime_sys::segmented_rmsnorm_silu_mul_f32(
             &self.recurrent_output_buffer,
-            &self.attn_norm_weight_buffer,
+            weights.attn_norm_weight_buffer.as_ref(),
             &self.z_buffer,
-            self.value_heads,
-            self.value_dim,
+            value_heads,
+            value_dim,
             1e-6_f32,
             &mut self.attn_projection_input_buffer,
             Some(stream),
@@ -46057,7 +46417,8 @@ impl PackageLinearAttnResidentStepLayer {
             "attention RMSNorm SiLU-mul"
         );
         let component_started = component_started!();
-        self.out_matrix
+        weights
+            .out_matrix
             .matvec_add(
                 &self.attn_projection_input_buffer,
                 match input {
@@ -46080,8 +46441,8 @@ impl PackageLinearAttnResidentStepLayer {
         let component_started = component_started!();
         ullm_runtime_sys::rmsnorm_f32(
             &self.attn_block_output_buffer,
-            &self.post_norm_weight_buffer,
-            self.hidden,
+            weights.post_norm_weight_buffer.as_ref(),
+            hidden,
             1e-5_f32,
             &mut self.post_normed_buffer,
             Some(stream),
@@ -46089,8 +46450,8 @@ impl PackageLinearAttnResidentStepLayer {
         .map_err(|err| format!("failed to run linear-attn resident post RMSNorm: {err}"))?;
         finish_component!(component_started, post_rmsnorm_ms, "post RMSNorm");
         let component_started = component_started!();
-        self.mlp_gate_matrix.matvec_silu_mul_with(
-            &self.mlp_up_matrix,
+        weights.mlp_gate_matrix.matvec_silu_mul_with(
+            &weights.mlp_up_matrix,
             &self.post_normed_buffer,
             &mut self.mlp_activation_buffer,
             stream,
@@ -46102,7 +46463,8 @@ impl PackageLinearAttnResidentStepLayer {
             "MLP gate/up activation"
         );
         let component_started = component_started!();
-        self.mlp_down_matrix
+        weights
+            .mlp_down_matrix
             .matvec_add(
                 &self.mlp_activation_buffer,
                 &self.attn_block_output_buffer,
@@ -46179,19 +46541,31 @@ impl PackageSelfAttnResidentStepBatchLayer {
         let mut value_dim = None;
         let mut registry = WeightRegistry::new();
         let mut shared_buffers = PackageResidentSharedBufferRegistry::new();
+        let mut shared_weights: Option<std::sync::Arc<PackageSelfAttnResidentStepWeights>> = None;
         for request_id in &request_ids {
-            let layer = PackageSelfAttnResidentStepLayer::load_with_registry(
-                context,
-                stream,
-                &mut registry,
-                Some(&mut shared_buffers),
-                path,
-                chunk_bytes,
-                layer_index,
-                &block_table,
-                block_size,
-                cache_blocks,
-            )
+            let layer = if let Some(weights) = shared_weights.clone() {
+                PackageSelfAttnResidentStepLayer::load_state_with_weights(
+                    context,
+                    stream,
+                    weights,
+                    &block_table,
+                )
+            } else {
+                let layer = PackageSelfAttnResidentStepLayer::load_with_registry(
+                    context,
+                    stream,
+                    &mut registry,
+                    Some(&mut shared_buffers),
+                    path,
+                    chunk_bytes,
+                    layer_index,
+                    &block_table,
+                    block_size,
+                    cache_blocks,
+                )?;
+                shared_weights = Some(layer.weights.clone());
+                Ok(layer)
+            }
             .map_err(|err| {
                 format!(
                     "failed to load self-attn resident batch layer {layer_index} for request {request_id:?}: {err}"
@@ -46454,16 +46828,23 @@ impl PackageLinearAttnResidentStepBatchLayer {
         let mut hidden = None;
         let mut registry = WeightRegistry::new();
         let mut shared_buffers = PackageResidentSharedBufferRegistry::new();
+        let mut shared_weights: Option<std::sync::Arc<PackageLinearAttnResidentStepWeights>> = None;
         for request_id in &request_ids {
-            let layer = PackageLinearAttnResidentStepLayer::load_with_registry(
-                context,
-                stream,
-                &mut registry,
-                Some(&mut shared_buffers),
-                path,
-                chunk_bytes,
-                layer_index,
-            )
+            let layer = if let Some(weights) = shared_weights.clone() {
+                PackageLinearAttnResidentStepLayer::load_state_with_weights(context, stream, weights)
+            } else {
+                let layer = PackageLinearAttnResidentStepLayer::load_with_registry(
+                    context,
+                    stream,
+                    &mut registry,
+                    Some(&mut shared_buffers),
+                    path,
+                    chunk_bytes,
+                    layer_index,
+                )?;
+                shared_weights = Some(layer.weights.clone());
+                Ok(layer)
+            }
             .map_err(|err| {
                 format!(
                     "failed to load linear-attn resident batch layer {layer_index} for request {request_id:?}: {err}"

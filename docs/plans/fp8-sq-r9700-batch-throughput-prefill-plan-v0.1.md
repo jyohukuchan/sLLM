@@ -3565,6 +3565,44 @@ Inventory:
 2. request-batch stepをreal batch executorへ置き換えてfull package throughput rowを作る。
 3. SQ候補をfull mixed pathへ接続する準備を続ける。
 
+## 2026-07-09 progress: T1 mixed request-state weight-bundle sharing
+
+前回の要点:
+
+- `manifest-all` full mixed request-state smokeは、AQ4 payload、AQ4 scale/row-scale、主要passthrough weight bufferのslot間共有まで通っていた。
+- ただしresident layer struct内ではweight fieldとstate/workspace fieldが混在しており、layerごとに1つのweight-only resident bundleという境界はまだ明示されていなかった。
+
+今回の変更点:
+
+- self-attention resident layerを `PackageSelfAttnResidentStepWeights` とrequest slot state/workspaceへ分けた。
+- linear-attention resident layerを `PackageLinearAttnResidentStepWeights` とrequest slot state/workspaceへ分けた。
+- batch layer loaderは1slot目でweight bundleを作り、2slot目以降は同じ `Arc<...Weights>` からstate/workspaceだけを作る。
+- requestごとのpaged KV cache、block table、Conv1d history、recurrent state、workspaceは引き続きslot別に残した。
+- smoke出力に `self_attn_weight_bundle_shared=true` と `linear_attn_weight_bundle_shared=true` を追加した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-mixed-request-state-weight-bundle-sharing-v1.md` に保存した。
+
+実測値:
+
+| field | scale/passthrough shared | weight bundle shared |
+| --- | ---: | ---: |
+| final top1 tokens | `44370,5446` | `44370,5446` |
+| layer load ms | 16240.561131 | 10256.735321 |
+| total wall ms | 16859.363507 | 10907.692026 |
+| self-attn weight bundle shared | n/a | `true` |
+| linear-attn weight bundle shared | n/a | `true` |
+| verified | `true` | `true` |
+
+判断:
+
+- full mixed request-state pathで、layerごとに1つのweight-only resident bundleを作る境界は通った。
+- これはまだreal batch throughput rowではない。実行は `batching_mode=request_state_interleaved` で、`prefill_real_batch=false` / `decode_real_batch=false` のままである。
+
+次の行動:
+
+1. request-state interleaved stepをreal request-batch executorへ置き換える。
+2. full packageで `batching.mode=real`、`prefill_real_batch=true`、`decode_real_batch=true` のAQ4 baseline rowを保存する。
+3. T2 SQ候補を同じfull mixed pathへ接続し、AQ4/SQ比較へ進む。
+
 ## Risks
 
 | risk | impact | handling |
