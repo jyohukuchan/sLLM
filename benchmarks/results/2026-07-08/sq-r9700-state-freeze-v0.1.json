@@ -74,7 +74,8 @@
     "T5: move to AQ4/FP8 throughput comparison after the T1 full package total-throughput runner exists and a T2 model-loop-safe subset is encoded in the runtime path",
     "T6/T7: run vLLM comparison only after uLLM R9700 batch=1/4/8 AQ4 and FP8 rows share the same schema",
     "T2: keep layer7-up-fallback as the current passing boundary for layer3 k16/up32 plus layer7 k16; keep layer7-up16 and layer7-up64 as failure guards",
-    "T2: add the next family/layer around the layer7-up-fallback boundary while preserving strict_top1 on the model-loop prompt bundle"
+    "T2: keep layer7-plus-o32 and layer7-plus-gate32 as individual passing branches; keep layer7-plus-down64 and layer7-plus-o32-gate32 as failure guards",
+    "T2: next probe should either recover o32+gate32 with stronger scale/layout or choose one branch, o32 or gate32, before widening coverage"
   ],
   "schema_version": "sq-r9700-state-freeze-v0.1",
   "sq_candidate": {
@@ -111,7 +112,7 @@
       ],
       "scale_block_cols": 32,
       "scale_granularity": "row_block",
-      "status": "model_loop_layer7_up_fallback_is_current_passing_boundary",
+      "status": "model_loop_layer7_o_or_gate_individual_branch_boundary",
       "model_loop_coverage_reduction": {
         "artifact": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-coverage-reduction-v1.md",
         "comparison_json": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-coverage-reduction-v1/comparison.json",
@@ -148,6 +149,22 @@
         ],
         "finding": "layer3 k16/up32 plus layer7 k16 remains strict-top1 stable only when layer7 up_proj falls back; layer7 up_proj row-block16 and row-block64 both fail case_a with AQ4 top1 at SQ top8 rank 2",
         "next_required_probe": "add the next family/layer around layer3 k16/up32 plus layer7 k16 while keeping layer7 up_proj fallback until a stronger scale/layout or text-level acceptance rule is available"
+      },
+      "layer7_add_family_probe": {
+        "artifact": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-add-family-v1.md",
+        "comparison_json": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-add-family-v1/comparison.json",
+        "results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-add-family-v1/results.jsonl",
+        "passing_probes": [
+          "layer7-plus-o32",
+          "layer7-plus-gate32"
+        ],
+        "failure_guards": [
+          "layer7-plus-down64",
+          "layer7-plus-o32-gate32"
+        ],
+        "finding": "layer7 o_proj row-block32 and layer7 gate_proj row-block32 each preserve strict top1 individually, but layer7 down_proj row-block64 fails case_a and o32+gate32 also fails case_a despite both individual probes passing",
+        "current_boundary": "layer3 k16/up32 plus layer7 k16, with layer7 up_proj and down_proj fallback; o_proj and gate_proj are individual branch candidates, not a combined promoted subset",
+        "next_required_probe": "either recover o32+gate32 with stronger scale/layout or choose one branch, o32 or gate32, before widening coverage"
       }
     },
     "current_policy_artifact": {
@@ -247,9 +264,14 @@
       "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-up-scale-v1.md",
       "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-policy-v0.1.json",
       "benchmarks/results/2026-07-09/sq-fp8-layer7-up16-policy-v0.1.json",
-      "benchmarks/results/2026-07-09/sq-fp8-layer7-up64-policy-v0.1.json"
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up64-policy-v0.1.json",
+      "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-add-family-v1.md",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-o32-policy-v0.1.json",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-gate32-policy-v0.1.json",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-down64-policy-v0.1.json",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-o32-gate32-policy-v0.1.json"
     ],
-    "t2_short_prompt_guard_note": "One selected q_proj tensor and then the layer 3 projection set are loaded from SQ FP8 while the rest falls back to AQ4. The layer 3 projection-set guard matched AQ4 top1 in 3/3 short token-ID cases. Expanding to layers 3,7 changed top1 for attention-only, MLP-only, and attention+MLP overlays, while AQ4 top1 remained inside SQ top8. Family split shows q/v/down are risky for strict top1, while k/o/gate/up preserve top1 individually and as a combined subset across 3/3 short prompts. Expanding k/o/gate/up to layers 3,7,11,15 preserved top1 in 2/3 short prompts and failed case_a. Row-block scale recovers q at block32 and down at block64, but v remains strict-top1 risky for tested block sizes. A mixed candidate with v fallback and q/k/o/gate/up/down row-block32 FP8 passes layers 3,7,11,15 in 3/3 short prompts and layers 3,7,11,15,19 on len4. The same policy fails layers 3,7,11,15,19,23 and all self-attention probe layers. Layer 23 alone is fixed by q/v fallback, but 6-layer q/v fallback still fails, so cumulative drift remains. T2 promotion rule v0.1 is strict_top1; top-k/rank/gap are diagnostic-only. Six-layer family split shows k/up row-block32 passes strict top1 and k/up combined passes 3/3 short prompts, but o/gate/down fail individually at 6 layers. Per-layer combination search shows k/up all 6 plus any one or two of o/gate/down on layers 3,7,11,15,19 pass len4, while adding all three fails len4. The kup6_gate5_down5 prompt bundle passes len4, case_a, and case_b strict top1; case_a top8 overlap is only 2/8, so it is a six-layer regression subset rather than a full SQ policy. The selected FP8/fallback policy is saved as sq-fp8-kup6-gate5-down5-policy-v0.1 and was materialized into a real payload artifact for runtime boundary verification. Full-target SQ guard is still pending and needs broader coverage, stronger format decisions, or a formally accepted text-level guard. A stricter six-layer token-id model-loop prompt-bundle guard later showed that the same kup6_gate5_down5 artifact fails strict top1 on len4 and case_a when token-id embedding, selected runtime layers, request-batch prefill, decode ready batch, final norm, and lm_head are connected in one path; AQ4 top1 remains in SQ top8. Therefore the direct logits prompt-bundle pass is weaker evidence than the model-loop guard. Coverage reduction on the stricter model-loop gate then showed k/up row-block32 still fails case_a even when reduced to layer3 only; up_proj layer3 row-block32 and k_proj layer3 row-block16 pass individually, but k/up layer3 row-block16 fails when combined. Therefore the next T2 step is mixed per-family/per-tensor scale-layout support rather than widening k/up coverage. Mixed scale support then showed k row-block16 plus up row-block32 recovers layer3-only coverage but fails case_a when expanded to layers 3 and 7, so layer7 coverage interaction is now the immediate T2 boundary. Layer7 isolation then showed layer7 k16/up32 alone and layer3 k16/up32 plus layer7 k16 pass, while layer3 k16/up32 plus layer7 up32 fails case_a. The immediate next probe should target layer7 up_proj scale or fallback. Layer7 up scale probing then showed that keeping layer7 up_proj as fallback preserves strict top1 for layer3 k16/up32 plus layer7 k16, while layer7 up_proj row-block16 and row-block64 both fail case_a. Therefore the current T2 model-loop-safe boundary keeps layer7 up_proj in fallback.",
+    "t2_short_prompt_guard_note": "One selected q_proj tensor and then the layer 3 projection set are loaded from SQ FP8 while the rest falls back to AQ4. The layer 3 projection-set guard matched AQ4 top1 in 3/3 short token-ID cases. Expanding to layers 3,7 changed top1 for attention-only, MLP-only, and attention+MLP overlays, while AQ4 top1 remained inside SQ top8. Family split shows q/v/down are risky for strict top1, while k/o/gate/up preserve top1 individually and as a combined subset across 3/3 short prompts. Expanding k/o/gate/up to layers 3,7,11,15 preserved top1 in 2/3 short prompts and failed case_a. Row-block scale recovers q at block32 and down at block64, but v remains strict-top1 risky for tested block sizes. A mixed candidate with v fallback and q/k/o/gate/up/down row-block32 FP8 passes layers 3,7,11,15 in 3/3 short prompts and layers 3,7,11,15,19 on len4. The same policy fails layers 3,7,11,15,19,23 and all self-attention probe layers. Layer 23 alone is fixed by q/v fallback, but 6-layer q/v fallback still fails, so cumulative drift remains. T2 promotion rule v0.1 is strict_top1; top-k/rank/gap are diagnostic-only. Six-layer family split shows k/up row-block32 passes strict top1 and k/up combined passes 3/3 short prompts, but o/gate/down fail individually at 6 layers. Per-layer combination search shows k/up all 6 plus any one or two of o/gate/down on layers 3,7,11,15,19 pass len4, while adding all three fails len4. The kup6_gate5_down5 prompt bundle passes len4, case_a, and case_b strict top1; case_a top8 overlap is only 2/8, so it is a six-layer regression subset rather than a full SQ policy. The selected FP8/fallback policy is saved as sq-fp8-kup6-gate5-down5-policy-v0.1 and was materialized into a real payload artifact for runtime boundary verification. Full-target SQ guard is still pending and needs broader coverage, stronger format decisions, or a formally accepted text-level guard. A stricter six-layer token-id model-loop prompt-bundle guard later showed that the same kup6_gate5_down5 artifact fails strict top1 on len4 and case_a when token-id embedding, selected runtime layers, request-batch prefill, decode ready batch, final norm, and lm_head are connected in one path; AQ4 top1 remains in SQ top8. Therefore the direct logits prompt-bundle pass is weaker evidence than the model-loop guard. Coverage reduction on the stricter model-loop gate then showed k/up row-block32 still fails case_a even when reduced to layer3 only; up_proj layer3 row-block32 and k_proj layer3 row-block16 pass individually, but k/up layer3 row-block16 fails when combined. Therefore the next T2 step is mixed per-family/per-tensor scale-layout support rather than widening k/up coverage. Mixed scale support then showed k row-block16 plus up row-block32 recovers layer3-only coverage but fails case_a when expanded to layers 3 and 7, so layer7 coverage interaction is now the immediate T2 boundary. Layer7 isolation then showed layer7 k16/up32 alone and layer3 k16/up32 plus layer7 k16 pass, while layer3 k16/up32 plus layer7 up32 fails case_a. The immediate next probe should target layer7 up_proj scale or fallback. Layer7 up scale probing then showed that keeping layer7 up_proj as fallback preserves strict top1 for layer3 k16/up32 plus layer7 k16, while layer7 up_proj row-block16 and row-block64 both fail case_a. Therefore the current T2 model-loop-safe boundary keeps layer7 up_proj in fallback. Layer7 add-family probing then showed that layer7 o_proj row-block32 and gate_proj row-block32 pass individually, while layer7 down_proj row-block64 and the o32+gate32 combination fail case_a. Therefore o/gate are branch candidates, not a combined promoted subset under strict_top1.",
     "t2_sq_token_id_model_loop_bridge": "partial_done_for_selected_layer_real_prefill_guard",
     "t2_sq_token_id_model_loop_bridge_artifact": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-real-prefill-smoke-v1.md",
     "t2_sq_token_id_model_loop_bridge_note": "sq-fp8-token-ids-model-loop-smoke connects the current kup6_gate5_down5 SQ FP8 artifact to the token-id model-loop request-batch prefill path. The R9700 layers 3,7 smoke used batch=2, prompt=2, generated=1 and preserved batching.mode=real, prefill_real_batch=true, decode_real_batch=true, sq_overlay=true, final_top1_tokens=[155793,23175], and verified=true. This is a selected-layer bridge, not final full LM throughput.",
@@ -288,6 +310,23 @@
       "benchmarks/results/2026-07-09/sq-fp8-layer7-up16-policy-artifact-v0.1.json",
       "benchmarks/results/2026-07-09/sq-fp8-layer7-up64-policy-artifact-v0.1.json"
     ],
-    "t2_sq_layer7_up_scale_note": "R9700 model-loop prompt bundle shows layer7-up-fallback passes 3/3, while layer7-up16 and layer7-up64 both fail case_a. AQ4 top1 remains in SQ top8 at rank 2 for the failing variants. Current passing boundary is layer3 k_proj row-block16, layer3 up_proj row-block32, and layer7 k_proj row-block16 with layer7 up_proj fallback."
+    "t2_sq_layer7_up_scale_note": "R9700 model-loop prompt bundle shows layer7-up-fallback passes 3/3, while layer7-up16 and layer7-up64 both fail case_a. AQ4 top1 remains in SQ top8 at rank 2 for the failing variants. Current passing boundary is layer3 k_proj row-block16, layer3 up_proj row-block32, and layer7 k_proj row-block16 with layer7 up_proj fallback.",
+    "t2_sq_layer7_add_family": "partial_done_o_gate_individual_pass_combined_fails",
+    "t2_sq_layer7_add_family_artifact": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-add-family-v1.md",
+    "t2_sq_layer7_add_family_comparison_json": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-add-family-v1/comparison.json",
+    "t2_sq_layer7_add_family_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-add-family-v1/results.jsonl",
+    "t2_sq_layer7_add_family_policy_jsons": [
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-o32-policy-v0.1.json",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-gate32-policy-v0.1.json",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-down64-policy-v0.1.json",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-o32-gate32-policy-v0.1.json"
+    ],
+    "t2_sq_layer7_add_family_policy_artifact_jsons": [
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-o32-policy-artifact-v0.1.json",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-gate32-policy-artifact-v0.1.json",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-down64-policy-artifact-v0.1.json",
+      "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-o32-gate32-policy-artifact-v0.1.json"
+    ],
+    "t2_sq_layer7_add_family_note": "R9700 model-loop prompt bundle shows layer7-plus-o32 and layer7-plus-gate32 pass 3/3. layer7-plus-down64 fails case_a with AQ4 top1 at SQ top8 rank 2. layer7-plus-o32-gate32 also fails case_a with AQ4 top1 at SQ top8 rank 2, so o/gate are individual branch candidates rather than a combined promoted subset."
   }
 }

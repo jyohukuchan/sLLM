@@ -1,0 +1,790 @@
+{
+  "schema_version": "sq-fp8-model-loop-comparison-v0.1",
+  "date": "2026-07-09",
+  "run_id": "phase-t2-sq-fp8-token-id-model-loop-layer7-add-family-v1",
+  "baseline": {
+    "source_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-prompt-bundle-v1/results.jsonl",
+    "case_id": "aq4-r9700-token-id-model-loop-prompt-bundle-layers3-7-11-15-19-23-b3",
+    "final_top1_tokens": [
+      110784,
+      237950,
+      182949
+    ],
+    "metrics": {
+      "prefill_tokens_per_second": 33.04426,
+      "decode_tokens_per_second": 32.565648,
+      "end_to_end_total_tokens_per_second": 32.981036,
+      "vram_consumed_bytes": 5885833216,
+      "vram_peak_bytes": 6016020480
+    },
+    "batching": {
+      "component_command": "package-token-ids-model-loop-smoke",
+      "component_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+      "decode_executor": "stack_ready_batch",
+      "decode_executor_request_parallelism": 3,
+      "decode_real_batch": true,
+      "mode": "real",
+      "prefill_batch_request_counts": [
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2
+      ],
+      "prefill_executor": "stack_prefill_request_batch_step",
+      "prefill_executor_request_parallelism": 3,
+      "prefill_executor_token_parallelism": null,
+      "prefill_real_batch": true,
+      "resolved_prefill_executor": "stack_prefill_request_batch_step",
+      "scheduler_policy": "model_loop_ready_batch"
+    }
+  },
+  "variants": [
+    {
+      "variant": "layer7-plus-o32",
+      "description": "layer3 k16/up32 + layer7 k16/o32; layer7 up fallback",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-layer7-up-fallback-plus-layer7-o32",
+      "artifact": "/tmp/ullm-sq-fp8-layer7-up-fallback-plus-layer7-o32-policy-v0.1-artifact",
+      "strict_top1_pass_count": 3,
+      "case_count": 3,
+      "strict_top1_pass": true,
+      "pass_by_case": [
+        {
+          "case": "len4",
+          "aq4_top1": 110784,
+          "sq_top1": 110784,
+          "strict_top1_match": true
+        },
+        {
+          "case": "case_a",
+          "aq4_top1": 237950,
+          "sq_top1": 237950,
+          "strict_top1_match": true
+        },
+        {
+          "case": "case_b",
+          "aq4_top1": 182949,
+          "sq_top1": 182949,
+          "strict_top1_match": true
+        }
+      ],
+      "aq4_top1_rank_in_sq_top8": [
+        {
+          "case": "len4",
+          "aq4_top1_rank_in_sq_top8": 1
+        },
+        {
+          "case": "case_a",
+          "aq4_top1_rank_in_sq_top8": 1
+        },
+        {
+          "case": "case_b",
+          "aq4_top1_rank_in_sq_top8": 1
+        }
+      ],
+      "top8_common": [
+        {
+          "case": "len4",
+          "common_top8_count": 7
+        },
+        {
+          "case": "case_a",
+          "common_top8_count": 4
+        },
+        {
+          "case": "case_b",
+          "common_top8_count": 7
+        }
+      ],
+      "final_top1_tokens": [
+        110784,
+        237950,
+        182949
+      ],
+      "final_topk_tokens": [
+        [
+          110784,
+          102446,
+          242203,
+          98413,
+          120222,
+          143001,
+          172083,
+          69538
+        ],
+        [
+          237950,
+          193706,
+          111791,
+          124170,
+          68712,
+          100411,
+          207459,
+          208360
+        ],
+        [
+          182949,
+          69895,
+          97533,
+          121250,
+          214852,
+          159207,
+          139376,
+          209130
+        ]
+      ],
+      "metrics": {
+        "prefill_tokens_per_second": 33.065052,
+        "decode_tokens_per_second": 32.826436,
+        "end_to_end_total_tokens_per_second": 33.033732,
+        "vram_consumed_bytes": 5885837312,
+        "vram_peak_bytes": 6016024576
+      },
+      "batching": {
+        "component_command": "sq-fp8-token-ids-model-loop-smoke",
+        "component_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+        "decode_executor": "stack_ready_batch",
+        "decode_executor_request_parallelism": 3,
+        "decode_real_batch": true,
+        "mode": "real",
+        "prefill_batch_request_counts": [
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2
+        ],
+        "prefill_executor": "stack_prefill_request_batch_step",
+        "prefill_executor_request_parallelism": 3,
+        "prefill_executor_token_parallelism": null,
+        "prefill_real_batch": true,
+        "resolved_prefill_executor": "stack_prefill_request_batch_step",
+        "scheduler_policy": "model_loop_ready_batch"
+      },
+      "workload": {
+        "layers_csv": "3,7,11,15,19,23",
+        "batch_size": 3,
+        "prefill_total_input_tokens": 20,
+        "decode_total_generated_tokens": 3,
+        "sq_fp8_tensor_count": 4,
+        "sq_passthrough_tensor_count": 771
+      }
+    },
+    {
+      "variant": "layer7-plus-gate32",
+      "description": "layer3 k16/up32 + layer7 k16/gate32; layer7 up fallback",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-layer7-up-fallback-plus-layer7-gate32",
+      "artifact": "/tmp/ullm-sq-fp8-layer7-up-fallback-plus-layer7-gate32-policy-v0.1-artifact",
+      "strict_top1_pass_count": 3,
+      "case_count": 3,
+      "strict_top1_pass": true,
+      "pass_by_case": [
+        {
+          "case": "len4",
+          "aq4_top1": 110784,
+          "sq_top1": 110784,
+          "strict_top1_match": true
+        },
+        {
+          "case": "case_a",
+          "aq4_top1": 237950,
+          "sq_top1": 237950,
+          "strict_top1_match": true
+        },
+        {
+          "case": "case_b",
+          "aq4_top1": 182949,
+          "sq_top1": 182949,
+          "strict_top1_match": true
+        }
+      ],
+      "aq4_top1_rank_in_sq_top8": [
+        {
+          "case": "len4",
+          "aq4_top1_rank_in_sq_top8": 1
+        },
+        {
+          "case": "case_a",
+          "aq4_top1_rank_in_sq_top8": 1
+        },
+        {
+          "case": "case_b",
+          "aq4_top1_rank_in_sq_top8": 1
+        }
+      ],
+      "top8_common": [
+        {
+          "case": "len4",
+          "common_top8_count": 7
+        },
+        {
+          "case": "case_a",
+          "common_top8_count": 5
+        },
+        {
+          "case": "case_b",
+          "common_top8_count": 7
+        }
+      ],
+      "final_top1_tokens": [
+        110784,
+        237950,
+        182949
+      ],
+      "final_topk_tokens": [
+        [
+          110784,
+          242203,
+          102446,
+          120222,
+          143001,
+          98413,
+          172083,
+          69538
+        ],
+        [
+          237950,
+          111791,
+          193706,
+          124170,
+          68712,
+          100411,
+          13817,
+          212635
+        ],
+        [
+          182949,
+          159207,
+          97533,
+          69895,
+          121250,
+          214852,
+          139376,
+          161229
+        ]
+      ],
+      "metrics": {
+        "prefill_tokens_per_second": 33.01673,
+        "decode_tokens_per_second": 32.651026,
+        "end_to_end_total_tokens_per_second": 32.968565,
+        "vram_consumed_bytes": 5885870080,
+        "vram_peak_bytes": 6016057344
+      },
+      "batching": {
+        "component_command": "sq-fp8-token-ids-model-loop-smoke",
+        "component_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+        "decode_executor": "stack_ready_batch",
+        "decode_executor_request_parallelism": 3,
+        "decode_real_batch": true,
+        "mode": "real",
+        "prefill_batch_request_counts": [
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2
+        ],
+        "prefill_executor": "stack_prefill_request_batch_step",
+        "prefill_executor_request_parallelism": 3,
+        "prefill_executor_token_parallelism": null,
+        "prefill_real_batch": true,
+        "resolved_prefill_executor": "stack_prefill_request_batch_step",
+        "scheduler_policy": "model_loop_ready_batch"
+      },
+      "workload": {
+        "layers_csv": "3,7,11,15,19,23",
+        "batch_size": 3,
+        "prefill_total_input_tokens": 20,
+        "decode_total_generated_tokens": 3,
+        "sq_fp8_tensor_count": 4,
+        "sq_passthrough_tensor_count": 771
+      }
+    },
+    {
+      "variant": "layer7-plus-down64",
+      "description": "layer3 k16/up32 + layer7 k16/down64; layer7 up fallback",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-layer7-up-fallback-plus-layer7-down64",
+      "artifact": "/tmp/ullm-sq-fp8-layer7-up-fallback-plus-layer7-down64-policy-v0.1-artifact",
+      "strict_top1_pass_count": 2,
+      "case_count": 3,
+      "strict_top1_pass": false,
+      "pass_by_case": [
+        {
+          "case": "len4",
+          "aq4_top1": 110784,
+          "sq_top1": 110784,
+          "strict_top1_match": true
+        },
+        {
+          "case": "case_a",
+          "aq4_top1": 237950,
+          "sq_top1": 111791,
+          "strict_top1_match": false
+        },
+        {
+          "case": "case_b",
+          "aq4_top1": 182949,
+          "sq_top1": 182949,
+          "strict_top1_match": true
+        }
+      ],
+      "aq4_top1_rank_in_sq_top8": [
+        {
+          "case": "len4",
+          "aq4_top1_rank_in_sq_top8": 1
+        },
+        {
+          "case": "case_a",
+          "aq4_top1_rank_in_sq_top8": 2
+        },
+        {
+          "case": "case_b",
+          "aq4_top1_rank_in_sq_top8": 1
+        }
+      ],
+      "top8_common": [
+        {
+          "case": "len4",
+          "common_top8_count": 7
+        },
+        {
+          "case": "case_a",
+          "common_top8_count": 5
+        },
+        {
+          "case": "case_b",
+          "common_top8_count": 7
+        }
+      ],
+      "final_top1_tokens": [
+        110784,
+        111791,
+        182949
+      ],
+      "final_topk_tokens": [
+        [
+          110784,
+          242203,
+          102446,
+          120222,
+          98413,
+          143001,
+          172083,
+          69538
+        ],
+        [
+          111791,
+          237950,
+          193706,
+          124170,
+          100411,
+          68712,
+          208360,
+          172960
+        ],
+        [
+          182949,
+          69895,
+          121250,
+          159207,
+          97533,
+          214852,
+          80186,
+          139376
+        ]
+      ],
+      "metrics": {
+        "prefill_tokens_per_second": 33.213301,
+        "decode_tokens_per_second": 32.884681,
+        "end_to_end_total_tokens_per_second": 33.170066,
+        "vram_consumed_bytes": 5885894656,
+        "vram_peak_bytes": 6016081920
+      },
+      "batching": {
+        "component_command": "sq-fp8-token-ids-model-loop-smoke",
+        "component_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+        "decode_executor": "stack_ready_batch",
+        "decode_executor_request_parallelism": 3,
+        "decode_real_batch": true,
+        "mode": "real",
+        "prefill_batch_request_counts": [
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2
+        ],
+        "prefill_executor": "stack_prefill_request_batch_step",
+        "prefill_executor_request_parallelism": 3,
+        "prefill_executor_token_parallelism": null,
+        "prefill_real_batch": true,
+        "resolved_prefill_executor": "stack_prefill_request_batch_step",
+        "scheduler_policy": "model_loop_ready_batch"
+      },
+      "workload": {
+        "layers_csv": "3,7,11,15,19,23",
+        "batch_size": 3,
+        "prefill_total_input_tokens": 20,
+        "decode_total_generated_tokens": 3,
+        "sq_fp8_tensor_count": 4,
+        "sq_passthrough_tensor_count": 771
+      }
+    },
+    {
+      "variant": "layer7-plus-o32-gate32",
+      "description": "layer3 k16/up32 + layer7 k16/o32/gate32; layer7 up/down fallback",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-layer7-up-fallback-plus-layer7-o32-gate32",
+      "artifact": "/tmp/ullm-sq-fp8-layer7-up-fallback-plus-layer7-o32-gate32-policy-v0.1-artifact",
+      "strict_top1_pass_count": 2,
+      "case_count": 3,
+      "strict_top1_pass": false,
+      "pass_by_case": [
+        {
+          "case": "len4",
+          "aq4_top1": 110784,
+          "sq_top1": 110784,
+          "strict_top1_match": true
+        },
+        {
+          "case": "case_a",
+          "aq4_top1": 237950,
+          "sq_top1": 193706,
+          "strict_top1_match": false
+        },
+        {
+          "case": "case_b",
+          "aq4_top1": 182949,
+          "sq_top1": 182949,
+          "strict_top1_match": true
+        }
+      ],
+      "aq4_top1_rank_in_sq_top8": [
+        {
+          "case": "len4",
+          "aq4_top1_rank_in_sq_top8": 1
+        },
+        {
+          "case": "case_a",
+          "aq4_top1_rank_in_sq_top8": 2
+        },
+        {
+          "case": "case_b",
+          "aq4_top1_rank_in_sq_top8": 1
+        }
+      ],
+      "top8_common": [
+        {
+          "case": "len4",
+          "common_top8_count": 6
+        },
+        {
+          "case": "case_a",
+          "common_top8_count": 4
+        },
+        {
+          "case": "case_b",
+          "common_top8_count": 7
+        }
+      ],
+      "final_top1_tokens": [
+        110784,
+        193706,
+        182949
+      ],
+      "final_topk_tokens": [
+        [
+          110784,
+          102446,
+          242203,
+          98413,
+          143001,
+          120222,
+          115326,
+          172083
+        ],
+        [
+          193706,
+          237950,
+          111791,
+          124170,
+          68712,
+          100411,
+          153103,
+          207459
+        ],
+        [
+          182949,
+          97533,
+          69895,
+          121250,
+          159207,
+          214852,
+          139376,
+          161229
+        ]
+      ],
+      "metrics": {
+        "prefill_tokens_per_second": 33.341784,
+        "decode_tokens_per_second": 33.048955,
+        "end_to_end_total_tokens_per_second": 33.303295,
+        "vram_consumed_bytes": 5252460544,
+        "vram_peak_bytes": 5382647808
+      },
+      "batching": {
+        "component_command": "sq-fp8-token-ids-model-loop-smoke",
+        "component_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+        "decode_executor": "stack_ready_batch",
+        "decode_executor_request_parallelism": 3,
+        "decode_real_batch": true,
+        "mode": "real",
+        "prefill_batch_request_counts": [
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          2,
+          2,
+          2,
+          2
+        ],
+        "prefill_executor": "stack_prefill_request_batch_step",
+        "prefill_executor_request_parallelism": 3,
+        "prefill_executor_token_parallelism": null,
+        "prefill_real_batch": true,
+        "resolved_prefill_executor": "stack_prefill_request_batch_step",
+        "scheduler_policy": "model_loop_ready_batch"
+      },
+      "workload": {
+        "layers_csv": "3,7,11,15,19,23",
+        "batch_size": 3,
+        "prefill_total_input_tokens": 20,
+        "decode_total_generated_tokens": 3,
+        "sq_fp8_tensor_count": 5,
+        "sq_passthrough_tensor_count": 770
+      }
+    }
+  ],
+  "finding": "Adding layer7 o_proj row-block32 or layer7 gate_proj row-block32 individually preserves strict top1, but layer7 down_proj row-block64 fails case_a and the combined layer7 o32+gate32 probe also fails case_a.",
+  "promotion_rule": "strict_top1",
+  "passing_variants": [
+    "layer7-plus-o32",
+    "layer7-plus-gate32"
+  ],
+  "failure_guards": [
+    "layer7-plus-down64",
+    "layer7-plus-o32-gate32"
+  ],
+  "next_action": "Keep layer7 up_proj and down_proj fallback. Probe whether o/gate combined can be recovered with stronger scale/layout, or choose one of o32/gate32 as a branch before widening coverage."
+}
