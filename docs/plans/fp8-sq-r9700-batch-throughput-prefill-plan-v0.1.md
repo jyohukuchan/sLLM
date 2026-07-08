@@ -210,6 +210,28 @@
 2. accumulator layoutが確定したら、cached-prefix flash2のQK dot部分を小さい条件で置き換え、sampled diffを保存する。
 3. その後、複数query row/blockでK/V tileを再利用する本命のFlashAttention2-like構造へ進める。
 
+### 2026-07-08 progress: RDNA4 FP8 rocWMMA QK probe v1
+
+前回の要点:
+
+- direct builtinのFP8 WMMA QK probeでは、`ones` は期待どおり `16.0` になった。
+- ただし `layout` patternではraw accumulator previewがCPU row-major Q*K^Tと一致せず、A/B input register packingとaccumulator orderの両方を自前で扱う必要がある状態だった。
+
+今回の変更点:
+
+- C ABI `ullm_runtime_rocwmma_fp8_qk_probe`、Rust FFI `rocwmma_fp8_qk_probe`、CLI `runtime-rocwmma-fp8-qk-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]` を追加した。
+- HIPRTC kernelから `rocwmma::fragment`、`load_matrix_sync`、`mma_sync`、`store_matrix_sync` を使う16x16 FP8 QK probeを追加した。
+- HIPRTC compile helperにrocWMMA include pathを追加できる経路を入れ、既存kernelのcompile optionは従来どおりに保った。
+- R9700 runtime device index `2` で、`ones` は `max_abs=16.0`、`layout` はrow-major `0..255`、preview `0..63` を確認した。
+- V620/RDNA2 runtime device index `1` ではRDNA4必須として拒否されることを確認した。
+- 結果は `benchmarks/results/2026-07-08/runtime-wmma/phase-c9-rdna4-fp8-rocwmma-qk-probe-v1.md` に保存した。
+
+次の行動:
+
+1. direct builtinのraw layout解析を主経路から外し、RDNA4向けFlashAttention2-like実装ではrocWMMA fragment APIを第一候補にする。
+2. まず16x16 QK tileを既存cached-prefix/cold-prefill flash2のQK dot部分へ小さい条件で組み込み、sampled diffとtok/sを測る。
+3. その後、online softmaxとV accumulationを同じtile loopへ寄せ、FlashAttention2-likeの実装としてattention matrixを展開しない経路に育てる。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。

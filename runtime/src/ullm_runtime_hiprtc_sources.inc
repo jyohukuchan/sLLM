@@ -83,6 +83,42 @@ extern "C" __global__ void ullm_wmma_fp8_qk_probe_kernel(
 )";
     }
 
+    static const char *rocwmma_fp8_qk_probe_kernel_source() {
+        return R"(
+#include <rocwmma/rocwmma.hpp>
+
+extern "C" __global__ void ullm_rocwmma_fp8_qk_probe_kernel(
+    const unsigned char *q,
+    const unsigned char *k,
+    float *output) {
+    if (blockIdx.x != 0u || threadIdx.x >= 32u) {
+        return;
+    }
+#if defined(__gfx1200__) || defined(__gfx1201__)
+    using namespace rocwmma;
+    using FragA = fragment<matrix_a, 16, 16, 16, float8_t, row_major>;
+    using FragB = fragment<matrix_b, 16, 16, 16, float8_t, col_major>;
+    using FragC = fragment<accumulator, 16, 16, 16, float32_t, row_major>;
+
+    FragA a;
+    FragB b;
+    FragC c;
+    fill_fragment(c, 0.0f);
+    load_matrix_sync(a, reinterpret_cast<const float8_t *>(q), 16);
+    load_matrix_sync(b, reinterpret_cast<const float8_t *>(k), 16);
+    mma_sync(c, a, b, c);
+    store_matrix_sync(output, c, 16);
+#else
+    if (threadIdx.x == 0u) {
+        for (unsigned int i = 0u; i < 256u; ++i) {
+            output[i] = 0.0f;
+        }
+    }
+#endif
+}
+)";
+    }
+
     static const char *aq4_kernel_source() {
         return R"(
 extern "C" __global__ void ullm_aq4_dequant_f32_kernel(

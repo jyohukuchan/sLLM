@@ -97,6 +97,11 @@ fn main() -> ExitCode {
             env::args().nth(3),
             env::args().nth(4),
         ),
+        Some("runtime-rocwmma-fp8-qk-probe-smoke") => runtime_rocwmma_fp8_qk_probe_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+        ),
         Some("runtime-paged-decode-attn-smoke") => {
             runtime_paged_decode_attn_smoke(env::args().nth(2))
         }
@@ -5535,67 +5540,19 @@ fn runtime_wmma_fp8_probe_smoke(device_index: Option<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn runtime_wmma_fp8_qk_probe_smoke(
+fn runtime_fp8_qk_probe_smoke(
+    command_name: &'static str,
+    command_label: &'static str,
+    call_label: &'static str,
     device_index: Option<String>,
     pattern: Option<String>,
     preview_count: Option<String>,
+    probe: Fp8QkProbeKernel,
 ) -> ExitCode {
-    enum Pattern {
-        Ones,
-        Layout,
-    }
-
-    impl Pattern {
-        fn as_str(&self) -> &'static str {
-            match self {
-                Self::Ones => "ones",
-                Self::Layout => "layout",
-            }
-        }
-    }
-
-    fn parse_pattern(raw: Option<String>) -> Result<Pattern, ExitCode> {
-        match raw {
-            Some(raw) => {
-                let value = raw.split_once('=').map_or(raw.as_str(), |(_, value)| value);
-                match value {
-                    "ones" => Ok(Pattern::Ones),
-                    "layout" => Ok(Pattern::Layout),
-                    _ => {
-                        eprintln!(
-                            "runtime-wmma-fp8-qk-probe-smoke: invalid pattern {raw}; expected ones|layout"
-                        );
-                        Err(ExitCode::from(2))
-                    }
-                }
-            }
-            None => Ok(Pattern::Ones),
-        }
-    }
-
-    let device_count = match ullm_runtime_sys::device_count() {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("failed to query device count: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let selected_device_index = match device_index {
-        Some(raw) => match parse_optional_device_index(Some(raw)) {
-            Ok(value) => value,
-            Err(code) => return code,
-        },
-        None => match (0..device_count).find(|&index| {
-            ullm_runtime_sys::device_info(index)
-                .map(|info| is_rdna4_device(&info))
-                .unwrap_or(false)
-        }) {
-            Some(index) => index,
-            None => {
-                println!("runtime-wmma-fp8-qk-probe-smoke: no rdna4 device found; skipped");
-                return ExitCode::SUCCESS;
-            }
-        },
+    let selected_device_index = match select_rdna4_device(device_index, command_name) {
+        Ok(Some(index)) => index,
+        Ok(None) => return ExitCode::SUCCESS,
+        Err(code) => return code,
     };
     let mut context = match ullm_runtime_sys::RuntimeContext::create(selected_device_index) {
         Ok(context) => context,
@@ -5613,14 +5570,14 @@ fn runtime_wmma_fp8_qk_probe_smoke(
     };
     if info.backend != "hip" {
         eprintln!(
-            "runtime wmma fp8 qk probe smoke requires a HIP device: backend={} device={}",
+            "{call_label} requires a HIP device: backend={} device={}",
             info.backend, info.name
         );
         return ExitCode::from(1);
     }
     if !is_rdna4_device(&info) {
         eprintln!(
-            "runtime wmma fp8 qk probe smoke requires RDNA4: backend={} device={} compute={}.{} arch={}",
+            "{call_label} requires RDNA4: backend={} device={} compute={}.{} arch={}",
             info.backend, info.name, info.compute_major, info.compute_minor, info.gcn_arch_name
         );
         return ExitCode::from(1);
@@ -5632,7 +5589,8 @@ fn runtime_wmma_fp8_qk_probe_smoke(
             return ExitCode::from(1);
         }
     };
-    let pattern = match parse_pattern(pattern) {
+
+    let pattern = match parse_fp8_qk_pattern(pattern, command_name) {
         Ok(pattern) => pattern,
         Err(code) => return code,
     };
@@ -5646,28 +5604,208 @@ fn runtime_wmma_fp8_qk_probe_smoke(
     let mut q_buffer = match context.alloc_buffer(tile_bytes) {
         Ok(buffer) => buffer,
         Err(err) => {
-            eprintln!("failed to allocate runtime wmma q buffer: {err}");
+            eprintln!(
+                "failed to allocate runtime {} q buffer: {err}",
+                command_label
+            );
             return ExitCode::from(1);
         }
     };
     let mut k_buffer = match context.alloc_buffer(tile_bytes) {
         Ok(buffer) => buffer,
         Err(err) => {
-            eprintln!("failed to allocate runtime wmma k buffer: {err}");
+            eprintln!(
+                "failed to allocate runtime {} k buffer: {err}",
+                command_label
+            );
             return ExitCode::from(1);
         }
     };
     let mut output_buffer = match context.alloc_buffer(output_bytes) {
         Ok(buffer) => buffer,
         Err(err) => {
-            eprintln!("failed to allocate runtime wmma qk output buffer: {err}");
+            eprintln!(
+                "failed to allocate runtime {} qk output buffer: {err}",
+                command_label
+            );
             return ExitCode::from(1);
         }
     };
 
-    let (q_bytes, k_bytes): (Vec<u8>, Vec<u8>) = match pattern {
-        Pattern::Ones => (vec![0x38_u8; tile_bytes], vec![0x38_u8; tile_bytes]),
-        Pattern::Layout => {
+    let (q_bytes, k_bytes) = fp8_qk_probe_pattern_bytes(&pattern);
+    if let Err(err) = q_buffer.copy_from_host(0, &q_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy runtime {} q input: {err}", command_label);
+        return ExitCode::from(1);
+    }
+    if let Err(err) = k_buffer.copy_from_host(0, &k_bytes, Some(&mut stream)) {
+        eprintln!("failed to copy runtime {} k input: {err}", command_label);
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!(
+            "failed to synchronize runtime {} q/k copy: {err}",
+            command_label
+        );
+        return ExitCode::from(1);
+    }
+
+    if let Err(err) = probe(&q_buffer, &k_buffer, &mut output_buffer, Some(&mut stream)) {
+        eprintln!("failed to run {command_name}: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after {command_name}: {err}");
+        return ExitCode::from(1);
+    }
+
+    let mut output_raw = vec![0_u8; output_bytes];
+    if let Err(err) = output_buffer.copy_to_host(0, &mut output_raw, Some(&mut stream)) {
+        eprintln!("failed to copy {command_name} output back to host: {err}");
+        return ExitCode::from(1);
+    }
+    if let Err(err) = stream.synchronize() {
+        eprintln!("failed to synchronize runtime stream after {command_name} output copy: {err}");
+        return ExitCode::from(1);
+    }
+
+    let output = decode_f32_le_values(&output_raw);
+    let mut max_abs = 0.0_f32;
+    for value in &output {
+        if !value.is_finite() {
+            eprintln!("{command_name} output is not finite");
+            return ExitCode::from(1);
+        }
+        let abs = value.abs();
+        if abs > max_abs {
+            max_abs = abs;
+        }
+    }
+    if !output.iter().any(|value| *value != 0.0) {
+        eprintln!("{command_name} output is all zero");
+        return ExitCode::from(1);
+    }
+    let preview = format_f32_preview(&output[..preview_count.min(output.len())]);
+
+    println!(
+        "{command_name} backend={} device={} compute={}.{} arch={} pattern={} max_abs={max_abs:.9} preview_count={} preview={} finite=true nonzero=true verified=true",
+        info.backend,
+        info.name,
+        info.compute_major,
+        info.compute_minor,
+        info.gcn_arch_name,
+        pattern.as_str(),
+        preview_count,
+        preview
+    );
+    ExitCode::SUCCESS
+}
+
+fn runtime_wmma_fp8_qk_probe_smoke(
+    device_index: Option<String>,
+    pattern: Option<String>,
+    preview_count: Option<String>,
+) -> ExitCode {
+    runtime_fp8_qk_probe_smoke(
+        "runtime-wmma-fp8-qk-probe-smoke",
+        "wmma",
+        "runtime wmma fp8 qk probe smoke",
+        device_index,
+        pattern,
+        preview_count,
+        ullm_runtime_sys::wmma_fp8_qk_probe,
+    )
+}
+
+fn runtime_rocwmma_fp8_qk_probe_smoke(
+    device_index: Option<String>,
+    pattern: Option<String>,
+    preview_count: Option<String>,
+) -> ExitCode {
+    runtime_fp8_qk_probe_smoke(
+        "runtime-rocwmma-fp8-qk-probe-smoke",
+        "rocwmma",
+        "runtime rocwmma fp8 qk probe smoke",
+        device_index,
+        pattern,
+        preview_count,
+        ullm_runtime_sys::rocwmma_fp8_qk_probe,
+    )
+}
+
+type Fp8QkProbeKernel = fn(
+    &ullm_runtime_sys::RuntimeBuffer,
+    &ullm_runtime_sys::RuntimeBuffer,
+    &mut ullm_runtime_sys::RuntimeBuffer,
+    Option<&mut ullm_runtime_sys::RuntimeStream>,
+) -> Result<(), String>;
+
+enum Fp8QkPattern {
+    Ones,
+    Layout,
+}
+
+impl Fp8QkPattern {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ones => "ones",
+            Self::Layout => "layout",
+        }
+    }
+}
+
+fn parse_fp8_qk_pattern(raw: Option<String>, command_name: &str) -> Result<Fp8QkPattern, ExitCode> {
+    match raw {
+        Some(raw) => {
+            let value = raw.split_once('=').map_or(raw.as_str(), |(_, value)| value);
+            match value {
+                "ones" => Ok(Fp8QkPattern::Ones),
+                "layout" => Ok(Fp8QkPattern::Layout),
+                _ => {
+                    eprintln!("{command_name}: invalid pattern {raw}; expected ones|layout");
+                    Err(ExitCode::from(2))
+                }
+            }
+        }
+        None => Ok(Fp8QkPattern::Ones),
+    }
+}
+
+fn select_rdna4_device(
+    device_index: Option<String>,
+    command_name: &str,
+) -> Result<Option<u32>, ExitCode> {
+    let device_count = match ullm_runtime_sys::device_count() {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to query device count: {err}");
+            return Err(ExitCode::from(1));
+        }
+    };
+    let selected = match device_index {
+        Some(raw) => match parse_optional_device_index(Some(raw)) {
+            Ok(value) => value,
+            Err(code) => return Err(code),
+        },
+        None => match (0..device_count).find(|&index| {
+            ullm_runtime_sys::device_info(index)
+                .map(|info| is_rdna4_device(&info))
+                .unwrap_or(false)
+        }) {
+            Some(index) => index,
+            None => {
+                println!("{command_name}: no rdna4 device found; skipped");
+                return Ok(None);
+            }
+        },
+    };
+    Ok(Some(selected))
+}
+
+fn fp8_qk_probe_pattern_bytes(pattern: &Fp8QkPattern) -> (Vec<u8>, Vec<u8>) {
+    let tile_bytes = 16_usize * 16_usize;
+    match pattern {
+        Fp8QkPattern::Ones => (vec![0x38_u8; tile_bytes], vec![0x38_u8; tile_bytes]),
+        Fp8QkPattern::Layout => {
             let mut q_values = vec![0.0_f32; tile_bytes];
             let mut k_values = vec![0.0_f32; tile_bytes];
             for row in 0..16 {
@@ -5690,76 +5828,7 @@ fn runtime_wmma_fp8_qk_probe_smoke(
                 .collect();
             (q_bytes, k_bytes)
         }
-    };
-    if let Err(err) = q_buffer.copy_from_host(0, &q_bytes, Some(&mut stream)) {
-        eprintln!("failed to copy runtime wmma q input: {err}");
-        return ExitCode::from(1);
     }
-    if let Err(err) = k_buffer.copy_from_host(0, &k_bytes, Some(&mut stream)) {
-        eprintln!("failed to copy runtime wmma k input: {err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = stream.synchronize() {
-        eprintln!("failed to synchronize runtime stream after wmma q/k copy: {err}");
-        return ExitCode::from(1);
-    }
-
-    if let Err(err) = ullm_runtime_sys::wmma_fp8_qk_probe(
-        &q_buffer,
-        &k_buffer,
-        &mut output_buffer,
-        Some(&mut stream),
-    ) {
-        eprintln!("failed to run runtime wmma fp8 qk probe: {err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = stream.synchronize() {
-        eprintln!("failed to synchronize runtime stream after wmma fp8 qk probe: {err}");
-        return ExitCode::from(1);
-    }
-
-    let mut output_raw = vec![0_u8; output_bytes];
-    if let Err(err) = output_buffer.copy_to_host(0, &mut output_raw, Some(&mut stream)) {
-        eprintln!("failed to copy runtime wmma fp8 qk probe output back to host: {err}");
-        return ExitCode::from(1);
-    }
-    if let Err(err) = stream.synchronize() {
-        eprintln!(
-            "failed to synchronize runtime stream after wmma fp8 qk probe output copy: {err}"
-        );
-        return ExitCode::from(1);
-    }
-
-    let output = decode_f32_le_values(&output_raw);
-    let mut max_abs = 0.0_f32;
-    for value in &output {
-        if !value.is_finite() {
-            eprintln!("runtime wmma fp8 qk probe output is not finite");
-            return ExitCode::from(1);
-        }
-        let abs = value.abs();
-        if abs > max_abs {
-            max_abs = abs;
-        }
-    }
-    if !output.iter().any(|value| *value != 0.0) {
-        eprintln!("runtime wmma fp8 qk probe output is all zero");
-        return ExitCode::from(1);
-    }
-    let preview = format_f32_preview(&output[..preview_count.min(output.len())]);
-
-    println!(
-        "runtime-wmma-fp8-qk-probe-smoke backend={} device={} compute={}.{} arch={} pattern={} max_abs={max_abs:.9} preview_count={} preview={} finite=true nonzero=true verified=true",
-        info.backend,
-        info.name,
-        info.compute_major,
-        info.compute_minor,
-        info.gcn_arch_name,
-        pattern.as_str(),
-        preview_count,
-        preview
-    );
-    ExitCode::SUCCESS
 }
 
 fn runtime_linear_attn_gate_beta_smoke(device_index: Option<String>) -> ExitCode {
@@ -38882,7 +38951,7 @@ fn split_linear_attn_qkv_for_recurrent(
 
 fn print_help() {
     eprintln!(
-        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-causal-attn-batch-smoke [DEVICE_INDEX] [BATCH_COUNT] [SEQUENCE_LEN] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=causal_attn_batch_f32|default|flash2|causal_attn_batch_f32_flash2]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-cached-prefix-attn-smoke [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-wmma-fp8-probe-smoke [DEVICE_INDEX]|runtime-wmma-fp8-qk-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-qkv-rope-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-block-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-layer-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
+        "usage: ullm-engine <inspect-devices|runtime-smoke|runtime-memory-smoke [DEVICE_INDEX]|runtime-stream-smoke [DEVICE_INDEX]|runtime-copy-smoke [DEVICE_INDEX]|runtime-rmsnorm-smoke [DEVICE_INDEX]|runtime-silu-mul-smoke [DEVICE_INDEX]|runtime-sigmoid-mul-smoke [DEVICE_INDEX]|runtime-add-smoke [DEVICE_INDEX]|runtime-rope-smoke [DEVICE_INDEX]|runtime-causal-attn-smoke [DEVICE_INDEX]|runtime-causal-attn-batch-smoke [DEVICE_INDEX] [BATCH_COUNT] [SEQUENCE_LEN] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=causal_attn_batch_f32|default|flash2|causal_attn_batch_f32_flash2]|runtime-decode-attn-smoke [DEVICE_INDEX]|runtime-cached-prefix-attn-smoke [DEVICE_INDEX] [CACHED_PREFIX_TOKENS] [NEW_TOKENS] [MEASURED_REPEATS] [Q_HEADS] [KV_HEADS] [HEAD_DIM] [VALUE_DIM] [EXECUTOR=cached_prefix_chunked|cached_prefix_flash2|decode_loop] [KV_CACHE_DTYPE=fp8_e4m3|f32]|runtime-paged-decode-attn-smoke [DEVICE_INDEX]|runtime-paged-kv-write-smoke [DEVICE_INDEX]|runtime-scheduler-paged-decode-smoke [DEVICE_INDEX]|runtime-scheduler-layer-decode-smoke [DEVICE_INDEX]|runtime-kv-paged-decode-smoke [DEVICE_INDEX]|runtime-depthwise-conv1d-smoke [DEVICE_INDEX]|runtime-wmma-fp8-probe-smoke [DEVICE_INDEX]|runtime-wmma-fp8-qk-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]|runtime-rocwmma-fp8-qk-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]|runtime-linear-attn-gate-beta-smoke [DEVICE_INDEX]|runtime-linear-attn-recurrent-smoke [DEVICE_INDEX]|runtime-mlp-smoke [DEVICE_INDEX]|inspect-package PATH|package-load-smoke PACKAGE_DIR [DEVICE_INDEX] [MAX_BYTES] [PAYLOAD_ROLE]|package-tensor-load-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-weight-register-many-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [MAX_TENSORS]|package-materialize-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-materialize-matvec-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR]|package-rmsnorm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-rmsnorm-mlp-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [input|post]|package-linear-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a|b|qkv|z|out|all]|package-self-attn-proj-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [q|k|v|o|all]|package-self-attn-qk-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-self-attn-rope-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-attention-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-decode-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-scheduler-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-self-attn-mlp-block-model-loop-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX,...|FIRST_LAYER_INDEX SECOND_LAYER_INDEX[,...]] [SEQUENCE_LEN] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-token-ids-logits-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-layer-golden-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]|package-golden-prefix-smoke PACKAGE_DIR GOLDEN_FIXTURE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_START] [LAYER_END_EXCLUSIVE] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [REPORT_PATH] [RUN_MODE] [ROW_SCALE_OVERRIDES_JSON] [INPUT_DUMP_DIR] [SAMPLED_TOKEN_INDICES] [CELL_DELTA_OVERRIDES_JSON]|package-linear-attn-qkv-norm-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX]|package-linear-attn-conv1d-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-gate-beta-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-recurrent-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-post-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-workflow-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-mlp-block-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]|package-linear-attn-aux-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [a-log|dt-bias|conv1d|norm|all]|package-materialize-bench PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]|package-prefill-aq4-matvec-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_NAME] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-qkv-rope-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-self-attn-block-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-recurrent-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-post-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-attention-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-mlp-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]|package-linear-attn-layer-batch-smoke PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]>"
     );
     eprintln!(
         "package-aq4-matvec-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [TENSOR_SELECTOR] [REPEATS]"
@@ -38895,6 +38964,9 @@ fn print_help() {
     );
     eprintln!(
         "runtime-wmma-fp8-qk-probe-smoke: [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]"
+    );
+    eprintln!(
+        "runtime-rocwmma-fp8-qk-probe-smoke: [DEVICE_INDEX] [PATTERN=ones|layout] [PREVIEW_COUNT]"
     );
     eprintln!(
         "package-token-ids-bench: same arguments as package-token-ids-generate-smoke; writes the same measured JSON report"
