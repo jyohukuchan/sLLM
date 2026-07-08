@@ -1,0 +1,203 @@
+{
+  "aq4": {
+    "case_id": "aq4-full-mixed-prompt-bundle",
+    "decode_tps": 80.852685,
+    "end_to_end_tps": 35.096093,
+    "final_top1_tokens": [
+      24218,
+      4105,
+      329
+    ],
+    "prefill_tps": 67.076031,
+    "vram_consumed_bytes": 4443123712
+  },
+  "candidate": {
+    "artifact": "/tmp/ullm-sq-fp8-v-layer3-v32-policy-v0.1-artifact",
+    "id": "sq-fp8-w8a16-r9700-v0-v-layer3-v32"
+  },
+  "interpretation": "v_proj layer3 row-block32 direct FP8 preserves strict top1 on this prompt bundle; q/k and v each pass separately, while q/k/v together fails case_a, so the observed failure is cumulative/interaction drift.",
+  "quality": {
+    "per_prompt": [
+      {
+        "aq4_margin_over_sq_top1_in_aq4": 0.0,
+        "aq4_top1": 24218,
+        "aq4_top1_logit_in_aq4": 7.201347828,
+        "aq4_top1_logit_in_sq": 7.194907188,
+        "aq4_top1_rank_in_sq_top8": 1,
+        "aq4_top8_tokens": [
+          24218,
+          41813,
+          88110,
+          14482,
+          81395,
+          61946,
+          56374,
+          60607
+        ],
+        "label": "len4",
+        "prompt_token_ids": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "sq_margin_over_aq4_top1_in_sq": 0.0,
+        "sq_top1": 24218,
+        "sq_top1_logit_in_aq4": 7.201347828,
+        "sq_top1_logit_in_sq": 7.194907188,
+        "sq_top1_margin_over_second_in_sq": 0.3532805440000004,
+        "sq_top1_rank_in_aq4_top8": 1,
+        "sq_top8_tokens": [
+          24218,
+          41813,
+          88110,
+          14482,
+          81395,
+          56374,
+          61946,
+          60607
+        ],
+        "strict_top1_match": true,
+        "top8_overlap_count": 8
+      },
+      {
+        "aq4_margin_over_sq_top1_in_aq4": 0.0,
+        "aq4_top1": 4105,
+        "aq4_top1_logit_in_aq4": 4.995436668,
+        "aq4_top1_logit_in_sq": 4.987856865,
+        "aq4_top1_rank_in_sq_top8": 1,
+        "aq4_top8_tokens": [
+          4105,
+          5582,
+          42228,
+          513,
+          200,
+          1119,
+          998,
+          314
+        ],
+        "label": "case_a",
+        "prompt_token_ids": [
+          100,
+          200,
+          300,
+          400,
+          500,
+          600,
+          700,
+          800
+        ],
+        "sq_margin_over_aq4_top1_in_sq": 0.0,
+        "sq_top1": 4105,
+        "sq_top1_logit_in_aq4": 4.995436668,
+        "sq_top1_logit_in_sq": 4.987856865,
+        "sq_top1_margin_over_second_in_sq": 0.016001701000000423,
+        "sq_top1_rank_in_aq4_top8": 1,
+        "sq_top8_tokens": [
+          4105,
+          5582,
+          42228,
+          513,
+          200,
+          1119,
+          998,
+          314
+        ],
+        "strict_top1_match": true,
+        "top8_overlap_count": 8
+      },
+      {
+        "aq4_margin_over_sq_top1_in_aq4": 0.0,
+        "aq4_top1": 329,
+        "aq4_top1_logit_in_aq4": 4.806379318,
+        "aq4_top1_logit_in_sq": 4.808291435,
+        "aq4_top1_rank_in_sq_top8": 1,
+        "aq4_top8_tokens": [
+          329,
+          933,
+          8903,
+          261,
+          294,
+          1547,
+          334,
+          627
+        ],
+        "label": "case_b",
+        "prompt_token_ids": [
+          42,
+          314,
+          2718,
+          1618,
+          12345,
+          23456,
+          34567,
+          45678
+        ],
+        "sq_margin_over_aq4_top1_in_sq": 0.0,
+        "sq_top1": 329,
+        "sq_top1_logit_in_aq4": 4.806379318,
+        "sq_top1_logit_in_sq": 4.808291435,
+        "sq_top1_margin_over_second_in_sq": 0.20270538300000052,
+        "sq_top1_rank_in_aq4_top8": 1,
+        "sq_top8_tokens": [
+          329,
+          933,
+          8903,
+          261,
+          294,
+          334,
+          1547,
+          627
+        ],
+        "strict_top1_match": true,
+        "top8_overlap_count": 8
+      }
+    ],
+    "strict_top1_all_match": true,
+    "strict_top1_pass_count": 3,
+    "strict_top1_total": 3
+  },
+  "run_id": "phase-t2-sq-fp8-full-mixed-v-only-prompt-bundle-v1",
+  "sq": {
+    "case_id": "sq-v-layer3-full-mixed-prompt-bundle",
+    "decode_tps": 80.634172,
+    "end_to_end_tps": 31.871183,
+    "final_top1_tokens": [
+      24218,
+      4105,
+      329
+    ],
+    "prefill_tps": 60.580213,
+    "sq_fp8_pair_matvec_count": 0,
+    "sq_fp8_single_matvec_count": 23,
+    "sq_fp8_triple_matvec_count": 0,
+    "sq_projection_boundary": "single",
+    "vram_consumed_bytes": 4445179904
+  },
+  "workload": {
+    "batch_size": 3,
+    "decode_real_batch": true,
+    "generated_tokens_per_request": [
+      1,
+      1,
+      1
+    ],
+    "path": "manifest-all full mixed request-state",
+    "prefill_real_batch": true,
+    "prompt_bundle": [
+      "len4",
+      "case_a",
+      "case_b"
+    ],
+    "prompt_tokens_per_request": [
+      4,
+      8,
+      8
+    ],
+    "sq_notes": [
+      "full-mixed-prompt-bundle",
+      "prompt_bundle=len4_case_a_case_b",
+      "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL=1"
+    ]
+  }
+}

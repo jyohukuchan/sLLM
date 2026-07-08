@@ -3905,6 +3905,40 @@ Inventory:
 2. `v_proj` 単体または `q/k + v` の別row-block/scale粒度を試し、`case_a` のtop1 swapを避けられるか確認する。
 3. speed評価では、通常dispatchと比較可能な条件に戻して再測する。
 
+## 2026-07-09 progress: T2 SQ FP8 v-only full mixed prompt bundle
+
+前回の要点:
+
+- layer3 `q/k/v` SQ FP8 triple候補は、full mixed prompt bundleで `case_a` のtop1をAQ4 `4105` からSQ `5582` に入れ替えた。
+- layer3 `q/k` pair候補は同じprompt bundleでstrict top1 `3 / 3` を維持した。
+- 次の切り分けでは、`v_proj` 単体がtop1 swapを起こすか確認する必要があった。
+
+今回の変更点:
+
+- layer3 `v_proj` 単体候補 `sq-fp8-w8a16-r9700-v0-v-layer3-v32` を追加した。
+- policyとartifact summaryを保存し、artifactは `/tmp/ullm-sq-fp8-v-layer3-v32-policy-v0.1-artifact` に生成した。
+- `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL=1` を付け、single direct SQ FP8 kernelが実際に踏まれることをtelemetryで確認した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-full-mixed-v-only-prompt-bundle-v1.md` に保存した。
+
+実測値:
+
+| row | prefill real | decode real | prefill tok/s | decode tok/s | end-to-end tok/s | final top1 | strict top1 |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- |
+| AQ4 baseline | true | true | 67.076031 | 80.852685 | 35.096093 | `24218,4105,329` | reference |
+| SQ `v-layer3-v32` | true | true | 60.580213 | 80.634172 | 31.871183 | `24218,4105,329` | 3 / 3 |
+
+判断:
+
+- layer3 `v_proj` 単体候補は、full mixed prompt bundleでstrict top1を維持した。
+- `case_a` のmarginは `q/k` pair単体時の約 `0.000080586` より広く、`v` 単体ではtop1 swapの直接原因には見えない。
+- `q/k` pairと `v` 単体はそれぞれ通るが、`q/k/v` tripleでは落ちるため、現failureは単一tensorの致命的driftではなく累積・相互作用driftとして扱う。
+
+次の行動:
+
+1. `v` 単体はfull mixed prompt-bundle pass境界として保存する。
+2. `q/k/v` の同時適用を維持したまま、`v16` または `q16/v16` などのscale粒度を試す。
+3. `case_a` のtop1 marginを、少なくとも `q/k` pair単体より明確に広げられる候補を優先する。
+
 ## Risks
 
 | risk | impact | handling |

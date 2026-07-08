@@ -1,0 +1,80 @@
+{
+  "schema_version": "sq-fp8-policy-v0.1",
+  "date": "2026-07-09",
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-v-layer3-v32",
+  "policy_id": "v_layer3_v32",
+  "status": "v_only_diagnostic_not_promoted",
+  "target_gpu": "R9700/RDNA4",
+  "scale": {
+    "granularity": "row_block",
+    "block_cols": 32,
+    "dtype": "f32",
+    "overrides": []
+  },
+  "fp8_selection": {
+    "include_regex": "^model\\.language_model\\.layers\\.3\\.self_attn\\.v_proj\\.weight$",
+    "families": [
+      {
+        "family": "self_attn.v_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 32
+      }
+    ],
+    "expected_fp8_tensor_count": 1
+  },
+  "fallback_policy": [
+    {
+      "family": "self_attn.q_proj",
+      "layers": [
+        3
+      ],
+      "reason": "kept_as_AQ4_to_isolate_v_proj_drift"
+    },
+    {
+      "family": "self_attn.k_proj",
+      "layers": [
+        3
+      ],
+      "reason": "kept_as_AQ4_to_isolate_v_proj_drift"
+    },
+    {
+      "family": "all_other_language_model_tensors",
+      "layers": "all",
+      "reason": "not_selected_in_current_v_only_diagnostic"
+    },
+    {
+      "family": "visual_mtp_rdna2_tp_targets",
+      "layers": "all",
+      "reason": "deferred_target"
+    }
+  ],
+  "acceptance_rule": {
+    "promotion_rule": "strict_top1",
+    "diagnostic_only": [
+      "topk_common",
+      "baseline_top1_rank_in_sq_topk",
+      "sq_top1_minus_baseline_top1_logit"
+    ]
+  },
+  "prompt_bundle_result": {
+    "strict_top1_pass_count": 3,
+    "case_count": 3,
+    "result_path": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-full-mixed-v-only-prompt-bundle-v1.md",
+    "promoted_full_sq_policy": false
+  },
+  "artifacts": [
+    {
+      "artifact": "/tmp/ullm-sq-fp8-v-layer3-v32-policy-v0.1-artifact",
+      "summary_json": "benchmarks/results/2026-07-09/sq-fp8-v-layer3-v32-policy-artifact-v0.1.json",
+      "fp8_tensor_count": 1,
+      "passthrough_tensor_count": 774
+    }
+  ],
+  "next_steps": [
+    "Build with tools/build-sq-fp8-w8a16-artifact.py --policy-json.",
+    "Run full mixed request-state smoke without forcing q/k pair dispatch.",
+    "Compare against q/k pair and q/k/v triple prompt bundle results to isolate v_proj drift."
+  ]
+}
