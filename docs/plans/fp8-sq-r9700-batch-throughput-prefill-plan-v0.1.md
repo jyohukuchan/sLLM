@@ -3640,6 +3640,42 @@ Inventory:
 2. SQ FP8 direct matvecまたは低遅延dequant matvecへ進む。
 3. native SQ rowができたら、同じB=1/4/8 schemaでAQ4/SQ/vLLM比較へ戻る。
 
+## 2026-07-09 progress: T2 SQ FP8 full mixed conservative candidate
+
+前回の要点:
+
+- `kup6_gate5_down5` はfull mixed B=4/B=8で2番目requestのfinal top1がAQ4 baselineからずれた。
+- selected-layerで通ったcandidateでも、full mixed request-batch pathではstrict top1 guardを別途通す必要がある。
+
+今回の変更点:
+
+- R9700で `sq-fp8-w8a16-r9700-v0-k-layer3-rb16` をfull mixed `manifest-all` B=1/4/8で再評価した。
+- `up-layer3` と `kup1-layer3-k16-up32` はB=4だけ確認し、full mixed expansionとしてrejectした。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-mixed-request-state-conservative-candidate-v1.md` と `results.jsonl` に保存した。
+
+実測値:
+
+| candidate | batch | SQ prefill tok/s | SQ decode tok/s | SQ end-to-end tok/s | AQ4 final top1 | SQ final top1 | top1 match |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| `k-layer3-rb16` | 1 | 17.180309 | 80.069802 | 8.301199 | `44370` | `44370` | `true` |
+| `k-layer3-rb16` | 4 | 48.691111 | 81.134326 | 25.144005 | `44370,5446,10701,25411` | `44370,5446,10701,25411` | `true` |
+| `k-layer3-rb16` | 8 | 63.272579 | 81.162501 | 35.820128 | `44370,5446,10701,25411,21901,685,279,27973` | `44370,5446,10701,25411,21901,685,279,27973` | `true` |
+| `up-layer3` | 4 | 40.916537 | 64.087055 | 22.785325 | `44370,5446,10701,25411` | `44370,1622,10701,25411` | `false` |
+| `kup1-layer3-k16-up32` | 4 | 36.929827 | 60.895996 | 20.726920 | `44370,5446,10701,25411` | `44370,1622,10701,25411` | `false` |
+
+判断:
+
+- 現在full mixed strict-top1 regression subsetとしてpromoteできる保守候補は、layer3 `k_proj` row-block16の1 tensorだけである。
+- layer3 `up_proj` は単体でもB=4でtop1 driftを起こすため、`k+up` へ広げるcandidateはpromoteしない。
+- B=4/B=8は `prefill_real_batch=true` / `decode_real_batch=true` で通っているため、full mixed request-batch guardとして扱う。
+- 速度は引き続き `sq_execution_mode=materialized_f32_fallback` なので、SQ format本来の速度評価ではなくquality boundary確認として扱う。
+
+次の行動:
+
+1. `k-layer3-rb16` をfull mixed strict-top1 regression subsetとして固定する。
+2. SQ FP8 direct matvecまたは低遅延dequant matvecを実装し、materialized F32 fallbackから外す。
+3. native SQ rowができたら、B=1/4/8と長いprefill/prefix gridへ同じcandidateを流す。
+
 ## Risks
 
 | risk | impact | handling |
