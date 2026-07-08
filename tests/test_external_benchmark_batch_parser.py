@@ -278,6 +278,9 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "package-self-attn-mlp-block-model-loop-smoke "
             "package=/tmp/model.ullm.d layers=[3, 7] layers_csv=3,7 "
             "input_source=embedding_token_ids prefill_mode=token_id_layer_stack "
+            "sq_overlay=true sq_candidate=sq-fp8-w8a16-r9700-v0 "
+            "sq_artifact=/tmp/sq-artifact sq_schema_version=sq-fp8-artifact-v0.1 "
+            "sq_fp8_tensor_count=22 sq_passthrough_tensor_count=753 sq_row_chunk=256 "
             "batching_mode=real "
             "prefill_executor=stack_prefill_request_batch_step decode_executor=stack_ready_batch "
             "prefill_real_batch=true decode_real_batch=true "
@@ -337,6 +340,13 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         )
         self.assertEqual(row["workload"]["prefill_mode"], "token_id_layer_stack")
         self.assertEqual(row["workload"]["input_source"], "embedding_token_ids")
+        self.assertTrue(row["workload"]["sq_overlay"])
+        self.assertEqual(row["workload"]["sq_candidate"], "sq-fp8-w8a16-r9700-v0")
+        self.assertEqual(row["workload"]["sq_artifact"], "/tmp/sq-artifact")
+        self.assertEqual(row["workload"]["sq_schema_version"], "sq-fp8-artifact-v0.1")
+        self.assertEqual(row["workload"]["sq_fp8_tensor_count"], 22)
+        self.assertEqual(row["workload"]["sq_passthrough_tensor_count"], 753)
+        self.assertEqual(row["workload"]["sq_row_chunk"], 256)
         self.assertEqual(row["workload"]["final_top1_tokens"], [42, 43, 44])
         self.assertEqual(row["workload"]["layers_csv"], "3,7")
         self.assertEqual(row["batching"]["mode"], "real")

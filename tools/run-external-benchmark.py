@@ -865,6 +865,16 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         row_workload["layers_csv"] = layers_csv
     if isinstance(report.get("input_source"), str):
         row_workload["input_source"] = report.get("input_source")
+    if report.get("sq_overlay") is True:
+        row_workload["sq_overlay"] = True
+    for key in ("sq_candidate", "sq_artifact", "sq_schema_version"):
+        value = report.get(key)
+        if isinstance(value, str) and value != "none":
+            row_workload[key] = value
+    for key in ("sq_fp8_tensor_count", "sq_passthrough_tensor_count", "sq_row_chunk"):
+        value = parse_int(report.get(key))
+        if value is not None and value > 0:
+            row_workload[key] = value
     final_top1_tokens = parse_int_csv(report.get("final_top1_tokens_csv"))
     if final_top1_tokens:
         row_workload["final_top1_tokens"] = final_top1_tokens

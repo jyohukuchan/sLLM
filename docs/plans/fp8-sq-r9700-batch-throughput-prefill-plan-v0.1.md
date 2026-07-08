@@ -1976,7 +1976,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | T1 real batch/total throughput runner | partial done with package-backed component batch grid, logical full-package grid, hybrid model-loop smoke, and token-id selected-layer real-prefill bridge | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`, `phase-t1-package-prefill-component-batch-grid-v1.md`, `benchmarks/workloads/r9700-aq4-full-package-logical-batch-small-grid.json`, `phase-t1-full-package-logical-batch-small-grid-v1.md`, `phase-t1-model-loop-hybrid-throughput-smoke-v1.md`, `phase-t1-token-id-model-loop-hybrid-smoke-v1.md`, `phase-t1-token-id-model-loop-real-prefill-smoke-v1.md`; real full-package request-batch prefill/decode/end-to-end total throughput is still not done. |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done with policy artifact verified | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; actual `kup6_gate5_down5` payload artifact generated under `/tmp` with `22` FP8 tensors and `753` passthrough tensors. |
-| T2 runtime load path | partial done with policy artifact materialize verified | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization; policy artifact materialize smoke verified on R9700. |
+| T2 runtime load path | partial done with policy artifact materialize and selected-layer model-loop bridge verified | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `sq-fp8-token-ids-model-loop-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization; policy artifact materialize smoke and token-id model-loop SQ overlay bridge verified on R9700. |
 | T2 short prompt guard | partial done with six-layer prompt bundle subset found | one-tensor and layer-3 projection-set guards passed top1; row-block scale produced a `v`-fallback mixed candidate; later six-layer split narrowed the safe subset to `k/up` over layers `3,7,11,15,19,23` plus at most two of `o/gate/down` over layers `3,7,11,15,19`; `kup6_gate5_down5` passes len4/case_a/case_b strict top1, but case_a top8 overlap is only `2 / 8`: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-family-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-per-layer-combination-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-kup6-gate5-down5-prompt-bundle-v0.1.md` |
 
 次の行動:
@@ -2231,6 +2231,42 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 1. このrowはselected-layer T1/T2 bridgeとして扱う。full LM throughputやSQ最終性能判断には使わない。
 2. 次はSQ overlayまたはcandidate policyをこのtoken-id model-loop pathへ接続し、AQ4/SQのfinal top1、top-k overlap、logit gap、throughputを同じscheduler pathで比較する。
 3. full-package real batch runnerはT1aとして継続し、最終的なAQ4/SQ/vLLM比較にはfull-package real batch行を使う。
+
+## 2026-07-09 progress: T2 SQ FP8 token-id model-loop bridge
+
+前回の要点:
+
+- T1ではtoken-id model-loop pathがrequest-batch prefillとdecode ready batchを通すようになった。
+- T2では `kup6_gate5_down5` policy artifactをruntimeへ渡す経路はmaterialize/logits smokeで確認済みだった。
+- まだSQ FP8 policy artifactをtoken-id model-loop pathへ接続していなかった。
+
+今回の変更点:
+
+- `sq-fp8-token-ids-model-loop-smoke` を追加した。
+- `Qwen3PackageModelRuntime::load_with_sq_overlay` を使い、`/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact` をselected-layer model-loop pathへ接続した。
+- stdoutとJSONLに `sq_overlay`、`sq_candidate`、`sq_artifact`、`sq_fp8_tensor_count`、`sq_passthrough_tensor_count`、`sq_row_chunk` を保存するようにした。
+- `tools/run-external-benchmark.py --parse ullm-model-loop-throughput` はSQ overlay metadataを `workload` に保持する。
+- R9700で layers `3,7`、`batch=2`、prompt `2`、generated `1` のSQ FP8 selected-layer smokeを実行し、AQ4と同じfinal top1 `155793,23175` を確認した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-real-prefill-smoke-v1.md` に保存した。
+
+実測値:
+
+| row | final top1 | prefill real | decode real | prefill tok/s | decode tok/s | end-to-end tok/s | verified |
+| --- | --- | --- | --- | ---: | ---: | ---: | --- |
+| AQ4 real-prefill bridge | `155793,23175` | true | true | 85.722441 | 84.560571 | 85.331620 | true |
+| SQ FP8 real-prefill bridge | `155793,23175` | true | true | 99.526151 | 99.900180 | 99.650516 | true |
+
+注意:
+
+- このrowはselected-layer bridgeであり、full LM throughputではない。
+- 内部tok/sはlayer loadとSQ artifact materializationを含まない。wrapper elapsedは `33.426s` だった。
+- token数が小さいので、速度の最終判断ではなく、同じscheduler pathでSQ品質guardとthroughput schemaを保存できたことを成果とする。
+
+次の行動:
+
+1. 既存のlen4/case_a/case_b prompt bundleをこのSQ model-loop pathに接続し、AQ4/SQのtop1、top-k overlap、AQ4 top1 rank、logit gapを保存する。
+2. prompt-bundle rowでも `batching.mode=real` と `prefill_real_batch=true` を維持する。
+3. full-package real batch runnerはT1aとして継続し、最終比較にはfull-package real batch行を使う。
 
 ## 2026-07-08 current plan update: SQ format design phase v1
 

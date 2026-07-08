@@ -319,6 +319,20 @@ fn main() -> ExitCode {
             env::args().nth(11),
             env::args().nth(12),
         ),
+        Some("sq-fp8-token-ids-model-loop-smoke") => sq_fp8_token_ids_model_loop_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+            env::args().nth(11),
+            env::args().nth(12),
+            env::args().nth(13),
+        ),
         Some("package-token-ids-logits-smoke") => package_token_ids_logits_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -14091,6 +14105,15 @@ struct PackageModelLoopExecutionSummary {
     total_wall_ms: f64,
 }
 
+struct PackageModelLoopSqOverlayInfo {
+    artifact: String,
+    candidate: String,
+    schema_version: String,
+    fp8_tensor_count: u64,
+    passthrough_tensor_count: u64,
+    row_chunk: usize,
+}
+
 struct PackageModelLoopSmokeRun {
     command_name: &'static str,
     model: Qwen3PackageModelRuntime,
@@ -14101,6 +14124,7 @@ struct PackageModelLoopSmokeRun {
     final_top_logits: Option<Vec<Vec<PackageTokenLogit>>>,
     lm_head_top_k: Option<usize>,
     lm_head_chunk_rows: Option<usize>,
+    sq_overlay_info: Option<PackageModelLoopSqOverlayInfo>,
     sequence_len: usize,
     rotary_dim: usize,
     rope_base: f32,
@@ -14124,6 +14148,20 @@ fn parse_package_model_loop_rotary_dim(
         ));
     }
     Ok(rotary_dim)
+}
+
+fn package_model_loop_sq_overlay_info(
+    artifact: &ullm_engine::sq::SqFp8Artifact,
+    row_chunk: usize,
+) -> PackageModelLoopSqOverlayInfo {
+    PackageModelLoopSqOverlayInfo {
+        artifact: artifact.artifact_dir.display().to_string(),
+        candidate: artifact.manifest.candidate.id.clone(),
+        schema_version: artifact.manifest.schema_version.clone(),
+        fp8_tensor_count: artifact.manifest.storage.fp8_tensor_count,
+        passthrough_tensor_count: artifact.manifest.storage.passthrough_tensor_count,
+        row_chunk,
+    }
 }
 
 impl PackageModelLoopRequestPlan {
@@ -14847,6 +14885,7 @@ impl PackageModelLoopSmokeRun {
             final_top_logits: None,
             lm_head_top_k: None,
             lm_head_chunk_rows: None,
+            sq_overlay_info: None,
             sequence_len,
             rotary_dim,
             rope_base,
@@ -14868,9 +14907,24 @@ impl PackageModelLoopSmokeRun {
         rotary_dim: Option<String>,
         rope_base: f32,
         position_offset: usize,
+        command_name: &'static str,
+        sq_artifact: Option<&ullm_engine::sq::SqFp8Artifact>,
     ) -> Result<Self, String> {
-        let model =
-            Qwen3PackageModelRuntime::load(context, stream, path, chunk_bytes, layer_indices)?;
+        let sq_row_chunk = 256_usize;
+        let sq_overlay = sq_artifact.map(|artifact| Qwen3PackageSqOverlay {
+            artifact,
+            row_chunk: sq_row_chunk,
+        });
+        let sq_overlay_info =
+            sq_artifact.map(|artifact| package_model_loop_sq_overlay_info(artifact, sq_row_chunk));
+        let model = Qwen3PackageModelRuntime::load_with_sq_overlay(
+            context,
+            stream,
+            path,
+            chunk_bytes,
+            layer_indices,
+            sq_overlay.as_ref(),
+        )?;
         let rotary_dim = parse_package_model_loop_rotary_dim(&model, rotary_dim)?;
         let block_size = 2_usize;
         let request_plan = PackageModelLoopRequestPlan::from_token_id_batches(
@@ -14895,7 +14949,7 @@ impl PackageModelLoopSmokeRun {
         )?;
 
         Ok(Self {
-            command_name: "package-token-ids-model-loop-smoke",
+            command_name,
             model,
             request_plan,
             layer_run_plan,
@@ -14904,6 +14958,7 @@ impl PackageModelLoopSmokeRun {
             final_top_logits: None,
             lm_head_top_k: Some(top_k),
             lm_head_chunk_rows: Some(lm_head_chunk_rows),
+            sq_overlay_info,
             sequence_len,
             rotary_dim,
             rope_base,
@@ -15174,6 +15229,37 @@ impl PackageModelLoopSmokeRun {
         } else {
             "synthetic_layer_stack"
         };
+        let sq_overlay = self.sq_overlay_info.is_some();
+        let sq_candidate = self
+            .sq_overlay_info
+            .as_ref()
+            .map(|info| info.candidate.as_str())
+            .unwrap_or("none");
+        let sq_artifact = self
+            .sq_overlay_info
+            .as_ref()
+            .map(|info| info.artifact.as_str())
+            .unwrap_or("none");
+        let sq_schema_version = self
+            .sq_overlay_info
+            .as_ref()
+            .map(|info| info.schema_version.as_str())
+            .unwrap_or("none");
+        let sq_fp8_tensor_count = self
+            .sq_overlay_info
+            .as_ref()
+            .map(|info| info.fp8_tensor_count)
+            .unwrap_or(0);
+        let sq_passthrough_tensor_count = self
+            .sq_overlay_info
+            .as_ref()
+            .map(|info| info.passthrough_tensor_count)
+            .unwrap_or(0);
+        let sq_row_chunk = self
+            .sq_overlay_info
+            .as_ref()
+            .map(|info| info.row_chunk)
+            .unwrap_or(0);
         let q_norm_max_abs_diff = prepared_diffs.q_norm_max_abs_diff;
         let k_norm_max_abs_diff = prepared_diffs.k_norm_max_abs_diff;
         let q_rope_max_abs_diff = prepared_diffs.q_rope_max_abs_diff;
@@ -15190,13 +15276,20 @@ impl PackageModelLoopSmokeRun {
         let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
 
         Ok(format!(
-            "{} package={} layers={:?} layers_csv={} input_source={} prefill_mode={} batching_mode={} prefill_executor={} decode_executor=stack_ready_batch prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard={} lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_top_logits_source=verified_expected_layer_output input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_ready_counts={:?} decode_batch_ready_counts_csv={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} generated_tokens_csv={} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+            "{} package={} layers={:?} layers_csv={} input_source={} prefill_mode={} sq_overlay={} sq_candidate={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} batching_mode={} prefill_executor={} decode_executor=stack_ready_batch prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard={} lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_top_logits_source=verified_expected_layer_output input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_ready_counts={:?} decode_batch_ready_counts_csv={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} generated_tokens_csv={} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
             self.command_name,
             path,
             layer_indices,
             layer_indices_csv,
             self.request_plan.input_source,
             prefill_mode,
+            sq_overlay,
+            sq_candidate,
+            sq_artifact,
+            sq_schema_version,
+            sq_fp8_tensor_count,
+            sq_passthrough_tensor_count,
+            sq_row_chunk,
             batching_mode,
             prefill_executor,
             prefill_real_batch,
@@ -18545,6 +18638,121 @@ fn package_token_ids_model_loop_smoke(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn sq_fp8_token_ids_model_loop_smoke(
+    path: Option<String>,
+    artifact_path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    prompt_token_ids_batch: Option<String>,
+    generated_tokens_batch: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("sq-fp8-token-ids-model-loop-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(artifact_path) = artifact_path else {
+        eprintln!("sq-fp8-token-ids-model-loop-smoke requires an SQ FP8 artifact path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_model_loop_layer_indices(layer_indices) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids_batch = match parse_package_prompt_token_ids_batch(
+        prompt_token_ids_batch.or_else(|| Some("len:3x3".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let generated_tokens_batch = match parse_package_generated_tokens_batch(
+        generated_tokens_batch,
+        prompt_token_ids_batch.len(),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 8, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let artifact = match read_sq_fp8_artifact(&artifact_path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read SQ FP8 artifact: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match package_token_ids_model_loop_smoke_impl_with_sq_overlay(
+        "sq-fp8-token-ids-model-loop-smoke",
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        Some(&artifact),
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn parse_package_token_ids_model_loop_layer_indices(
     value: Option<String>,
 ) -> Result<Vec<usize>, ExitCode> {
@@ -18578,6 +18786,39 @@ fn package_token_ids_model_loop_smoke_impl(
     rope_base: f32,
     position_offset: usize,
 ) -> Result<String, String> {
+    package_token_ids_model_loop_smoke_impl_with_sq_overlay(
+        "package-token-ids-model-loop-smoke",
+        path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_model_loop_smoke_impl_with_sq_overlay(
+    command_name: &'static str,
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    prompt_token_ids_batch: Vec<Vec<usize>>,
+    generated_tokens_batch: Vec<usize>,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+    sq_artifact: Option<&ullm_engine::sq::SqFp8Artifact>,
+) -> Result<String, String> {
     let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
         .map_err(|err| format!("failed to create runtime context: {err}"))?;
     let info = context
@@ -18600,6 +18841,8 @@ fn package_token_ids_model_loop_smoke_impl(
         rotary_dim,
         rope_base,
         position_offset,
+        command_name,
+        sq_artifact,
     )?;
     smoke_run.execute(&mut context, &mut stream)?;
     smoke_run.compute_final_top_logits(
@@ -40526,6 +40769,9 @@ fn print_help() {
     );
     eprintln!(
         "package-token-ids-model-loop-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+    );
+    eprintln!(
+        "sq-fp8-token-ids-model-loop-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "sq-fp8-token-ids-logits-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"

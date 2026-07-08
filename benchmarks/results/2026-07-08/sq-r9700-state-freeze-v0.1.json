@@ -157,6 +157,10 @@
     "t2_policy_artifact_dir": "/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact",
     "t2_runtime_load_path": "partial_done_policy_artifact_materialize_verified",
     "t2_runtime_load_smoke": "sq-fp8-materialize-smoke cpu0/r9700 fixture path and r9700 policy artifact tensor path verified",
+    "t2_sq_token_id_model_loop_bridge": "partial_done_for_selected_layer_real_prefill_guard",
+    "t2_sq_token_id_model_loop_bridge_artifact": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-real-prefill-smoke-v1.md",
+    "t2_sq_token_id_model_loop_bridge_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-real-prefill-smoke-v1/results.jsonl",
+    "t2_sq_token_id_model_loop_bridge_note": "sq-fp8-token-ids-model-loop-smoke connects the current kup6_gate5_down5 SQ FP8 artifact to the token-id model-loop request-batch prefill path. The R9700 layers 3,7 smoke used batch=2, prompt=2, generated=1 and preserved batching.mode=real, prefill_real_batch=true, decode_real_batch=true, sq_overlay=true, final_top1_tokens=[155793,23175], and verified=true. This is a selected-layer bridge, not final full LM throughput.",
     "t2_short_prompt_guard": "partial_done_six_layer_prompt_bundle_subset_found",
     "t2_short_prompt_guard_artifacts": [
       "benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md",
@@ -191,6 +195,7 @@
     "T1: use synthetic and package-backed component real-batch rows only for kernel/schema validation, not final SQ package throughput",
     "T1/T2: use package-token-ids-model-loop-smoke as the current selected-layer bridge from token IDs to model-loop scheduler and final lm_head top1 guard",
     "T1/T2: use phase-t1-token-id-model-loop-real-prefill-smoke-v1 as the current selected-layer request-batch prefill bridge; it is still not final full LM throughput",
+    "T2: use sq-fp8-token-ids-model-loop-smoke as the current SQ selected-layer bridge for AQ4/SQ top1 and schema comparison; it is still not final full LM throughput",
     "T1: extend logical full-package rows to real full-package request-batch prefill/decode/end-to-end rows before using total throughput rows for SQ performance decisions",
     "T5: use native FP8 or materialization-aware runtime paths for throughput comparison; do not use SQ overlay load timing as an SQ speed result",
     "T5: move to AQ4/FP8 throughput comparison after the T1 full package total-throughput runner exists and the T2 prompt-bundle subset is encoded in the runtime path",
