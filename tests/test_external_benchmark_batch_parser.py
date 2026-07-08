@@ -277,10 +277,12 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         stdout = (
             "package-self-attn-mlp-block-model-loop-smoke "
             "package=/tmp/model.ullm.d layers=[3, 7] layers_csv=3,7 "
-            "prefill_mode=synthetic_layer_stack batching_mode=hybrid "
+            "input_source=embedding_token_ids prefill_mode=token_id_layer_stack "
+            "batching_mode=hybrid "
             "prefill_executor=stack_prefill_step decode_executor=stack_ready_batch "
             "prefill_real_batch=false decode_real_batch=true "
             "prefill_executor_request_parallelism=1 decode_executor_request_parallelism=2 "
+            "final_lm_head_guard=true final_top1_tokens_csv=42,43,44 "
             "sequence_len=3 request_count=3 concurrent_requests=3 "
             "prompt_tokens=[1, 2, 1] prompt_tokens_csv=1,2,1 "
             "max_new_tokens=[2, 1, 0] max_new_tokens_csv=2,1,0 "
@@ -332,6 +334,9 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             row["workload"]["total_context_tokens_after_prefill_per_request"],
             [3, 3, 1],
         )
+        self.assertEqual(row["workload"]["prefill_mode"], "token_id_layer_stack")
+        self.assertEqual(row["workload"]["input_source"], "embedding_token_ids")
+        self.assertEqual(row["workload"]["final_top1_tokens"], [42, 43, 44])
         self.assertEqual(row["workload"]["layers_csv"], "3,7")
         self.assertEqual(row["batching"]["mode"], "hybrid")
         self.assertFalse(row["batching"]["prefill_real_batch"])

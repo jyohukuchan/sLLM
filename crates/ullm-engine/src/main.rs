@@ -306,6 +306,19 @@ fn main() -> ExitCode {
                 env::args().nth(10),
             )
         }
+        Some("package-token-ids-model-loop-smoke") => package_token_ids_model_loop_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+            env::args().nth(8),
+            env::args().nth(9),
+            env::args().nth(10),
+            env::args().nth(11),
+            env::args().nth(12),
+        ),
         Some("package-token-ids-logits-smoke") => package_token_ids_logits_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -13982,16 +13995,20 @@ fn package_self_attn_mlp_block_scheduler_smoke_impl(
 }
 
 struct PackageModelLoopRequestPlan {
+    input_source: &'static str,
     scheduler: SchedulerState,
     requests: Vec<Request>,
     request_ids: Vec<u64>,
     prompt_tokens: Vec<usize>,
     max_new_tokens: Vec<usize>,
     total_tokens: Vec<usize>,
+    prompt_token_ids_by_request: Vec<Vec<usize>>,
+    decode_token_ids_by_request: Vec<Vec<usize>>,
     block_tables: Vec<Vec<u32>>,
     initial_residuals: Vec<Vec<f32>>,
     block_size: usize,
     cache_blocks: usize,
+    position_stride: usize,
 }
 
 #[derive(Default)]
@@ -14039,11 +14056,15 @@ struct PackageModelLoopExecutionSummary {
 }
 
 struct PackageModelLoopSmokeRun {
+    command_name: &'static str,
     model: Qwen3PackageModelRuntime,
     request_plan: PackageModelLoopRequestPlan,
     layer_run_plan: PackageModelLoopLayerRunPlan,
     execution_plan: PackageModelLoopExecutionPlan,
     execution_summary: Option<PackageModelLoopExecutionSummary>,
+    final_top_logits: Option<Vec<Vec<PackageTokenLogit>>>,
+    lm_head_top_k: Option<usize>,
+    lm_head_chunk_rows: Option<usize>,
     sequence_len: usize,
     rotary_dim: usize,
     rope_base: f32,
@@ -14071,15 +14092,183 @@ fn parse_package_model_loop_rotary_dim(
 
 impl PackageModelLoopRequestPlan {
     fn new(sequence_len: usize, hidden: usize, block_size: usize) -> Result<Self, String> {
-        if block_size == 0 {
-            return Err("model-loop block size must be greater than zero".to_string());
-        }
         let requests = vec![
             Request::new(201, sequence_len - 2, 2),
             Request::new(202, sequence_len - 1, 1),
             Request::new(203, 1, 0),
         ];
+        let mut initial_residuals = Vec::with_capacity(requests.len());
+        for (request_index, request) in requests.iter().enumerate() {
+            let total_tokens = request
+                .prompt_tokens
+                .checked_add(request.max_new_tokens)
+                .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
+            let base_input = deterministic_f32_vector(hidden);
+            let residual_elements = total_tokens.checked_mul(hidden).ok_or_else(|| {
+                format!("request {:?} residual element count overflows", request.id)
+            })?;
+            let mut residual = Vec::with_capacity(residual_elements);
+            for timestep in 0..total_tokens {
+                let shifted_timestep = timestep
+                    .checked_add(request_index.checked_mul(sequence_len).ok_or_else(|| {
+                        "model-loop residual timestep multiplier overflows".to_string()
+                    })?)
+                    .ok_or_else(|| "model-loop residual timestep overflows".to_string())?;
+                residual.extend(linear_attn_step_input(&base_input, shifted_timestep));
+            }
+            initial_residuals.push(residual);
+        }
+        let request_count = requests.len();
+        Self::from_initial_residuals(
+            requests,
+            initial_residuals,
+            vec![Vec::new(); request_count],
+            vec![Vec::new(); request_count],
+            hidden,
+            block_size,
+            sequence_len,
+            "synthetic_residual",
+        )
+    }
 
+    fn from_token_id_batches(
+        path: &str,
+        prompt_token_ids_batch: Vec<Vec<usize>>,
+        generated_tokens_batch: Vec<usize>,
+        hidden: usize,
+        block_size: usize,
+    ) -> Result<Self, String> {
+        if prompt_token_ids_batch.is_empty() {
+            return Err("model-loop token-id batch requires at least one request".to_string());
+        }
+        if prompt_token_ids_batch.len() != generated_tokens_batch.len() {
+            return Err(format!(
+                "model-loop token-id prompt request count {} does not match generated token count {}",
+                prompt_token_ids_batch.len(),
+                generated_tokens_batch.len()
+            ));
+        }
+        let (embedding_vocab, embedding_hidden) = package_embedding_shape(path)?;
+        if embedding_hidden != hidden {
+            return Err(format!(
+                "model-loop token-id embedding hidden mismatch: embedding={embedding_hidden} model={hidden}"
+            ));
+        }
+        if embedding_vocab <= 1 {
+            return Err(format!(
+                "model-loop token-id embedding vocab must be greater than one, got {embedding_vocab}"
+            ));
+        }
+
+        let mut requests = Vec::with_capacity(prompt_token_ids_batch.len());
+        let mut initial_residuals = Vec::with_capacity(prompt_token_ids_batch.len());
+        let mut decode_token_ids_by_request = Vec::with_capacity(prompt_token_ids_batch.len());
+        let mut position_stride = 0_usize;
+        for (request_index, prompt_token_ids) in prompt_token_ids_batch.iter().enumerate() {
+            if prompt_token_ids.is_empty() {
+                return Err(format!(
+                    "model-loop token-id request {request_index} has no prompt tokens"
+                ));
+            }
+            if let Some(token_id) = prompt_token_ids
+                .iter()
+                .copied()
+                .find(|token_id| *token_id >= embedding_vocab)
+            {
+                return Err(format!(
+                    "model-loop token-id request {request_index} token id {token_id} is out of embedding range 0..{embedding_vocab}"
+                ));
+            }
+            let generated_tokens = generated_tokens_batch[request_index];
+            let mut decode_token_ids = Vec::with_capacity(generated_tokens);
+            for generated_index in 0..generated_tokens {
+                let future_token_id = 1
+                    + ((request_index
+                        .checked_mul(4096)
+                        .and_then(|value| value.checked_add(prompt_token_ids.len()))
+                        .and_then(|value| value.checked_add(generated_index))
+                        .ok_or_else(|| {
+                            "model-loop token-id future token id seed overflows".to_string()
+                        })?)
+                        % (embedding_vocab - 1));
+                decode_token_ids.push(future_token_id);
+            }
+            let mut token_ids = prompt_token_ids.clone();
+            token_ids.extend(decode_token_ids.iter().copied());
+            let rows = read_named_passthrough_f32_rows(path, QWEN3_EMBED_TOKENS_TENSOR, &token_ids)
+                .map_err(|err| {
+                    format!(
+                        "failed to read model-loop token-id embedding rows for request {request_index}: {err}"
+                    )
+                })?;
+            if rows.columns != hidden || rows.values.len() != token_ids.len() * hidden {
+                return Err(format!(
+                    "model-loop token-id embedding shape mismatch for request {request_index}: columns={} values={} tokens={} hidden={hidden}",
+                    rows.columns,
+                    rows.values.len(),
+                    token_ids.len()
+                ));
+            }
+            let request_id = 301_u64
+                .checked_add(
+                    u64::try_from(request_index)
+                        .map_err(|_| "model-loop token-id request index exceeds u64".to_string())?,
+                )
+                .ok_or_else(|| "model-loop token-id request id overflows".to_string())?;
+            requests.push(Request::new(
+                request_id,
+                prompt_token_ids.len(),
+                generated_tokens,
+            ));
+            position_stride = position_stride.max(token_ids.len());
+            decode_token_ids_by_request.push(decode_token_ids);
+            initial_residuals.push(rows.values);
+        }
+
+        Self::from_initial_residuals(
+            requests,
+            initial_residuals,
+            prompt_token_ids_batch,
+            decode_token_ids_by_request,
+            hidden,
+            block_size,
+            position_stride,
+            "embedding_token_ids",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_initial_residuals(
+        requests: Vec<Request>,
+        initial_residuals_input: Vec<Vec<f32>>,
+        prompt_token_ids_by_request: Vec<Vec<usize>>,
+        decode_token_ids_by_request: Vec<Vec<usize>>,
+        hidden: usize,
+        block_size: usize,
+        position_stride: usize,
+        input_source: &'static str,
+    ) -> Result<Self, String> {
+        if block_size == 0 {
+            return Err("model-loop block size must be greater than zero".to_string());
+        }
+        if requests.is_empty() {
+            return Err("model-loop request plan requires at least one request".to_string());
+        }
+        if position_stride == 0 {
+            return Err("model-loop position stride must be greater than zero".to_string());
+        }
+        if requests.len() != initial_residuals_input.len()
+            || requests.len() != prompt_token_ids_by_request.len()
+            || requests.len() != decode_token_ids_by_request.len()
+        {
+            return Err(format!(
+                "model-loop request count mismatch: requests={} residuals={} prompt_ids={} decode_ids={}",
+                requests.len(),
+                initial_residuals_input.len(),
+                prompt_token_ids_by_request.len(),
+                decode_token_ids_by_request.len()
+            ));
+        }
         let mut required_blocks = 0_usize;
         for request in &requests {
             let total_tokens = request
@@ -14130,18 +14319,21 @@ impl PackageModelLoopRequestPlan {
                 .prompt_tokens
                 .checked_add(request.max_new_tokens)
                 .ok_or_else(|| format!("request {:?} total token count overflows", request.id))?;
-            let base_input = deterministic_f32_vector(hidden);
             let residual_elements = request_total_tokens.checked_mul(hidden).ok_or_else(|| {
                 format!("request {:?} residual element count overflows", request.id)
             })?;
-            let mut residual = Vec::with_capacity(residual_elements);
-            for timestep in 0..request_total_tokens {
-                let shifted_timestep = timestep
-                    .checked_add(request_index.checked_mul(sequence_len).ok_or_else(|| {
-                        "model-loop residual timestep multiplier overflows".to_string()
-                    })?)
-                    .ok_or_else(|| "model-loop residual timestep overflows".to_string())?;
-                residual.extend(linear_attn_step_input(&base_input, shifted_timestep));
+            let residual = initial_residuals_input
+                .get(request_index)
+                .ok_or_else(|| {
+                    format!("model-loop residual input missing for request index {request_index}")
+                })?
+                .clone();
+            if residual.len() != residual_elements {
+                return Err(format!(
+                    "model-loop residual length mismatch for request {:?}: got {} expected {residual_elements}",
+                    request.id,
+                    residual.len()
+                ));
             }
             request_ids.push(request.id.0);
             prompt_tokens.push(request.prompt_tokens);
@@ -14152,16 +14344,20 @@ impl PackageModelLoopRequestPlan {
         }
 
         Ok(Self {
+            input_source,
             scheduler,
             requests,
             request_ids,
             prompt_tokens,
             max_new_tokens,
             total_tokens,
+            prompt_token_ids_by_request,
+            decode_token_ids_by_request,
             block_tables,
             initial_residuals,
             block_size,
             cache_blocks,
+            position_stride,
         })
     }
 
@@ -14226,7 +14422,6 @@ impl PackageModelLoopLayerRunPlan {
         model: &Qwen3PackageModelRuntime,
         request_plan: &PackageModelLoopRequestPlan,
         decode_shape: PagedDecodeShape,
-        sequence_len: usize,
         rotary_dim: usize,
         rope_base: f32,
         position_offset: usize,
@@ -14251,8 +14446,9 @@ impl PackageModelLoopLayerRunPlan {
                         .layer_output
                         .clone()
                 };
-                let request_position_stride =
-                    request_index.checked_mul(sequence_len).ok_or_else(|| {
+                let request_position_stride = request_index
+                    .checked_mul(request_plan.position_stride)
+                    .ok_or_else(|| {
                         "model-loop request position offset multiplier overflows".to_string()
                     })?;
                 let request_position_offset = position_offset
@@ -14591,18 +14787,78 @@ impl PackageModelLoopSmokeRun {
             &model,
             &request_plan,
             execution_plan.decode.decode_shape,
-            sequence_len,
             rotary_dim,
             rope_base,
             position_offset,
         )?;
 
         Ok(Self {
+            command_name: "package-self-attn-mlp-block-model-loop-smoke",
             model,
             request_plan,
             layer_run_plan,
             execution_plan,
             execution_summary: None,
+            final_top_logits: None,
+            lm_head_top_k: None,
+            lm_head_chunk_rows: None,
+            sequence_len,
+            rotary_dim,
+            rope_base,
+            position_offset,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_from_token_ids(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        path: &str,
+        chunk_bytes: usize,
+        layer_indices: &[usize],
+        prompt_token_ids_batch: Vec<Vec<usize>>,
+        generated_tokens_batch: Vec<usize>,
+        top_k: usize,
+        lm_head_chunk_rows: usize,
+        rotary_dim: Option<String>,
+        rope_base: f32,
+        position_offset: usize,
+    ) -> Result<Self, String> {
+        let model =
+            Qwen3PackageModelRuntime::load(context, stream, path, chunk_bytes, layer_indices)?;
+        let rotary_dim = parse_package_model_loop_rotary_dim(&model, rotary_dim)?;
+        let block_size = 2_usize;
+        let request_plan = PackageModelLoopRequestPlan::from_token_id_batches(
+            path,
+            prompt_token_ids_batch,
+            generated_tokens_batch,
+            model.hidden,
+            block_size,
+        )?;
+        let sequence_len = request_plan.position_stride;
+        let execution_plan = PackageModelLoopExecutionPlan::new(&model, &request_plan)?;
+
+        let layer_run_plan = PackageModelLoopLayerRunPlan::prepare(
+            context,
+            stream,
+            &model,
+            &request_plan,
+            execution_plan.decode.decode_shape,
+            rotary_dim,
+            rope_base,
+            position_offset,
+        )?;
+
+        Ok(Self {
+            command_name: "package-token-ids-model-loop-smoke",
+            model,
+            request_plan,
+            layer_run_plan,
+            execution_plan,
+            execution_summary: None,
+            final_top_logits: None,
+            lm_head_top_k: Some(top_k),
+            lm_head_chunk_rows: Some(lm_head_chunk_rows),
             sequence_len,
             rotary_dim,
             rope_base,
@@ -14626,6 +14882,92 @@ impl PackageModelLoopSmokeRun {
             &mut self.layer_run_plan,
         )?;
         self.execution_summary = Some(summary);
+        Ok(())
+    }
+
+    fn compute_final_top_logits(
+        &mut self,
+        path: &str,
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        chunk_bytes: usize,
+        top_k: usize,
+        lm_head_chunk_rows: usize,
+    ) -> Result<(), String> {
+        let mut final_norm = read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, chunk_bytes)
+            .map_err(|err| format!("failed to read model-loop final RMSNorm tensor: {err}"))?;
+        final_norm.values =
+            effective_rmsnorm_weight_values(QWEN3_FINAL_NORM_TENSOR, &final_norm.values);
+        if final_norm.values.len() != self.model.hidden {
+            return Err(format!(
+                "model-loop final RMSNorm length mismatch: len={} hidden={}",
+                final_norm.values.len(),
+                self.model.hidden
+            ));
+        }
+        let final_layer_runs =
+            self.layer_run_plan.runs_by_layer.last().ok_or_else(|| {
+                "model-loop final top logits require at least one layer".to_string()
+            })?;
+        let mut final_top_logits = Vec::with_capacity(final_layer_runs.len());
+        for run in final_layer_runs {
+            let final_token_index = run
+                .total_tokens
+                .checked_sub(1)
+                .ok_or_else(|| format!("request {:?} has no final token", run.request_id))?;
+            let final_start = final_token_index
+                .checked_mul(self.model.hidden)
+                .ok_or_else(|| "model-loop final hidden start overflows".to_string())?;
+            let final_end = final_start
+                .checked_add(self.model.hidden)
+                .ok_or_else(|| "model-loop final hidden end overflows".to_string())?;
+            if final_end > run.checks.expected.layer_output.len() {
+                return Err(format!(
+                    "model-loop final hidden slice {final_start}..{final_end} exceeds request {:?} layer output len {}",
+                    run.request_id,
+                    run.checks.expected.layer_output.len()
+                ));
+            }
+            let final_hidden = &run.checks.expected.layer_output[final_start..final_end];
+            let final_normed = runtime_host_rmsnorm_f32(final_hidden, &final_norm.values, 1e-6_f32);
+            if final_normed.len() != self.model.hidden
+                || final_normed.iter().any(|value| !value.is_finite())
+            {
+                return Err(format!(
+                    "model-loop final normalized hidden state for request {:?} contains invalid values",
+                    run.request_id
+                ));
+            }
+            let top_logits = match package_lm_head_top_k_from_rows(
+                path,
+                &final_normed,
+                top_k,
+                lm_head_chunk_rows,
+            ) {
+                Ok((_, _, _, top_logits)) => top_logits,
+                Err(cpu_err) => {
+                    let mut lm_head_runtime = PackageLmHeadRuntime::load(
+                        PackageLmHeadMode::GpuResidentF32,
+                        context,
+                        stream,
+                        path,
+                        chunk_bytes,
+                        self.model.hidden,
+                        lm_head_chunk_rows,
+                    )
+                    .map_err(|resident_err| {
+                        format!(
+                            "failed to compute model-loop lm_head top-k: cpu_chunked_error={cpu_err}; resident_error={resident_err}"
+                        )
+                    })?;
+                    lm_head_runtime.top_logits(path, stream, &final_normed, top_k)?
+                }
+            };
+            final_top_logits.push(top_logits);
+        }
+        self.final_top_logits = Some(final_top_logits);
+        self.lm_head_top_k = Some(top_k);
+        self.lm_head_chunk_rows = Some(lm_head_chunk_rows);
         Ok(())
     }
 
@@ -14730,6 +15072,40 @@ impl PackageModelLoopSmokeRun {
         let post_norm_dtypes = self.model.post_norm_dtypes();
         let prepared_diffs = &self.layer_run_plan.prepared_diffs;
         let runtime_diffs = self.layer_run_plan.runtime_diffs();
+        let final_top1_tokens = self
+            .final_top_logits
+            .as_ref()
+            .map(|requests| {
+                requests
+                    .iter()
+                    .filter_map(|entries| entries.first().map(|entry| entry.token_id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let final_top1_tokens_csv = final_top1_tokens
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let final_top1_logits_csv = self
+            .final_top_logits
+            .as_ref()
+            .map(|requests| {
+                requests
+                    .iter()
+                    .filter_map(|entries| {
+                        entries.first().map(|entry| format!("{:.6}", entry.logit))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        let final_lm_head_guard = self.final_top_logits.is_some();
+        let prefill_mode = if self.request_plan.input_source == "embedding_token_ids" {
+            "token_id_layer_stack"
+        } else {
+            "synthetic_layer_stack"
+        };
         let q_norm_max_abs_diff = prepared_diffs.q_norm_max_abs_diff;
         let k_norm_max_abs_diff = prepared_diffs.k_norm_max_abs_diff;
         let q_rope_max_abs_diff = prepared_diffs.q_rope_max_abs_diff;
@@ -14746,12 +15122,23 @@ impl PackageModelLoopSmokeRun {
         let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
 
         Ok(format!(
-            "package-self-attn-mlp-block-model-loop-smoke package={} layers={:?} layers_csv={} prefill_mode=synthetic_layer_stack batching_mode=hybrid prefill_executor=stack_prefill_step decode_executor=stack_ready_batch prefill_real_batch=false decode_real_batch={} prefill_executor_request_parallelism=1 decode_executor_request_parallelism={} input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} decode_batch_ready_counts={:?} decode_batch_ready_counts_csv={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} generated_tokens_csv={} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+            "{} package={} layers={:?} layers_csv={} input_source={} prefill_mode={} batching_mode=hybrid prefill_executor=stack_prefill_step decode_executor=stack_ready_batch prefill_real_batch=false decode_real_batch={} prefill_executor_request_parallelism=1 decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard={} lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_top_logits_source=verified_expected_layer_output input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} decode_batch_ready_counts={:?} decode_batch_ready_counts_csv={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} generated_tokens_csv={} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+            self.command_name,
             path,
             layer_indices,
             layer_indices_csv,
+            self.request_plan.input_source,
+            prefill_mode,
             decode_real_batch,
             decode_executor_request_parallelism,
+            self.request_plan.prompt_token_ids_by_request,
+            self.request_plan.decode_token_ids_by_request,
+            final_lm_head_guard,
+            self.lm_head_top_k.unwrap_or(0),
+            self.lm_head_chunk_rows.unwrap_or(0),
+            final_top1_tokens,
+            final_top1_tokens_csv,
+            final_top1_logits_csv,
             input_norm_tensors,
             q_tensors,
             k_tensors,
@@ -14779,12 +15166,18 @@ impl PackageModelLoopSmokeRun {
             execution_summary.prefill_wall_ms,
             execution_summary.decode_wall_ms,
             execution_summary.total_wall_ms,
-            tps(prefill_total_input_tokens, execution_summary.prefill_wall_ms)
-                .map(|value| format!("{value:.6}"))
-                .unwrap_or_else(|| "null".to_string()),
-            tps(decode_total_generated_tokens, execution_summary.decode_wall_ms)
-                .map(|value| format!("{value:.6}"))
-                .unwrap_or_else(|| "null".to_string()),
+            tps(
+                prefill_total_input_tokens,
+                execution_summary.prefill_wall_ms
+            )
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
+            tps(
+                decode_total_generated_tokens,
+                execution_summary.decode_wall_ms
+            )
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "null".to_string()),
             tps(end_to_end_total_tokens, execution_summary.total_wall_ms)
                 .map(|value| format!("{value:.6}"))
                 .unwrap_or_else(|| "null".to_string()),
@@ -17974,6 +18367,175 @@ fn package_self_attn_mlp_block_model_loop_smoke_impl(
         position_offset,
     )?;
     smoke_run.execute(&mut context, &mut stream)?;
+    smoke_run.format_output(path, device_index, &info)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_model_loop_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    prompt_token_ids_batch: Option<String>,
+    generated_tokens_batch: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-token-ids-model-loop-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_model_loop_layer_indices(layer_indices) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids_batch = match parse_package_prompt_token_ids_batch(
+        prompt_token_ids_batch.or_else(|| Some("len:3x3".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let generated_tokens_batch = match parse_package_generated_tokens_batch(
+        generated_tokens_batch,
+        prompt_token_ids_batch.len(),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 8, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+
+    match package_token_ids_model_loop_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn parse_package_token_ids_model_loop_layer_indices(
+    value: Option<String>,
+) -> Result<Vec<usize>, ExitCode> {
+    let Some(raw) = value else {
+        return Ok(vec![3, 7]);
+    };
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case("default") {
+        return Ok(vec![3, 7]);
+    }
+    if raw.eq_ignore_ascii_case("all") {
+        eprintln!(
+            "package-token-ids-model-loop-smoke requires explicit self-attention layer indices; use default or a CSV such as 3,7"
+        );
+        return Err(ExitCode::from(2));
+    }
+    parse_usize_csv(raw, "model-loop token-id layer list")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_model_loop_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    prompt_token_ids_batch: Vec<Vec<usize>>,
+    generated_tokens_batch: Vec<usize>,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+) -> Result<String, String> {
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+
+    let mut smoke_run = PackageModelLoopSmokeRun::new_from_token_ids(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        &layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+    )?;
+    smoke_run.execute(&mut context, &mut stream)?;
+    smoke_run.compute_final_top_logits(
+        path,
+        &mut context,
+        &mut stream,
+        chunk_bytes,
+        top_k,
+        lm_head_chunk_rows,
+    )?;
     smoke_run.format_output(path, device_index, &info)
 }
 
@@ -39887,6 +40449,9 @@ fn print_help() {
     );
     eprintln!(
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
+    );
+    eprintln!(
+        "package-token-ids-model-loop-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "sq-fp8-token-ids-logits-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all] [TOKEN_IDS_CSV|len:N] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"

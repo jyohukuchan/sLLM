@@ -1973,7 +1973,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | --- | --- | --- |
 | T0 state freeze | done | `benchmarks/results/2026-07-08/sq-r9700-state-freeze-v0.1.json`, `.md` |
 | T1 result schema preservation | partial done | `docs/specs/batch-throughput-workload-v0.1.md`, `docs/specs/inference-benchmark-result-v0.1.md`, `tools/run-external-benchmark.py` |
-| T1 real batch/total throughput runner | partial done with package-backed component batch grid, logical full-package grid, and hybrid model-loop smoke | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`, `phase-t1-package-prefill-component-batch-grid-v1.md`, `benchmarks/workloads/r9700-aq4-full-package-logical-batch-small-grid.json`, `phase-t1-full-package-logical-batch-small-grid-v1.md`, `phase-t1-model-loop-hybrid-throughput-smoke-v1.md`; real full-package request-batch prefill/decode/end-to-end total throughput is still not done. |
+| T1 real batch/total throughput runner | partial done with package-backed component batch grid, logical full-package grid, hybrid model-loop smoke, and token-id selected-layer bridge | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`, `phase-t1-package-prefill-component-batch-grid-v1.md`, `benchmarks/workloads/r9700-aq4-full-package-logical-batch-small-grid.json`, `phase-t1-full-package-logical-batch-small-grid-v1.md`, `phase-t1-model-loop-hybrid-throughput-smoke-v1.md`, `phase-t1-token-id-model-loop-hybrid-smoke-v1.md`; real full-package request-batch prefill/decode/end-to-end total throughput is still not done. |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done with policy artifact verified | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; actual `kup6_gate5_down5` payload artifact generated under `/tmp` with `22` FP8 tensors and `753` passthrough tensors. |
 | T2 runtime load path | partial done with policy artifact materialize verified | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization; policy artifact materialize smoke verified on R9700. |
@@ -2179,6 +2179,30 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 1. このhybrid rowはselected-layer stack guardとして扱う。full language-model SQ/vLLM比較には使わない。
 2. 次はtoken-id full package pathとmodel-loop stack runnerの接続点を作り、embedding、all selected runtime layers、final norm/lm_head、quality guardを同じrequest-batch scheduler上で扱う。
 3. prefillもrequest-batch化できた段階で `batching.mode=real` へ昇格する。decodeだけrealの間は `hybrid` として区別する。
+
+## 2026-07-08 progress: T1 token-id model-loop bridge
+
+前回の要点:
+
+- selected-layer model-loop smokeはscheduler、KV cache、decode ready batch、throughput key-value stdoutを通せるようになった。
+- ただし入力はsynthetic residualであり、SQ候補のdriftを見るためのtoken-id embedding入力とfinal lm_head guardには未接続だった。
+- full-package real request-batch throughputはまだ未完了なので、selected-layer bridgeは中間gateとして扱う必要があった。
+
+今回の変更点:
+
+- `package-token-ids-model-loop-smoke` を追加した。
+- prompt token ID batchを `model.language_model.embed_tokens.weight` のrowへ変換し、model-loop schedulerの初期residualとして使う。
+- decode側は固定のsynthetic future token IDをembedding rowとして追加する。これはgreedy generationではなく、scheduler、selected runtime layers、final lm_head guardを接続するための中間gateである。
+- final hiddenにfinal RMSNormとlm_head top-kをかけ、requestごとのfinal top1 tokenをstdoutとJSONLへ保存した。
+- `tools/run-external-benchmark.py --parse ullm-model-loop-throughput` は `input_source`、`resolved_prefill_executor`、`final_top1_tokens` を保持するようにした。
+- R9700 AQ4 packageで layers `3,7`、`batch=2`、prompt `2`、generated `1` のsmokeを実行し、`batching.mode=hybrid`、`decode_real_batch=true`、`final_top1_tokens=155793,23175`、`verified=true` を保存した。
+- 結果は `benchmarks/results/2026-07-08/package-batch-throughput/phase-t1-token-id-model-loop-hybrid-smoke-v1.md` に保存した。
+
+次の行動:
+
+1. このrowはselected-layer T1/T2 bridgeとして扱う。full LM throughputやSQ最終性能判断には使わない。
+2. 次はSQ overlayまたはcandidate policyをこのtoken-id model-loop pathへ接続し、AQ4/SQのfinal top1、top-k overlap、logit gap、throughputを同じscheduler pathで比較する。
+3. prefillのrequest-batch化は未完了なので、`batching.mode=hybrid` のまま区別する。full-package real batch runnerはT1aとして継続する。
 
 ## 2026-07-08 current plan update: SQ format design phase v1
 

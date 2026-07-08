@@ -840,6 +840,7 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
     row_workload["prefill_mode"] = report.get("prefill_mode") or "synthetic_layer_stack"
     if isinstance(report.get("prefill_executor"), str):
         row_workload["prefill_executor"] = report.get("prefill_executor")
+        row_workload["resolved_prefill_executor"] = report.get("prefill_executor")
     if prompt_tokens_per_request:
         row_workload["prompt_tokens_per_request"] = prompt_tokens_per_request
         row_workload["cached_prefix_tokens_per_request"] = [
@@ -862,6 +863,11 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
             row_workload[key] = value
     if isinstance(layers_csv, str):
         row_workload["layers_csv"] = layers_csv
+    if isinstance(report.get("input_source"), str):
+        row_workload["input_source"] = report.get("input_source")
+    final_top1_tokens = parse_int_csv(report.get("final_top1_tokens_csv"))
+    if final_top1_tokens:
+        row_workload["final_top1_tokens"] = final_top1_tokens
     sequence_len = parse_int(report.get("sequence_len"))
     if sequence_len is not None:
         row_workload["sequence_len"] = sequence_len
