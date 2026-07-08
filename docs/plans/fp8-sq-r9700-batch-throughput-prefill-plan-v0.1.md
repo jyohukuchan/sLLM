@@ -2074,6 +2074,36 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 4. cold prefill、cached prefix、decodeの代表gridを埋める。cached-prefixでは `cached_prefix_rdna4_fp8_auto` と `resolved_executor` を使う。
 5. uLLM側のR9700結果が揃った後、vLLMを同じgridで測る。R9700 FP8がunsupportedなら、unsupported reason付きの比較行として残す。
 
+## 2026-07-08 current plan update: SQ format evaluation execution order
+
+前回の要点:
+
+- R9700/RDNA4のcached-prefix/cold-prefill componentは、FlashAttention2-style scalar path、FP8-Q path、rocWMMA path、auto executorまで進み、SQ候補評価を始める前提速度としては十分と判断する。
+- `kup6_gate5_down5` は6層prompt bundleでstrict top1を維持するが、case_aのtop8 overlapが低いため、full SQ policyではなくregression subsetとして扱う。
+- T1はpackage-backed component real-batch JSONLまでは進んだが、full packageのrequest-batch prefill、decode、end-to-end total throughputはまだ未完了である。
+
+今回の変更点:
+
+- 次の主線を、追加のattention kernel開発ではなくSQ format evaluationへ戻す。
+- self-attention componentのrequest-boundary検証は有用だが、SQ評価の必須経路ではfull package total throughput runnerを優先する。flattened component gridはkernel/schema sanityに限定し、最終性能比較には使わない。
+- SQ候補1は引き続き `sq-fp8-w8a16-r9700-v0` とし、R9700だけで実装・計測する。
+- throughput比較では、SQ overlayのhost-side materialize/load timingを速度結果として使わない。native FP8 path、materialization-aware runtime path、またはmaterialized working-setを明示したpathだけを比較対象にする。
+- fixed batch v0.1の評価軸は、`batch=1/4/8`、cold prefill、cached prefix、decode、end-to-end、VRAM、resident bytes、working-set bytes、quality guardに限定する。
+- continuous batching、tensor parallel、API/server integration、V620/RDNA2 dequant pathは、SQ候補1のR9700評価後へ回す。
+- vLLM比較は、uLLM側のR9700 AQ4/FP8行が同じschemaで揃った後に行う。R9700 FP8がvLLM側でunsupportedなら、unsupported reason、backend、dtype、quantizationを比較行に残す。
+
+次の行動:
+
+1. T1aとして、full package request-batch runnerを作る。必須出力は `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、`batching.mode=real`、`concurrent_requests`、`prompt_tokens_per_request`、`generated_tokens_per_request`、KV cache bytes、VRAM peakである。
+2. T1bとして、AQ4 packageで `batch=1/4/8` のsmall gridを通し、component gridではなくfull package rowとしてJSONLへ保存する。
+3. T2aとして、`sq-fp8-kup6-gate5-down5-policy-v0.1.json` をruntime pathへ接続し、selected FP8/fallback familyが速度計測時にもmanifestから追跡できるようにする。
+4. T2bとして、SQ pathのquality guardをbatch pathにも接続する。v0.1の昇格条件はstrict top1一致のままにし、top-k overlap、AQ4 top1 rank、logit gapは診断値として保存する。
+5. T3として、FP8 SQ候補1のcold prefill、cached prefix、decode、end-to-end rowsを保存する。cached prefixは `cached_prefix_rdna4_fp8_auto` を既定にし、`resolved_executor` を必ず残す。
+6. T4として、AQ4 baselineとFP8 SQ候補1を同一workload gridで比較する。比較表にはquality、VRAM、resident bytes、materialized working-set bytes、prefill/decode/end-to-end total throughputを同じ行に入れる。
+7. T5として、SQ候補1が品質または速度で不十分ならformat iterationへ進む。候補はrow-block幅、scale dtype/layout、fallback family、FP8値+FP8 scale、またはより保守的なhybrid policyである。
+8. T6として、uLLM側の比較表が固まった後にvLLMを同じgridで測る。vLLM側のunsupported/fallbackは失敗ではなく比較条件として記録する。
+9. T7として、R9700 SQ候補1の採否判断を行う。採用条件は、AQ4比のVRAM/working-set削減が説明でき、total throughputが大きく悪化せず、quality guardが通ることである。
+
 ## Risks
 
 | risk | impact | handling |
