@@ -2456,6 +2456,43 @@ Quality:
 3. 次の候補はlayer7単体 `k16/up32`、またはlayer7 `k_proj` / `up_proj` の片側fallbackである。
 4. full-package real batch throughputは引き続きT1aとして別に進める。
 
+## 2026-07-09 progress: T2 SQ FP8 model-loop layer7 isolation
+
+前回の要点:
+
+- `kup1-layer3-k16-up32` はstrict top1を `3 / 3` 維持した。
+- `kup2-k16-up32` は、同じmixed scaleをlayers `3,7` へ広げると `case_a` が崩れた。
+- 次はlayer7単体と、layer3 passing probeへlayer7の片側だけを足す切り分けが必要だった。
+
+今回の変更点:
+
+- `layer7 k16/up32`、`layer3 k16/up32 + layer7 k16`、`layer3 k16/up32 + layer7 up32` の3条件を作った。
+- すべて同じR9700 six-layer token-id model-loop prompt bundleで評価した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-isolation-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| variant | FP8 tensors | pass | len4 SQ top1 | case_a SQ top1 | case_a AQ4 rank in SQ top8 | case_b SQ top1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `layer7-k16-up32` | 2 | 3 / 3 | 110784 | 237950 | 1 | 182949 |
+| `layer3-kup-plus-layer7-k16` | 3 | 3 / 3 | 110784 | 237950 | 1 | 182949 |
+| `layer3-kup-plus-layer7-up32` | 3 | 2 / 3 | 110784 | 193706 | 3 | 182949 |
+
+判断:
+
+- layer7単体の `k16/up32` はstrict top1を維持する。
+- layer3 passing probeへlayer7 `k_proj` row-block16だけを足してもstrict top1を維持する。
+- layer3 passing probeへlayer7 `up_proj` row-block32を足すと `case_a` が崩れる。
+- 現在のT2境界は、layer7 `up_proj` とlayer3 k/up mixed-scale probeのinteractionに絞られた。
+- `case_a` のAQ4 top1はSQ top8 rank `3` に残るが、strict top1 promotion ruleではfailure guardとして扱う。
+
+次の行動:
+
+1. `layer7-k16-up32` と `layer3-kup-plus-layer7-k16` はpassing probesとして保持する。
+2. `layer3-kup-plus-layer7-up32` を現在のfailure guardとして残す。
+3. 次はlayer7 `up_proj` のrow-block16、row-block64、またはfallbackを、layer3 k16/up32 + layer7 k16固定で試す。
+4. full-package real batch throughputは引き続きT1aとして別に進める。
+
 ## Risks
 
 | risk | impact | handling |
