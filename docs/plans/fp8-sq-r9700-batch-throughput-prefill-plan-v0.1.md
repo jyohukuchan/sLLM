@@ -27,6 +27,7 @@
 5. long context向けに、`2^16` token級のcold prefillと、cached prefix `L` に対して新規chunk `M` を追加するcached prefillを測れるようにする。
 6. 512 tokenを超える複数patternの結果から、causal attention、cached prefix attention、projection/MLP batchのどこを次に直すべきかを決める。
 7. uLLM側でR9700のprefill/decodeが比較可能な速度になった後、vLLM baselineを同じworkload gridで測る。
+8. FP8 K/V cacheの長prefix bottleneck解消として、R9700/RDNA4向けFlashAttention2-style tiled attentionを次の主タスクにする。
 
 ## 2026-07-08 cached prefix FP8 KV cache note
 
@@ -72,6 +73,48 @@
 1. 長いprefixで残る遅さは、変換命令よりkernel構造の問題として扱う。
 2. K score計算でdecoded Kを再利用するtile設計を検討する。
 3. packed変換はCKのgfx12注意点を踏まえ、単体変換版の正しさと速度を基準にしてから別途検証する。
+
+## 2026-07-08 next task: FlashAttention2 implementation
+
+前回の要点:
+
+- FP8 K/V cacheは専用変換命令により、R9700/RDNA4では変換そのもののoverheadをかなり削減できた。
+- `L=4096` ではF32に近く、`L=16384` ではF32より速いが、`L=65536` ではまだF32より遅い。
+- 残っている主因は、現cached-prefix kernelが長いprefixでK/Vをtile化せず、decoded K/Vやscoreを十分に再利用できていないことだと考える。
+
+今回の変更点:
+
+- 次の主タスクを、R9700/RDNA4向けFlashAttention2-style tiled attention実装にする。
+- 対象はまずcached prefix prefillとcold prefillのattention componentに限定する。
+- R9700/RDNA4では、FP8変換命令、BF16/FP16系演算、十分なLDS/波面制御を前提に、そのまま実装できるものとして進める。
+- RDNA2/V620などBF16が使えない、またはFP8変換・scale変換の条件が異なる環境は今回の合否から外す。
+- RDNA2向けには、必要ならFP32へのdequant機構、別accumulator path、またはfallback attention kernelを後続で設計する。今回は保留する。
+
+次の行動:
+
+1. `runtime-cached-prefix-attn-smoke` にFlashAttention2 executorを追加する。
+   - 例: `cached_prefix_flash2` または `flash2_cached_prefix`
+   - 既存の `cached_prefix_chunked` は比較baselineとして残す。
+2. RDNA4向けに、Q block x K/V tileのonline softmax kernelを実装する。
+   - K/VはFP8 E4M3 byte cacheから専用命令でF32またはBF16/FP16計算値へ変換する。
+   - score max、denominator、weighted valueをtile単位で更新し、K score再計算を避ける。
+   - `M`方向とhead方向の並列性を確保し、`L=65536`でdecode-likeに落ち込む問題を優先して見る。
+3. correctness guardを既存のsampled referenceに接続する。
+   - `L={4096,16384,65536}`、`M={16,128,512}` を最低限の保存gridにする。
+   - `M=1` または `M=16` のdecode境界に近い条件はrepeat数を増やして外れ値を記録する。
+4. FP8/F32の両方でFlashAttention2 executorを測る。
+   - FP8専用最適化だけでなく、kernel構造改善そのものの効果をF32でも分離して見る。
+   - 指標は `prefill_total_input_tps`、`attention_pair_tps_mean`、`cache_kv_bytes_total`、sampled diff。
+5. 結果が安定したら、package self-attention prefillのattention componentへ接続する。
+   - 最初はattention-only smokeでよい。
+   - Q/K/V projection、QK norm/RoPE、o projection/MLPとの統合は後続に回す。
+
+完了条件:
+
+- R9700でFlashAttention2 executorがHIP kernel必須モードで動く。
+- cached-prefix FP8 K/V cacheの保存gridでsampled guardが通る。
+- v2 builtin conversion結果より `L=65536` のFP8 tok/sまたはpair/sが明確に改善する。
+- F32 baselineに対して、kernel構造による改善とFP8 cache byte削減による改善を分けて説明できる。
 
 ## Goal
 
