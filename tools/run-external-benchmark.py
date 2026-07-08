@@ -926,7 +926,12 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         row_workload["input_source"] = report.get("input_source")
     if report.get("sq_overlay") is True:
         row_workload["sq_overlay"] = True
-    for key in ("sq_candidate", "sq_artifact", "sq_schema_version"):
+    for key in (
+        "sq_candidate",
+        "sq_artifact",
+        "sq_schema_version",
+        "sq_execution_mode",
+    ):
         value = report.get(key)
         if isinstance(value, str) and value != "none":
             row_workload[key] = value

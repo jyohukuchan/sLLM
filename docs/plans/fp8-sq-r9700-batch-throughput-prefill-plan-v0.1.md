@@ -3603,6 +3603,43 @@ Inventory:
 2. full packageで `batching.mode=real`、`prefill_real_batch=true`、`decode_real_batch=true` のAQ4 baseline rowを保存する。
 3. T2 SQ候補を同じfull mixed pathへ接続し、AQ4/SQ比較へ進む。
 
+## 2026-07-09 progress: T2 SQ FP8 mixed request-state resident throughput
+
+前回の要点:
+
+- full mixed AQ4 `manifest-all` resident throughput baselineはB=1/4/8で取得済みだった。
+- T2ではSQ FP8 candidateを同じfull mixed resident pathへ接続し、AQ4/SQのqualityとthroughputを同じschemaで比較する必要があった。
+
+今回の変更点:
+
+- `sq-fp8-token-ids-mixed-request-state-smoke` を追加した。
+- full mixed request-state loaderへ `Qwen3PackageSqOverlay` を渡し、artifactに存在するtensorだけSQ FP8からF32 resident bufferへmaterializeするようにした。
+- artifactに存在しないtensorは従来どおりAQ4 resident matvecへfallbackする。
+- `PackageAq4ResidentMatvec` はAQ4 storageとSQ/F32 materialized storageを持てるようになった。
+- stdoutに `sq_execution_mode=materialized_f32_fallback` を追加した。
+- `run-external-benchmark.py` は `sq_execution_mode` をworkload metadataとして保持する。
+- R9700で `kup6_gate5_down5` artifactをB=1/4/8のfull `manifest-all` で実行し、結果を `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-mixed-request-state-resident-throughput-small-grid-v1.md` に保存した。
+
+実測値:
+
+| batch | mode | SQ prefill tok/s | SQ decode tok/s | SQ end-to-end tok/s | AQ4 end-to-end tok/s | AQ4 final top1 | SQ final top1 | top1 match |
+| ---: | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| 1 | `single` | 13.047930 | 24.609341 | 7.260317 | 8.926325 | `44370` | `44370` | `true` |
+| 4 | `real` | 20.661755 | 24.890457 | 14.585119 | 24.096096 | `44370,5446,10701,25411` | `44370,1622,10701,25411` | `false` |
+| 8 | `real` | 22.932277 | 25.066788 | 17.961835 | 34.577530 | `44370,5446,10701,25411,21901,685,279,27973` | `44370,1622,10701,25411,21901,685,279,27973` | `false` |
+
+判断:
+
+- SQ FP8 candidateをfull mixed resident pathへ接続できた。
+- B=4/B=8で2番目requestのfinal top1がAQ4 baselineからずれるため、`kup6_gate5_down5` はfull mixed quality guardを通過していない。
+- 現在のSQ速度はmaterialized F32 fallbackを含むため、native SQ kernelの速度代表値ではない。
+
+次の行動:
+
+1. top1 driftが出ない保守的SQ candidateをfull mixed pathで再評価する。
+2. SQ FP8 direct matvecまたは低遅延dequant matvecへ進む。
+3. native SQ rowができたら、同じB=1/4/8 schemaでAQ4/SQ/vLLM比較へ戻る。
+
 ## Risks
 
 | risk | impact | handling |

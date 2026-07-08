@@ -55,8 +55,8 @@ use ullm_engine::scheduler::{
     SchedulerState,
 };
 use ullm_engine::sq::{
-    materialize_sq_fp8_tensor_rows_to_runtime_f32, read_sq_fp8_artifact,
-    select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
+    materialize_named_sq_fp8_tensor_to_runtime_f32, materialize_sq_fp8_tensor_rows_to_runtime_f32,
+    read_sq_fp8_artifact, select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
 };
 
 fn main() -> ExitCode {
@@ -335,6 +335,22 @@ fn main() -> ExitCode {
                 env::args().nth(10),
                 env::args().nth(11),
                 env::args().nth(12),
+            )
+        }
+        Some("sq-fp8-token-ids-mixed-request-state-smoke") => {
+            sq_fp8_token_ids_mixed_request_state_smoke(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+                env::args().nth(8),
+                env::args().nth(9),
+                env::args().nth(10),
+                env::args().nth(11),
+                env::args().nth(12),
+                env::args().nth(13),
             )
         }
         Some("sq-fp8-token-ids-model-loop-smoke") => sq_fp8_token_ids_model_loop_smoke(
@@ -19282,6 +19298,124 @@ fn package_token_ids_mixed_request_state_smoke(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn sq_fp8_token_ids_mixed_request_state_smoke(
+    path: Option<String>,
+    artifact_path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    prompt_token_ids_batch: Option<String>,
+    generated_tokens_batch: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("sq-fp8-token-ids-mixed-request-state-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(artifact_path) = artifact_path else {
+        eprintln!("sq-fp8-token-ids-mixed-request-state-smoke requires an SQ FP8 artifact path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_layer_indices_for_package(
+        &path,
+        layer_indices.or_else(|| Some("manifest-all".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids_batch = match parse_package_prompt_token_ids_batch(
+        prompt_token_ids_batch.or_else(|| Some("len:2x2".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let generated_tokens_batch = match parse_package_generated_tokens_batch(
+        generated_tokens_batch,
+        prompt_token_ids_batch.len(),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 1, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let artifact = match read_sq_fp8_artifact(&artifact_path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read SQ FP8 artifact: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
+        "sq-fp8-token-ids-mixed-request-state-smoke",
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        Some(&artifact),
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn package_token_ids_mixed_request_state_smoke_impl(
     path: &str,
     device_index: u32,
@@ -19294,6 +19428,39 @@ fn package_token_ids_mixed_request_state_smoke_impl(
     rotary_dim: Option<String>,
     rope_base: f32,
     position_offset: usize,
+) -> Result<String, String> {
+    package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
+        "package-token-ids-mixed-request-state-smoke",
+        path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
+    command_name: &'static str,
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_indices: Vec<usize>,
+    prompt_token_ids_batch: Vec<Vec<usize>>,
+    generated_tokens_batch: Vec<usize>,
+    top_k: usize,
+    lm_head_chunk_rows: usize,
+    rotary_dim: Option<String>,
+    rope_base: f32,
+    position_offset: usize,
+    sq_artifact: Option<&ullm_engine::sq::SqFp8Artifact>,
 ) -> Result<String, String> {
     if layer_indices.is_empty() {
         return Err("mixed request-state smoke requires at least one layer".to_string());
@@ -19318,6 +19485,13 @@ fn package_token_ids_mixed_request_state_smoke_impl(
     let mut stream = context
         .create_stream()
         .map_err(|err| format!("failed to create mixed request-state stream: {err}"))?;
+    let sq_row_chunk = 256_usize;
+    let sq_overlay = sq_artifact.map(|artifact| Qwen3PackageSqOverlay {
+        artifact,
+        row_chunk: sq_row_chunk,
+    });
+    let sq_overlay_info =
+        sq_artifact.map(|artifact| package_model_loop_sq_overlay_info(artifact, sq_row_chunk));
 
     let (embedding_vocab, hidden) = package_embedding_shape(path)?;
     if hidden == 0 {
@@ -19362,6 +19536,7 @@ fn package_token_ids_mixed_request_state_smoke_impl(
                     chunk_bytes,
                     layer_index,
                     request_ids.clone(),
+                    sq_overlay.as_ref(),
                 )
                 .map_err(|err| {
                     format!(
@@ -19386,6 +19561,7 @@ fn package_token_ids_mixed_request_state_smoke_impl(
                     request_ids.clone(),
                     request_plan.block_size,
                     request_plan.cache_blocks,
+                    sq_overlay.as_ref(),
                 )
                 .map_err(|err| {
                     format!(
@@ -19660,14 +19836,53 @@ fn package_token_ids_mixed_request_state_smoke_impl(
     } else {
         "single"
     };
+    let sq_overlay_enabled = sq_overlay_info.is_some();
+    let sq_candidate = sq_overlay_info
+        .as_ref()
+        .map(|info| info.candidate.as_str())
+        .unwrap_or("none");
+    let sq_artifact_path = sq_overlay_info
+        .as_ref()
+        .map(|info| info.artifact.as_str())
+        .unwrap_or("none");
+    let sq_schema_version = sq_overlay_info
+        .as_ref()
+        .map(|info| info.schema_version.as_str())
+        .unwrap_or("none");
+    let sq_fp8_tensor_count = sq_overlay_info
+        .as_ref()
+        .map(|info| info.fp8_tensor_count)
+        .unwrap_or(0);
+    let sq_passthrough_tensor_count = sq_overlay_info
+        .as_ref()
+        .map(|info| info.passthrough_tensor_count)
+        .unwrap_or(0);
+    let sq_row_chunk_value = sq_overlay_info
+        .as_ref()
+        .map(|info| info.row_chunk)
+        .unwrap_or(0);
+    let sq_execution_mode = if sq_overlay_enabled {
+        "materialized_f32_fallback"
+    } else {
+        "none"
+    };
 
     Ok(format!(
-        "package-token-ids-mixed-request-state-smoke package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true sq_overlay={} sq_candidate={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        command_name,
         path,
         layer_indices,
         usize_csv(&layer_indices),
         layer_kinds,
         request_plan.input_source,
+        sq_overlay_enabled,
+        sq_candidate,
+        sq_artifact_path,
+        sq_schema_version,
+        sq_fp8_tensor_count,
+        sq_passthrough_tensor_count,
+        sq_row_chunk_value,
+        sq_execution_mode,
         batching_mode,
         prefill_real_batch,
         decode_real_batch,
@@ -38753,6 +38968,7 @@ fn package_linear_attn_request_state_smoke_impl(
         chunk_bytes,
         layer_index,
         request_ids.clone(),
+        None,
     )?;
     if batch_layer.layer_index() != layer_index {
         return Err(format!(
@@ -43054,11 +43270,28 @@ struct PackageAq4ResidentMatvec {
     tensor_scale: f32,
     scale_count: usize,
     row_scale_count: usize,
-    index_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
-    scale_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
-    codebook_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
-    scale_values_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
-    row_scale_buffer: Option<std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>>,
+    storage: PackageResidentMatvecStorage,
+}
+
+enum PackageResidentMatvecStorage {
+    Aq4 {
+        index_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+        scale_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+        codebook_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+        scale_values_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+        row_scale_buffer: Option<std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>>,
+    },
+    F32 {
+        matrix_buffer: std::sync::Arc<ullm_runtime_sys::RuntimeBuffer>,
+    },
+}
+
+struct PackageAq4StorageRef<'a> {
+    index_buffer: &'a ullm_runtime_sys::RuntimeBuffer,
+    scale_buffer: &'a ullm_runtime_sys::RuntimeBuffer,
+    codebook_buffer: &'a ullm_runtime_sys::RuntimeBuffer,
+    scale_values_buffer: &'a ullm_runtime_sys::RuntimeBuffer,
+    row_scale_buffer: Option<&'a ullm_runtime_sys::RuntimeBuffer>,
 }
 
 #[derive(Default)]
@@ -43803,20 +44036,89 @@ impl PackageAq4ResidentMatvec {
             tensor_scale: materialize.tensor_scale,
             scale_count: materialize.scale_values.len(),
             row_scale_count: if row_scale_buffer.is_some() { rows } else { 0 },
-            index_buffer: loaded.index.buffer.clone(),
-            scale_buffer: loaded.scale.buffer.clone(),
-            codebook_buffer: loaded.codebook.buffer.clone(),
-            scale_values_buffer,
-            row_scale_buffer,
+            storage: PackageResidentMatvecStorage::Aq4 {
+                index_buffer: loaded.index.buffer.clone(),
+                scale_buffer: loaded.scale.buffer.clone(),
+                codebook_buffer: loaded.codebook.buffer.clone(),
+                scale_values_buffer,
+                row_scale_buffer,
+            },
         })
     }
 
-    fn scale_values_buffer(&self) -> &ullm_runtime_sys::RuntimeBuffer {
-        self.scale_values_buffer.as_ref()
+    fn load_with_sq_overlay(
+        context: &mut ullm_runtime_sys::RuntimeContext,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        registry: &mut WeightRegistry,
+        shared_buffers: Option<&mut PackageResidentSharedBufferRegistry>,
+        path: &str,
+        tensor_name: &str,
+        chunk_bytes: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
+    ) -> Result<Self, String> {
+        if let Some(overlay) = sq_overlay {
+            match materialize_named_sq_fp8_tensor_to_runtime_f32(
+                context,
+                stream,
+                overlay.artifact,
+                tensor_name,
+                overlay.row_chunk,
+            ) {
+                Ok(Some(materialized)) => {
+                    return Ok(Self {
+                        rows: materialized.rows,
+                        cols: materialized.cols,
+                        group_size: 0,
+                        tensor_scale: 1.0,
+                        scale_count: 0,
+                        row_scale_count: 0,
+                        storage: PackageResidentMatvecStorage::F32 {
+                            matrix_buffer: std::sync::Arc::new(materialized.buffer),
+                        },
+                    });
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(format!(
+                        "failed to materialize SQ FP8 overlay tensor {tensor_name}: {err}"
+                    ));
+                }
+            }
+        }
+        Self::load_with_shared_buffers(
+            context,
+            stream,
+            registry,
+            shared_buffers,
+            path,
+            tensor_name,
+            chunk_bytes,
+        )
     }
 
-    fn row_scale_buffer(&self) -> Option<&ullm_runtime_sys::RuntimeBuffer> {
-        self.row_scale_buffer.as_deref()
+    fn aq4_storage(&self, label: &str) -> Result<PackageAq4StorageRef<'_>, String> {
+        match &self.storage {
+            PackageResidentMatvecStorage::Aq4 {
+                index_buffer,
+                scale_buffer,
+                codebook_buffer,
+                scale_values_buffer,
+                row_scale_buffer,
+            } => Ok(PackageAq4StorageRef {
+                index_buffer: index_buffer.as_ref(),
+                scale_buffer: scale_buffer.as_ref(),
+                codebook_buffer: codebook_buffer.as_ref(),
+                scale_values_buffer: scale_values_buffer.as_ref(),
+                row_scale_buffer: row_scale_buffer.as_deref(),
+            }),
+            PackageResidentMatvecStorage::F32 { .. } => Err(format!(
+                "{label} requested AQ4 storage for SQ/F32 resident matrix"
+            )),
+        }
+    }
+
+    fn is_f32(&self) -> bool {
+        matches!(self.storage, PackageResidentMatvecStorage::F32 { .. })
     }
 
     fn row_f32(
@@ -43826,23 +44128,45 @@ impl PackageAq4ResidentMatvec {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         label: &str,
     ) -> Result<(), String> {
-        ullm_runtime_sys::aq4_row_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
-            self.row_scale_buffer(),
-            self.scale_count,
-            self.group_size,
-            self.tensor_scale,
-            self.row_scale_count,
-            self.rows,
-            self.cols,
-            row_index,
-            output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to gather {label} AQ4 row: {err}"))
+        match &self.storage {
+            PackageResidentMatvecStorage::Aq4 { .. } => {
+                let aq4 = self.aq4_storage(label)?;
+                ullm_runtime_sys::aq4_row_f32(
+                    aq4.index_buffer,
+                    aq4.scale_buffer,
+                    aq4.codebook_buffer,
+                    aq4.scale_values_buffer,
+                    aq4.row_scale_buffer,
+                    self.scale_count,
+                    self.group_size,
+                    self.tensor_scale,
+                    self.row_scale_count,
+                    self.rows,
+                    self.cols,
+                    row_index,
+                    output_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to gather {label} AQ4 row: {err}"))
+            }
+            PackageResidentMatvecStorage::F32 { matrix_buffer } => {
+                let offset = row_index
+                    .checked_mul(self.cols)
+                    .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+                    .ok_or_else(|| format!("{label} F32 row offset overflows"))?;
+                let row_bytes = checked_f32_byte_len(self.cols, label)?;
+                let mut bytes = vec![0_u8; row_bytes];
+                matrix_buffer
+                    .copy_to_host(offset, &mut bytes, Some(stream))
+                    .map_err(|err| format!("failed to copy {label} F32 row from runtime: {err}"))?;
+                stream
+                    .synchronize()
+                    .map_err(|err| format!("failed to synchronize {label} F32 row copy: {err}"))?;
+                output_buffer
+                    .copy_from_host(0, &bytes, Some(stream))
+                    .map_err(|err| format!("failed to copy {label} F32 row to runtime: {err}"))
+            }
+        }
     }
 
     fn matvec(
@@ -43852,23 +44176,37 @@ impl PackageAq4ResidentMatvec {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         label: &str,
     ) -> Result<(), String> {
-        ullm_runtime_sys::aq4_matvec_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
-            input_buffer,
-            self.row_scale_buffer(),
-            self.scale_count,
-            self.group_size,
-            self.tensor_scale,
-            self.row_scale_count,
-            self.rows,
-            self.cols,
-            output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} AQ4 matvec: {err}"))
+        match &self.storage {
+            PackageResidentMatvecStorage::Aq4 { .. } => {
+                let aq4 = self.aq4_storage(label)?;
+                ullm_runtime_sys::aq4_matvec_f32(
+                    aq4.index_buffer,
+                    aq4.scale_buffer,
+                    aq4.codebook_buffer,
+                    aq4.scale_values_buffer,
+                    input_buffer,
+                    aq4.row_scale_buffer,
+                    self.scale_count,
+                    self.group_size,
+                    self.tensor_scale,
+                    self.row_scale_count,
+                    self.rows,
+                    self.cols,
+                    output_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} AQ4 matvec: {err}"))
+            }
+            PackageResidentMatvecStorage::F32 { matrix_buffer } => ullm_runtime_sys::matvec_f32(
+                matrix_buffer.as_ref(),
+                input_buffer,
+                self.rows,
+                self.cols,
+                output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to run {label} F32 matvec: {err}")),
+        }
     }
 
     fn matvec_batch(
@@ -43879,13 +44217,14 @@ impl PackageAq4ResidentMatvec {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         label: &str,
     ) -> Result<(), String> {
+        let aq4 = self.aq4_storage(label)?;
         ullm_runtime_sys::aq4_matvec_batch_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
+            aq4.index_buffer,
+            aq4.scale_buffer,
+            aq4.codebook_buffer,
+            aq4.scale_values_buffer,
             input_buffer,
-            self.row_scale_buffer(),
+            aq4.row_scale_buffer,
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43907,13 +44246,14 @@ impl PackageAq4ResidentMatvec {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         label: &str,
     ) -> Result<usize, String> {
+        let aq4 = self.aq4_storage(label)?;
         ullm_runtime_sys::aq4_matvec_top1_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
+            aq4.index_buffer,
+            aq4.scale_buffer,
+            aq4.codebook_buffer,
+            aq4.scale_values_buffer,
             input_buffer,
-            self.row_scale_buffer(),
+            aq4.row_scale_buffer,
             self.scale_count,
             self.group_size,
             self.tensor_scale,
@@ -43935,24 +44275,41 @@ impl PackageAq4ResidentMatvec {
         stream: &mut ullm_runtime_sys::RuntimeStream,
         label: &str,
     ) -> Result<(), String> {
-        ullm_runtime_sys::aq4_matvec_add_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
-            input_buffer,
-            residual_buffer,
-            self.row_scale_buffer(),
-            self.scale_count,
-            self.group_size,
-            self.tensor_scale,
-            self.row_scale_count,
-            self.rows,
-            self.cols,
-            output_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} AQ4 matvec add: {err}"))
+        match &self.storage {
+            PackageResidentMatvecStorage::Aq4 { .. } => {
+                let aq4 = self.aq4_storage(label)?;
+                ullm_runtime_sys::aq4_matvec_add_f32(
+                    aq4.index_buffer,
+                    aq4.scale_buffer,
+                    aq4.codebook_buffer,
+                    aq4.scale_values_buffer,
+                    input_buffer,
+                    residual_buffer,
+                    aq4.row_scale_buffer,
+                    self.scale_count,
+                    self.group_size,
+                    self.tensor_scale,
+                    self.row_scale_count,
+                    self.rows,
+                    self.cols,
+                    output_buffer,
+                    Some(stream),
+                )
+                .map_err(|err| format!("failed to run {label} AQ4 matvec add: {err}"))
+            }
+            PackageResidentMatvecStorage::F32 { .. } => {
+                self.matvec(input_buffer, output_buffer, stream, label)?;
+                let mut projected =
+                    read_runtime_buffer_f32(output_buffer, stream, self.rows, label)?;
+                let residual = read_runtime_buffer_f32(residual_buffer, stream, self.rows, label)?;
+                for (left, right) in projected.iter_mut().zip(residual.iter()) {
+                    *left += *right;
+                }
+                output_buffer
+                    .copy_from_host(0, &encode_f32_to_bytes(&projected), Some(stream))
+                    .map_err(|err| format!("failed to copy {label} F32 matvec add: {err}"))
+            }
+        }
     }
 
     fn matvec_pair_with(
@@ -43970,21 +44327,27 @@ impl PackageAq4ResidentMatvec {
                 self.rows, self.cols, right.rows, right.cols
             ));
         }
+        if self.is_f32() || right.is_f32() {
+            self.matvec(input_buffer, left_output_buffer, stream, label)?;
+            return right.matvec(input_buffer, right_output_buffer, stream, label);
+        }
+        let left_aq4 = self.aq4_storage(label)?;
+        let right_aq4 = right.aq4_storage(label)?;
         let result = ullm_runtime_sys::aq4_matvec_pair_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
-            self.row_scale_buffer(),
+            left_aq4.index_buffer,
+            left_aq4.scale_buffer,
+            left_aq4.codebook_buffer,
+            left_aq4.scale_values_buffer,
+            left_aq4.row_scale_buffer,
             self.scale_count,
             self.group_size,
             self.tensor_scale,
             self.row_scale_count,
-            right.index_buffer.as_ref(),
-            right.scale_buffer.as_ref(),
-            right.codebook_buffer.as_ref(),
-            right.scale_values_buffer(),
-            right.row_scale_buffer(),
+            right_aq4.index_buffer,
+            right_aq4.scale_buffer,
+            right_aq4.codebook_buffer,
+            right_aq4.scale_values_buffer,
+            right_aq4.row_scale_buffer,
             right.scale_count,
             right.group_size,
             right.tensor_scale,
@@ -44027,30 +44390,38 @@ impl PackageAq4ResidentMatvec {
                 self.rows, self.cols, second.rows, second.cols, third.rows, third.cols
             ));
         }
+        if self.is_f32() || second.is_f32() || third.is_f32() {
+            self.matvec(input_buffer, first_output_buffer, stream, label)?;
+            second.matvec(input_buffer, second_output_buffer, stream, label)?;
+            return third.matvec(input_buffer, third_output_buffer, stream, label);
+        }
+        let first_aq4 = self.aq4_storage(label)?;
+        let second_aq4 = second.aq4_storage(label)?;
+        let third_aq4 = third.aq4_storage(label)?;
         let result = ullm_runtime_sys::aq4_matvec_triple_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
-            self.row_scale_buffer(),
+            first_aq4.index_buffer,
+            first_aq4.scale_buffer,
+            first_aq4.codebook_buffer,
+            first_aq4.scale_values_buffer,
+            first_aq4.row_scale_buffer,
             self.scale_count,
             self.group_size,
             self.tensor_scale,
             self.row_scale_count,
-            second.index_buffer.as_ref(),
-            second.scale_buffer.as_ref(),
-            second.codebook_buffer.as_ref(),
-            second.scale_values_buffer(),
-            second.row_scale_buffer(),
+            second_aq4.index_buffer,
+            second_aq4.scale_buffer,
+            second_aq4.codebook_buffer,
+            second_aq4.scale_values_buffer,
+            second_aq4.row_scale_buffer,
             second.scale_count,
             second.group_size,
             second.tensor_scale,
             second.row_scale_count,
-            third.index_buffer.as_ref(),
-            third.scale_buffer.as_ref(),
-            third.codebook_buffer.as_ref(),
-            third.scale_values_buffer(),
-            third.row_scale_buffer(),
+            third_aq4.index_buffer,
+            third_aq4.scale_buffer,
+            third_aq4.codebook_buffer,
+            third_aq4.scale_values_buffer,
+            third_aq4.row_scale_buffer,
             third.scale_count,
             third.group_size,
             third.tensor_scale,
@@ -44112,39 +44483,57 @@ impl PackageAq4ResidentMatvec {
                 a.rows, a.cols, b.rows, b.cols
             ));
         }
+        if self.is_f32() || z.is_f32() || a.is_f32() || b.is_f32() {
+            self.matvec(input_buffer, qkv_output_buffer, stream, label)?;
+            z.matvec(input_buffer, z_output_buffer, stream, label)?;
+            return a.matvec_gate_beta_with(
+                b,
+                input_buffer,
+                a_log_buffer,
+                dt_bias_buffer,
+                gate_output_buffer,
+                beta_output_buffer,
+                stream,
+                label,
+            );
+        }
+        let qkv_aq4 = self.aq4_storage(label)?;
+        let z_aq4 = z.aq4_storage(label)?;
+        let a_aq4 = a.aq4_storage(label)?;
+        let b_aq4 = b.aq4_storage(label)?;
         let result = ullm_runtime_sys::aq4_matvec_qkv_z_gate_beta_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
-            self.row_scale_buffer(),
+            qkv_aq4.index_buffer,
+            qkv_aq4.scale_buffer,
+            qkv_aq4.codebook_buffer,
+            qkv_aq4.scale_values_buffer,
+            qkv_aq4.row_scale_buffer,
             self.scale_count,
             self.group_size,
             self.tensor_scale,
             self.row_scale_count,
-            z.index_buffer.as_ref(),
-            z.scale_buffer.as_ref(),
-            z.codebook_buffer.as_ref(),
-            z.scale_values_buffer(),
-            z.row_scale_buffer(),
+            z_aq4.index_buffer,
+            z_aq4.scale_buffer,
+            z_aq4.codebook_buffer,
+            z_aq4.scale_values_buffer,
+            z_aq4.row_scale_buffer,
             z.scale_count,
             z.group_size,
             z.tensor_scale,
             z.row_scale_count,
-            a.index_buffer.as_ref(),
-            a.scale_buffer.as_ref(),
-            a.codebook_buffer.as_ref(),
-            a.scale_values_buffer(),
-            a.row_scale_buffer(),
+            a_aq4.index_buffer,
+            a_aq4.scale_buffer,
+            a_aq4.codebook_buffer,
+            a_aq4.scale_values_buffer,
+            a_aq4.row_scale_buffer,
             a.scale_count,
             a.group_size,
             a.tensor_scale,
             a.row_scale_count,
-            b.index_buffer.as_ref(),
-            b.scale_buffer.as_ref(),
-            b.codebook_buffer.as_ref(),
-            b.scale_values_buffer(),
-            b.row_scale_buffer(),
+            b_aq4.index_buffer,
+            b_aq4.scale_buffer,
+            b_aq4.codebook_buffer,
+            b_aq4.scale_values_buffer,
+            b_aq4.row_scale_buffer,
             b.scale_count,
             b.group_size,
             b.tensor_scale,
@@ -44204,21 +44593,37 @@ impl PackageAq4ResidentMatvec {
                 self.rows, self.cols, up.rows, up.cols
             ));
         }
+        if self.is_f32() || up.is_f32() {
+            self.matvec(input_buffer, output_buffer, stream, label)?;
+            let gate_values = read_runtime_buffer_f32(output_buffer, stream, self.rows, label)?;
+            up.matvec(input_buffer, output_buffer, stream, label)?;
+            let mut up_values = read_runtime_buffer_f32(output_buffer, stream, up.rows, label)?;
+            for (value, gate) in up_values.iter_mut().zip(gate_values.iter()) {
+                let sigmoid = 1.0_f32 / (1.0_f32 + (-*gate).exp());
+                *value *= *gate * sigmoid;
+            }
+            output_buffer
+                .copy_from_host(0, &encode_f32_to_bytes(&up_values), Some(stream))
+                .map_err(|err| format!("failed to copy {label} F32 SiLU-mul result: {err}"))?;
+            return Ok(());
+        }
+        let gate_aq4 = self.aq4_storage(label)?;
+        let up_aq4 = up.aq4_storage(label)?;
         ullm_runtime_sys::aq4_matvec_silu_mul_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
-            self.row_scale_buffer(),
+            gate_aq4.index_buffer,
+            gate_aq4.scale_buffer,
+            gate_aq4.codebook_buffer,
+            gate_aq4.scale_values_buffer,
+            gate_aq4.row_scale_buffer,
             self.scale_count,
             self.group_size,
             self.tensor_scale,
             self.row_scale_count,
-            up.index_buffer.as_ref(),
-            up.scale_buffer.as_ref(),
-            up.codebook_buffer.as_ref(),
-            up.scale_values_buffer(),
-            up.row_scale_buffer(),
+            up_aq4.index_buffer,
+            up_aq4.scale_buffer,
+            up_aq4.codebook_buffer,
+            up_aq4.scale_values_buffer,
+            up_aq4.row_scale_buffer,
             up.scale_count,
             up.group_size,
             up.tensor_scale,
@@ -44250,21 +44655,50 @@ impl PackageAq4ResidentMatvec {
                 self.rows, self.cols, b.rows, b.cols
             ));
         }
+        if self.is_f32() || b.is_f32() {
+            self.matvec(input_buffer, gate_output_buffer, stream, label)?;
+            b.matvec(input_buffer, beta_output_buffer, stream, label)?;
+            let a_values = read_runtime_buffer_f32(gate_output_buffer, stream, self.rows, label)?;
+            let b_values = read_runtime_buffer_f32(beta_output_buffer, stream, b.rows, label)?;
+            let a_log_values = read_runtime_buffer_f32(a_log_buffer, stream, self.rows, label)?;
+            let dt_bias_values = read_runtime_buffer_f32(dt_bias_buffer, stream, self.rows, label)?;
+            let mut gate_values = vec![0.0_f32; self.rows];
+            let mut beta_values = vec![0.0_f32; self.rows];
+            for index in 0..self.rows {
+                let x = a_values[index] + dt_bias_values[index];
+                let softplus = if x <= 20.0_f32 {
+                    (1.0_f32 + x.exp()).ln()
+                } else {
+                    x
+                };
+                gate_values[index] = -a_log_values[index].exp() * softplus;
+                beta_values[index] = 1.0_f32 / (1.0_f32 + (-b_values[index]).exp());
+            }
+            gate_output_buffer
+                .copy_from_host(0, &encode_f32_to_bytes(&gate_values), Some(stream))
+                .map_err(|err| format!("failed to copy {label} F32 gate output: {err}"))?;
+            beta_output_buffer
+                .copy_from_host(0, &encode_f32_to_bytes(&beta_values), Some(stream))
+                .map_err(|err| format!("failed to copy {label} F32 beta output: {err}"))?;
+            return Ok(());
+        }
+        let a_aq4 = self.aq4_storage(label)?;
+        let b_aq4 = b.aq4_storage(label)?;
         ullm_runtime_sys::aq4_matvec_gate_beta_f32(
-            self.index_buffer.as_ref(),
-            self.scale_buffer.as_ref(),
-            self.codebook_buffer.as_ref(),
-            self.scale_values_buffer(),
-            self.row_scale_buffer(),
+            a_aq4.index_buffer,
+            a_aq4.scale_buffer,
+            a_aq4.codebook_buffer,
+            a_aq4.scale_values_buffer,
+            a_aq4.row_scale_buffer,
             self.scale_count,
             self.group_size,
             self.tensor_scale,
             self.row_scale_count,
-            b.index_buffer.as_ref(),
-            b.scale_buffer.as_ref(),
-            b.codebook_buffer.as_ref(),
-            b.scale_values_buffer(),
-            b.row_scale_buffer(),
+            b_aq4.index_buffer,
+            b_aq4.scale_buffer,
+            b_aq4.codebook_buffer,
+            b_aq4.scale_values_buffer,
+            b_aq4.row_scale_buffer,
             b.scale_count,
             b.group_size,
             b.tensor_scale,
@@ -44385,6 +44819,7 @@ impl PackageSelfAttnResidentStepLayer {
             block_table,
             block_size,
             cache_blocks,
+            None,
         )
     }
 
@@ -44400,6 +44835,7 @@ impl PackageSelfAttnResidentStepLayer {
         block_table: &[u32],
         block_size: usize,
         cache_blocks: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
     ) -> Result<Self, String> {
         if block_table.len() != cache_blocks {
             return Err(format!(
@@ -44432,7 +44868,7 @@ impl PackageSelfAttnResidentStepLayer {
         let mut post_norm = read_named_passthrough_f32(path, &post_norm_tensor, chunk_bytes)?;
         post_norm.values = effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
 
-        let q_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let q_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -44440,8 +44876,9 @@ impl PackageSelfAttnResidentStepLayer {
             path,
             &q_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let k_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let k_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -44449,8 +44886,9 @@ impl PackageSelfAttnResidentStepLayer {
             path,
             &k_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let v_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let v_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -44458,8 +44896,9 @@ impl PackageSelfAttnResidentStepLayer {
             path,
             &v_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let o_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let o_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -44467,8 +44906,9 @@ impl PackageSelfAttnResidentStepLayer {
             path,
             &o_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let mlp_gate_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let mlp_gate_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -44476,8 +44916,9 @@ impl PackageSelfAttnResidentStepLayer {
             path,
             &gate_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let mlp_up_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let mlp_up_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -44485,8 +44926,9 @@ impl PackageSelfAttnResidentStepLayer {
             path,
             &up_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let mlp_down_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let mlp_down_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -44494,6 +44936,7 @@ impl PackageSelfAttnResidentStepLayer {
             path,
             &down_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
 
         let hidden = q_matrix.cols;
@@ -45525,6 +45968,7 @@ impl PackageLinearAttnResidentStepLayer {
             path,
             chunk_bytes,
             layer_index,
+            None,
         )
     }
 
@@ -45536,6 +45980,7 @@ impl PackageLinearAttnResidentStepLayer {
         path: &str,
         chunk_bytes: usize,
         layer_index: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
     ) -> Result<Self, String> {
         let key_heads = 16_usize;
         let value_heads = 32_usize;
@@ -45641,7 +46086,7 @@ impl PackageLinearAttnResidentStepLayer {
         let post_norm_weight_values =
             effective_rmsnorm_weight_values(&post_norm_tensor, &post_norm.values);
 
-        let qkv_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let qkv_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -45649,8 +46094,9 @@ impl PackageLinearAttnResidentStepLayer {
             path,
             &qkv_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let a_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let a_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -45658,8 +46104,9 @@ impl PackageLinearAttnResidentStepLayer {
             path,
             &a_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let b_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let b_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -45667,8 +46114,9 @@ impl PackageLinearAttnResidentStepLayer {
             path,
             &b_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let z_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let z_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -45676,8 +46124,9 @@ impl PackageLinearAttnResidentStepLayer {
             path,
             &z_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let out_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let out_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -45685,8 +46134,9 @@ impl PackageLinearAttnResidentStepLayer {
             path,
             &out_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let mlp_gate_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let mlp_gate_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -45694,8 +46144,9 @@ impl PackageLinearAttnResidentStepLayer {
             path,
             &gate_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let mlp_up_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let mlp_up_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -45703,8 +46154,9 @@ impl PackageLinearAttnResidentStepLayer {
             path,
             &up_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
-        let mlp_down_matrix = PackageAq4ResidentMatvec::load_with_shared_buffers(
+        let mlp_down_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
             context,
             stream,
             registry,
@@ -45712,6 +46164,7 @@ impl PackageLinearAttnResidentStepLayer {
             path,
             &down_tensor,
             chunk_bytes,
+            sq_overlay,
         )?;
         if qkv_matrix.rows != qkv_step_elements || qkv_matrix.cols != hidden {
             return Err(format!(
@@ -46551,6 +47004,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
         request_ids: Vec<RequestId>,
         block_size: usize,
         cache_blocks: usize,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
     ) -> Result<Self, String> {
         if block_size == 0 {
             return Err(format!(
@@ -46605,6 +47059,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     &block_table,
                     block_size,
                     cache_blocks,
+                    sq_overlay,
                 )?;
                 shared_weights = Some(layer.weights.clone());
                 Ok(layer)
@@ -46864,6 +47319,7 @@ impl PackageLinearAttnResidentStepBatchLayer {
         chunk_bytes: usize,
         layer_index: usize,
         request_ids: Vec<RequestId>,
+        sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
     ) -> Result<Self, String> {
         let request_index =
             package_linear_attn_request_slot_index(&request_ids, "linear-attn resident batch")?;
@@ -46884,6 +47340,7 @@ impl PackageLinearAttnResidentStepBatchLayer {
                     path,
                     chunk_bytes,
                     layer_index,
+                    sq_overlay,
                 )?;
                 shared_weights = Some(layer.weights.clone());
                 Ok(layer)

@@ -281,6 +281,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_overlay=true sq_candidate=sq-fp8-w8a16-r9700-v0 "
             "sq_artifact=/tmp/sq-artifact sq_schema_version=sq-fp8-artifact-v0.1 "
             "sq_fp8_tensor_count=22 sq_passthrough_tensor_count=753 sq_row_chunk=256 "
+            "sq_execution_mode=materialized_f32_fallback "
             "request_batch_executor=true fused_request_batch=false throughput_row=true "
             "load_excluded_from_total=true final_logits_in_total=true "
             "batching_mode=real "
@@ -356,6 +357,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["sq_fp8_tensor_count"], 22)
         self.assertEqual(row["workload"]["sq_passthrough_tensor_count"], 753)
         self.assertEqual(row["workload"]["sq_row_chunk"], 256)
+        self.assertEqual(
+            row["workload"]["sq_execution_mode"],
+            "materialized_f32_fallback",
+        )
         self.assertEqual(row["workload"]["final_top1_tokens"], [42, 43, 44])
         self.assertEqual(
             row["workload"]["final_topk_tokens"],
