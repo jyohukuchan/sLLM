@@ -43,14 +43,15 @@
 ## 次の行動
 
 1. T2 short guardの昇格条件は、text-level guardが実装・採用されるまではstrict top1一致にする。
-2. `kup6_gate5_down5` を現在の6層strict-top1 regression subsetとして固定する。
-3. `benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json` を現在の六層policy representationとして使う。実payload artifactは `/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact` で確認済みだが、`/tmp` 配下なので必要時に `--policy-json` から再生成する。
-4. `kup6_ogatedown5` はstrict-top1 failureかつnear-miss guardとして保存する。
-5. top-k overlap、AQ4 top1 rank、logit gapは診断指標として保存するが、strict top1失敗を上書きしない。
-6. T1 real batch runnerとVRAM samplingの実測gridを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
-7. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにし、`resolved_executor` を必ず保存する。
-8. T3の追加FlashAttention2-like最適化は、SQ候補比較の阻害要因になったcaseだけに限定する。現時点ではSQ評価本体へ進む。
-9. T5でAQ4 baselineとFP8 SQ候補を同じworkload gridで比較し、uLLM側のR9700結果が揃った後にvLLM baselineを同じgridで測る。
+2. `kup6_gate5_down5` を現在の6層strict-top1 regression subsetとして固定する。これはfull SQ policyではなく、次の候補探索の基準点として扱う。
+3. 次の主タスクをSQ format evaluationに移す。追加のFlashAttention2-like最適化は、SQ候補比較で明確な阻害要因になったcaseだけに限定する。
+4. SQ候補探索では、row-block幅、scale dtype/layout、FP8 scale有無、fallback family/layer、W8A16/W8A8を候補軸として保存し、quality guardとthroughput/memoryを同じresult schemaに流す。
+5. `benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json` を現在のpolicy representationとして使う。実payload artifactは `/tmp/ullm-sq-fp8-kup6-gate5-down5-policy-v0.1-artifact` で確認済みだが、`/tmp` 配下なので必要時に `--policy-json` から再生成する。
+6. `kup6_ogatedown5` はstrict-top1 failureかつnear-miss guardとして保存する。
+7. top-k overlap、AQ4 top1 rank、logit gapは診断指標として保存するが、strict top1失敗を上書きしない。
+8. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにし、`resolved_executor` を必ず保存する。
+9. full-package real batch runnerは最終比較には必要だが、SQ候補探索の開始blockerにはしない。候補探索中はcomponent、selected-layer stack、materialization-aware runtime pathの結果も、用途を明示して使う。
+10. AQ4 baselineとFP8 SQ候補を同じworkload gridで比較し、uLLM側のR9700結果が揃った後にvLLM baselineを同じgridで測る。
 
 ## 2026-07-08 cached prefix FP8 KV cache note
 
@@ -2178,6 +2179,39 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 1. このhybrid rowはselected-layer stack guardとして扱う。full language-model SQ/vLLM比較には使わない。
 2. 次はtoken-id full package pathとmodel-loop stack runnerの接続点を作り、embedding、all selected runtime layers、final norm/lm_head、quality guardを同じrequest-batch scheduler上で扱う。
 3. prefillもrequest-batch化できた段階で `batching.mode=real` へ昇格する。decodeだけrealの間は `hybrid` として区別する。
+
+## 2026-07-08 current plan update: SQ format design phase v1
+
+前回の要点:
+
+- R9700/RDNA4のcached-prefix/cold-prefill componentは、SQ候補評価を始める前提速度として一旦十分と判断した。
+- T1はlogical full-package gridとselected-layer hybrid model-loop smokeまで進んだが、real full-package request-batch throughputはまだ未完了である。
+- T2は `kup6_gate5_down5` の6層strict-top1 regression subsetと、実FP8 payload artifactのmaterialize smokeまで進んだ。
+
+今回の変更点:
+
+- 以後の主線を、追加attention kernel開発ではなくSQ format design/evaluationへ移す。
+- full-package real batch runnerは最終性能比較に必要だが、SQ候補探索の開始blockerにはしない。
+- SQ候補探索は、品質境界、format候補、速度/メモリ測定の3本を並行して進める。
+- `kup6_gate5_down5` はbaseline candidateではなく「現在壊れていない最小regression subset」として扱う。これを起点に、より広いfamily/layer coverageへ広げるか、別scale/layoutへ進むかを判断する。
+- SQ formatの候補軸を次のように固定する。
+  - `sq-fp8-w8a16-r9700-v0`: FP8 weight + BF16/F32 activation、row-block F32 scale。現在の基準候補。
+  - `sq-fp8-w8a16-r9700-v1-scale16`: FP8 weight + FP16/BF16 scale。F32 scaleのbyte/帯域を減らせるかを見る候補。
+  - `sq-fp8-w8a16-r9700-v1-scale8`: FP8 weight + FP8 scale。品質劣化とscale復号overheadが許容できるかだけを見る実験候補。
+  - `sq-fp8-w8a8-r9700-v0`: FP8 weight + FP8 activation。R9700 native経路でthroughputが伸びる場合だけ進める候補。
+  - `sq-fp8-hybrid-r9700-v0`: risky family/layerをAQ4またはhigher precision fallbackに残す保守候補。
+- 品質guardは当面strict top1を正式条件にする。top-k overlap、AQ4 top1 rank、logit gap、短文生成結果は診断として残すが、strict top1 failureを自動承認しない。
+- speed評価では、overlay host materialize/load timingをSQ速度として読まない。native FP8、materialization-aware runtime path、またはmaterialized working-setを明示したpathだけを比較対象にする。
+
+次の行動:
+
+1. `sq-fp8-kup6-gate5-down5-policy-v0.1.json` を基準に、候補matrixを機械可読なmanifestへ落とす。各候補にはquantized tensor family、fallback family、scale dtype/layout、row-block幅、resident bytes、working-set bytesを必ず持たせる。
+2. 品質探索を優先して、`kup6_gate5_down5` から広げる方向と、scale/layoutを強める方向を分けて試す。少なくともlen4/case_a/case_bに加え、もう少し長いtoken-id prompt bundleを追加する。
+3. selected-layer stackでは、token-id embedding入力、selected runtime layers、final norm/lm_head、quality guardを同じscheduler pathへ接続する。これはfull LMではないが、SQ候補のdriftとthroughputを同じ経路で見るための中間gateにする。
+4. full-package real batch runnerはT1aとして継続する。`batch=1/4/8`、prompt `512`、generated `128` のAQ4/FP8比較行を最初の保存gridにする。
+5. prefill/cached-prefixは、既存の `cached_prefix_rdna4_fp8_auto` とcold causal flash2系の結果を基準にする。SQ候補のformat差が見えないcaseだけ、追加kernel最適化へ戻る。
+6. throughput比較表は、AQ4、SQ候補、必要ならvLLM参考行を同じ列で並べる。列はquality、resident bytes、working-set bytes、VRAM peak、prefill total input tok/s、decode total generated tok/s、end-to-end tok/s、batching mode、executor/resolved executorにする。
+7. SQ候補1の採否は、AQ4比でVRAM/working-set削減が説明でき、quality guardが通り、decode/prefill throughputが大きく悪化しないことを条件にする。満たせない場合は、FP8 scale、fallback増加、row-block幅変更、または別SQ候補へ進む。
 
 ## Risks
 
