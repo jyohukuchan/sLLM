@@ -82,13 +82,14 @@
       "benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md",
       "benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md",
       "benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md",
-      "benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md"
+      "benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md",
+      "benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md"
     ],
-    "t2_short_prompt_guard_note": "One selected q_proj tensor and then the layer 3 projection set are loaded from SQ FP8 while the rest falls back to AQ4. The layer 3 projection-set guard matched AQ4 top1 in 3/3 short token-ID cases. Expanding to layers 3,7 changed top1 for attention-only, MLP-only, and attention+MLP overlays, while AQ4 top1 remained inside SQ top8. Family split shows q/v/down are risky for strict top1, while k/o/gate/up preserve top1 individually and as a combined subset across 3/3 short prompts. Full-target SQ guard is still pending and needs q/v/down scale/format or fallback policy plus an acceptance rule."
+    "t2_short_prompt_guard_note": "One selected q_proj tensor and then the layer 3 projection set are loaded from SQ FP8 while the rest falls back to AQ4. The layer 3 projection-set guard matched AQ4 top1 in 3/3 short token-ID cases. Expanding to layers 3,7 changed top1 for attention-only, MLP-only, and attention+MLP overlays, while AQ4 top1 remained inside SQ top8. Family split shows q/v/down are risky for strict top1, while k/o/gate/up preserve top1 individually and as a combined subset across 3/3 short prompts. Expanding k/o/gate/up to layers 3,7,11,15 preserved top1 in 2/3 short prompts and failed case_a, so even this subset needs layer-count and prompt-bundle qualification. Full-target SQ guard is still pending and needs q/v/down scale/format or fallback policy plus an acceptance rule."
   },
   "next_steps": [
     "T2: keep sq-fp8-materialize-smoke as the runtime artifact-boundary guard",
-    "T2: expand the strict-top1-safe k/o/gate/up subset before a fuller SQ artifact",
+    "T2: keep 4layer_case_a as a regression guard for k/o/gate/up expansion",
     "T2: test stronger scale/format policy or fallback for q/v/down",
     "T2: define whether the short guard requires strict top1 match, top-k overlap, or text-level tolerance",
     "T3: move to batch/cold/cached-prefix/decode grid only after the full-target short guard satisfies the acceptance rule"

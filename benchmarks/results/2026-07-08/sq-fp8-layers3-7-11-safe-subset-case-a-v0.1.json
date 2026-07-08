@@ -1,0 +1,64 @@
+{
+  "baseline_raw_report_json": "/tmp/ullm-sq-fp8-layers3-7-11-safe-subset-case-a-v0.1/raw/baseline.json",
+  "baseline_top1": 184137,
+  "baseline_top_tokens": [
+    184137,
+    15611,
+    217359,
+    197397,
+    228348,
+    81293,
+    18655,
+    43021
+  ],
+  "baseline_verified": true,
+  "case_count": 1,
+  "cases": [
+    {
+      "artifact_dir": "/tmp/ullm-sq-fp8-layers3-7-11-safe-subset-case-a-v0.1/artifacts/safe_k_o_gate_up",
+      "baseline_top1": 184137,
+      "baseline_top1_rank_in_sq_topk": 1,
+      "baseline_top_tokens": [
+        184137,
+        15611,
+        217359,
+        197397,
+        228348,
+        81293,
+        18655,
+        43021
+      ],
+      "fp8_tensor_count": 12,
+      "layer_load_ms": 32164.513588,
+      "name": "safe_k_o_gate_up",
+      "passthrough_tensor_count": 763,
+      "raw_report_json": "/tmp/ullm-sq-fp8-layers3-7-11-safe-subset-case-a-v0.1/raw/safe_k_o_gate_up.sq.json",
+      "sq_top1": 184137,
+      "sq_top1_minus_baseline_top1_logit": 0.0,
+      "sq_top_tokens": [
+        184137,
+        15611,
+        246962,
+        228348,
+        81293,
+        217359,
+        18655,
+        1878
+      ],
+      "top1_match": true,
+      "topk_common": 6,
+      "total_ms": 33161.15927,
+      "verified": true
+    }
+  ],
+  "device_index": 2,
+  "engine": "target/debug/ullm-engine",
+  "layers": "3,7,11",
+  "lm_head_chunk_rows": 4096,
+  "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+  "schema_version": "sq-fp8-overlay-logits-guard-result-v0.1",
+  "source_model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "token_ids": "100,200,300,400,500,600,700,800",
+  "top1_match_count": 1,
+  "top_k": 8
+}

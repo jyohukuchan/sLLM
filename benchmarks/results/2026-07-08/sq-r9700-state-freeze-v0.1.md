@@ -69,12 +69,12 @@ Required artifact metadata:
 | T1 real batch runner | not done | Needed before SQ throughput comparison. |
 | T2 artifact metadata path | partial done | `sq-fp8-w8a16-r9700-v0` manifest and writer are staged. |
 | T2 runtime load path | partial done | `sq-fp8-materialize-smoke` validates the artifact boundary; `sq-fp8-token-ids-logits-smoke` validates one selected tensor overlay in the package path. |
-| T2 short prompt guard | partial done with boundary found | One `q_proj` overlay and layer 3 projection set passed top1 guards; layers `3,7` changed top1. Family split points to `q/v/down` as risky and `k/o/gate/up` as the first strict-top1-safe subset, with `3 / 3` short prompts passing. Full-target SQ guard is still pending. |
+| T2 short prompt guard | partial done with boundary found | One `q_proj` overlay and layer 3 projection set passed top1 guards; layers `3,7` changed top1. Family split points to `q/v/down` as risky. `k/o/gate/up` passes layers `3,7` but shows prompt-dependent drift at layers `3,7,11,15`. Full-target SQ guard is still pending. |
 
 ## Next Action
 
 1. Keep `sq-fp8-materialize-smoke` as the runtime artifact-boundary guard.
-2. Expand the strict-top1-safe `k/o/gate/up` subset before trying a fuller SQ artifact.
+2. Keep `4layer_case_a` as a regression guard for `k/o/gate/up` expansion.
 3. For `q/v/down`, test a stronger scale/format policy or keep them as fallback until quality is stable.
 4. Define the T2 short-guard acceptance rule: strict top1 match, top-k overlap, or text-level tolerance.
 5. Move to T3 only after the full-target guard satisfies that acceptance rule.

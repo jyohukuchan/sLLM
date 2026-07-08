@@ -144,7 +144,9 @@ tensors for names not present in the artifact. The first R9700 guard covered onl
 self-attention and MLP projection tensors. A later layers `3,7` guard found top1 ranking drift while
 keeping the AQ4 top1 inside SQ top8. A family split guard then identified `q/v/down` as the first
 risky row-scale FP8 families and `k/o/gate/up` as the first strict-top1-safe subset in that small
-guard. These are runtime boundary and short-quality guards, not full SQ candidate quality results.
+guard. A later safe-subset scaling guard found that `k/o/gate/up` is not globally safe under strict
+top1: it passes layers `3,7`, but layers `3,7,11,15` fail one of three short prompts. These are
+runtime boundary and short-quality guards, not full SQ candidate quality results.
 
 For repeatable guard runs, use:
 
