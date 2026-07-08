@@ -241,6 +241,7 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
     unsigned long long q_groups_per_kv,
     unsigned long long head_dim,
     unsigned long long value_dim,
+    unsigned long long value_group_width,
     float softmax_scale,
     float q_scale,
     float k_scale,
@@ -252,7 +253,6 @@ extern "C" __global__ void ullm_cached_prefix_attn_fp8_e4m3_rocwmma_kernel(
     using FragB = fragment<matrix_b, 16, 16, 16, float8_t, col_major>;
     using FragC = fragment<accumulator, 16, 16, 16, float32_t, row_major>;
 
-    const unsigned long long value_group_width = 64ull;
     const unsigned long long value_groups =
         (value_dim + value_group_width - 1ull) / value_group_width;
     const unsigned long long groups_per_token = kv_heads * q_groups_per_kv * value_groups;

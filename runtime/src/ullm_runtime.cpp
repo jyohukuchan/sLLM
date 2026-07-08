@@ -25,6 +25,7 @@
 namespace {
 
 constexpr unsigned int kAq4MatvecTop1RowsPerBlock = 8u;
+constexpr unsigned int kRocwmmaCachedPrefixValueGroupWidth = 64u;
 
 thread_local std::string last_error;
 
@@ -93,6 +94,27 @@ unsigned int block_size_from_env(const char *env_name, unsigned int fallback) {
     if (end == raw || *end != '\0' || value < 32ul || value > 256ul ||
         (value & (value - 1ul)) != 0ul) {
         return fallback;
+    }
+    return static_cast<unsigned int>(value);
+}
+
+bool rocwmma_cached_prefix_value_group_width_is_valid(unsigned long value) {
+    return value == 16ul || value == 32ul || value == 64ul || value == 128ul || value == 256ul;
+}
+
+unsigned int rocwmma_cached_prefix_default_value_group_width(size_t new_tokens) {
+    return new_tokens < 64u ? 16u : kRocwmmaCachedPrefixValueGroupWidth;
+}
+
+unsigned int rocwmma_cached_prefix_value_group_width(size_t new_tokens) {
+    const char *raw = std::getenv("ULLM_ROCWMMA_CACHED_PREFIX_VALUE_GROUP_WIDTH");
+    if (raw == nullptr || raw[0] == '\0') {
+        return rocwmma_cached_prefix_default_value_group_width(new_tokens);
+    }
+    char *end = nullptr;
+    const unsigned long value = std::strtoul(raw, &end, 10);
+    if (end == raw || *end != '\0' || !rocwmma_cached_prefix_value_group_width_is_valid(value)) {
+        return rocwmma_cached_prefix_default_value_group_width(new_tokens);
     }
     return static_cast<unsigned int>(value);
 }
@@ -11387,7 +11409,7 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
         return false;
     }
     const size_t q_groups_per_kv = q_per_kv / 16u;
-    constexpr size_t value_group_width = 64u;
+    const size_t value_group_width = rocwmma_cached_prefix_value_group_width(new_tokens);
     const size_t value_groups = (value_dim + value_group_width - 1u) / value_group_width;
     if (kv_heads > std::numeric_limits<size_t>::max() / q_groups_per_kv ||
         kv_heads * q_groups_per_kv > std::numeric_limits<size_t>::max() / value_groups) {
@@ -11429,6 +11451,8 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
         static_cast<unsigned long long>(q_groups_per_kv);
     unsigned long long kernel_head_dim = static_cast<unsigned long long>(head_dim);
     unsigned long long kernel_value_dim = static_cast<unsigned long long>(value_dim);
+    unsigned long long kernel_value_group_width =
+        static_cast<unsigned long long>(value_group_width);
     void *q_ptr = q_buffer->ptr;
     void *k_ptr = k_cache_buffer->ptr;
     void *v_ptr = v_cache_buffer->ptr;
@@ -11444,6 +11468,7 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
         &kernel_q_groups_per_kv,
         &kernel_head_dim,
         &kernel_value_dim,
+        &kernel_value_group_width,
         &softmax_scale,
         &q_scale,
         &k_scale,

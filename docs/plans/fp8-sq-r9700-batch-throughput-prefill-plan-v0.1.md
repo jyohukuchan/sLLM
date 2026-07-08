@@ -1520,6 +1520,34 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 2. rocWMMA版は、QK/softmax再計算を減らすだけでなく、複数query row/blockでK/V tileを再利用するFlashAttention2-like構造へ寄せる。
 3. SQ候補評価では、FP8 Q復号単体を主ボトルネック扱いせず、attention kernel構造の未成熟と分けて評価する。
 
+### 2026-07-08 progress: RDNA4 FP8 rocWMMA value group heuristic v1
+
+前回の要点:
+
+- `cached_prefix_flash2_fp8q` により、FP8 Q復号そのものは主ボトルネックではないと切り分けた。
+- rocWMMA版の残りの問題は、value groupごとのQK/softmax再計算とblock並列性のバランスだった。
+
+今回の変更点:
+
+- `cached_prefix_rocwmma_fp8` のvalue group幅をruntime選択にした。
+- `ULLM_ROCWMMA_CACHED_PREFIX_VALUE_GROUP_WIDTH={16,32,64,128,256}` で明示指定できる。
+- env未指定時は、`new_tokens < 64` なら16、そうでなければ64を選ぶ。
+- kernelにはvalue group幅を引数で渡すため、同じHIPRTC moduleでshapeごとの選択ができる。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c15-rocwmma-value-group-heuristic-v1.md` に保存した。
+
+観察:
+
+- `L=4096,M=16` ではvalue group幅16が最速だったが、scalar `cached_prefix_flash2_fp8q` にはまだ大きく負ける。
+- `L=4096,M=128` では `cached_prefix_rocwmma_fp8` が `15.409175ms`、scalar `cached_prefix_flash2` が `26.629428ms`、`cached_prefix_flash2_fp8q` が `28.595555ms` だった。
+- `L=4096,M=512` では `cached_prefix_rocwmma_fp8` が `70.911643ms`、scalar `cached_prefix_flash2` が `103.509898ms`、`cached_prefix_flash2_fp8q` が `113.356638ms` だった。
+- つまりrocWMMAはdecode-likeな短いchunkではまだ不利だが、SQ評価で重要な数百token prefill chunkではscalar flash2を上回り始めた。
+
+次の行動:
+
+1. short chunkでは `cached_prefix_flash2_fp8q`、larger prefill chunkでは `cached_prefix_rocwmma_fp8` を比較baselineとして扱う。
+2. rocWMMA側はvalue group調整だけではなく、複数query token tileへ拡張してFlashAttention2-likeなK/V tile再利用に寄せる。
+3. SQ候補評価では、`M=128/512` 以上のcached prefix prefillを必ず含める。
+
 ## Risks
 
 | risk | impact | handling |
