@@ -175,6 +175,11 @@ acceptance result is saved in
 `benchmarks/results/2026-07-08/sq-fp8-mixed-candidate-acceptance-v0.1.md` and is not accepted for
 T2 promotion.
 
+A later six-layer boundary guard found that only `k/up` row-block32 remains strict-top1-safe across
+the tested `3 / 3` short prompts for layers `3,7,11,15,19,23`. `o/gate/down` fail strict top1
+individually with row-block32 and still fail with row-block16. The `k/up` subset is a regression
+guard and not a final SQ policy because it leaves `q/v/o/gate/down` as fallback.
+
 For repeatable guard runs, use:
 
 ```text

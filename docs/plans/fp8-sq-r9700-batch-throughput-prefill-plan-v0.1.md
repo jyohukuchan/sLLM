@@ -25,14 +25,17 @@
 - この混合候補は layers `3,7,11,15` の短い3ケースと layers `3,7,11,15,19` のlen4 caseではstrict top1を維持した。
 - 同じ混合候補は layers `3,7,11,15,19,23` と all self-attention probe layers `3,7,11,15,19,23,27,31` ではstrict top1を維持できなかった。
 - layer `23` は境界層であり、`q/v` fallbackでlayer `23` 単体は回復するが、6層bundleではまだ累積driftが残る。
+- 6層bundleのfamily splitでは、row-block32の `k` と `up` は単独でstrict top1を維持したが、`o/gate/down` は単独でtop1を動かした。
+- row-block16でも `o/gate/down` はstrict top1に戻らなかった。
+- `k/up` row-block32の6層部分候補は短い3 promptでstrict top1一致だったが、case_aのtop8 overlapは `2 / 8` と低い。これは回帰guardであり、full SQ policyではない。
 - したがって現時点では、T2は「品質境界をかなり狭めたがfull-target SQ guard未完了」と扱う。real batch throughput比較へ進む前に、full-target相当のacceptance ruleか追加fallback/別formatを決める必要がある。
 
 ## 次の行動
 
 1. T2 short guardの昇格条件は、text-level guardが実装・採用されるまではstrict top1一致にする。
 2. top-k overlap、AQ4 top1 rank、logit gapは診断指標として保存するが、strict top1失敗を上書きしない。
-3. 6層bundleの累積driftを追加fallback、per-layer policy、またはより強いscale/layoutで縮める。
-4. `v` fallback + `q/k/o/gate/up/down` row-block32 FP8は、4-5層まで通った部分候補として固定し、回帰guardにする。
+3. 6層bundleの累積driftを、`q/v/o/gate/down` の追加fallback、per-layer policy、またはより強いscale/layoutで縮める。
+4. `k/up` row-block32 FP8は、6層まで通った部分候補として固定し、回帰guardにする。
 5. full-target相当のT2 guardがstrict top1 ruleを満たす、またはtext-level guardを正式採用した段階で、T1 real batch runnerとT5 FP8/AQ4 throughput packへ進む。
 6. T1側ではreal batch executorとVRAM samplingの実測gridを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
 7. cached-prefix測定では `cached_prefix_rdna4_fp8_auto` を暫定default executorにする。
@@ -991,6 +994,31 @@ Exit criteria:
 2. top-k/rank/gapは、near missと強い失敗を分ける診断列として使う。
 3. 6層bundleのstrict top1 failureを、per-layer/family fallbackまたはstronger scale/layoutで潰す。
 4. mixed candidateはまだT5 throughput比較用のpromoted SQ policyとして扱わない。
+
+### T2 current status: six-layer family boundary v1
+
+前回の要点:
+
+- `v` fallback + `q/k/o/gate/up/down` row-block32 FP8は6層でstrict top1を維持できなかった。
+- `q/v` fallbackでlayer `23` 単体は回復したが、6層bundleは回復しなかった。
+- 6層の累積driftがどのfamilyから来ているかをさらに切る必要があった。
+
+今回の変更点:
+
+- layers `3,7,11,15,19,23` のfamily splitをrow-block32で実行した。
+- `k` と `up` は単独でstrict top1一致だった。
+- `o`、`gate`、`down` は単独でstrict top1不一致だった。
+- `o/gate/down` をrow-block16にしてもstrict top1は回復しなかった。
+- `k/up` row-block32を同時にFP8化した6層部分候補は、len4、case_a、case_bの `3 / 3` でstrict top1一致だった。
+- ただしcase_aのtop8 overlapは `2 / 8` と低く、診断ruleは失敗した。
+- 結果は `benchmarks/results/2026-07-08/sq-fp8-six-layer-family-boundary-v0.1.md` に保存した。
+
+次の行動:
+
+1. `k/up` row-block32は6層strict-top1 regression subsetとして保持する。
+2. これはcoverageが低すぎるため、promoted SQ policyとは扱わない。
+3. 次のT2は `q/v/o/gate/down` に対するper-layer fallback、別scale/layout、またはstronger formatを試す。
+4. 診断gapだけで順序を付けるなら、`o/down` を `gate` より先に見る。
 
 ### T3: Prefill optimization v0.1, 4-7 days
 
