@@ -1972,7 +1972,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | --- | --- | --- |
 | T0 state freeze | done | `benchmarks/results/2026-07-08/sq-r9700-state-freeze-v0.1.json`, `.md` |
 | T1 result schema preservation | partial done | `docs/specs/batch-throughput-workload-v0.1.md`, `docs/specs/inference-benchmark-result-v0.1.md`, `tools/run-external-benchmark.py` |
-| T1 real batch/total throughput runner | partial done with package-backed component batch grid | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`, `phase-t1-package-prefill-component-batch-grid-v1.md`; full package decode/end-to-end total throughput is still not done. |
+| T1 real batch/total throughput runner | partial done with package-backed component batch grid and logical full-package grid | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`, `phase-t1-package-prefill-component-batch-grid-v1.md`, `benchmarks/workloads/r9700-aq4-full-package-logical-batch-small-grid.json`, `phase-t1-full-package-logical-batch-small-grid-v1.md`; real full-package request-batch prefill/decode/end-to-end total throughput is still not done. |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done with policy artifact verified | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; actual `kup6_gate5_down5` payload artifact generated under `/tmp` with `22` FP8 tensors and `753` passthrough tensors. |
 | T2 runtime load path | partial done with policy artifact materialize verified | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization; policy artifact materialize smoke verified on R9700. |
@@ -2103,6 +2103,38 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 7. T5として、SQ候補1が品質または速度で不十分ならformat iterationへ進む。候補はrow-block幅、scale dtype/layout、fallback family、FP8値+FP8 scale、またはより保守的なhybrid policyである。
 8. T6として、uLLM側の比較表が固まった後にvLLMを同じgridで測る。vLLM側のunsupported/fallbackは失敗ではなく比較条件として記録する。
 9. T7として、R9700 SQ候補1の採否判断を行う。採用条件は、AQ4比のVRAM/working-set削減が説明でき、total throughputが大きく悪化せず、quality guardが通ることである。
+
+## 2026-07-08 progress: T1 full-package logical batch small grid
+
+前回の要点:
+
+- T1にはpackage-backed component real-batch rowとflattened component batch gridがある。
+- ただし、これらはkernel/schema sanityであり、full packageのprefill/decode/end-to-end throughputではなかった。
+- SQ候補比較へ進むには、少なくともfull package rowで `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、VRAM、correctnessが落ちないことを確認する必要がある。
+
+今回の変更点:
+
+- AQ4 full-package logical batch small grid workloadを追加した。
+  - `benchmarks/workloads/r9700-aq4-full-package-logical-batch-small-grid.json`
+- R9700で `batch=1/4/8`、`prompt_tokens=4`、`generated_tokens=2` を実測した。
+  - `benchmarks/results/2026-07-08/package-batch-throughput/phase-t1-full-package-logical-batch-small-grid-v1.md`
+- 3行すべて `status=ok`、`correctness.verified_all=true` だった。
+- JSONLには `prefill_total_input_tokens_per_second`、`decode_total_generated_tokens_per_second`、`end_to_end_total_tokens_per_second`、`memory.kv_cache_bytes_total`、VRAM peak/consumedが残った。
+- ただし全行 `batching.mode=logical`、`prefill_real_batch=false`、`decode_real_batch=false`、`runtime_reused_across_requests=false`、`weights_reloaded_per_request=true` である。
+
+実測値:
+
+| batch | prefill total tok/s | decode generated tok/s | end-to-end tok/s | KV cache bytes | VRAM consumed bytes | verified |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | 33.574674811 | 68.797769301 | 2.172326744 | 393216 | 4279500800 | true |
+| 4 | 58.744142319 | 69.070493674 | 2.433498426 | 1572864 | 4206096384 | true |
+| 8 | 67.008573726 | 69.071288010 | 2.533759132 | 3145728 | 4279500800 | true |
+
+次の行動:
+
+1. このlogical full-package gridは、schema/control-plane guardとして扱う。SQ/vLLM比較の最終性能判断には使わない。
+2. T1の次の実装は、full package pathへreal request-batch prefill/decode executorを接続し、同じ `batch=1/4/8` gridで `batching.mode=real` の行を出すことに集中する。
+3. real batch化後も同じJSONL schemaを使い、logical/realの差分が比較表で混ざらないようにする。
 
 ## Risks
 

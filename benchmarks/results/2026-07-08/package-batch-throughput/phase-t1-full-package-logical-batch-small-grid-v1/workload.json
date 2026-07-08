@@ -1,0 +1,57 @@
+{
+  "schema_version": "ullm-batch-throughput-workload-v0.1",
+  "run_id": "r9700-aq4-full-package-logical-batch-small-grid",
+  "package_dir": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+  "engine": "target/release/ullm-engine",
+  "engine_name": "uLLM",
+  "model_name": "Qwen3.5-9B",
+  "model_format": "ullm-package",
+  "model_quantization": "AQ4",
+  "gpu_card": "card2",
+  "device_index": 2,
+  "chunk_bytes": 1048576,
+  "layers": "all",
+  "top_k": 4,
+  "lm_head_chunk_rows": 4096,
+  "rotary_dim": 32,
+  "rope_base": 10000000,
+  "position_offset": 0,
+  "lm_head_mode": "gpu_resident_f32",
+  "kv_cache_dtype": "f32",
+  "require_hip_kernels": true,
+  "env": {
+    "ULLM_PREFILL_DEVICE_TOKEN_LOOP": "1"
+  },
+  "warmup_runs": 0,
+  "measured_runs": 1,
+  "timeout_seconds": 900,
+  "memory_sample_interval": 1.0,
+  "notes": [
+    "T1 full-package control-plane grid for AQ4 baseline schema validation",
+    "This is full package execution but logical batch: package-batch-throughput-bench sequentially invokes the existing single-request path.",
+    "Do not use these rows as real request-batch throughput or final SQ/vLLM comparison rows."
+  ],
+  "cases": [
+    {
+      "case_id": "aq4-r9700-fullpkg-logical-b1-pp4-tg2",
+      "concurrent_requests": 1,
+      "prompt_tokens": 4,
+      "generated_tokens": 2,
+      "context_length": 16
+    },
+    {
+      "case_id": "aq4-r9700-fullpkg-logical-b4-pp4-tg2",
+      "concurrent_requests": 4,
+      "prompt_tokens": 4,
+      "generated_tokens": 2,
+      "context_length": 16
+    },
+    {
+      "case_id": "aq4-r9700-fullpkg-logical-b8-pp4-tg2",
+      "concurrent_requests": 8,
+      "prompt_tokens": 4,
+      "generated_tokens": 2,
+      "context_length": 16
+    }
+  ]
+}
