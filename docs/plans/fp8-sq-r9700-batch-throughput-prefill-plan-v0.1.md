@@ -2493,6 +2493,42 @@ Quality:
 3. 次はlayer7 `up_proj` のrow-block16、row-block64、またはfallbackを、layer3 k16/up32 + layer7 k16固定で試す。
 4. full-package real batch throughputは引き続きT1aとして別に進める。
 
+## 2026-07-09 progress: T2 SQ FP8 model-loop layer7 up scale
+
+前回の要点:
+
+- layer7 isolationでは、layer7単体の `k16/up32` と、layer3 k16/up32 passing probeへlayer7 `k_proj` row-block16だけを足した条件はstrict top1を維持した。
+- layer3 k16/up32 passing probeへlayer7 `up_proj` row-block32を足すと `case_a` が崩れた。
+- 直近の境界はlayer7 `up_proj` のscaleまたはfallbackだった。
+
+今回の変更点:
+
+- layer3 `k_proj` row-block16 + layer3 `up_proj` row-block32 + layer7 `k_proj` row-block16を固定した。
+- layer7 `up_proj` について、fallback、row-block16、row-block64の3条件をpolicy artifact化した。
+- 同じR9700 six-layer token-id model-loop prompt bundleで評価し、結果を `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-up-scale-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| variant | layer7 up policy | FP8 tensors | pass | len4 SQ top1 | case_a SQ top1 | case_a AQ4 rank in SQ top8 | case_b SQ top1 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `layer7-up-fallback` | fallback | 3 | 3 / 3 | 110784 | 237950 | 1 | 182949 |
+| `layer7-up16` | row-block16 | 4 | 2 / 3 | 110784 | 193706 | 2 | 182949 |
+| `layer7-up64` | row-block64 | 4 | 2 / 3 | 110784 | 193706 | 2 | 182949 |
+
+判断:
+
+- layer7 `up_proj` fallbackは、layer3 k16/up32 + layer7 k16のpassing subsetを維持した。
+- layer7 `up_proj` row-block16とrow-block64は、どちらも `case_a` でAQ4 top1 `237950` からSQ top1 `193706` へ入れ替わった。
+- どちらの失敗でもAQ4 top1はSQ top8 rank `2` に残るため、壊滅的崩壊ではなくranking driftとして扱う。
+- 現在のT2 policy boundaryでは、layer3 `k_proj` row-block16、layer3 `up_proj` row-block32、layer7 `k_proj` row-block16をpassing subsetとして保持し、layer7 `up_proj` はfallbackに残す。
+
+次の行動:
+
+1. `layer7-up-fallback` を現在のpassing boundaryとして保持する。
+2. `layer7-up16` と `layer7-up64` をfailure guardsとして残す。
+3. 次はこのpassing subsetを基準に、追加family/layerを1つずつ戻して `case_a` driftが再発する境界を探す。
+4. full-package real batch throughputは引き続きT1aとして別に進める。
+
 ## Risks
 
 | risk | impact | handling |
