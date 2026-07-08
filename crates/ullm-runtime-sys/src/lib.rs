@@ -524,6 +524,33 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_causal_attn_f32_flash2(
+        q_buffer: *const RawRuntimeBuffer,
+        k_buffer: *const RawRuntimeBuffer,
+        v_buffer: *const RawRuntimeBuffer,
+        sequence_len: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
+    fn ullm_runtime_causal_attn_batch_f32_flash2(
+        q_buffer: *const RawRuntimeBuffer,
+        k_buffer: *const RawRuntimeBuffer,
+        v_buffer: *const RawRuntimeBuffer,
+        batch_count: usize,
+        sequence_len: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+        softmax_scale: f32,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_decode_attn_f32(
         q_buffer: *const RawRuntimeBuffer,
         k_buffer: *const RawRuntimeBuffer,
@@ -3206,6 +3233,98 @@ pub fn causal_attn_f32(
     })
 }
 
+pub fn causal_attn_f32_flash2(
+    q: &RuntimeBuffer,
+    k: &RuntimeBuffer,
+    v: &RuntimeBuffer,
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if sequence_len == 0 {
+        return Err("f32 causal attention sequence_len must be greater than zero".to_string());
+    }
+    if q_heads == 0 {
+        return Err("f32 causal attention q_heads must be greater than zero".to_string());
+    }
+    if kv_heads == 0 {
+        return Err("f32 causal attention kv_heads must be greater than zero".to_string());
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err("f32 causal attention q_heads must be a multiple of kv_heads".to_string());
+    }
+    if head_dim == 0 {
+        return Err("f32 causal attention head_dim must be greater than zero".to_string());
+    }
+    if value_dim == 0 {
+        return Err("f32 causal attention value_dim must be greater than zero".to_string());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "f32 causal attention softmax scale must be finite and greater than zero".to_string(),
+        );
+    }
+
+    let q_head_sequence = sequence_len
+        .checked_mul(q_heads)
+        .ok_or_else(|| "f32 causal attention q head-sequence count overflows".to_string())?;
+    let kv_head_sequence = sequence_len
+        .checked_mul(kv_heads)
+        .ok_or_else(|| "f32 causal attention kv head-sequence count overflows".to_string())?;
+    let q_elements = q_head_sequence
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 causal attention q element count overflows".to_string())?;
+    let k_elements = kv_head_sequence
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 causal attention k element count overflows".to_string())?;
+    let v_elements = kv_head_sequence
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 causal attention v element count overflows".to_string())?;
+    let output_elements = q_head_sequence
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 causal attention output element count overflows".to_string())?;
+
+    let q_bytes = q_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 causal attention q byte size overflows".to_string())?;
+    let k_bytes = k_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 causal attention k byte size overflows".to_string())?;
+    let v_bytes = v_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 causal attention v byte size overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 causal attention output byte size overflows".to_string())?;
+
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, k_bytes, k.size()?)?;
+    check_copy_range(0, v_bytes, v.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_causal_attn_f32_flash2(
+            q.raw.as_ptr(),
+            k.raw.as_ptr(),
+            v.raw.as_ptr(),
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn causal_attn_batch_f32(
     q: &RuntimeBuffer,
@@ -3316,6 +3435,132 @@ pub fn causal_attn_batch_f32(
     let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
     status_to_result(unsafe {
         ullm_runtime_causal_attn_batch_f32(
+            q.raw.as_ptr(),
+            k.raw.as_ptr(),
+            v.raw.as_ptr(),
+            batch_count,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn causal_attn_batch_f32_flash2(
+    q: &RuntimeBuffer,
+    k: &RuntimeBuffer,
+    v: &RuntimeBuffer,
+    batch_count: usize,
+    sequence_len: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+    softmax_scale: f32,
+    output: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    if batch_count == 0 {
+        return Err(
+            "f32 batched causal attention batch_count must be greater than zero".to_string(),
+        );
+    }
+    if sequence_len == 0 {
+        return Err(
+            "f32 batched causal attention sequence_len must be greater than zero".to_string(),
+        );
+    }
+    if q_heads == 0 {
+        return Err("f32 batched causal attention q_heads must be greater than zero".to_string());
+    }
+    if kv_heads == 0 {
+        return Err("f32 batched causal attention kv_heads must be greater than zero".to_string());
+    }
+    if !q_heads.is_multiple_of(kv_heads) {
+        return Err(
+            "f32 batched causal attention q_heads must be a multiple of kv_heads".to_string(),
+        );
+    }
+    if head_dim == 0 {
+        return Err("f32 batched causal attention head_dim must be greater than zero".to_string());
+    }
+    if value_dim == 0 {
+        return Err("f32 batched causal attention value_dim must be greater than zero".to_string());
+    }
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err(
+            "f32 batched causal attention softmax scale must be finite and greater than zero"
+                .to_string(),
+        );
+    }
+
+    let q_head_sequence_per_batch = sequence_len.checked_mul(q_heads).ok_or_else(|| {
+        "f32 batched causal attention q head-sequence count overflows".to_string()
+    })?;
+    let kv_head_sequence_per_batch = sequence_len.checked_mul(kv_heads).ok_or_else(|| {
+        "f32 batched causal attention kv head-sequence count overflows".to_string()
+    })?;
+    let q_elements_per_batch = q_head_sequence_per_batch
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 batched causal attention q element count overflows".to_string())?;
+    let k_elements_per_batch = kv_head_sequence_per_batch
+        .checked_mul(head_dim)
+        .ok_or_else(|| "f32 batched causal attention k element count overflows".to_string())?;
+    let v_elements_per_batch = kv_head_sequence_per_batch
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 batched causal attention v element count overflows".to_string())?;
+    let output_elements_per_batch = q_head_sequence_per_batch
+        .checked_mul(value_dim)
+        .ok_or_else(|| "f32 batched causal attention output element count overflows".to_string())?;
+
+    let q_elements = q_elements_per_batch
+        .checked_mul(batch_count)
+        .ok_or_else(|| {
+            "f32 batched causal attention q batch element count overflows".to_string()
+        })?;
+    let k_elements = k_elements_per_batch
+        .checked_mul(batch_count)
+        .ok_or_else(|| {
+            "f32 batched causal attention k batch element count overflows".to_string()
+        })?;
+    let v_elements = v_elements_per_batch
+        .checked_mul(batch_count)
+        .ok_or_else(|| {
+            "f32 batched causal attention v batch element count overflows".to_string()
+        })?;
+    let output_elements = output_elements_per_batch
+        .checked_mul(batch_count)
+        .ok_or_else(|| {
+            "f32 batched causal attention output batch element count overflows".to_string()
+        })?;
+
+    let q_bytes = q_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 batched causal attention q byte size overflows".to_string())?;
+    let k_bytes = k_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 batched causal attention k byte size overflows".to_string())?;
+    let v_bytes = v_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 batched causal attention v byte size overflows".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "f32 batched causal attention output byte size overflows".to_string())?;
+
+    check_copy_range(0, q_bytes, q.size()?)?;
+    check_copy_range(0, k_bytes, k.size()?)?;
+    check_copy_range(0, v_bytes, v.size()?)?;
+    check_copy_range(0, output_bytes, output.size()?)?;
+
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_causal_attn_batch_f32_flash2(
             q.raw.as_ptr(),
             k.raw.as_ptr(),
             v.raw.as_ptr(),
@@ -6088,6 +6333,81 @@ mod tests {
     }
 
     #[test]
+    fn cpu_causal_attn_f32_flash2_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let sequence_len = 3_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..sequence_len * q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..sequence_len * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..sequence_len * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let expected = expected_causal_attn(
+            &q_values,
+            &k_values,
+            &v_values,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k = context
+            .alloc_buffer(k_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v = context
+            .alloc_buffer(v_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream))
+            .unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        causal_attn_f32_flash2(
+            &q,
+            &k,
+            &v,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
     fn cpu_causal_attn_batch_f32_computes_expected_values() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();
@@ -6146,6 +6466,89 @@ mod tests {
         stream.synchronize().unwrap();
 
         causal_attn_batch_f32(
+            &q,
+            &k,
+            &v,
+            batch_count,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-5);
+    }
+
+    #[test]
+    fn cpu_causal_attn_batch_f32_flash2_computes_expected_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let batch_count = 2_usize;
+        let sequence_len = 3_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_elements_per_batch = sequence_len * q_heads * head_dim;
+        let k_elements_per_batch = sequence_len * kv_heads * head_dim;
+        let v_elements_per_batch = sequence_len * kv_heads * value_dim;
+        let q_values = (0..batch_count * q_elements_per_batch)
+            .map(|index| (index as f32 - 19.0) / 23.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..batch_count * k_elements_per_batch)
+            .map(|index| ((index * 3) as f32 - 17.0) / 29.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..batch_count * v_elements_per_batch)
+            .map(|index| ((index * 5) as f32 - 11.0) / 31.0)
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for batch in 0..batch_count {
+            expected.extend(expected_causal_attn(
+                &q_values[batch * q_elements_per_batch..(batch + 1) * q_elements_per_batch],
+                &k_values[batch * k_elements_per_batch..(batch + 1) * k_elements_per_batch],
+                &v_values[batch * v_elements_per_batch..(batch + 1) * v_elements_per_batch],
+                sequence_len,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+            ));
+        }
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k = context
+            .alloc_buffer(k_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v = context
+            .alloc_buffer(v_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream))
+            .unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        causal_attn_batch_f32_flash2(
             &q,
             &k,
             &v,
@@ -10412,6 +10815,84 @@ mod tests {
     }
 
     #[test]
+    fn first_hip_causal_attn_f32_flash2_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let sequence_len = 3_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_values = (0..sequence_len * q_heads * head_dim)
+            .map(|index| (index as f32 - 8.0) / 11.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..sequence_len * kv_heads * head_dim)
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..sequence_len * kv_heads * value_dim)
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let expected = expected_causal_attn(
+            &q_values,
+            &k_values,
+            &v_values,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+        );
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k = context
+            .alloc_buffer(k_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v = context
+            .alloc_buffer(v_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream))
+            .unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        causal_attn_f32_flash2(
+            &q,
+            &k,
+            &v,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-4);
+    }
+
+    #[test]
     fn first_hip_causal_attn_batch_f32_computes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;
@@ -10473,6 +10954,92 @@ mod tests {
         stream.synchronize().unwrap();
 
         causal_attn_batch_f32(
+            &q,
+            &k,
+            &v,
+            batch_count,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; expected.len() * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &expected, 1e-4);
+    }
+
+    #[test]
+    fn first_hip_causal_attn_batch_f32_flash2_computes_expected_values_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let batch_count = 2_usize;
+        let sequence_len = 3_usize;
+        let q_heads = 4_usize;
+        let kv_heads = 2_usize;
+        let head_dim = 3_usize;
+        let value_dim = 2_usize;
+        let softmax_scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let q_elements_per_batch = sequence_len * q_heads * head_dim;
+        let k_elements_per_batch = sequence_len * kv_heads * head_dim;
+        let v_elements_per_batch = sequence_len * kv_heads * value_dim;
+        let q_values = (0..batch_count * q_elements_per_batch)
+            .map(|index| (index as f32 - 19.0) / 23.0)
+            .collect::<Vec<_>>();
+        let k_values = (0..batch_count * k_elements_per_batch)
+            .map(|index| ((index * 3) as f32 - 17.0) / 29.0)
+            .collect::<Vec<_>>();
+        let v_values = (0..batch_count * v_elements_per_batch)
+            .map(|index| ((index * 5) as f32 - 11.0) / 31.0)
+            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for batch in 0..batch_count {
+            expected.extend(expected_causal_attn(
+                &q_values[batch * q_elements_per_batch..(batch + 1) * q_elements_per_batch],
+                &k_values[batch * k_elements_per_batch..(batch + 1) * k_elements_per_batch],
+                &v_values[batch * v_elements_per_batch..(batch + 1) * v_elements_per_batch],
+                sequence_len,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+            ));
+        }
+        let mut q = context
+            .alloc_buffer(q_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut k = context
+            .alloc_buffer(k_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut v = context
+            .alloc_buffer(v_values.len() * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(expected.len() * std::mem::size_of::<f32>())
+            .unwrap();
+
+        q.copy_from_host(0, &f32s_to_le_bytes(&q_values), Some(&mut stream))
+            .unwrap();
+        k.copy_from_host(0, &f32s_to_le_bytes(&k_values), Some(&mut stream))
+            .unwrap();
+        v.copy_from_host(0, &f32s_to_le_bytes(&v_values), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        causal_attn_batch_f32_flash2(
             &q,
             &k,
             &v,

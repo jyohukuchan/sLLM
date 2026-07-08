@@ -142,6 +142,30 @@
 2. cold prefill causal attention側にも同じtile online-softmax方針を展開する。
 3. package self-attention prefillのattention componentに接続し、SQ候補評価用のprefill pathに近づける。
 
+### 2026-07-08 progress: cold-prefill causal flash2 F32 v1
+
+前回の要点:
+
+- cached-prefix flash2はFP8/F32の両方で改善し、tile online-softmax構造自体の効果を確認した。
+- 次はcold prefill causal attention側にも同じ方針を展開する段階だった。
+- 既存のcold prefill kernelは `value_dim <= 256` ではすでにonline softmax 1-passなので、単純置換より別API/別executorで比較する方が安全だった。
+
+今回の変更点:
+
+- `ullm_runtime_causal_attn_f32_flash2` と `ullm_runtime_causal_attn_batch_f32_flash2` を追加した。
+- Rust FFIに `causal_attn_f32_flash2` と `causal_attn_batch_f32_flash2` を追加した。
+- `runtime-causal-attn-batch-smoke` に `EXECUTOR=causal_attn_batch_f32|default|flash2|causal_attn_batch_f32_flash2` を追加した。
+- HIPRTC kernelは64 token tileのscoreをshared memoryに置き、online softmaxでmax、denominator、weighted valueを更新する。
+- R9700の初期safe gridでは、旧 `causal_attn_batch_f32` 比で `1.19x-1.24x` のinput tok/s改善を確認した。
+- 結果は `benchmarks/results/2026-07-08/runtime-causal-attn/phase-c6-causal-flash2-tiled-online-softmax-v1.md` に保存した。
+
+次の行動:
+
+1. `runtime-causal-attn-batch-smoke` の8MiB上限とは別に、長context prefill用の安全なbenchmark harnessを作る。
+2. 複数query row/blockでK/V tileを再利用し、cold prefillでFlashAttention2に近い構造へ進める。
+3. RDNA4向けMFMA/WMMA layoutを小さいprototypeで検証し、QK/V accumulationをscalar loopから置き換える。
+4. package self-attention attention componentのexecutor選択にflash2を接続する。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。

@@ -155,6 +155,166 @@ ullm_status ullm_runtime_causal_attn_f32(
         stream);
 }
 
+ullm_status ullm_runtime_causal_attn_f32_flash2(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_buffer == nullptr || v_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 causal flash2 attention received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (sequence_len == 0 || q_heads == 0 || kv_heads == 0 || head_dim == 0 || value_dim == 0) {
+        set_error("f32 causal flash2 attention dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((q_heads % kv_heads) != 0) {
+        set_error("f32 causal flash2 attention q_heads must be a multiple of kv_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error("f32 causal flash2 attention softmax scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_buffer, k_buffer) ||
+        !buffers_share_backend(q_buffer, v_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error("f32 causal flash2 attention buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 causal flash2 attention stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (q_heads > max_size / sequence_len) {
+        set_error("f32 causal flash2 attention q head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_head_sequence = sequence_len * q_heads;
+    if (head_dim > max_size / q_head_sequence) {
+        set_error("f32 causal flash2 attention q element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = q_head_sequence * head_dim;
+
+    if (kv_heads > max_size / sequence_len) {
+        set_error("f32 causal flash2 attention kv head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_sequence = sequence_len * kv_heads;
+    if (head_dim > max_size / kv_head_sequence ||
+        value_dim > max_size / kv_head_sequence) {
+        set_error("f32 causal flash2 attention kv element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements = kv_head_sequence * head_dim;
+    const size_t v_elements = kv_head_sequence * value_dim;
+    if (value_dim > max_size / q_head_sequence) {
+        set_error("f32 causal flash2 attention output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t output_elements = q_head_sequence * value_dim;
+    if (q_elements > max_size / sizeof(float) ||
+        k_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float) ||
+        output_elements > max_size / sizeof(float)) {
+        set_error("f32 causal flash2 attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    if (q_buffer->bytes < q_bytes) {
+        set_error("f32 causal flash2 attention q buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_buffer->bytes < k_bytes) {
+        set_error("f32 causal flash2 attention k buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_buffer->bytes < v_bytes) {
+        set_error("f32 causal flash2 attention v buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < output_bytes) {
+        set_error("f32 causal flash2 attention output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k = static_cast<const float *>(k_buffer->ptr);
+        const auto *v = static_cast<const float *>(v_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        causal_attn_f32_host(
+            q,
+            k,
+            v,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output);
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (causal_attn_f32_flash2_hip_kernel(
+            q_buffer,
+            k_buffer,
+            v_buffer,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_CAUSAL_ATTN_F32_FLASH2_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ? "f32 causal flash2 attention HIP kernel is unavailable" :
+                                       hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return causal_attn_f32_hip_staging(
+        q_buffer,
+        k_buffer,
+        v_buffer,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_bytes,
+        k_bytes,
+        v_bytes,
+        output_bytes,
+        output_buffer,
+        stream);
+}
+
 ullm_status ullm_runtime_causal_attn_batch_f32(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_buffer,
@@ -310,6 +470,183 @@ ullm_status ullm_runtime_causal_attn_batch_f32(
         set_error(
             hip_kernel_error.empty() ? "f32 batched causal attention HIP kernel is unavailable" :
                                        hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    return causal_attn_batch_f32_hip_staging(
+        q_buffer,
+        k_buffer,
+        v_buffer,
+        batch_count,
+        sequence_len,
+        q_heads,
+        kv_heads,
+        head_dim,
+        value_dim,
+        softmax_scale,
+        q_bytes,
+        k_bytes,
+        v_bytes,
+        output_bytes,
+        output_buffer,
+        stream);
+}
+
+ullm_status ullm_runtime_causal_attn_batch_f32_flash2(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t batch_count,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream) {
+    if (q_buffer == nullptr || k_buffer == nullptr || v_buffer == nullptr || output_buffer == nullptr) {
+        set_error("f32 batched causal flash2 attention received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (batch_count == 0 || sequence_len == 0 || q_heads == 0 || kv_heads == 0 ||
+        head_dim == 0 || value_dim == 0) {
+        set_error("f32 batched causal flash2 attention dimensions must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if ((q_heads % kv_heads) != 0) {
+        set_error("f32 batched causal flash2 attention q_heads must be a multiple of kv_heads");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(softmax_scale) || softmax_scale <= 0.0f) {
+        set_error("f32 batched causal flash2 attention softmax scale must be finite and greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(q_buffer, k_buffer) ||
+        !buffers_share_backend(q_buffer, v_buffer) ||
+        !buffers_share_backend(q_buffer, output_buffer)) {
+        set_error("f32 batched causal flash2 attention buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("f32 batched causal flash2 attention stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (q_heads > max_size / sequence_len) {
+        set_error("f32 batched causal flash2 attention q head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_head_sequence_per_batch = sequence_len * q_heads;
+    if (kv_heads > max_size / sequence_len) {
+        set_error("f32 batched causal flash2 attention kv head-sequence element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t kv_head_sequence_per_batch = sequence_len * kv_heads;
+
+    if (head_dim > max_size / q_head_sequence_per_batch ||
+        value_dim > max_size / q_head_sequence_per_batch) {
+        set_error("f32 batched causal flash2 attention q/output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements_per_batch = q_head_sequence_per_batch * head_dim;
+    const size_t output_elements_per_batch = q_head_sequence_per_batch * value_dim;
+    if (head_dim > max_size / kv_head_sequence_per_batch ||
+        value_dim > max_size / kv_head_sequence_per_batch) {
+        set_error("f32 batched causal flash2 attention kv element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t k_elements_per_batch = kv_head_sequence_per_batch * head_dim;
+    const size_t v_elements_per_batch = kv_head_sequence_per_batch * value_dim;
+
+    if (batch_count > max_size / q_elements_per_batch ||
+        batch_count > max_size / k_elements_per_batch ||
+        batch_count > max_size / v_elements_per_batch ||
+        batch_count > max_size / output_elements_per_batch) {
+        set_error("f32 batched causal flash2 attention batch element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_elements = batch_count * q_elements_per_batch;
+    const size_t k_elements = batch_count * k_elements_per_batch;
+    const size_t v_elements = batch_count * v_elements_per_batch;
+    const size_t output_elements = batch_count * output_elements_per_batch;
+    if (q_elements > max_size / sizeof(float) ||
+        k_elements > max_size / sizeof(float) ||
+        v_elements > max_size / sizeof(float) ||
+        output_elements > max_size / sizeof(float)) {
+        set_error("f32 batched causal flash2 attention byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t q_bytes = q_elements * sizeof(float);
+    const size_t k_bytes = k_elements * sizeof(float);
+    const size_t v_bytes = v_elements * sizeof(float);
+    const size_t output_bytes = output_elements * sizeof(float);
+    if (q_buffer->bytes < q_bytes) {
+        set_error("f32 batched causal flash2 attention q buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (k_buffer->bytes < k_bytes) {
+        set_error("f32 batched causal flash2 attention k buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (v_buffer->bytes < v_bytes) {
+        set_error("f32 batched causal flash2 attention v buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < output_bytes) {
+        set_error("f32 batched causal flash2 attention output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (q_buffer->backend == BackendKind::Cpu) {
+        const auto *q = static_cast<const float *>(q_buffer->ptr);
+        const auto *k = static_cast<const float *>(k_buffer->ptr);
+        const auto *v = static_cast<const float *>(v_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        for (size_t batch = 0; batch < batch_count; ++batch) {
+            causal_attn_f32_host(
+                q + batch * q_elements_per_batch,
+                k + batch * k_elements_per_batch,
+                v + batch * v_elements_per_batch,
+                sequence_len,
+                q_heads,
+                kv_heads,
+                head_dim,
+                value_dim,
+                softmax_scale,
+                output + batch * output_elements_per_batch);
+        }
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    if (causal_attn_batch_f32_flash2_hip_kernel(
+            q_buffer,
+            k_buffer,
+            v_buffer,
+            batch_count,
+            sequence_len,
+            q_heads,
+            kv_heads,
+            head_dim,
+            value_dim,
+            softmax_scale,
+            output_buffer,
+            stream,
+            &hip_kernel_error)) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    const bool require_hip_kernel =
+        std::getenv("ULLM_REQUIRE_HIP_CAUSAL_ATTN_BATCH_F32_FLASH2_KERNEL") != nullptr ||
+        std::getenv("ULLM_REQUIRE_HIP_CAUSAL_ATTN_F32_FLASH2_KERNEL") != nullptr;
+    if (require_hip_kernel) {
+        set_error(
+            hip_kernel_error.empty() ?
+                "f32 batched causal flash2 attention HIP kernel is unavailable" :
+                hip_kernel_error.c_str());
         return ULLM_STATUS_RUNTIME_ERROR;
     }
     return causal_attn_batch_f32_hip_staging(

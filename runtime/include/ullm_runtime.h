@@ -539,7 +539,34 @@ ullm_status ullm_runtime_causal_attn_f32(
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream);
 
+ullm_status ullm_runtime_causal_attn_f32_flash2(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
 ullm_status ullm_runtime_causal_attn_batch_f32(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    size_t batch_count,
+    size_t sequence_len,
+    size_t q_heads,
+    size_t kv_heads,
+    size_t head_dim,
+    size_t value_dim,
+    float softmax_scale,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream);
+
+ullm_status ullm_runtime_causal_attn_batch_f32_flash2(
     const ullm_runtime_buffer *q_buffer,
     const ullm_runtime_buffer *k_buffer,
     const ullm_runtime_buffer *v_buffer,

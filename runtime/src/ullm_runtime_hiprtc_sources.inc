@@ -3296,6 +3296,144 @@ extern "C" __global__ void ullm_causal_attn_f32_kernel(
 )";
     }
 
+    static const char *causal_attn_flash2_f32_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_causal_attn_f32_flash2_kernel(
+    const float *q,
+    const float *k,
+    const float *v,
+    unsigned long long sequence_len,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output) {
+    constexpr unsigned int kTileTokens = 64u;
+    const unsigned long long q_head_index = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned long long q_head_elements = sequence_len * q_heads;
+    if (q_head_index >= q_head_elements) {
+        return;
+    }
+    const unsigned int tid = threadIdx.x;
+    if (value_dim > static_cast<unsigned long long>(blockDim.x)) {
+        return;
+    }
+
+    const unsigned long long q_head = q_head_index % q_heads;
+    const unsigned long long timestep = q_head_index / q_heads;
+    const unsigned long long cache_len = timestep + 1ull;
+    const unsigned long long q_per_kv = q_heads / kv_heads;
+    const unsigned long long kv_head = q_head / q_per_kv;
+    const unsigned long long q_base = (timestep * q_heads + q_head) * head_dim;
+    const unsigned long long value = static_cast<unsigned long long>(tid);
+    const bool value_active = value < value_dim;
+
+    __shared__ float reduce[256];
+    __shared__ float scores[kTileTokens];
+    __shared__ float shared_tile_max;
+    __shared__ float shared_tile_sum;
+    __shared__ float shared_m_new;
+    __shared__ float shared_alpha;
+
+    float max_score = -3.4028234663852886e38f;
+    float denominator = 0.0f;
+    float weighted = 0.0f;
+
+    for (unsigned long long tile_start = 0; tile_start < cache_len; tile_start += kTileTokens) {
+        const unsigned long long remaining = cache_len - tile_start;
+        const unsigned int tile_count =
+            remaining < static_cast<unsigned long long>(kTileTokens) ?
+                static_cast<unsigned int>(remaining) :
+                kTileTokens;
+
+        for (unsigned int tile_offset = 0; tile_offset < tile_count; ++tile_offset) {
+            const unsigned long long source_timestep =
+                tile_start + static_cast<unsigned long long>(tile_offset);
+            const unsigned long long k_base = (source_timestep * kv_heads + kv_head) * head_dim;
+            float partial = 0.0f;
+            for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+                partial += q[q_base + dim] * k[k_base + dim];
+            }
+            reduce[tid] = partial;
+            __syncthreads();
+            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                scores[tile_offset] = reduce[0] * softmax_scale;
+            }
+            __syncthreads();
+        }
+
+        float local_max = -3.4028234663852886e38f;
+        for (unsigned int tile_offset = tid; tile_offset < tile_count; tile_offset += blockDim.x) {
+            const float score = scores[tile_offset];
+            local_max = score > local_max ? score : local_max;
+        }
+        reduce[tid] = local_max;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] = reduce[tid] > reduce[tid + stride] ? reduce[tid] : reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0u) {
+            shared_tile_max = reduce[0];
+            const float m_new = max_score > shared_tile_max ? max_score : shared_tile_max;
+            shared_m_new = m_new;
+            shared_alpha = max_score <= -3.0e38f ? 0.0f : expf(max_score - m_new);
+        }
+        __syncthreads();
+
+        const float m_new = shared_m_new;
+        float local_sum = 0.0f;
+        for (unsigned int tile_offset = tid; tile_offset < tile_count; tile_offset += blockDim.x) {
+            const float weight = expf(scores[tile_offset] - m_new);
+            scores[tile_offset] = weight;
+            local_sum += weight;
+        }
+        reduce[tid] = local_sum;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] += reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0u) {
+            shared_tile_sum = reduce[0];
+        }
+        __syncthreads();
+
+        if (value_active) {
+            float tile_weighted = 0.0f;
+            for (unsigned int tile_offset = 0; tile_offset < tile_count; ++tile_offset) {
+                const unsigned long long source_timestep =
+                    tile_start + static_cast<unsigned long long>(tile_offset);
+                const unsigned long long v_index =
+                    (source_timestep * kv_heads + kv_head) * value_dim + value;
+                tile_weighted += scores[tile_offset] * v[v_index];
+            }
+            weighted = weighted * shared_alpha + tile_weighted;
+        }
+        denominator = denominator * shared_alpha + shared_tile_sum;
+        max_score = m_new;
+        __syncthreads();
+    }
+
+    if (value_active) {
+        const unsigned long long output_base = q_head_index * value_dim;
+        output[output_base + value] = weighted / denominator;
+    }
+}
+)";
+    }
+
     static const char *causal_attn_batch_kernel_source() {
         return R"(
 extern "C" __global__ void ullm_causal_attn_batch_f32_kernel(
@@ -3474,6 +3612,154 @@ extern "C" __global__ void ullm_causal_attn_batch_f32_kernel(
         if (value_active) {
             output[output_base + value] = weighted / denominator;
         }
+    }
+}
+)";
+    }
+
+    static const char *causal_attn_batch_flash2_f32_kernel_source() {
+        return R"(
+extern "C" __global__ void ullm_causal_attn_batch_f32_flash2_kernel(
+    const float *q,
+    const float *k,
+    const float *v,
+    unsigned long long batch_count,
+    unsigned long long sequence_len,
+    unsigned long long q_heads,
+    unsigned long long kv_heads,
+    unsigned long long head_dim,
+    unsigned long long value_dim,
+    float softmax_scale,
+    float *output) {
+    constexpr unsigned int kTileTokens = 64u;
+    const unsigned long long global_q_head_index = static_cast<unsigned long long>(blockIdx.x);
+    const unsigned long long q_head_elements_per_batch = sequence_len * q_heads;
+    const unsigned long long q_head_elements = batch_count * q_head_elements_per_batch;
+    if (global_q_head_index >= q_head_elements) {
+        return;
+    }
+    const unsigned int tid = threadIdx.x;
+    if (value_dim > static_cast<unsigned long long>(blockDim.x)) {
+        return;
+    }
+
+    const unsigned long long batch = global_q_head_index / q_head_elements_per_batch;
+    const unsigned long long q_head_index =
+        global_q_head_index - batch * q_head_elements_per_batch;
+    const unsigned long long q_head = q_head_index % q_heads;
+    const unsigned long long timestep = q_head_index / q_heads;
+    const unsigned long long cache_len = timestep + 1ull;
+    const unsigned long long q_per_kv = q_heads / kv_heads;
+    const unsigned long long kv_head = q_head / q_per_kv;
+    const unsigned long long q_batch_base = batch * q_head_elements_per_batch * head_dim;
+    const unsigned long long k_batch_base = batch * sequence_len * kv_heads * head_dim;
+    const unsigned long long v_batch_base = batch * sequence_len * kv_heads * value_dim;
+    const unsigned long long output_batch_base = batch * q_head_elements_per_batch * value_dim;
+    const unsigned long long q_base = q_batch_base + (timestep * q_heads + q_head) * head_dim;
+    const unsigned long long value = static_cast<unsigned long long>(tid);
+    const bool value_active = value < value_dim;
+
+    __shared__ float reduce[256];
+    __shared__ float scores[kTileTokens];
+    __shared__ float shared_tile_max;
+    __shared__ float shared_tile_sum;
+    __shared__ float shared_m_new;
+    __shared__ float shared_alpha;
+
+    float max_score = -3.4028234663852886e38f;
+    float denominator = 0.0f;
+    float weighted = 0.0f;
+
+    for (unsigned long long tile_start = 0; tile_start < cache_len; tile_start += kTileTokens) {
+        const unsigned long long remaining = cache_len - tile_start;
+        const unsigned int tile_count =
+            remaining < static_cast<unsigned long long>(kTileTokens) ?
+                static_cast<unsigned int>(remaining) :
+                kTileTokens;
+
+        for (unsigned int tile_offset = 0; tile_offset < tile_count; ++tile_offset) {
+            const unsigned long long source_timestep =
+                tile_start + static_cast<unsigned long long>(tile_offset);
+            const unsigned long long k_base =
+                k_batch_base + (source_timestep * kv_heads + kv_head) * head_dim;
+            float partial = 0.0f;
+            for (unsigned long long dim = tid; dim < head_dim; dim += blockDim.x) {
+                partial += q[q_base + dim] * k[k_base + dim];
+            }
+            reduce[tid] = partial;
+            __syncthreads();
+            for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    reduce[tid] += reduce[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0u) {
+                scores[tile_offset] = reduce[0] * softmax_scale;
+            }
+            __syncthreads();
+        }
+
+        float local_max = -3.4028234663852886e38f;
+        for (unsigned int tile_offset = tid; tile_offset < tile_count; tile_offset += blockDim.x) {
+            const float score = scores[tile_offset];
+            local_max = score > local_max ? score : local_max;
+        }
+        reduce[tid] = local_max;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] = reduce[tid] > reduce[tid + stride] ? reduce[tid] : reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0u) {
+            shared_tile_max = reduce[0];
+            const float m_new = max_score > shared_tile_max ? max_score : shared_tile_max;
+            shared_m_new = m_new;
+            shared_alpha = max_score <= -3.0e38f ? 0.0f : expf(max_score - m_new);
+        }
+        __syncthreads();
+
+        const float m_new = shared_m_new;
+        float local_sum = 0.0f;
+        for (unsigned int tile_offset = tid; tile_offset < tile_count; tile_offset += blockDim.x) {
+            const float weight = expf(scores[tile_offset] - m_new);
+            scores[tile_offset] = weight;
+            local_sum += weight;
+        }
+        reduce[tid] = local_sum;
+        __syncthreads();
+        for (unsigned int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                reduce[tid] += reduce[tid + stride];
+            }
+            __syncthreads();
+        }
+        if (tid == 0u) {
+            shared_tile_sum = reduce[0];
+        }
+        __syncthreads();
+
+        if (value_active) {
+            float tile_weighted = 0.0f;
+            for (unsigned int tile_offset = 0; tile_offset < tile_count; ++tile_offset) {
+                const unsigned long long source_timestep =
+                    tile_start + static_cast<unsigned long long>(tile_offset);
+                const unsigned long long v_index =
+                    v_batch_base + (source_timestep * kv_heads + kv_head) * value_dim + value;
+                tile_weighted += scores[tile_offset] * v[v_index];
+            }
+            weighted = weighted * shared_alpha + tile_weighted;
+        }
+        denominator = denominator * shared_alpha + shared_tile_sum;
+        max_score = m_new;
+        __syncthreads();
+    }
+
+    if (value_active) {
+        const unsigned long long output_base = output_batch_base + q_head_index * value_dim;
+        output[output_base + value] = weighted / denominator;
     }
 }
 )";
