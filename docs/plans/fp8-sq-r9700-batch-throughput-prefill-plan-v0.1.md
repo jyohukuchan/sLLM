@@ -308,6 +308,34 @@
 2. `head_dim=256,value_dim=256` で既存flash2を超えることを次の性能gateにする。
 3. その後、cold-prefill causal attention側へ同じrocWMMA tile方針を展開する。
 
+### 2026-07-08 progress: RDNA4 FP8 rocWMMA cached-prefix value group 64 v1
+
+前回の要点:
+
+- `cached_prefix_rocwmma_fp8` は16倍数dimensionに対応した。
+- ただし `value_dim=256` では16列value tileごとにQK/online softmaxを再計算するため、既存 `cached_prefix_flash2 fp8_e4m3` より遅かった。
+
+今回の変更点:
+
+- 1 blockが64列のvalue groupを担当するように変更した。
+- `value_dim=256` では、QK/online softmaxの再計算回数が16回から4回に減る。
+- full-value dynamic shared accumulator案も試したが、block並列性を失ってさらに遅くなったため採用しなかった。
+- R9700で `L=4096,M=16,q_heads=16,kv_heads=1,head_dim=256,value_dim=256` を測定し、`17.222257ms` から `15.438269ms` へ改善した。
+- ただし既存 `cached_prefix_flash2 fp8_e4m3` の `3.952818ms` にはまだ届いていない。
+- 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c13-rdna4-fp8-rocwmma-value-group64-v1.md` に保存した。
+
+観察:
+
+- 64列groupは、32列groupより長prefixで速く、128列groupやfull-value groupよりも速かった。
+- 現時点の律速は、QK/softmax再計算がまだ4回残ることと、V accumulationが十分に効率化されていないこと。
+- rocWMMAでQKだけ高速化しても、`value_dim=256` のV側をうまく並列化できないと既存scalar flash2に勝てない。
+
+次の行動:
+
+1. QK/softmaxを1回だけ計算しつつ、V accumulationのblock並列性を保つ2-stageまたはcooperative-group構造を検討する。
+2. その設計が重い場合は、先にcold-prefill causal attentionへrocWMMA QKを限定導入し、prefill側で効果が出るshapeを探す。
+3. `value_dim=256` のcached-prefixでは、既存flash2超えを引き続き性能gateにする。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。

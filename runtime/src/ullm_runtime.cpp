@@ -273,7 +273,8 @@ public:
         unsigned int block_x,
         void **kernel_params,
         void *stream,
-        int device_id) {
+        int device_id,
+        unsigned int dynamic_shared_bytes = 0) {
         load_once();
         if (hip_module_launch_kernel_ == nullptr || function == nullptr || kernel_params == nullptr ||
             !set_device(device_id)) {
@@ -287,7 +288,7 @@ public:
                    block_x,
                    1,
                    1,
-                   0,
+                   dynamic_shared_bytes,
                    stream,
                    kernel_params,
                    nullptr) == 0;
@@ -11381,15 +11382,16 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
         return false;
     }
     const size_t q_groups_per_kv = q_per_kv / 16u;
-    const size_t value_tiles = value_dim / 16u;
+    constexpr size_t value_group_width = 64u;
+    const size_t value_groups = (value_dim + value_group_width - 1u) / value_group_width;
     if (kv_heads > std::numeric_limits<size_t>::max() / q_groups_per_kv ||
-        kv_heads * q_groups_per_kv > std::numeric_limits<size_t>::max() / value_tiles) {
+        kv_heads * q_groups_per_kv > std::numeric_limits<size_t>::max() / value_groups) {
         if (error != nullptr) {
             *error = "fp8 e4m3 cached prefix rocWMMA attention groups-per-token overflows";
         }
         return false;
     }
-    const size_t groups_per_token = kv_heads * q_groups_per_kv * value_tiles;
+    const size_t groups_per_token = kv_heads * q_groups_per_kv * value_groups;
     if (new_tokens > std::numeric_limits<size_t>::max() / groups_per_token) {
         if (error != nullptr) {
             *error =
@@ -11412,7 +11414,7 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
         return false;
     }
 
-    constexpr unsigned int block_size = 32;
+    constexpr unsigned int block_size = 128;
     unsigned long long kernel_cached_prefix_len =
         static_cast<unsigned long long>(cached_prefix_len);
     unsigned long long kernel_new_tokens = static_cast<unsigned long long>(new_tokens);
@@ -11444,13 +11446,15 @@ bool cached_prefix_attn_fp8_e4m3_rocwmma_hip_kernel(
         &output_ptr,
     };
     void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    const size_t dynamic_shared_bytes = 16u * value_group_width * sizeof(float);
     if (!hip_runtime().module_launch_kernel(
             function,
             static_cast<unsigned int>(grid_size),
             block_size,
             kernel_params,
             hip_stream,
-            device_id)) {
+            device_id,
+            static_cast<unsigned int>(dynamic_shared_bytes))) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for fp8 e4m3 cached prefix rocWMMA attention";
         }
