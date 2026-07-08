@@ -116,27 +116,31 @@
 - v2 builtin conversion結果より `L=65536` のFP8 tok/sまたはpair/sが明確に改善する。
 - F32 baselineに対して、kernel構造による改善とFP8 cache byte削減による改善を分けて説明できる。
 
-### 2026-07-08 progress: cached-prefix flash2 FP8 v1
+### 2026-07-08 progress: cached-prefix flash2 FP8/F32 v1
 
 前回の要点:
 
 - FlashAttention2-style tiled attentionを、まずR9700/RDNA4のcached-prefix FP8 K/V cache向けに実装する方針だった。
 - 既存の `cached_prefix_chunked` は比較baselineとして残す方針だった。
+- F32でも同じexecutor構造を測り、FP8 byte削減効果とkernel構造改善を分けて見る方針だった。
 
 今回の変更点:
 
 - `ullm_runtime_cached_prefix_attn_fp8_e4m3_flash2` を追加した。
+- `ullm_runtime_cached_prefix_attn_f32_flash2` も追加し、F32 KV cacheで同じFlashAttention2-style executorを測れるようにした。
 - `runtime-cached-prefix-attn-smoke` に `cached_prefix_flash2` executorを追加した。
-- HIPRTC kernel `ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel` は、64 token tileのscoreをshared memoryに置き、online softmaxでmax、denominator、weighted valueを更新する。
+- `runtime-cached-prefix-attn-smoke` と `tools/run-runtime-cached-prefix-sweep.py` は、`cached_prefix_flash2` を `fp8_e4m3` と `f32` の両方で実行できる。
+- HIPRTC kernel `ullm_cached_prefix_attn_fp8_e4m3_flash2_kernel` と `ullm_cached_prefix_attn_f32_flash2_kernel` は、64 token tileのscoreをshared memoryに置き、online softmaxでmax、denominator、weighted valueを更新する。
 - R9700で `M=16` と `M=128` の代表gridを測定し、旧FP8 `cached_prefix_chunked` 比で `1.15x-1.50x` のtok/sを確認した。
+- `M=512` でも旧FP8比 `1.23x-1.36x` の改善を確認した。
+- F32 isolation sweepでは、旧F32 `cached_prefix_chunked` 比で `1.20x-1.49x` の改善を確認した。
 - 結果は `benchmarks/results/2026-07-08/runtime-cached-prefix-fp8-kv/phase-c5-flash2-tiled-online-softmax-v1.md` に保存した。
 
 次の行動:
 
-1. `M=512` まで含めた保存gridを追加測定する。
-2. 現v1はWMMA/MFMA未使用なので、QK/Vのmatmul構造をRDNA4向けに詰める。
-3. cold prefill causal attention側にも同じtile online-softmax方針を展開する。
-4. F32版flash2を追加するか、FP8専用最適化として扱うかを次の計測結果で判断する。
+1. 現v1はWMMA/MFMA未使用なので、QK/Vのmatmul構造をRDNA4向けに詰める。
+2. cold prefill causal attention側にも同じtile online-softmax方針を展開する。
+3. package self-attention prefillのattention componentに接続し、SQ候補評価用のprefill pathに近づける。
 
 ## Goal
 

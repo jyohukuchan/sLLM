@@ -2360,14 +2360,6 @@ fn runtime_cached_prefix_attn_smoke_impl(
                 .to_string(),
         );
     }
-    if executor == RuntimeCachedPrefixAttnExecutor::Flash2
-        && kv_cache_dtype != RuntimeCachedPrefixKvCacheDtype::Fp8E4m3
-    {
-        return Err(
-            "runtime cached prefix attention cached_prefix_flash2 executor currently supports only fp8_e4m3 kv cache"
-                .to_string(),
-        );
-    }
     let total_context_tokens = cached_prefix_tokens
         .checked_add(new_tokens)
         .ok_or_else(|| "runtime cached prefix attention total context overflows".to_string())?;
@@ -2616,29 +2608,52 @@ fn runtime_cached_prefix_attn_smoke_impl(
                                 })?;
                         }
                     },
-                    RuntimeCachedPrefixAttnExecutor::Flash2 => {
-                        ullm_runtime_sys::cached_prefix_attn_fp8_e4m3_flash2(
-                            &q_sequence_buffer,
-                            &k_cache_buffer,
-                            &v_cache_buffer,
-                            cached_prefix_tokens,
-                            new_tokens,
-                            q_heads,
-                            kv_heads,
-                            head_dim,
-                            value_dim,
-                            softmax_scale,
-                            k_cache_scale,
-                            v_cache_scale,
-                            &mut output_sequence_buffer,
-                            Some(stream),
-                        )
-                        .map_err(|err| {
-                            format!(
-                                "failed to run runtime fp8 e4m3 cached prefix flash2 attention: {err}"
+                    RuntimeCachedPrefixAttnExecutor::Flash2 => match kv_cache_dtype {
+                        RuntimeCachedPrefixKvCacheDtype::F32 => {
+                            ullm_runtime_sys::cached_prefix_attn_f32_flash2(
+                                &q_sequence_buffer,
+                                &k_cache_buffer,
+                                &v_cache_buffer,
+                                cached_prefix_tokens,
+                                new_tokens,
+                                q_heads,
+                                kv_heads,
+                                head_dim,
+                                value_dim,
+                                softmax_scale,
+                                &mut output_sequence_buffer,
+                                Some(stream),
                             )
-                        })?;
-                    }
+                            .map_err(|err| {
+                                format!(
+                                    "failed to run runtime f32 cached prefix flash2 attention: {err}"
+                                )
+                            })?;
+                        }
+                        RuntimeCachedPrefixKvCacheDtype::Fp8E4m3 => {
+                            ullm_runtime_sys::cached_prefix_attn_fp8_e4m3_flash2(
+                                &q_sequence_buffer,
+                                &k_cache_buffer,
+                                &v_cache_buffer,
+                                cached_prefix_tokens,
+                                new_tokens,
+                                q_heads,
+                                kv_heads,
+                                head_dim,
+                                value_dim,
+                                softmax_scale,
+                                k_cache_scale,
+                                v_cache_scale,
+                                &mut output_sequence_buffer,
+                                Some(stream),
+                            )
+                            .map_err(|err| {
+                                format!(
+                                    "failed to run runtime fp8 e4m3 cached prefix flash2 attention: {err}"
+                                )
+                            })?;
+                        }
+                    },
                     RuntimeCachedPrefixAttnExecutor::DecodeLoop => {
                         for (token_index, (q_buffer, output_buffer)) in
                             q_buffers.iter().zip(output_buffers.iter_mut()).enumerate()

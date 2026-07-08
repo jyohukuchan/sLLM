@@ -17,21 +17,15 @@ from typing import Any
 
 SCHEMA_VERSION = "runtime-cached-prefix-attn-sweep-v0.1"
 SMOKE_PREFIX = "runtime-cached-prefix-attn-smoke "
-EXECUTOR_ENVS = {
-    "cached_prefix_chunked": {
-        "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_KERNEL": "1"
-    },
-    "cached_prefix_flash2": {
-        "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_FLASH2_KERNEL": "1"
-    },
-    "decode_loop": {"ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL": "1"},
-}
+SUPPORTED_KV_CACHE_DTYPES = {"f32", "fp8_e4m3"}
+SUPPORTED_EXECUTORS = {"cached_prefix_chunked", "cached_prefix_flash2", "decode_loop"}
 
 
 @dataclass(frozen=True)
 class SweepCase:
     case_id: str
     executor: str
+    kv_cache_dtype: str
     cached_prefix_tokens: int
     new_prefill_tokens: int
     measured_repeats: int
@@ -44,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cached-prefix-tokens", default="4096,16384,65536")
     parser.add_argument("--new-tokens", default="1,16,128,512")
     parser.add_argument("--executors", default="cached_prefix_chunked")
+    parser.add_argument("--kv-cache-dtype", default="fp8_e4m3")
     parser.add_argument("--q-heads", type=int, default=16)
     parser.add_argument("--kv-heads", type=int, default=4)
     parser.add_argument("--head-dim", type=int, default=256)
@@ -88,7 +83,7 @@ def executor_csv(value: str) -> list[str]:
             item = "cached_prefix_flash2"
         if item == "decode_attn_f32_loop":
             item = "decode_loop"
-        if item not in EXECUTOR_ENVS:
+        if item not in SUPPORTED_EXECUTORS:
             raise SystemExit(
                 "executors must contain cached_prefix_chunked|chunked|cached_prefix_flash2|flash2|decode_loop"
             )
@@ -96,6 +91,33 @@ def executor_csv(value: str) -> list[str]:
     if not executors:
         raise SystemExit("executors must not be empty")
     return executors
+
+
+def kv_cache_dtype(value: str) -> str:
+    dtype = value.strip()
+    if dtype == "fp8":
+        dtype = "fp8_e4m3"
+    if dtype == "fp32":
+        dtype = "f32"
+    if dtype not in SUPPORTED_KV_CACHE_DTYPES:
+        raise SystemExit("kv-cache-dtype must be f32|fp32|fp8_e4m3|fp8")
+    return dtype
+
+
+def required_env_for_case(executor: str, dtype: str) -> dict[str, str]:
+    if executor == "decode_loop":
+        if dtype != "f32":
+            raise SystemExit("decode_loop executor supports only f32 kv cache")
+        return {"ULLM_REQUIRE_HIP_DECODE_ATTN_KERNEL": "1"}
+    if executor == "cached_prefix_chunked":
+        if dtype == "f32":
+            return {"ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_KERNEL": "1"}
+        return {"ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_KERNEL": "1"}
+    if executor == "cached_prefix_flash2":
+        if dtype == "f32":
+            return {"ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL": "1"}
+        return {"ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_FP8_E4M3_FLASH2_KERNEL": "1"}
+    raise SystemExit(f"unsupported executor: {executor}")
 
 
 def ensure_positive(value: int | float, label: str) -> None:
@@ -129,6 +151,7 @@ def build_cases(args: argparse.Namespace) -> list[SweepCase]:
     prefixes = positive_int_csv(args.cached_prefix_tokens, "cached-prefix-tokens")
     new_tokens_values = positive_int_csv(args.new_tokens, "new-tokens")
     executors = executor_csv(args.executors)
+    dtype = kv_cache_dtype(args.kv_cache_dtype)
     ensure_non_negative(args.device_index, "device-index")
     for label in [
         "q-heads",
@@ -161,11 +184,12 @@ def build_cases(args: argparse.Namespace) -> list[SweepCase]:
                     args.long_prefix_threshold,
                     args.long_new_token_threshold,
                 )
-                case_id = f"{executor}-l{cached_prefix_tokens}-m{new_tokens}"
+                case_id = f"{executor}-{dtype}-l{cached_prefix_tokens}-m{new_tokens}"
                 cases.append(
                     SweepCase(
                         case_id=case_id,
                         executor=executor,
+                        kv_cache_dtype=dtype,
                         cached_prefix_tokens=cached_prefix_tokens,
                         new_prefill_tokens=new_tokens,
                         measured_repeats=repeats,
@@ -223,6 +247,7 @@ def command_for_case(args: argparse.Namespace, case: SweepCase) -> list[str]:
         str(args.head_dim),
         str(args.value_dim),
         case.executor,
+        case.kv_cache_dtype,
     ]
 
 
@@ -235,16 +260,18 @@ def output_executor(case: SweepCase) -> str:
 def run_case(args: argparse.Namespace, run_id: str, case: SweepCase) -> dict[str, Any]:
     command = command_for_case(args, case)
     env = os.environ.copy()
-    env.update(EXECUTOR_ENVS[case.executor])
+    required_env = required_env_for_case(case.executor, case.kv_cache_dtype)
+    env.update(required_env)
     common = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "case_id": case.case_id,
         "command": command,
-        "required_env": EXECUTOR_ENVS[case.executor],
+        "required_env": required_env,
         "workload": {
             "prefill_mode": "cached_prefix",
             "executor": output_executor(case),
+            "kv_cache_dtype": case.kv_cache_dtype,
             "cached_prefix_tokens": case.cached_prefix_tokens,
             "new_prefill_tokens": case.new_prefill_tokens,
             "total_context_tokens_after_prefill": case.cached_prefix_tokens
@@ -353,8 +380,8 @@ def write_summary(path: Path, rows: list[dict[str, Any]]) -> None:
         f"- schema: `{SCHEMA_VERSION}`",
         f"- rows: {len(rows)}",
         "",
-        "| status | executor | L | M | repeats | mean ms | new tok/s | pair/s | diff |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| status | executor | dtype | L | M | repeats | mean ms | new tok/s | pair/s | diff |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         workload = row.get("workload", {})
@@ -366,6 +393,7 @@ def write_summary(path: Path, rows: list[dict[str, Any]]) -> None:
                 [
                     str(row.get("status", "")),
                     str(workload.get("executor", "")),
+                    str(workload.get("kv_cache_dtype", "")),
                     format_value(workload.get("cached_prefix_tokens"), 0),
                     format_value(workload.get("new_prefill_tokens"), 0),
                     format_value(workload.get("measured_repeats"), 0),
