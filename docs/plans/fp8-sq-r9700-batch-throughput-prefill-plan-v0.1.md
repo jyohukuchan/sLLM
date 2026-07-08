@@ -3344,6 +3344,32 @@ Inventory:
 2. 小さいB=2 / prompt=2 / generated=1で、full mixed pathの `prefill_real_batch=true` / `decode_real_batch=true` smokeを作る。
 3. その後、weights共有とactual throughputの改善へ進む。
 
+## 2026-07-09 progress: T1 linear-attn request state smoke
+
+前回の要点:
+
+- `PackageLinearAttnResidentStepBatchLayer` は追加済みだったが、unit test中心で、実package上の実行証拠はまだなかった。
+- full mixed-attention runnerへ進むには、linear-attention層のrecurrent stateとcausal Conv1d historyがrequest間で混ざらないことを実行時にも確認する必要があった。
+
+今回の変更点:
+
+- `package-linear-attn-request-state-smoke` を追加した。
+- R9700上で実packageのlinear-attention layer `0` を `request_count=2`、`sequence_len=2` でinterleaved実行した。
+- batch ownerの出力を、requestごとに単体 `PackageLinearAttnResidentStepLayer` をロードし直したserial referenceと比較した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t1-linear-attn-request-state-smoke-v1.md` に保存した。
+
+判断:
+
+- `serial_reference_max_abs_diff=0.000000000`、`nonfinite_count=0`、`unknown_request_rejected=true` で、request state ownerが実package上でもstate分離guardとして動くことを確認した。
+- このsmokeはthroughput rowではない。`interleaved_step_tps=80.056352` はsynchronous readback込みの小さいstate smoke値であり、SQ性能比較には使わない。
+- 現在はrequest slotごとにresident weightsを複製するため、full package throughputの最終形ではshared resident weight + per-request state bufferへ寄せる必要がある。
+
+次の行動:
+
+1. full mixed-attention runnerのlayer enumにself-attention resident step layerとlinear-attn request-state ownerを並べる。
+2. manifest order `0..31` の小さいB=2 / prompt=2 / generated=1 full mixed path smokeを作る。
+3. full mixed smoke後に、weights共有とactual throughput改善へ進む。
+
 ## Risks
 
 | risk | impact | handling |

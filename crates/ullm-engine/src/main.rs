@@ -606,6 +606,14 @@ fn main() -> ExitCode {
             env::args().nth(5),
             env::args().nth(6),
         ),
+        Some("package-linear-attn-request-state-smoke") => package_linear_attn_request_state_smoke(
+            env::args().nth(2),
+            env::args().nth(3),
+            env::args().nth(4),
+            env::args().nth(5),
+            env::args().nth(6),
+            env::args().nth(7),
+        ),
         Some("package-linear-attn-aux-smoke") => package_linear_attn_aux_smoke(
             env::args().nth(2),
             env::args().nth(3),
@@ -37942,6 +37950,262 @@ fn package_linear_attn_stateful_step_smoke_impl(
     ))
 }
 
+fn package_linear_attn_request_state_smoke(
+    path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    request_count: Option<String>,
+    sequence_len: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("package-linear-attn-request-state-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 0, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let request_count = match parse_optional_usize(request_count, 2, "request count") {
+        Ok(value) if (1..=4).contains(&value) => value,
+        Ok(_) => {
+            eprintln!(
+                "request count must be between 1 and 4 for package-linear-attn-request-state-smoke"
+            );
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let sequence_len = match parse_optional_usize(sequence_len, 2, "sequence length") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("sequence length must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+
+    match package_linear_attn_request_state_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        request_count,
+        sequence_len,
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn package_linear_attn_request_state_smoke_impl(
+    path: &str,
+    device_index: u32,
+    chunk_bytes: usize,
+    layer_index: usize,
+    request_count: usize,
+    sequence_len: usize,
+) -> Result<String, String> {
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create linear-attn request-state context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query linear-attn request-state device: {err}"))?;
+    let mut stream = context
+        .create_stream()
+        .map_err(|err| format!("failed to create linear-attn request-state stream: {err}"))?;
+
+    let mut request_ids = Vec::with_capacity(request_count);
+    for request_index in 0..request_count {
+        let offset = u64::try_from(request_index)
+            .map_err(|_| "request index is too large for RequestId".to_string())?;
+        request_ids.push(RequestId(501 + offset));
+    }
+    let mut batch_layer = PackageLinearAttnResidentStepBatchLayer::load(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        layer_index,
+        request_ids.clone(),
+    )?;
+    if batch_layer.layer_index() != layer_index {
+        return Err(format!(
+            "linear-attn request-state layer index mismatch: got {} expected {layer_index}",
+            batch_layer.layer_index()
+        ));
+    }
+    if batch_layer.request_count() != request_count {
+        return Err(format!(
+            "linear-attn request-state request count mismatch: got {} expected {request_count}",
+            batch_layer.request_count()
+        ));
+    }
+    if batch_layer.request_ids() != request_ids.as_slice() {
+        return Err("linear-attn request-state request id order changed".to_string());
+    }
+    let hidden = batch_layer.hidden();
+    let mut request_slots = Vec::with_capacity(request_count);
+    for request_id in &request_ids {
+        request_slots.push(batch_layer.request_slot(*request_id)?);
+    }
+    let unknown_request_rejected = batch_layer.request_slot(RequestId(u64::MAX)).is_err();
+    if !unknown_request_rejected {
+        return Err("linear-attn request-state accepted an unknown request id".to_string());
+    }
+
+    let mut base_inputs = Vec::with_capacity(request_count);
+    for request_index in 0..request_count {
+        let mut base = deterministic_f32_vector(hidden);
+        let request_scale = (request_index as f32 + 1.0_f32) * 0.0005_f32;
+        for (feature_index, value) in base.iter_mut().enumerate() {
+            let phase = (feature_index % 31) as f32 - 15.0_f32;
+            *value += phase * request_scale;
+        }
+        base_inputs.push(base);
+    }
+
+    let mut batch_outputs_by_request = (0..request_count)
+        .map(|_| Vec::with_capacity(sequence_len * hidden))
+        .collect::<Vec<_>>();
+    let interleaved_started = Instant::now();
+    let mut output_max_abs = 0.0_f32;
+    let mut nonfinite_count = 0_usize;
+    let mut first_output_preview = None;
+    let mut last_output_preview = String::new();
+    for timestep in 0..sequence_len {
+        for (request_index, &request_id) in request_ids.iter().enumerate() {
+            let residual = linear_attn_step_input(&base_inputs[request_index], timestep);
+            let label = format!(
+                "linear-attn request-state request={} timestep={timestep}",
+                request_id.0
+            );
+            batch_layer.step_from_host_to_device(&mut stream, request_id, &residual, &label)?;
+            let output = batch_layer.read_output(&mut stream, request_id)?;
+            if output.len() != hidden {
+                return Err(format!(
+                    "linear-attn request-state output length mismatch: request={} timestep={timestep} got {} expected {hidden}",
+                    request_id.0,
+                    output.len()
+                ));
+            }
+            for &value in &output {
+                if value.is_finite() {
+                    output_max_abs = output_max_abs.max(value.abs());
+                } else {
+                    nonfinite_count += 1;
+                }
+            }
+            let preview_len = output.len().min(6);
+            let preview = format_f32_preview(&output[..preview_len]);
+            if first_output_preview.is_none() {
+                first_output_preview = Some(preview.clone());
+            }
+            last_output_preview = preview;
+            batch_outputs_by_request[request_index].extend_from_slice(&output);
+        }
+    }
+    let interleaved_wall_ms = interleaved_started.elapsed().as_secs_f64() * 1000.0;
+    let interleaved_steps = request_count
+        .checked_mul(sequence_len)
+        .ok_or_else(|| "linear-attn request-state step count overflows".to_string())?;
+    if nonfinite_count != 0 {
+        return Err(format!(
+            "linear-attn request-state produced {nonfinite_count} non-finite output values"
+        ));
+    }
+    if output_max_abs == 0.0 {
+        return Err("linear-attn request-state produced only zero outputs".to_string());
+    }
+
+    drop(batch_layer);
+
+    let mut serial_max_abs_diff = 0.0_f32;
+    let serial_started = Instant::now();
+    for (request_index, request_id) in request_ids.iter().enumerate() {
+        let mut serial_layer = PackageLinearAttnResidentStepLayer::load(
+            &mut context,
+            &mut stream,
+            path,
+            chunk_bytes,
+            layer_index,
+        )
+        .map_err(|err| {
+            format!(
+                "failed to load linear-attn serial reference layer {layer_index} for request {}: {err}",
+                request_id.0
+            )
+        })?;
+        let mut serial_outputs = Vec::with_capacity(sequence_len * hidden);
+        for timestep in 0..sequence_len {
+            let output = serial_layer.step(
+                &mut stream,
+                &linear_attn_step_input(&base_inputs[request_index], timestep),
+            )?;
+            serial_outputs.extend(output);
+        }
+        let diff = verify_f32_close(
+            &format!(
+                "linear-attn request-state serial reference request {}",
+                request_id.0
+            ),
+            &batch_outputs_by_request[request_index],
+            &serial_outputs,
+            3e-3,
+            2e-5,
+        )?;
+        serial_max_abs_diff = serial_max_abs_diff.max(diff);
+    }
+    let serial_reference_wall_ms = serial_started.elapsed().as_secs_f64() * 1000.0;
+    let interleaved_step_tps = if interleaved_wall_ms > 0.0 {
+        interleaved_steps as f64 / (interleaved_wall_ms / 1000.0)
+    } else {
+        0.0
+    };
+    let request_ids_u64 = request_ids
+        .iter()
+        .map(|request_id| request_id.0)
+        .collect::<Vec<_>>();
+    let first_output_preview = first_output_preview.unwrap_or_else(|| "[]".to_string());
+
+    Ok(format!(
+        "package-linear-attn-request-state-smoke package={} layer={} request_count={} sequence_len={} request_ids={:?} request_slots={:?} hidden={} interleaved_steps={} state_owner=PackageLinearAttnResidentStepBatchLayer state_isolated_by_request=true shared_weight_final_design=false full_mixed_runner=false backend={} device_index={} name=\"{}\" interleaved_wall_ms={interleaved_wall_ms:.6} serial_reference_wall_ms={serial_reference_wall_ms:.6} interleaved_step_tps={interleaved_step_tps:.6} output_max_abs={output_max_abs:.9} serial_reference_max_abs_diff={serial_max_abs_diff:.9} nonfinite_count={} unknown_request_rejected={} first_output_preview={} last_output_preview={} verified=true",
+        path,
+        layer_index,
+        request_count,
+        sequence_len,
+        request_ids_u64,
+        request_slots,
+        hidden,
+        interleaved_steps,
+        info.backend,
+        device_index,
+        info.name,
+        nonfinite_count,
+        unknown_request_rejected,
+        first_output_preview,
+        last_output_preview,
+    ))
+}
+
 const PACKAGE_ROW_SCALE_OVERRIDES_SCHEMA_VERSION: &str = "package-row-scale-overrides-v0.1";
 const PACKAGE_CELL_DELTA_OVERRIDES_SCHEMA_VERSION: &str = "package-cell-delta-overrides-v0.1";
 
@@ -41243,6 +41507,9 @@ fn print_help() {
     );
     eprintln!(
         "package-linear-attn-stateful-step-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [SEQUENCE_LEN]"
+    );
+    eprintln!(
+        "package-linear-attn-request-state-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [REQUEST_COUNT<=4] [SEQUENCE_LEN]"
     );
     eprintln!("linear attention projection selector: a|b|qkv|z|out|all");
     eprintln!("self attention projection selector: q|k|v|o|all (alias: out for o)");
