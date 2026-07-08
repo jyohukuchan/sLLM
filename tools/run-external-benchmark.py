@@ -39,6 +39,13 @@ def parse_float(value: Any) -> float | None:
         return None
 
 
+def first_non_null(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def run_text(command: list[str]) -> str | None:
     try:
         completed = subprocess.run(
@@ -506,8 +513,23 @@ def parse_ullm_batch_throughput_metrics(
 def parse_ullm_component_prefill_metrics(
     report: dict[str, Any], memory: dict[str, Any]
 ) -> dict[str, Any]:
+    prompt_tokens = first_non_null(
+        parse_int(report.get("prompt_tokens_per_request")),
+        parse_int(report.get("prompt_tokens")),
+    )
+    request_parallelism = first_non_null(
+        parse_int(report.get("request_parallelism")),
+        parse_int(report.get("concurrent_requests")),
+        parse_int(report.get("batch_count")),
+        1,
+    )
     prefill_tokens = parse_int(report.get("prefill_total_input_tokens"))
-    prefill_tps = parse_float(report.get("prefill_total_input_tps"))
+    if prefill_tokens is None and prompt_tokens is not None and request_parallelism is not None:
+        prefill_tokens = prompt_tokens * request_parallelism
+    prefill_tps = first_non_null(
+        parse_float(report.get("prefill_total_input_tps")),
+        parse_float(report.get("token_tps_mean")),
+    )
     wall_ms = parse_float(report.get("wall_ms_mean"))
     consumed_bytes = memory.get("consumed_total_bytes")
     return {
@@ -661,17 +683,33 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
     row_workload = row.get("workload")
     if not isinstance(row_workload, dict):
         return
-    batch_count = parse_int(report.get("batch_count"))
-    concurrent_requests = parse_int(report.get("concurrent_requests")) or batch_count
-    prompt_tokens = parse_int(report.get("prompt_tokens_per_request"))
+    request_parallelism = first_non_null(parse_int(report.get("request_parallelism")), 1)
+    batch_count = first_non_null(
+        parse_int(report.get("batch_count")),
+        parse_int(report.get("concurrent_requests")),
+        request_parallelism,
+    )
+    concurrent_requests = first_non_null(
+        parse_int(report.get("concurrent_requests")),
+        batch_count,
+    )
+    prompt_tokens = first_non_null(
+        parse_int(report.get("prompt_tokens_per_request")),
+        parse_int(report.get("prompt_tokens")),
+    )
     prefill_tokens = parse_int(report.get("prefill_total_input_tokens"))
+    if prefill_tokens is None and prompt_tokens is not None and concurrent_requests is not None:
+        prefill_tokens = prompt_tokens * concurrent_requests
     estimated_work = parse_int(report.get("estimated_prefill_attention_work_tokens"))
     executor = report.get("executor")
+    batching_mode = report.get("batching_mode")
+    if not isinstance(batching_mode, str):
+        batching_mode = "real" if report.get("real_batch") is True else None
     if batch_count is not None:
         row_workload["batch_size"] = batch_count
     if concurrent_requests is not None:
         row_workload["concurrent_requests"] = concurrent_requests
-    row_workload["prefill_mode"] = report.get("prefill_mode")
+    row_workload["prefill_mode"] = report.get("prefill_mode") or "cold"
     if isinstance(executor, str):
         row_workload["prefill_executor"] = executor
         row_workload["resolved_prefill_executor"] = executor
@@ -686,10 +724,10 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
     if estimated_work is not None:
         row_workload["estimated_prefill_attention_work_tokens"] = estimated_work
     row["batching"] = {
-        "mode": report.get("batching_mode"),
+        "mode": batching_mode,
         "prefill_executor": executor,
         "resolved_prefill_executor": executor,
-        "prefill_real_batch": report.get("batching_mode") == "real",
+        "prefill_real_batch": batching_mode == "real",
         "prefill_executor_token_parallelism": parse_int(report.get("token_parallelism")),
         "prefill_executor_request_parallelism": parse_int(report.get("request_parallelism")),
         "decode_executor": None,
@@ -697,6 +735,7 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
         "decode_executor_request_parallelism": 0,
         "scheduler_policy": "component_fixed_batch",
         "component_command": report.get("command"),
+        "component_package": report.get("package"),
     }
 
 
@@ -969,7 +1008,10 @@ def main() -> int:
             "inf_count": None,
             "verified_all": verified if isinstance(verified, bool) else None,
             "sample_count": parse_int(ullm_report.get("sample_count")),
-            "sampled_max_abs_diff": parse_float(ullm_report.get("sampled_max_abs_diff")),
+            "sampled_max_abs_diff": first_non_null(
+                parse_float(ullm_report.get("sampled_max_abs_diff")),
+                parse_float(ullm_report.get("max_abs_diff")),
+            ),
         }
         ullm_correctness = None
     if ullm_correctness is not None:

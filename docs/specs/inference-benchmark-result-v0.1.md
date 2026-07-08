@@ -264,6 +264,13 @@ These rows are real-batch component rows, not full package throughput rows. They
 or component is using request/token parallelism, but they must not be used as final SQ package
 throughput until connected to the package runner.
 
+The same parser also accepts package-backed component smoke output such as
+`package-prefill-aq4-matvec-batch-smoke`. Those rows should preserve `batching.component_package`
+and may derive `prefill_total_input_tokens_per_second` from `token_tps_mean` when the component
+stdout does not emit the package-batch field name directly. These rows prove that the real-batch
+component path is connected to a `.ullm.d` package, but they are still not whole-model package total
+throughput rows.
+
 SQ candidate rows may also carry a top-level `candidate` object:
 
 - `candidate.id`: e.g. `sq-fp8-w8a16-r9700-v0`

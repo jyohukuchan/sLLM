@@ -1,0 +1,36 @@
+{
+  "cases": [
+    {
+      "case_id": "aq4-r9700-package-kproj-batch-prefill-pp2",
+      "command": "package-prefill-aq4-matvec-batch-smoke",
+      "component_args": [
+        "model.language_model.layers.3.self_attn.k_proj.weight",
+        "len:2",
+        "1"
+      ],
+      "context_length": 2,
+      "prompt_tokens": 2
+    }
+  ],
+  "chunk_bytes": 1048576,
+  "device_index": 2,
+  "engine": "target/debug/ullm-engine",
+  "engine_name": "uLLM",
+  "gpu_card": "card2",
+  "kv_cache_dtype": "f32",
+  "measured_runs": 1,
+  "memory_sample_interval": 1.0,
+  "model_format": "ullm-package",
+  "model_name": "Qwen3.5-9B",
+  "model_quantization": "AQ4",
+  "notes": [
+    "T1 smoke for package-backed prefill component real-batch runner",
+    "This is not final package total throughput; decode and whole-model scheduling remain pending."
+  ],
+  "package_dir": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+  "require_hip_kernels": true,
+  "run_id": "r9700-aq4-package-prefill-component-real-batch-smoke",
+  "schema_version": "ullm-package-prefill-component-workload-v0.1",
+  "timeout_seconds": 60,
+  "warmup_runs": 0
+}

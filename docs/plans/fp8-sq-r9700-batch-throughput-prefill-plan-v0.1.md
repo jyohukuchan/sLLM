@@ -35,6 +35,7 @@
 - `kup6_gate5_down5` の選択FP8 family/layerとfallback family/layerを `sq-fp8-policy-v0.1` として保存した。
 - `tools/build-sq-fp8-w8a16-artifact.py` は `--policy-json` で `sq-fp8-policy-v0.1` を読み、policyのinclude regex、candidate ID、row-block scaleをartifact manifestへ反映できる。
 - `kup6_gate5_down5` policyから実FP8 payload artifactを生成し、R9700で `sq-fp8-materialize-smoke` を通した。
+- T1では、`.ullm.d` package pathからpackage-backed prefill component real-batch smokeを実行し、`inference-benchmark-result-v0.1` JSONLへ保存できるrunnerを追加した。
 - したがって現時点では、T2は「品質境界をかなり狭めたがfull-target SQ guard未完了」と扱う。
 - 一方で、prefill/cached-prefix attentionはSQ候補評価の前提速度としては一旦十分と判断する。追加のFlashAttention2-like最適化は有益だが、SQ策定フェーズを止めるblockerにはしない。
 - 以後の主軸は、FP8 SQ候補の品質境界を固定し、real batch total throughputを測り、AQ4 baselineとvLLM参考値へ同じschemaで接続することに移す。
@@ -935,6 +936,27 @@ R9700 schema/control-plane smoke:
 2. full package throughput判断にはまだ使わない。
 3. 次はpackage prefillまたはdecode runnerをこのreal-batch executor pathへ接続する。
 
+### T1 current status: package prefill component runner v1
+
+前回の要点:
+
+- component prefill real-batch outputはJSONLへ変換できるようになった。
+- ただしsynthetic runtime componentであり、`.ullm.d` package pathとはまだ接続されていなかった。
+
+今回の変更点:
+
+- `tools/run-package-prefill-component-workload.py` を追加した。
+- `ullm-package-prefill-component-workload-v0.1` manifestからpackage-backed component smokeを実行し、`run-external-benchmark.py --parse ullm-component-prefill` で `inference-benchmark-result-v0.1` JSONLへ保存する。
+- parserは `package-prefill-aq4-matvec-batch-smoke` のようなpackage component stdoutも読めるようになり、`token_tps_mean` から `prefill_total_input_tokens_per_second` を補完し、`real_batch=true` を `batching.mode=real` として保存する。
+- R9700で `package-prefill-aq4-matvec-batch-smoke` を `.ullm.d` packageに対して実行し、`batching.mode=real`、`prefill_real_batch=true`、`prefill_executor=aq4_matvec_batch_f32`、`prefill_total_input_tokens_per_second=19063.596157` を確認した。
+- 結果は `benchmarks/results/2026-07-08/package-batch-throughput/phase-t1-package-prefill-component-runner-v1.md` に保存した。
+
+次の行動:
+
+1. package-backed component runnerはT1の中間段階として保持する。
+2. full package throughput判断にはまだ使わない。
+3. 次はrequest batch `batch=1/4/8` とdecode/end-to-end total throughputへ広げる。
+
 ### T2: FP8 SQ candidate package/runtime prototype, 3-5 days
 
 目的:
@@ -1136,7 +1158,7 @@ Exit criteria:
 
 1. このartifactはruntime boundary check用に使える。
 2. throughput比較ではhost-side materialize/load timingを使わない。
-3. T1 full package real-batch runnerを進める。
+3. T1 package-backed component runnerをfull package total throughput runnerへ広げる。
 
 ### T3: Prefill optimization v0.1, 4-7 days
 
@@ -1928,7 +1950,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | --- | --- | --- |
 | T0 state freeze | done | `benchmarks/results/2026-07-08/sq-r9700-state-freeze-v0.1.json`, `.md` |
 | T1 result schema preservation | partial done | `docs/specs/batch-throughput-workload-v0.1.md`, `docs/specs/inference-benchmark-result-v0.1.md`, `tools/run-external-benchmark.py` |
-| T1 real batch/total throughput runner | not done | next runner work |
+| T1 real batch/total throughput runner | partial done with package-backed component runner | `tools/run-package-prefill-component-workload.py`, `benchmarks/workloads/r9700-aq4-package-prefill-component-real-batch-smoke.json`, `phase-t1-package-prefill-component-runner-v1.md`; full package decode/end-to-end total throughput is still not done. |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done with policy artifact verified | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; actual `kup6_gate5_down5` payload artifact generated under `/tmp` with `22` FP8 tensors and `753` passthrough tensors. |
 | T2 runtime load path | partial done with policy artifact materialize verified | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization; policy artifact materialize smoke verified on R9700. |
@@ -1939,7 +1961,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 1. `kup6_gate5_down5` は6層strict-top1 regression subsetとして固定する。
 2. `kup6_ogatedown5` はstrict-top1 failureかつnear-miss diagnosticとして残す。
 3. T2は、`sq-fp8-kup6-gate5-down5-policy-v0.1.json` を `--policy-json` で渡し、次のartifact生成とfallback記録の基準にする。
-4. T1 real batch runnerを実装し、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executor、VRAM peakが失われないことを確認する。
+4. T1 real batch runnerをpackage-backed componentからfull package total throughputへ広げ、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executor、VRAM peakが失われないことを確認する。
 5. FP8 SQ候補のthroughput評価では、overlay load timingを使わない。native FP8、materialization-aware path、または明示的にmaterialized working-setを保存したruntime pathだけを速度比較対象にする。
 6. T3の追加prefill kernel作業は、SQ候補比較で不足が見えたcaseだけに限定する。現時点ではcached-prefix/cold-prefill component速度はSQ評価へ進む前提として十分と扱う。
 7. T5でAQ4 latest baselineとFP8 SQ候補を同じworkload gridで測り、quality、VRAM、resident bytes、working-set bytes、prefill/decode/end-to-end total throughputを比較する。
@@ -2017,6 +2039,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - SQ策定フェーズの主順序を、T2品質境界固定、T1 real batch throughput runner、T5 AQ4/FP8比較、T6/T7 vLLM比較に並べ直す。
 - T2では、`kup6_gate5_down5` を6層strict-top1 regression subsetとして扱う。ただしcase_aのtop8 overlapは低いため、full SQ policyには昇格しない。選択FP8/fallback方針は `sq-fp8-policy-v0.1` として保存した。
 - T1では、component prefill real-batch smoke outputを `inference-benchmark-result-v0.1` JSONLへ変換できる `ullm-component-prefill` parserを追加した。
+- T1では、`.ullm.d` package-backed prefill component smokeを同じJSONL経路へ流すrunnerを追加した。ただしfull package total throughputではない。
 - T2では、`kup6_gate5_down5` policyから実FP8 payload artifactを生成し、runtime materialize smokeまで確認した。
 - throughput評価では、SQ overlayのhost-side materialize/load timingを使わない。速度比較はnative FP8 path、materialization-aware runtime path、またはworking-setを明示したpathに限定する。
 - SQ候補の採用判断では、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、quality、VRAM、resident bytes、materialized working-set bytesを同じ表で見る。
@@ -2024,7 +2047,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 次の行動:
 
 1. `sq-fp8-kup6-gate5-down5-policy-v0.1.json` を `--policy-json` で渡して、次のSQ artifact生成とfallback理由記録を固定する。
-2. real batch runnerをfull package pathへ接続し、`batch=1/4/8` のprefill/decode/end-to-end total throughputを保存する。
+2. real batch runnerをfull package component pathからrequest batchとdecode/end-to-end pathへ広げ、`batch=1/4/8` のprefill/decode/end-to-end total throughputを保存する。
 3. FP8 SQ候補1とAQ4 latest baselineを同じworkload gridで測る。
 4. cold prefill、cached prefix、decodeの代表gridを埋める。cached-prefixでは `cached_prefix_rdna4_fp8_auto` と `resolved_executor` を使う。
 5. uLLM側のR9700結果が揃った後、vLLMを同じgridで測る。R9700 FP8がunsupportedなら、unsupported reason付きの比較行として残す。

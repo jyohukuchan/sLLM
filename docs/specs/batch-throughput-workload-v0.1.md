@@ -155,3 +155,41 @@ These rows may report:
 Component real-batch rows are useful for validating kernel-level request/token parallelism and
 schema preservation. They are not full package throughput rows until a package prefill/decode runner
 uses the same real-batch executor path.
+
+## Package Prefill Component Workload
+
+`tools/run-package-prefill-component-workload.py` consumes
+`ullm-package-prefill-component-workload-v0.1` manifests. This runner is a bridge between synthetic
+component rows and full package throughput rows: each case starts from a `.ullm.d` package path,
+calls a package-backed component smoke command, and writes `inference-benchmark-result-v0.1` JSONL
+through `tools/run-external-benchmark.py --parse ullm-component-prefill`.
+
+Example:
+
+```json
+{
+  "schema_version": "ullm-package-prefill-component-workload-v0.1",
+  "run_id": "r9700-aq4-package-prefill-component-real-batch-smoke",
+  "package_dir": "/tmp/model.ullm.d",
+  "engine": "target/debug/ullm-engine",
+  "model_name": "Qwen3.5-9B",
+  "model_quantization": "AQ4",
+  "gpu_card": "card2",
+  "device_index": 2,
+  "cases": [
+    {
+      "case_id": "aq4-kproj-pp2",
+      "command": "package-prefill-aq4-matvec-batch-smoke",
+      "prompt_tokens": 2,
+      "component_args": [
+        "model.language_model.layers.3.self_attn.k_proj.weight",
+        "len:2",
+        "1"
+      ]
+    }
+  ]
+}
+```
+
+This runner does not replace `package-batch-throughput-bench`. Its rows are package-backed
+component rows, not end-to-end total throughput rows.

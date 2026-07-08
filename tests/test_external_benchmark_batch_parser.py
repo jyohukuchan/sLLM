@@ -181,6 +181,54 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["batching"]["prefill_executor_request_parallelism"], 2)
         self.assertEqual(row["batching"]["prefill_executor_token_parallelism"], 32)
 
+    def test_parses_package_prefill_component_real_batch_key_value_output(self) -> None:
+        stdout = (
+            "package-prefill-aq4-matvec-batch-smoke "
+            "package=/tmp/model.ullm.d "
+            'tensor="model.language_model.layers.3.self_attn.k_proj.weight" '
+            "prompt_tokens=2 hidden=4096 rows=1024 cols=4096 "
+            "input_elements=8192 output_elements=2048 "
+            "executor=aq4_matvec_batch_f32 real_batch=true token_parallelism=2 "
+            "request_parallelism=1 backend=hip device_index=2 "
+            'name="AMD Radeon Graphics" warmup_runs=1 measured_repeats=1 '
+            "wall_ms_mean=0.104112 wall_ms_min=0.104112 wall_ms_max=0.104112 "
+            "token_tps_mean=19210.081451 element_tps_mean=19671123.405563 "
+            "max_abs_diff=0.000000101 verified=true"
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_component_prefill_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 1,
+                "concurrent_requests": 1,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+        TOOL.enrich_ullm_component_prefill_row(row, report)
+
+        self.assertEqual(report["command"], "package-prefill-aq4-matvec-batch-smoke")
+        self.assertEqual(metrics["prefill_total_input_tokens"], 2)
+        self.assertEqual(metrics["prefill_total_input_tokens_per_second"], 19210.081451)
+        self.assertEqual(metrics["prefill_wall_time_seconds"], 0.000104112)
+        self.assertEqual(row["workload"]["prefill_mode"], "cold")
+        self.assertEqual(row["workload"]["prompt_tokens_per_request"], [2])
+        self.assertEqual(row["batching"]["mode"], "real")
+        self.assertTrue(row["batching"]["prefill_real_batch"])
+        self.assertEqual(row["batching"]["prefill_executor"], "aq4_matvec_batch_f32")
+        self.assertEqual(row["batching"]["prefill_executor_request_parallelism"], 1)
+        self.assertEqual(row["batching"]["prefill_executor_token_parallelism"], 2)
+        self.assertEqual(row["batching"]["component_package"], "/tmp/model.ullm.d")
+
 
 if __name__ == "__main__":
     unittest.main()
