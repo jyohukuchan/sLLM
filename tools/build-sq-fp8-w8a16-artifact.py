@@ -50,7 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-artifact", required=True, type=Path)
     parser.add_argument("--candidate-id", default=DEFAULT_CANDIDATE_ID)
     parser.add_argument("--base-package", type=Path)
-    parser.add_argument("--scale-granularity", choices=("row", "tensor"), default="row")
+    parser.add_argument("--scale-granularity", choices=("row", "row_block", "tensor"), default="row")
+    parser.add_argument("--scale-block-cols", type=int, default=256)
     parser.add_argument("--activation-dtype", default="bf16_or_f32")
     parser.add_argument("--row-chunk", type=int, default=256)
     parser.add_argument("--include-regex", action="append", default=[])
@@ -235,12 +236,15 @@ def encode_selected_tensor(
     tensor: SelectedTensor,
     output: Path,
     scale_granularity: str,
+    scale_block_cols: int,
     row_chunk: int,
 ) -> dict[str, Any]:
     if not hasattr(torch, "float8_e4m3fn"):
         raise SystemExit("this PyTorch build does not provide torch.float8_e4m3fn")
     if row_chunk <= 0:
         raise SystemExit("row-chunk must be positive")
+    if scale_block_cols <= 0:
+        raise SystemExit("scale-block-cols must be positive")
     source = tensor.source
     if len(source.shape) != 2:
         raise SystemExit(f"FP8 target must be 2D: {source.name}")
@@ -261,6 +265,26 @@ def encode_selected_tensor(
                 encoded = normalized.to(torch.float8_e4m3fn).view(torch.uint8).contiguous()
                 payload_handle.write(encoded.cpu().numpy().tobytes())
                 scale_handle.write(scale.reshape(1).cpu().numpy().astype("float32").tobytes())
+            elif scale_granularity == "row_block":
+                for start in range(0, rows, row_chunk):
+                    end = min(start + row_chunk, rows)
+                    chunk = view[start:end].to(torch.float32)
+                    encoded_blocks = []
+                    scale_blocks = []
+                    for col_start in range(0, cols, scale_block_cols):
+                        col_end = min(col_start + scale_block_cols, cols)
+                        block = chunk[:, col_start:col_end]
+                        scale = block.abs().amax(dim=1) / FP8_E4M3_MAX
+                        scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+                        normalized = (block / scale[:, None]).clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX)
+                        encoded_blocks.append(
+                            normalized.to(torch.float8_e4m3fn).view(torch.uint8).contiguous()
+                        )
+                        scale_blocks.append(scale)
+                    encoded = torch.cat(encoded_blocks, dim=1).contiguous()
+                    scales = torch.stack(scale_blocks, dim=1).contiguous()
+                    payload_handle.write(encoded.cpu().numpy().tobytes())
+                    scale_handle.write(scales.cpu().numpy().astype("float32").tobytes())
             else:
                 for start in range(0, rows, row_chunk):
                     end = min(start + row_chunk, rows)
@@ -286,11 +310,18 @@ def tensor_manifest_entry(
     tensor: SelectedTensor,
     output: Path,
     scale_granularity: str,
+    scale_block_cols: int,
     metadata_only: bool,
 ) -> dict[str, Any]:
     source = tensor.source
     rows = source.shape[0] if len(source.shape) >= 1 else 1
-    scale_elements = 1 if scale_granularity == "tensor" else rows
+    cols = source.shape[1] if len(source.shape) >= 2 else 1
+    if scale_granularity == "tensor":
+        scale_elements = 1
+    elif scale_granularity == "row_block":
+        scale_elements = rows * ((cols + scale_block_cols - 1) // scale_block_cols)
+    else:
+        scale_elements = rows
     payload_bytes = source.elements
     scale_bytes = scale_elements * 4
     entry = {
@@ -309,6 +340,8 @@ def tensor_manifest_entry(
         "scale_elements": scale_elements,
         "scale_bytes": scale_bytes,
     }
+    if scale_granularity == "row_block":
+        entry["scale_block_cols"] = scale_block_cols
     if not metadata_only:
         payload_path = output / tensor.payload_file
         scale_path = output / tensor.scale_file
@@ -348,6 +381,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
                 tensor,
                 args.output_artifact,
                 args.scale_granularity,
+                args.scale_block_cols,
                 args.row_chunk,
             )
 
@@ -357,6 +391,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
             tensor,
             args.output_artifact,
             args.scale_granularity,
+            args.scale_block_cols,
             args.metadata_only or args.dry_run,
         )
         entry.update(encoded_by_name.get(tensor.source.name, {}))

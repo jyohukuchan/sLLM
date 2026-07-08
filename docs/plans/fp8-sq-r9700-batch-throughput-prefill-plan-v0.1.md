@@ -1684,6 +1684,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - 複数self-attention layerへ広げた `layers=3,7` では、attention-only、MLP-only、attention+MLPのいずれもtop1がAQ4 baselineから入れ替わった。AQ4 top1はSQ top8内に残るため壊滅的崩壊ではないが、full-targetへ進む前にfamily/scale/許容基準の切り分けが必要である。
 - family別切り分けでは、`q`、`v`、`down` が単独でtop1を動かし、`k`、`o`、`gate`、`up` は単独ではtop1を保った。さらに `k/o/gate/up` を同時にFP8化したsafe subsetは短い3 promptでtop1一致、`q/v/down` のrisk subsetはtop1不一致だった。
 - safe subsetを `layers=3,7,11,15` へ広げると、短い3 prompt中 `2 / 3` はtop1一致したが、case_aでtop1が入れ替わった。`layers=3,7,11`、layer `15` 単体、`layers=3,7,15` ではcase_aがtop1一致したため、4 self-attention layer時の累積または組み合わせdriftとして扱う。
+- `row_block` scaleを追加した。risk familyでは、`q` はrow-block32、`down` はrow-block64でtop1一致に戻ったが、`v` はblock16/32/64/128でもtop1不一致だった。`v` をfallbackし、`q/k/o/gate/up/down` をrow-block32 FP8にした混合候補は `layers=3,7` の短い3 promptでtop1一致した。
 
 現在のT0-T2状態:
 
@@ -1694,14 +1695,14 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | T1 real batch/total throughput runner | not done | next runner work |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done | `tools/build-sq-fp8-w8a16-artifact.py` |
-| T2 runtime load path | partial done | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py` |
-| T2 short prompt guard | partial done with boundary found | one-tensor and layer-3 projection-set guards passed top1; layers `3,7` found ranking drift and family split; safe subset layer scaling found 4-layer prompt-dependent drift: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md` |
+| T2 runtime load path | partial done | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization |
+| T2 short prompt guard | partial done with boundary found | one-tensor and layer-3 projection-set guards passed top1; layers `3,7` found ranking drift and family split; safe subset layer scaling found 4-layer prompt-dependent drift; row-block scale produced a `v`-fallback mixed candidate: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md` |
 
 次の行動:
 
-1. T2 short guardは、strict-top1基準では `k/o/gate/up` も「候補subset」であり、full-target扱いにはしない。`4layer_case_a` を回帰guardとして残す。
-2. `q/v/down` について、row-F32 scale以外のscale方針または高精度fallbackを試す。
-3. `k/o/gate/up` についても、より多いlayerへ広げる前にprompt bundleを増やすか、top-k/text-level許容基準を明文化する。
+1. T2 short guardは、次に `v` fallback + `q/k/o/gate/up/down` row-block32 FP8を `layers=3,7,11,15` と `4layer_case_a` へ広げる。
+2. `v` については、row-block FP8ではなく高精度fallbackまたは別形式を前提にする。
+3. `4layer_case_a` と `layers=3,7` mixed-candidate bundleを回帰guardとして残す。
 4. T1のrunner smokeを行い、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executorが失われないことを確認する。
 5. T2のfull-target short guardが合格基準を満たした後にT3へ移り、`batch=1/4/8`、cold prefill、cached prefix `L=65536,M=1/16/128/512`、decodeを同じschemaで保存する。
 
@@ -1753,6 +1754,15 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 - `layers=3,7,11,15` preserved top1 in `2 / 3` short prompts but failed case_a.
 - case_a still passed for `layers=3,7,11`, layer `15` alone, and `layers=3,7,15`, so the failure is cumulative or interaction-driven.
 - Result: `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md`.
+
+2026-07-08 SQ FP8 row-block scale risk guard:
+
+- Added `row_block` scale generation and runtime materialization.
+- `q` recovered top1 with row-block32.
+- `down` recovered top1 with row-block64.
+- `v` did not recover top1 for block16/32/64/128.
+- A mixed candidate with `v` fallback and `q/k/o/gate/up/down` row-block32 FP8 passed `3 / 3` short prompts for layers `3,7`.
+- Result: `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md`.
 
 ## Risks
 

@@ -69,6 +69,7 @@ pub struct SqFp8TensorEntry {
     pub scale_file: String,
     pub scale_elements: u64,
     pub scale_bytes: u64,
+    pub scale_block_cols: Option<u64>,
     pub payload_sha256: Option<String>,
     pub scale_sha256: Option<String>,
 }
@@ -375,6 +376,16 @@ pub fn materialize_sq_fp8_tensor_rows_to_host_f32(
         ));
     }
 
+    enum ScaleValues {
+        Row(Vec<f32>),
+        RowBlock {
+            values: Vec<f32>,
+            blocks_per_row: usize,
+            block_cols: usize,
+        },
+        Tensor(f32),
+    }
+
     let scales = match tensor.scale_granularity.as_str() {
         "row" => {
             let scale_offset = start_row
@@ -393,7 +404,78 @@ pub fn materialize_sq_fp8_tensor_rows_to_host_f32(
                     "failed to decode SQ FP8 row scales for {}: {err}",
                     tensor.name
                 )
-            })?
+            })
+            .map(ScaleValues::Row)?
+        }
+        "row_block" => {
+            let block_cols_u64 = tensor.scale_block_cols.ok_or_else(|| {
+                format!(
+                    "SQ FP8 tensor {} row_block scale is missing scale_block_cols",
+                    tensor.name
+                )
+            })?;
+            if block_cols_u64 == 0 {
+                return Err(format!(
+                    "SQ FP8 tensor {} row_block scale_block_cols must be greater than zero",
+                    tensor.name
+                ));
+            }
+            let block_cols = usize::try_from(block_cols_u64).map_err(|_| {
+                format!(
+                    "SQ FP8 tensor {} scale_block_cols does not fit usize",
+                    tensor.name
+                )
+            })?;
+            let blocks_per_row = cols
+                .checked_add(block_cols - 1)
+                .and_then(|value| value.checked_div(block_cols))
+                .ok_or_else(|| {
+                    format!("SQ FP8 tensor {} row_block count overflows", tensor.name)
+                })?;
+            let start_scale_index = start_row.checked_mul(blocks_per_row).ok_or_else(|| {
+                format!(
+                    "SQ FP8 row_block scale offset overflows for {}",
+                    tensor.name
+                )
+            })?;
+            let scale_count = row_count.checked_mul(blocks_per_row).ok_or_else(|| {
+                format!(
+                    "SQ FP8 row_block scale read count overflows for {}",
+                    tensor.name
+                )
+            })?;
+            let scale_offset = start_scale_index
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    format!(
+                        "SQ FP8 row_block scale byte offset overflows for {}",
+                        tensor.name
+                    )
+                })?;
+            let scale_bytes = scale_count
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    format!(
+                        "SQ FP8 row_block scale byte read size overflows for {}",
+                        tensor.name
+                    )
+                })?;
+            let values = decode_f32_le_values_exact(&read_exact_at(
+                &scale_path,
+                scale_offset as u64,
+                scale_bytes,
+            )?)
+            .map_err(|err| {
+                format!(
+                    "failed to decode SQ FP8 row_block scales for {}: {err}",
+                    tensor.name
+                )
+            })?;
+            ScaleValues::RowBlock {
+                values,
+                blocks_per_row,
+                block_cols,
+            }
         }
         "tensor" => {
             let values = decode_f32_le_values_exact(&read_exact_at(
@@ -407,7 +489,7 @@ pub fn materialize_sq_fp8_tensor_rows_to_host_f32(
                     tensor.name
                 )
             })?;
-            vec![values[0]; row_count]
+            ScaleValues::Tensor(values[0])
         }
         other => {
             return Err(format!(
@@ -417,20 +499,64 @@ pub fn materialize_sq_fp8_tensor_rows_to_host_f32(
         }
     };
 
+    match &scales {
+        ScaleValues::Row(values) => {
+            if values.len() != row_count {
+                return Err(format!(
+                    "SQ FP8 tensor {} row scale count mismatch: expected {row_count} got {}",
+                    tensor.name,
+                    values.len()
+                ));
+            }
+        }
+        ScaleValues::RowBlock {
+            values,
+            blocks_per_row,
+            ..
+        } => {
+            let expected = row_count.checked_mul(*blocks_per_row).ok_or_else(|| {
+                format!(
+                    "SQ FP8 tensor {} row_block scale count overflows",
+                    tensor.name
+                )
+            })?;
+            if values.len() != expected {
+                return Err(format!(
+                    "SQ FP8 tensor {} row_block scale count mismatch: expected {expected} got {}",
+                    tensor.name,
+                    values.len()
+                ));
+            }
+        }
+        ScaleValues::Tensor(_) => {}
+    }
+
     let mut output = Vec::with_capacity(payload.len());
     for row in 0..row_count {
-        let scale = scales[row];
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(format!(
-                "SQ FP8 tensor {} row {} has invalid scale {scale}",
-                tensor.name,
-                start_row + row
-            ));
-        }
         let row_start = row
             .checked_mul(cols)
             .ok_or_else(|| format!("SQ FP8 row offset overflows for {}", tensor.name))?;
-        for byte in &payload[row_start..row_start + cols] {
+        for (col, byte) in payload[row_start..row_start + cols].iter().enumerate() {
+            let scale = match &scales {
+                ScaleValues::Row(values) => values[row],
+                ScaleValues::RowBlock {
+                    values,
+                    blocks_per_row,
+                    block_cols,
+                } => {
+                    let block = col / *block_cols;
+                    values[row * *blocks_per_row + block]
+                }
+                ScaleValues::Tensor(value) => *value,
+            };
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err(format!(
+                    "SQ FP8 tensor {} row {} col {} has invalid scale {scale}",
+                    tensor.name,
+                    start_row + row,
+                    col
+                ));
+            }
             let value = fp8_e4m3fn_to_f32(*byte);
             if !value.is_finite() {
                 return Err(format!(
@@ -508,6 +634,32 @@ pub fn sq_fp8_tensor_rows_cols(tensor: &SqFp8TensorEntry) -> Result<(usize, usiz
     })?;
     let expected_scale_elements = match tensor.scale_granularity.as_str() {
         "row" => rows_u64,
+        "row_block" => {
+            let block_cols = tensor.scale_block_cols.ok_or_else(|| {
+                format!(
+                    "SQ FP8 tensor {} row_block scale is missing scale_block_cols",
+                    tensor.name
+                )
+            })?;
+            if block_cols == 0 {
+                return Err(format!(
+                    "SQ FP8 tensor {} row_block scale_block_cols must be greater than zero",
+                    tensor.name
+                ));
+            }
+            let blocks_per_row = cols_u64
+                .checked_add(block_cols - 1)
+                .and_then(|value| value.checked_div(block_cols))
+                .ok_or_else(|| {
+                    format!("SQ FP8 tensor {} row_block count overflows", tensor.name)
+                })?;
+            rows_u64.checked_mul(blocks_per_row).ok_or_else(|| {
+                format!(
+                    "SQ FP8 tensor {} row_block scale element count overflows",
+                    tensor.name
+                )
+            })?
+        }
         "tensor" => 1,
         other => {
             return Err(format!(
@@ -762,6 +914,74 @@ mod tests {
     }
 
     #[test]
+    fn materializes_row_block_scaled_fp8_payload() {
+        let root = temp_artifact_dir("sq-fp8-row-block-materialize-test");
+        fs::create_dir_all(root.join("fp8")).unwrap();
+        fs::create_dir_all(root.join("scales")).unwrap();
+        fs::write(
+            root.join("fp8/a.fp8_e4m3"),
+            [0x38_u8, 0x40, 0x30, 0xb8, 0x38, 0x40, 0x30, 0xb8],
+        )
+        .unwrap();
+        fs::write(
+            root.join("scales/a.scale_f32"),
+            f32_bytes(&[2.0, 0.5, 4.0, 0.25]),
+        )
+        .unwrap();
+        fs::write(
+            root.join("sq_manifest.json"),
+            r#"{
+              "schema_version": "sq-fp8-artifact-v0.1",
+              "candidate": {
+                "id": "sq-fp8-w8a16-r9700-v0",
+                "weight_payload_dtype": "fp8_e4m3",
+                "activation_dtype": "bf16_or_f32",
+                "scale_granularity": "row_block",
+                "scale_dtype": "f32"
+              },
+              "source": {"model_dir": null, "base_package": null},
+              "storage": {
+                "fp8_tensor_count": 1,
+                "passthrough_tensor_count": 0,
+                "fp8_payload_bytes": 8,
+                "fp8_scale_bytes": 16,
+                "passthrough_source_bytes_estimate": 0,
+                "compact_resident_bytes_estimate": 24,
+                "materialized_working_set_bytes_estimate": 32
+              },
+              "fp8_tensors": [{
+                "name": "layer.0.mlp.gate_proj.weight",
+                "family": "mlp_gate",
+                "source_dtype": "F32",
+                "shape": [2, 4],
+                "elements": 8,
+                "source_file": "/tmp/source.safetensors",
+                "payload_dtype": "fp8_e4m3",
+                "payload_file": "fp8/a.fp8_e4m3",
+                "payload_bytes": 8,
+                "scale_granularity": "row_block",
+                "scale_dtype": "f32",
+                "scale_file": "scales/a.scale_f32",
+                "scale_elements": 4,
+                "scale_bytes": 16,
+                "scale_block_cols": 2
+              }],
+              "passthrough_tensors": []
+            }"#,
+        )
+        .unwrap();
+
+        let artifact = read_sq_fp8_artifact(&root).unwrap();
+        let tensor = &artifact.manifest.fp8_tensors[0];
+        let values = materialize_sq_fp8_tensor_rows_to_host_f32(&root, tensor, 0, 2).unwrap();
+        assert_eq!(values, vec![2.0, 4.0, 0.25, -0.5, 4.0, 8.0, 0.125, -0.25]);
+        let second_row = materialize_sq_fp8_tensor_rows_to_host_f32(&root, tensor, 1, 1).unwrap();
+        assert_eq!(second_row, vec![4.0, 8.0, 0.125, -0.25]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn selector_rejects_ambiguous_substrings() {
         let manifest = SqFp8ArtifactManifest {
             schema_version: SQ_FP8_ARTIFACT_SCHEMA_VERSION.to_string(),
@@ -798,6 +1018,7 @@ mod tests {
                     scale_file: "scales/a".to_string(),
                     scale_elements: 1,
                     scale_bytes: 4,
+                    scale_block_cols: None,
                     payload_sha256: None,
                     scale_sha256: None,
                 },
@@ -816,6 +1037,7 @@ mod tests {
                     scale_file: "scales/b".to_string(),
                     scale_elements: 1,
                     scale_bytes: 4,
+                    scale_block_cols: None,
                     payload_sha256: None,
                     scale_sha256: None,
                 },

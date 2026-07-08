@@ -26,6 +26,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device-index", type=int, default=2)
     parser.add_argument("--chunk-bytes", type=int, default=1024 * 1024)
+    parser.add_argument("--scale-granularity", choices=("row", "row_block", "tensor"), default="row")
+    parser.add_argument("--scale-block-cols", type=int, default=256)
     parser.add_argument("--layers", required=True)
     parser.add_argument("--token-ids", required=True)
     parser.add_argument("--top-k", type=int, default=8)
@@ -195,6 +197,8 @@ def main() -> None:
         raise SystemExit("--top-k must be greater than zero")
     if args.lm_head_chunk_rows <= 0:
         raise SystemExit("--lm-head-chunk-rows must be greater than zero")
+    if args.scale_block_cols <= 0:
+        raise SystemExit("--scale-block-cols must be greater than zero")
 
     raw_dir = args.output_root / "raw"
     artifacts_dir = args.output_root / "artifacts"
@@ -229,7 +233,11 @@ def main() -> None:
                 str(args.package),
                 "--include-regex",
                 pattern,
+                "--scale-granularity",
+                args.scale_granularity,
             ]
+            if args.scale_granularity == "row_block":
+                build_command.extend(["--scale-block-cols", str(args.scale_block_cols)])
             if args.overwrite_artifacts:
                 build_command.append("--overwrite")
             run_to_file(build_command, build_stdout, build_stderr)
@@ -254,6 +262,8 @@ def main() -> None:
         "source_model_dir": str(args.source_model_dir),
         "engine": str(args.engine),
         "device_index": args.device_index,
+        "scale_granularity": args.scale_granularity,
+        "scale_block_cols": args.scale_block_cols if args.scale_granularity == "row_block" else None,
         "layers": args.layers,
         "token_ids": args.token_ids,
         "top_k": args.top_k,

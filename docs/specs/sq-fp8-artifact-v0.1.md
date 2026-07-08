@@ -71,6 +71,13 @@ When payload files are generated, entries should also include:
 
 For row scale, `scale_elements == shape[0]`. For tensor scale, `scale_elements == 1`.
 
+For row-block scale:
+
+- `scale_granularity == "row_block"`
+- `scale_block_cols` is required and must be greater than zero
+- `scale_elements == shape[0] * ceil(shape[1] / scale_block_cols)`
+- scale values are stored row-major by `(row, column_block)`
+
 ## Passthrough Entries
 
 Each `passthrough_tensors[]` entry records tensors intentionally left outside the FP8 payload:
@@ -147,6 +154,11 @@ risky row-scale FP8 families and `k/o/gate/up` as the first strict-top1-safe sub
 guard. A later safe-subset scaling guard found that `k/o/gate/up` is not globally safe under strict
 top1: it passes layers `3,7`, but layers `3,7,11,15` fail one of three short prompts. These are
 runtime boundary and short-quality guards, not full SQ candidate quality results.
+
+The next runtime boundary extension is `row_block` scale. In the first layers `3,7` guard,
+row-block32 recovers `q`, row-block64 recovers `down`, but `v` still fails strict top1. A mixed
+candidate that keeps `v` as fallback and stores `q/k/o/gate/up/down` as row-block32 FP8 passes
+`3 / 3` short prompts for layers `3,7`.
 
 For repeatable guard runs, use:
 
