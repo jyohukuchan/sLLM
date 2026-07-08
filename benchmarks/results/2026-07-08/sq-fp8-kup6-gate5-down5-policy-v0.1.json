@@ -123,7 +123,7 @@
   "next_steps": [
     "Use this policy as the current six-layer regression subset.",
     "Do not promote it to the full SQ policy without broader coverage or an accepted text-level guard.",
-    "Use the include_regex with build-sq-fp8-w8a16-artifact.py to generate matching SQ FP8 artifacts.",
+    "Pass this file to build-sq-fp8-w8a16-artifact.py with --policy-json to generate matching SQ FP8 artifacts.",
     "Proceed to T1 real batch runner before using throughput rows for SQ performance decisions."
   ]
 }

@@ -117,6 +117,25 @@ passthrough source bytes. This is intentionally conservative for the first candi
 `materialized_working_set_bytes_estimate` is the largest selected FP8 tensor materialized as F32.
 Later runtime paths may reduce this with native FP8 matmul or smaller materialization windows.
 
+## Policy Input
+
+The artifact builder accepts:
+
+```text
+tools/build-sq-fp8-w8a16-artifact.py --policy-json POLICY_JSON
+```
+
+For `schema_version = "sq-fp8-policy-v0.1"`, the policy supplies default values for:
+
+- `candidate_id`
+- selected FP8 tensor `include_regex`
+- scale granularity
+- row-block scale width
+
+Explicit CLI values still override policy defaults where applicable. Generated manifests include a
+`policy` block with policy ID, source policy path, selected FP8 rule, fallback policy, and prompt
+bundle result.
+
 ## Runtime Path Status
 
 The v0.1 artifact is the payload and metadata boundary for T2. Runtime execution support is staged:

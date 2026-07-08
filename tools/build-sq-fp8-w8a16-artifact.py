@@ -17,6 +17,7 @@ from safetensors import safe_open
 
 
 SCHEMA_VERSION = "sq-fp8-artifact-v0.1"
+POLICY_SCHEMA_VERSION = "sq-fp8-policy-v0.1"
 DEFAULT_CANDIDATE_ID = "sq-fp8-w8a16-r9700-v0"
 FP8_E4M3_MAX = 448.0
 
@@ -48,10 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-model-dir", required=True, type=Path)
     parser.add_argument("--output-artifact", required=True, type=Path)
-    parser.add_argument("--candidate-id", default=DEFAULT_CANDIDATE_ID)
+    parser.add_argument("--candidate-id")
     parser.add_argument("--base-package", type=Path)
-    parser.add_argument("--scale-granularity", choices=("row", "row_block", "tensor"), default="row")
-    parser.add_argument("--scale-block-cols", type=int, default=256)
+    parser.add_argument("--policy-json", type=Path)
+    parser.add_argument("--scale-granularity", choices=("row", "row_block", "tensor"))
+    parser.add_argument("--scale-block-cols", type=int)
     parser.add_argument("--activation-dtype", default="bf16_or_f32")
     parser.add_argument("--row-chunk", type=int, default=256)
     parser.add_argument("--include-regex", action="append", default=[])
@@ -62,6 +64,72 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
+
+
+def load_policy(path: Path) -> dict[str, Any]:
+    policy = read_json(path)
+    schema_version = policy.get("schema_version")
+    if schema_version != POLICY_SCHEMA_VERSION:
+        raise SystemExit(
+            f"policy schema_version must be {POLICY_SCHEMA_VERSION!r}, got {schema_version!r}"
+        )
+    return policy
+
+
+def resolve_policy_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    policy = load_policy(args.policy_json) if args.policy_json is not None else None
+
+    if args.candidate_id is None:
+        args.candidate_id = (
+            str(policy.get("candidate_id"))
+            if policy and policy.get("candidate_id")
+            else DEFAULT_CANDIDATE_ID
+        )
+
+    if policy is not None and not args.include_regex:
+        fp8_selection = policy.get("fp8_selection")
+        if not isinstance(fp8_selection, dict):
+            raise SystemExit("policy fp8_selection must be an object")
+        include_regex = fp8_selection.get("include_regex")
+        if not isinstance(include_regex, str) or not include_regex:
+            raise SystemExit("policy fp8_selection.include_regex must be a non-empty string")
+        args.include_regex.append(include_regex)
+
+    policy_scale = policy.get("scale") if policy is not None else None
+    if policy_scale is not None and not isinstance(policy_scale, dict):
+        raise SystemExit("policy scale must be an object")
+
+    if args.scale_granularity is None:
+        args.scale_granularity = (
+            str(policy_scale.get("granularity"))
+            if policy_scale and policy_scale.get("granularity")
+            else "row"
+        )
+    if args.scale_granularity not in {"row", "row_block", "tensor"}:
+        raise SystemExit(f"unsupported scale granularity: {args.scale_granularity}")
+
+    if args.scale_block_cols is None:
+        args.scale_block_cols = (
+            int(policy_scale.get("block_cols"))
+            if policy_scale and policy_scale.get("block_cols") is not None
+            else 256
+        )
+    if args.scale_block_cols <= 0:
+        raise SystemExit("scale-block-cols must be positive")
+
+    return policy
+
+
+def policy_manifest_entry(policy_json: Path, policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": policy.get("schema_version"),
+        "policy_json": str(policy_json),
+        "policy_id": policy.get("policy_id"),
+        "status": policy.get("status"),
+        "fp8_selection": policy.get("fp8_selection"),
+        "fallback_policy": policy.get("fallback_policy"),
+        "prompt_bundle_result": policy.get("prompt_bundle_result"),
+    }
 
 
 def sanitize(name: str) -> str:
@@ -437,11 +505,14 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "Runtime execution support is staged after metadata and payload generation are verified.",
         ],
     }
+    if getattr(args, "policy_payload", None) is not None and args.policy_json is not None:
+        manifest["policy"] = policy_manifest_entry(args.policy_json, args.policy_payload)
     return manifest
 
 
 def main() -> int:
     args = parse_args()
+    args.policy_payload = resolve_policy_args(args)
     manifest = build_manifest(args)
     if args.summary_json is not None and not args.dry_run:
         write_json(args.summary_json, manifest)

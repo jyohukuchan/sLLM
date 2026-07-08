@@ -33,6 +33,7 @@
 - len4上の次のprompt-bundle候補は、top8 overlapが最も高い `kup6_gate5_down5` である。
 - `kup6_gate5_down5` はcase_a/case_bへ広げてもstrict top1を維持した。ただしcase_aのtop8 overlapは `2 / 8` と低く、full SQ policyではなく6層regression subsetとして扱う。
 - `kup6_gate5_down5` の選択FP8 family/layerとfallback family/layerを `sq-fp8-policy-v0.1` として保存した。
+- `tools/build-sq-fp8-w8a16-artifact.py` は `--policy-json` で `sq-fp8-policy-v0.1` を読み、policyのinclude regex、candidate ID、row-block scaleをartifact manifestへ反映できる。
 - したがって現時点では、T2は「品質境界をかなり狭めたがfull-target SQ guard未完了」と扱う。
 - 一方で、prefill/cached-prefix attentionはSQ候補評価の前提速度としては一旦十分と判断する。追加のFlashAttention2-like最適化は有益だが、SQ策定フェーズを止めるblockerにはしない。
 - 以後の主軸は、FP8 SQ候補の品質境界を固定し、real batch total throughputを測り、AQ4 baselineとvLLM参考値へ同じschemaで接続することに移す。
@@ -41,7 +42,7 @@
 
 1. T2 short guardの昇格条件は、text-level guardが実装・採用されるまではstrict top1一致にする。
 2. `kup6_gate5_down5` を現在の6層strict-top1 regression subsetとして固定する。
-3. `benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json` を現在の六層policy representationとして使う。
+3. `benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json` を現在の六層policy representationとして使い、artifact生成では `--policy-json` で渡す。
 4. `kup6_ogatedown5` はstrict-top1 failureかつnear-miss guardとして保存する。
 5. top-k overlap、AQ4 top1 rank、logit gapは診断指標として保存するが、strict top1失敗を上書きしない。
 6. T1 real batch runnerとVRAM samplingの実測gridを整備し、`prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps` を同一schemaへ流す。
@@ -1073,6 +1074,27 @@ Exit criteria:
 3. `sq-fp8-kup6-gate5-down5-policy-v0.1.json` を、次のartifact生成とfallback記録の基準にする。
 4. T1 real batch runnerを進め、SQ候補評価で使えるthroughput行を作る。
 
+### T2 current status: policy JSON builder input v1
+
+前回の要点:
+
+- `kup6_gate5_down5` の選択FP8/fallback方針を `sq-fp8-policy-v0.1` として保存した。
+- ただし保存直後は、artifact builderへ手動でinclude regexを渡す必要があった。
+
+今回の変更点:
+
+- `tools/build-sq-fp8-w8a16-artifact.py` に `--policy-json` を追加した。
+- policyの `candidate_id`、`fp8_selection.include_regex`、scale granularity、row-block widthをbuilder defaultとして使えるようにした。
+- 生成manifestへ `policy` blockを追加し、policy ID、source policy path、FP8 selection、fallback policy、prompt bundle resultを保存する。
+- dry-runで `kup6_gate5_down5` が `22` FP8 tensors、`753` passthrough tensors、row-block32として解決されることを確認した。
+- 結果は `benchmarks/results/2026-07-08/sq-fp8-policy-json-builder-v0.1.md` に保存した。
+
+次の行動:
+
+1. 次のSQ FP8 artifact生成では `--policy-json` を使う。
+2. T1 real batch runnerを進め、SQ候補評価で使えるthroughput行を作る。
+3. throughput比較ではoverlay load timingを使わず、native FP8またはmaterialization-aware runtime pathを使う。
+
 ### T3: Prefill optimization v0.1, 4-7 days
 
 目的:
@@ -1865,7 +1887,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | T1 result schema preservation | partial done | `docs/specs/batch-throughput-workload-v0.1.md`, `docs/specs/inference-benchmark-result-v0.1.md`, `tools/run-external-benchmark.py` |
 | T1 real batch/total throughput runner | not done | next runner work |
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
-| T2 FP8 SQ artifact writer | partial done | `tools/build-sq-fp8-w8a16-artifact.py` |
+| T2 FP8 SQ artifact writer | partial done with policy input | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; dry-run confirmed `kup6_gate5_down5` selects `22` FP8 tensors and `753` passthrough tensors. |
 | T2 runtime load path | partial done | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization |
 | T2 short prompt guard | partial done with six-layer prompt bundle subset found | one-tensor and layer-3 projection-set guards passed top1; row-block scale produced a `v`-fallback mixed candidate; later six-layer split narrowed the safe subset to `k/up` over layers `3,7,11,15,19,23` plus at most two of `o/gate/down` over layers `3,7,11,15,19`; `kup6_gate5_down5` passes len4/case_a/case_b strict top1, but case_a top8 overlap is only `2 / 8`: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-family-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-per-layer-combination-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-kup6-gate5-down5-prompt-bundle-v0.1.md` |
 
@@ -1873,7 +1895,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 
 1. `kup6_gate5_down5` は6層strict-top1 regression subsetとして固定する。
 2. `kup6_ogatedown5` はstrict-top1 failureかつnear-miss diagnosticとして残す。
-3. T2は、`sq-fp8-kup6-gate5-down5-policy-v0.1.json` を次のartifact生成とfallback記録の基準にする。
+3. T2は、`sq-fp8-kup6-gate5-down5-policy-v0.1.json` を `--policy-json` で渡し、次のartifact生成とfallback記録の基準にする。
 4. T1 real batch runnerを実装し、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executor、VRAM peakが失われないことを確認する。
 5. FP8 SQ候補のthroughput評価では、overlay load timingを使わない。native FP8、materialization-aware path、または明示的にmaterialized working-setを保存したruntime pathだけを速度比較対象にする。
 6. T3の追加prefill kernel作業は、SQ候補比較で不足が見えたcaseだけに限定する。現時点ではcached-prefix/cold-prefill component速度はSQ評価へ進む前提として十分と扱う。
@@ -1956,7 +1978,7 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 
 次の行動:
 
-1. `sq-fp8-kup6-gate5-down5-policy-v0.1.json` を使って、次のSQ artifact生成とfallback理由記録を固定する。
+1. `sq-fp8-kup6-gate5-down5-policy-v0.1.json` を `--policy-json` で渡して、次のSQ artifact生成とfallback理由記録を固定する。
 2. real batch runnerをfull package pathへ接続し、`batch=1/4/8` のprefill/decode/end-to-end total throughputを保存する。
 3. FP8 SQ候補1とAQ4 latest baselineを同じworkload gridで測る。
 4. cold prefill、cached prefix、decodeの代表gridを埋める。cached-prefixでは `cached_prefix_rdna4_fp8_auto` と `resolved_executor` を使う。

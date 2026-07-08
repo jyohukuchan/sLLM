@@ -33,6 +33,12 @@ Builder include regex:
 ^model\.language_model\.layers\.((3|7|11|15|19|23)\.(self_attn\.k_proj|mlp\.up_proj)|(3|7|11|15|19)\.mlp\.(gate_proj|down_proj))\.weight$
 ```
 
+Artifact builder:
+
+```text
+tools/build-sq-fp8-w8a16-artifact.py --policy-json benchmarks/results/2026-07-08/sq-fp8-kup6-gate5-down5-policy-v0.1.json
+```
+
 ## Fallback Policy
 
 | family | layers | reason |
@@ -60,4 +66,5 @@ policy.
 
 1. Use this policy as the current six-layer strict-top1 regression subset.
 2. Keep `kup6_ogatedown5` as a near-miss failure guard.
-3. Move T1 real batch runner forward before using throughput rows for SQ performance decisions.
+3. Use `--policy-json` for the next matching SQ FP8 artifact generation.
+4. Move T1 real batch runner forward before using throughput rows for SQ performance decisions.
