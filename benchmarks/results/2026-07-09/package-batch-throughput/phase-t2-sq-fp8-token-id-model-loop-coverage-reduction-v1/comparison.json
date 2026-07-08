@@ -1,0 +1,1498 @@
+{
+  "aq4_baseline_case_id": "aq4-r9700-token-id-model-loop-prompt-bundle-layers3-7-11-15-19-23-b3",
+  "aq4_baseline_results_jsonl": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-prompt-bundle-v1/results.jsonl",
+  "aq4_top1_tokens": [
+    110784,
+    237950,
+    182949
+  ],
+  "findings": [
+    "k/up row-block32 fails case_a even when reduced to layer3 only.",
+    "layer3 up_proj row-block32 preserves strict top1 for all three prompt-bundle cases.",
+    "layer3 k_proj row-block32 fails case_a, but layer3 k_proj row-block16 preserves strict top1.",
+    "layer3 k/up row-block16 still fails case_a, so the k/up interaction remains risky even when k uses finer scale.",
+    "Direct logits prompt-bundle guards are weaker than the token-id model-loop guard for this candidate family."
+  ],
+  "layers_csv": "3,7,11,15,19,23",
+  "prompt_bundle": [
+    {
+      "case_id": "len4",
+      "token_ids": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "case_id": "case_a",
+      "token_ids": [
+        100,
+        200,
+        300,
+        400,
+        500,
+        600,
+        700,
+        800
+      ]
+    },
+    {
+      "case_id": "case_b",
+      "token_ids": [
+        42,
+        314,
+        2718,
+        1618,
+        12345,
+        23456,
+        34567,
+        45678
+      ]
+    }
+  ],
+  "run_id": "phase-t2-sq-fp8-token-id-model-loop-coverage-reduction-v1",
+  "schema_version": "ullm-model-loop-coverage-reduction-comparison-v0.1",
+  "variants": [
+    {
+      "artifact": "/tmp/ullm-sq-fp8-layers3-7-11-15-19-23-k-up-rowblock32-len4-v0.1/artifacts/k_up",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-kup6",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-kup6-layers3-7-11-15-19-23-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            102446,
+            242203,
+            120222,
+            143001,
+            172083,
+            136810,
+            115326
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": 0.6345150000000004,
+          "aq4_top1_rank_in_sq_top8": 4,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 193706,
+          "sq_top1_minus_aq4_top1_logit": 0.04564900000000005,
+          "sq_top1_rank_in_aq4_top8": 5,
+          "sq_top8_tokens": [
+            193706,
+            111791,
+            68712,
+            237950,
+            124170,
+            13817,
+            207459,
+            172960
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": false,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            69895,
+            121250,
+            97533,
+            159207,
+            139376,
+            214852,
+            243285
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "k/up layers 3,7,11,15,19,23 row-block32",
+      "fp8_tensor_count": 12,
+      "metrics": {
+        "decode_tps": 32.420529,
+        "end_to_end_tps": 31.633117,
+        "prefill_tps": 31.518292,
+        "vram_consumed_bytes": 5252481024,
+        "wrapper_elapsed_seconds": 38.89486200502142
+      },
+      "passthrough_tensor_count": 763,
+      "scale_block_cols": 32,
+      "strict_top1_all_pass": false,
+      "strict_top1_pass_count": 2,
+      "variant": "kup6-rowblock32"
+    },
+    {
+      "artifact": "/tmp/ullm-sq-fp8-kup5-model-loop-candidate-v0.1-artifact",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-kup5",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-kup5-layers3-7-11-15-19-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            102446,
+            242203,
+            143001,
+            120222,
+            172083,
+            98413,
+            136810
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": 0.6345150000000004,
+          "aq4_top1_rank_in_sq_top8": 5,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 193706,
+          "sq_top1_minus_aq4_top1_logit": 0.12094899999999953,
+          "sq_top1_rank_in_aq4_top8": 5,
+          "sq_top8_tokens": [
+            193706,
+            111791,
+            68712,
+            124170,
+            237950,
+            207459,
+            172960,
+            13817
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": false,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            121250,
+            69895,
+            97533,
+            159207,
+            139376,
+            214852,
+            243285
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "k/up layers 3,7,11,15,19 row-block32",
+      "fp8_tensor_count": 10,
+      "metrics": {
+        "decode_tps": 27.980197,
+        "end_to_end_tps": 28.623304,
+        "prefill_tps": 28.722329,
+        "vram_consumed_bytes": 5757931520,
+        "wrapper_elapsed_seconds": 34.9668853180483
+      },
+      "passthrough_tensor_count": 765,
+      "scale_block_cols": 32,
+      "strict_top1_all_pass": false,
+      "strict_top1_pass_count": 2,
+      "variant": "kup5-rowblock32"
+    },
+    {
+      "artifact": "/tmp/ullm-sq-fp8-kup4-model-loop-candidate-v0.1-artifact",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-kup4",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-kup4-layers3-7-11-15-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            102446,
+            242203,
+            143001,
+            120222,
+            98413,
+            172083,
+            136810
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": 0.6345150000000004,
+          "aq4_top1_rank_in_sq_top8": 5,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 193706,
+          "sq_top1_minus_aq4_top1_logit": 0.21036900000000003,
+          "sq_top1_rank_in_aq4_top8": 5,
+          "sq_top8_tokens": [
+            193706,
+            68712,
+            124170,
+            111791,
+            237950,
+            172960,
+            207459,
+            13817
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": false,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            121250,
+            97533,
+            69895,
+            159207,
+            214852,
+            139376,
+            243285
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "k/up layers 3,7,11,15 row-block32",
+      "fp8_tensor_count": 8,
+      "metrics": {
+        "decode_tps": 32.889667,
+        "end_to_end_tps": 32.771065,
+        "prefill_tps": 32.753348,
+        "vram_consumed_bytes": 5885849600,
+        "wrapper_elapsed_seconds": 27.6041970589431
+      },
+      "passthrough_tensor_count": 767,
+      "scale_block_cols": 32,
+      "strict_top1_all_pass": false,
+      "strict_top1_pass_count": 2,
+      "variant": "kup4-rowblock32"
+    },
+    {
+      "artifact": "/tmp/ullm-sq-fp8-kup3-model-loop-candidate-v0.1-artifact",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-kup3",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-kup3-layers3-7-11-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            102446,
+            242203,
+            143001,
+            98413,
+            120222,
+            172083,
+            69538
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": 0.6345150000000004,
+          "aq4_top1_rank_in_sq_top8": 4,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 193706,
+          "sq_top1_minus_aq4_top1_logit": 0.09074199999999966,
+          "sq_top1_rank_in_aq4_top8": 5,
+          "sq_top8_tokens": [
+            193706,
+            68712,
+            124170,
+            237950,
+            111791,
+            181585,
+            207459,
+            100411
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": false,
+          "top8_common": 4,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            121250,
+            97533,
+            159207,
+            69895,
+            214852,
+            139376,
+            243285
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "k/up layers 3,7,11 row-block32",
+      "fp8_tensor_count": 6,
+      "metrics": {
+        "decode_tps": 32.753033,
+        "end_to_end_tps": 29.443417,
+        "prefill_tps": 29.003803,
+        "vram_consumed_bytes": 5757943808,
+        "wrapper_elapsed_seconds": 22.698323099990375
+      },
+      "passthrough_tensor_count": 769,
+      "scale_block_cols": 32,
+      "strict_top1_all_pass": false,
+      "strict_top1_pass_count": 2,
+      "variant": "kup3-rowblock32"
+    },
+    {
+      "artifact": "/tmp/ullm-sq-fp8-kup2-model-loop-candidate-v0.1-artifact",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-kup2",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-kup2-layers3-7-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            98413,
+            143001,
+            120222,
+            69538,
+            136810
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": 0.6345150000000004,
+          "aq4_top1_rank_in_sq_top8": 3,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 193706,
+          "sq_top1_minus_aq4_top1_logit": 0.08402399999999943,
+          "sq_top1_rank_in_aq4_top8": 5,
+          "sq_top8_tokens": [
+            193706,
+            68712,
+            237950,
+            111791,
+            124170,
+            207459,
+            100411,
+            181585
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": false,
+          "top8_common": 4,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            238270
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "k/up layers 3,7 row-block32",
+      "fp8_tensor_count": 4,
+      "metrics": {
+        "decode_tps": 28.099076,
+        "end_to_end_tps": 29.518301,
+        "prefill_tps": 29.743645,
+        "vram_consumed_bytes": 5757939712,
+        "wrapper_elapsed_seconds": 17.849364331923425
+      },
+      "passthrough_tensor_count": 771,
+      "scale_block_cols": 32,
+      "strict_top1_all_pass": false,
+      "strict_top1_pass_count": 2,
+      "variant": "kup2-rowblock32"
+    },
+    {
+      "artifact": "/tmp/ullm-sq-fp8-kup1-layer3-model-loop-candidate-v0.1-artifact",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-kup1-layer3",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-kup1-layer3-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            120222,
+            98413,
+            143001,
+            172083,
+            69538
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": null,
+          "aq4_top1_rank_in_sq_top8": 4,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 124170,
+          "sq_top1_minus_aq4_top1_logit": 0.0165570000000006,
+          "sq_top1_rank_in_aq4_top8": null,
+          "sq_top8_tokens": [
+            124170,
+            193706,
+            111791,
+            237950,
+            68712,
+            100411,
+            172960,
+            164462
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": false,
+          "top8_common": 5,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            121250,
+            69895,
+            159207,
+            97533,
+            214852,
+            139376,
+            243285
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "k/up layer 3 row-block32",
+      "fp8_tensor_count": 2,
+      "metrics": {
+        "decode_tps": 28.20984,
+        "end_to_end_tps": 28.545759,
+        "prefill_tps": 28.596838,
+        "vram_consumed_bytes": 5757898752,
+        "wrapper_elapsed_seconds": 11.581525922985747
+      },
+      "passthrough_tensor_count": 773,
+      "scale_block_cols": 32,
+      "strict_top1_all_pass": false,
+      "strict_top1_pass_count": 2,
+      "variant": "kup1-layer3-rowblock32"
+    },
+    {
+      "artifact": "/tmp/ullm-sq-fp8-k-layer3-model-loop-candidate-v0.1-artifact",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-k-layer3",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-k-layer3-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            120222,
+            172083,
+            136810,
+            98413
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": 0.32150700000000043,
+          "aq4_top1_rank_in_sq_top8": 2,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 111791,
+          "sq_top1_minus_aq4_top1_logit": 0.06605900000000009,
+          "sq_top1_rank_in_aq4_top8": 2,
+          "sq_top8_tokens": [
+            111791,
+            237950,
+            124170,
+            68712,
+            193706,
+            13817,
+            172960,
+            100411
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": false,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            69895,
+            97533,
+            121250,
+            159207,
+            214852,
+            243285,
+            139376
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "k layer 3 row-block32",
+      "fp8_tensor_count": 1,
+      "metrics": {
+        "decode_tps": 28.374203,
+        "end_to_end_tps": 28.19817,
+        "prefill_tps": 28.171953,
+        "vram_consumed_bytes": 5885849600,
+        "wrapper_elapsed_seconds": 6.072928257053718
+      },
+      "passthrough_tensor_count": 774,
+      "scale_block_cols": 32,
+      "strict_top1_all_pass": false,
+      "strict_top1_pass_count": 2,
+      "variant": "k-layer3-rowblock32"
+    },
+    {
+      "artifact": "/tmp/ullm-sq-fp8-up-layer3-model-loop-candidate-v0.1-artifact",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-up-layer3",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-up-layer3-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            98413
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 237950,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            193706,
+            26293,
+            68712,
+            172960,
+            207459
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            97533,
+            139376,
+            214852,
+            69895,
+            188263
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 8,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "up layer 3 row-block32",
+      "fp8_tensor_count": 1,
+      "metrics": {
+        "decode_tps": 30.492668,
+        "end_to_end_tps": 29.111424,
+        "prefill_tps": 28.914957,
+        "vram_consumed_bytes": 5757927424,
+        "wrapper_elapsed_seconds": 10.430651014088653
+      },
+      "passthrough_tensor_count": 774,
+      "scale_block_cols": 32,
+      "strict_top1_all_pass": true,
+      "strict_top1_pass_count": 3,
+      "variant": "up-layer3-rowblock32"
+    },
+    {
+      "artifact": "/tmp/ullm-sq-fp8-k-layer3-rb16-model-loop-candidate-v0.1-artifact",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-k-layer3-rb16",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-k-layer3-rb16-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            120222,
+            172083,
+            98413,
+            136810
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 237950,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            237950,
+            111791,
+            124170,
+            193706,
+            13817,
+            100411,
+            68712,
+            134735
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": true,
+          "top8_common": 6,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            69895,
+            97533,
+            214852,
+            121250,
+            159207,
+            139376,
+            243285
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "k layer 3 row-block16",
+      "fp8_tensor_count": 1,
+      "metrics": {
+        "decode_tps": 29.61763,
+        "end_to_end_tps": 32.643338,
+        "prefill_tps": 33.151344,
+        "vram_consumed_bytes": 5757923328,
+        "wrapper_elapsed_seconds": 5.922251190058887
+      },
+      "passthrough_tensor_count": 774,
+      "scale_block_cols": 16,
+      "strict_top1_all_pass": true,
+      "strict_top1_pass_count": 3,
+      "variant": "k-layer3-rowblock16"
+    },
+    {
+      "artifact": "/tmp/ullm-sq-fp8-kup1-layer3-rb16-model-loop-candidate-v0.1-artifact",
+      "candidate_id": "sq-fp8-w8a16-r9700-v0-kup1-layer3-rb16",
+      "case_count": 3,
+      "case_id": "sq-fp8-r9700-token-id-model-loop-prompt-bundle-kup1-layer3-rb16-b3",
+      "cases": [
+        {
+          "aq4_top1": 110784,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            143001,
+            172083,
+            120222,
+            69538,
+            135929
+          ],
+          "case_id": "len4",
+          "sq_top1": 110784,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            110784,
+            242203,
+            102446,
+            120222,
+            98413,
+            143001,
+            172083,
+            69538
+          ],
+          "token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 237950,
+          "aq4_top1_minus_sq_top1_logit": 0.6345150000000004,
+          "aq4_top1_rank_in_sq_top8": 3,
+          "aq4_top8_tokens": [
+            237950,
+            111791,
+            13817,
+            26293,
+            193706,
+            172960,
+            68712,
+            134735
+          ],
+          "case_id": "case_a",
+          "sq_top1": 193706,
+          "sq_top1_minus_aq4_top1_logit": 0.05853000000000019,
+          "sq_top1_rank_in_aq4_top8": 5,
+          "sq_top8_tokens": [
+            193706,
+            124170,
+            237950,
+            111791,
+            68712,
+            100411,
+            134735,
+            212635
+          ],
+          "token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "top1_match": false,
+          "top8_common": 5,
+          "top8_width": 8
+        },
+        {
+          "aq4_top1": 182949,
+          "aq4_top1_minus_sq_top1_logit": 0.0,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            182949,
+            121250,
+            159207,
+            69895,
+            97533,
+            214852,
+            139376,
+            188263
+          ],
+          "case_id": "case_b",
+          "sq_top1": 182949,
+          "sq_top1_minus_aq4_top1_logit": 0.0,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            182949,
+            159207,
+            214852,
+            121250,
+            69895,
+            97533,
+            139376,
+            243285
+          ],
+          "token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "top1_match": true,
+          "top8_common": 7,
+          "top8_width": 8
+        }
+      ],
+      "coverage": "k/up layer 3 row-block16",
+      "fp8_tensor_count": 2,
+      "metrics": {
+        "decode_tps": 32.58752,
+        "end_to_end_tps": 32.995555,
+        "prefill_tps": 33.057643,
+        "vram_consumed_bytes": 5757898752,
+        "wrapper_elapsed_seconds": 10.879593299003318
+      },
+      "passthrough_tensor_count": 773,
+      "scale_block_cols": 16,
+      "strict_top1_all_pass": false,
+      "strict_top1_pass_count": 2,
+      "variant": "kup1-layer3-rowblock16"
+    }
+  ]
+}

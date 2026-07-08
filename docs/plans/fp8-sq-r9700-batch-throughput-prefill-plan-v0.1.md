@@ -1977,13 +1977,13 @@ R9700/RDNA4で同じFP8 pathが動くとは限らない。
 | T2 FP8 SQ artifact manifest | done | `docs/specs/sq-fp8-artifact-v0.1.md` |
 | T2 FP8 SQ artifact writer | partial done with policy artifact verified | `tools/build-sq-fp8-w8a16-artifact.py` accepts `--policy-json`; actual `kup6_gate5_down5` payload artifact generated under `/tmp` with `22` FP8 tensors and `753` passthrough tensors. |
 | T2 runtime load path | partial done with policy artifact materialize and selected-layer model-loop bridge verified | `crates/ullm-engine/src/sq.rs`, `Qwen3PackageSqOverlay`, `sq-fp8-materialize-smoke`, `sq-fp8-token-ids-logits-smoke`, `sq-fp8-token-ids-model-loop-smoke`, `tools/run-sq-fp8-overlay-logits-guard.py`, row-block scale materialization; policy artifact materialize smoke and token-id model-loop SQ overlay bridge verified on R9700. |
-| T2 short prompt guard | partial done with six-layer prompt bundle subset found | one-tensor and layer-3 projection-set guards passed top1; row-block scale produced a `v`-fallback mixed candidate; later six-layer split narrowed the safe subset to `k/up` over layers `3,7,11,15,19,23` plus at most two of `o/gate/down` over layers `3,7,11,15,19`; `kup6_gate5_down5` passes len4/case_a/case_b strict top1, but case_a top8 overlap is only `2 / 8`: `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-family-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-per-layer-combination-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-kup6-gate5-down5-prompt-bundle-v0.1.md` |
+| T2 short prompt guard | partial done with six-layer prompt bundle subset found; stricter model-loop guard now blocks promotion | one-tensor and layer-3 projection-set guards passed top1; row-block scale produced a `v`-fallback mixed candidate; later six-layer split narrowed the safe subset to `k/up` over layers `3,7,11,15,19,23` plus at most two of `o/gate/down` over layers `3,7,11,15,19`; `kup6_gate5_down5` passes direct logits len4/case_a/case_b strict top1, but the six-layer token-id model-loop prompt bundle fails `len4` and `case_a`. Coverage reduction shows k/up row-block32 still fails `case_a` even at layer3 only; `up_proj` layer3 row-block32 and `k_proj` layer3 row-block16 pass individually, but k/up layer3 row-block16 fails when combined. Guard artifacts include `benchmarks/results/2026-07-08/sq-fp8-qproj-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layer3-projection-overlay-logits-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-overlay-quality-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-layers3-7-family-split-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-safe-subset-layer-scaling-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-rowblock-scale-risk-guard-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-family-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-per-layer-combination-boundary-v0.1.md`, `benchmarks/results/2026-07-08/sq-fp8-six-layer-kup6-gate5-down5-prompt-bundle-v0.1.md`, `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-prompt-bundle-v1.md`, and `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-coverage-reduction-v1.md`. |
 
 次の行動:
 
-1. `kup6_gate5_down5` は6層strict-top1 regression subsetとして固定する。
+1. `kup6_gate5_down5` はdirect logits regression subsetとしては残すが、token-id model-loop prompt bundleで崩れるためSQ quality policyへは昇格しない。
 2. `kup6_ogatedown5` はstrict-top1 failureかつnear-miss diagnosticとして残す。
-3. T2は、`sq-fp8-kup6-gate5-down5-policy-v0.1.json` を `--policy-json` で渡し、次のartifact生成とfallback記録の基準にする。
+3. T2は、model-loop prompt bundleを昇格gateにして、次はper-family/per-tensor scale-layout対応を入れて `k_proj` row-block16 + `up_proj` row-block32 のような混合scale policyを試す。
 4. T1 real batch runnerをpackage-backed componentからfull package total throughputへ広げ、JSONL変換後に `prefill_total_input_tps`、`decode_total_generated_tps`、`end_to_end_total_tps`、KV cache bytes、requested/resolved executor、VRAM peakが失われないことを確認する。
 5. FP8 SQ候補のthroughput評価では、overlay load timingを使わない。native FP8、materialization-aware path、または明示的にmaterialized working-setを保存したruntime pathだけを速度比較対象にする。
 6. T3の追加prefill kernel作業は、SQ候補比較で不足が見えたcaseだけに限定する。現時点ではcached-prefix/cold-prefill component速度はSQ評価へ進む前提として十分と扱う。
@@ -2373,6 +2373,50 @@ Quality:
 1. `kup6_gate5_down5` はselected-layer regression subsetとして維持し、promoted SQ policyとは扱わない。
 2. 次のT2品質探索では、model-loop top1 driftを起こすFP8 coverageを削る方向、またはscale/layout候補を変える方向を優先する。
 3. 以後のAQ4/SQ比較では `final_topk_tokens` / `final_topk_logits` を保存し、top1だけで判断しない。
+4. full-package real batch throughputは引き続きT1aとして別に進める。
+
+## 2026-07-09 progress: T2 SQ FP8 model-loop coverage reduction
+
+前回の要点:
+
+- `kup6_gate5_down5` はdirect logits prompt bundleでは通ったが、token-id model-loop prompt bundleでは `len4` と `case_a` が崩れた。
+- 現在の正式な昇格条件は、direct logitsではなくtoken-id model-loop上のstrict top1である。
+- 次は、どのFP8 coverageがmodel-loop top1 driftを起こすかを切り分ける必要があった。
+
+今回の変更点:
+
+- k/up row-block32のcoverageを `6 -> 5 -> 4 -> 3 -> 2 -> 1` layerへ削り、R9700で同じ6-layer token-id model-loop prompt bundleを再実行した。
+- layer3について `k_proj` 単体、`up_proj` 単体、`k_proj` row-block16、`k/up` row-block16を追加評価した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-coverage-reduction-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| variant | FP8 tensors | pass | len4 SQ top1 | case_a SQ top1 | case_a AQ4 rank in SQ top8 | case_b SQ top1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `kup6-rowblock32` | 12 | 2 / 3 | 110784 | 193706 | 4 | 182949 |
+| `kup5-rowblock32` | 10 | 2 / 3 | 110784 | 193706 | 5 | 182949 |
+| `kup4-rowblock32` | 8 | 2 / 3 | 110784 | 193706 | 5 | 182949 |
+| `kup3-rowblock32` | 6 | 2 / 3 | 110784 | 193706 | 4 | 182949 |
+| `kup2-rowblock32` | 4 | 2 / 3 | 110784 | 193706 | 3 | 182949 |
+| `kup1-layer3-rowblock32` | 2 | 2 / 3 | 110784 | 124170 | 4 | 182949 |
+| `k-layer3-rowblock32` | 1 | 2 / 3 | 110784 | 111791 | 2 | 182949 |
+| `up-layer3-rowblock32` | 1 | 3 / 3 | 110784 | 237950 | 1 | 182949 |
+| `k-layer3-rowblock16` | 1 | 3 / 3 | 110784 | 237950 | 1 | 182949 |
+| `kup1-layer3-rowblock16` | 2 | 2 / 3 | 110784 | 193706 | 3 | 182949 |
+
+判断:
+
+- k/up row-block32は、coverageをlayer3だけまで削っても `case_a` が崩れる。
+- `up_proj` layer3 row-block32と `k_proj` layer3 row-block16は単体ではstrict top1を維持する。
+- ただし `k/up` layer3 row-block16は組み合わせると `case_a` が崩れるため、単体probeのpassをそのままpolicy passとは扱えない。
+- 次のT2では、artifact builder/runtime metadataにper-family/per-tensor scale-layoutを持たせ、`k_proj` row-block16 + `up_proj` row-block32のような混合scale policyをmodel-loop guardで試す。
+- このselected-layer model-loopのtok/sとVRAMは診断用であり、full-package SQ throughputではない。wrapper elapsedにはartifact read/materializationが含まれる。
+
+次の行動:
+
+1. model-loop prompt bundleをSQ quality promotion gateとして継続する。
+2. per-family/per-tensor scale-layoutをartifact manifestとbuilderに追加する。
+3. 混合scale policyを作った後、`k_proj` と `up_proj` の組み合わせを最小coverageから再評価する。
 4. full-package real batch throughputは引き続きT1aとして別に進める。
 
 ## Risks
