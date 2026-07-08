@@ -2567,6 +2567,42 @@ Quality:
 3. 次は `o32+gate32` の組み合わせをより強いscale/layoutで回復できるか試すか、`o32` または `gate32` の片側branchでcoverageを広げる。
 4. full-package real batch throughputは引き続きT1aとして別に進める。
 
+## 2026-07-09 progress: T2 SQ FP8 model-loop layer7 o/gate scale
+
+前回の要点:
+
+- layer7 add-family probeでは、layer7 `o_proj` row-block32と `gate_proj` row-block32は個別に `3 / 3` strict top1を維持した。
+- ただし `o32+gate32` の同時追加は `case_a` で崩れた。
+- 次の確認は、`o/gate` の同時追加がrow-block幅の強化で回復するかを見ることだった。
+
+今回の変更点:
+
+- layer3 `k_proj` row-block16 + layer3 `up_proj` row-block32 + layer7 `k_proj` row-block16を固定した。
+- layer7 `up_proj` と `down_proj` はfallbackのまま、`o/gate` の組み合わせを `o16+gate32`、`o32+gate16`、`o16+gate16` で評価した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-token-id-model-loop-layer7-ogate-scale-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| variant | FP8 tensors | pass | len4 SQ top1 | case_a SQ top1 | case_a AQ4 rank in SQ top8 | case_b SQ top1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `layer7-ogate-o16-gate32` | 5 | 2 / 3 | 110784 | 193706 | 2 | 182949 |
+| `layer7-ogate-o32-gate16` | 5 | 2 / 3 | 110784 | 193706 | 2 | 182949 |
+| `layer7-ogate-o16-gate16` | 5 | 2 / 3 | 110784 | 193706 | 2 | 182949 |
+
+判断:
+
+- `o16+gate32`、`o32+gate16`、`o16+gate16` はすべて `case_a` が `193706` へ入れ替わった。
+- 失敗時もAQ4 top1 `237950` はSQ top8 rank `2` に残るため、壊滅的崩壊ではなくranking driftである。
+- row-block16化だけでは、layer7 `o_proj` と `gate_proj` の同時追加は回復しない。
+- 現在のT2境界では、`o_proj` と `gate_proj` は片方ずつのbranch候補として扱い、同時追加はfailure guardに残す。
+
+次の行動:
+
+1. `o+gate` 同時追加は現行W8A16/F32 row-block scaleではfailure guardとして保持する。
+2. 次は `o32` branchまたは `gate32` branchのどちらかを選び、coverageを広げる。
+3. `o+gate` 同時追加を回復する場合は、row-block幅ではなく別scale layout、別dtype、またはtext-level acceptance guardの導入後に再評価する。
+4. full-package real batch throughputは引き続きT1aとして別に進める。
+
 ## Risks
 
 | risk | impact | handling |

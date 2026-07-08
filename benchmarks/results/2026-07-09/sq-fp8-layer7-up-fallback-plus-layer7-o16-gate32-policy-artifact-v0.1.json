@@ -1,0 +1,75 @@
+{
+  "schema_version": "sq-fp8-policy-artifact-result-v0.1",
+  "date": "2026-07-09",
+  "artifact_dir": "/tmp/ullm-sq-fp8-layer7-up-fallback-plus-layer7-o16-gate32-policy-v0.1-artifact",
+  "artifact_manifest": "/tmp/ullm-sq-fp8-layer7-up-fallback-plus-layer7-o16-gate32-policy-v0.1-artifact/sq_manifest.json",
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-layer7-up-fallback-plus-layer7-o16-gate32",
+  "policy_id": "layer7_up_fallback_plus_layer7_o16_gate32",
+  "source_policy_json": "benchmarks/results/2026-07-09/sq-fp8-layer7-up-fallback-plus-layer7-o16-gate32-policy-v0.1.json",
+  "source_model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "base_package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+  "candidate": {
+    "activation_dtype": "bf16_or_f32",
+    "default_scale_block_cols": 32,
+    "default_scale_granularity": "row_block",
+    "id": "sq-fp8-w8a16-r9700-v0-layer7-up-fallback-plus-layer7-o16-gate32",
+    "scale_dtype": "f32",
+    "scale_granularity": "mixed",
+    "scale_layout": "per_tensor",
+    "weight_payload_dtype": "fp8_e4m3"
+  },
+  "storage": {
+    "artifact_disk_usage_bytes_approx": 144974202,
+    "artifact_file_count": 11,
+    "compact_resident_bytes_estimate": 19199261664,
+    "fp8_payload_bytes": 125829120,
+    "fp8_scale_bytes": 18874368,
+    "fp8_tensor_count": 5,
+    "materialized_working_set_bytes_estimate": 201326592,
+    "passthrough_source_bytes_estimate": 19054558176,
+    "passthrough_tensor_count": 770
+  },
+  "manifest_policy_block_present": true,
+  "fp8_tensor_scales": [
+    {
+      "name": "model.language_model.layers.3.mlp.up_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 32,
+      "scale_elements": 1572864,
+      "scale_override_id": null
+    },
+    {
+      "name": "model.language_model.layers.3.self_attn.k_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 16,
+      "scale_elements": 262144,
+      "scale_override_id": "k-rowblock16"
+    },
+    {
+      "name": "model.language_model.layers.7.mlp.gate_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 32,
+      "scale_elements": 1572864,
+      "scale_override_id": null
+    },
+    {
+      "name": "model.language_model.layers.7.self_attn.k_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 16,
+      "scale_elements": 262144,
+      "scale_override_id": "k-rowblock16"
+    },
+    {
+      "name": "model.language_model.layers.7.self_attn.o_proj.weight",
+      "scale_granularity": "row_block",
+      "scale_block_cols": 16,
+      "scale_elements": 1048576,
+      "scale_override_id": "layer7-o-rowblock16"
+    }
+  ],
+  "notes": [
+    "FP8 payload files are stored under /tmp and are not committed to git.",
+    "This compact result records policy-json to manifest generation for a layer7 o/gate scale probe.",
+    "Throughput and quality are recorded in phase-t2-sq-fp8-token-id-model-loop-layer7-ogate-scale-v1."
+  ]
+}
