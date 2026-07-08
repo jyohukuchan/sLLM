@@ -82,6 +82,13 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_rocwmma_fp8_attn_probe(
+        q_buffer: *const RawRuntimeBuffer,
+        k_buffer: *const RawRuntimeBuffer,
+        v_buffer: *const RawRuntimeBuffer,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_aq4_dequant_f32(
         index_buffer: *const RawRuntimeBuffer,
         scale_buffer: *const RawRuntimeBuffer,
@@ -1001,6 +1008,33 @@ pub fn rocwmma_fp8_qk_probe(
         ullm_runtime_rocwmma_fp8_qk_probe(
             q_buffer.raw.as_ptr(),
             k_buffer.raw.as_ptr(),
+            output_buffer.raw.as_ptr(),
+            stream,
+        )
+    })
+}
+
+pub fn rocwmma_fp8_attn_probe(
+    q_buffer: &RuntimeBuffer,
+    k_buffer: &RuntimeBuffer,
+    v_buffer: &RuntimeBuffer,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<(), String> {
+    let q_bytes = 16_usize * 16_usize;
+    let k_bytes = 32_usize * 16_usize;
+    let v_bytes = 32_usize * 16_usize * std::mem::size_of::<f32>();
+    let output_bytes = 16_usize * 16_usize * std::mem::size_of::<f32>();
+    check_copy_range(0, q_bytes, q_buffer.size()?)?;
+    check_copy_range(0, k_bytes, k_buffer.size()?)?;
+    check_copy_range(0, v_bytes, v_buffer.size()?)?;
+    check_copy_range(0, output_bytes, output_buffer.size()?)?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    status_to_result(unsafe {
+        ullm_runtime_rocwmma_fp8_attn_probe(
+            q_buffer.raw.as_ptr(),
+            k_buffer.raw.as_ptr(),
+            v_buffer.raw.as_ptr(),
             output_buffer.raw.as_ptr(),
             stream,
         )
@@ -5078,6 +5112,59 @@ mod tests {
         stream.synchronize().unwrap();
 
         rocwmma_fp8_qk_probe(&q_buffer, &k_buffer, &mut output_buffer, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output = vec![0_u8; output_bytes];
+        output_buffer
+            .copy_to_host(0, &mut output, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let output = le_bytes_to_f32s(&output);
+        assert!(output.iter().all(|value| value.is_finite()));
+        assert!(output.iter().any(|value| *value != 0.0_f32));
+    }
+
+    #[test]
+    fn cpu_rocwmma_fp8_attn_probe_outputs_finite_nonzero_values() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let q_bytes = 16_usize * 16_usize;
+        let k_bytes = 32_usize * 16_usize;
+        let v_elements = 32_usize * 16_usize;
+        let output_bytes = 16_usize * 16_usize * std::mem::size_of::<f32>();
+        let mut q_buffer = context.alloc_buffer(q_bytes).unwrap();
+        let mut k_buffer = context.alloc_buffer(k_bytes).unwrap();
+        let mut v_buffer = context
+            .alloc_buffer(v_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output_buffer = context.alloc_buffer(output_bytes).unwrap();
+
+        let q_input = vec![0x38_u8; q_bytes];
+        let k_input = vec![0x38_u8; k_bytes];
+        let v_input = (0..v_elements)
+            .map(|index| ((index % 23) as f32 - 11.0) * 0.03125)
+            .collect::<Vec<_>>();
+
+        q_buffer
+            .copy_from_host(0, &q_input, Some(&mut stream))
+            .unwrap();
+        k_buffer
+            .copy_from_host(0, &k_input, Some(&mut stream))
+            .unwrap();
+        v_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&v_input), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        rocwmma_fp8_attn_probe(
+            &q_buffer,
+            &k_buffer,
+            &v_buffer,
+            &mut output_buffer,
+            Some(&mut stream),
+        )
+        .unwrap();
         stream.synchronize().unwrap();
 
         let mut output = vec![0_u8; output_bytes];
@@ -12465,6 +12552,70 @@ mod tests {
         stream.synchronize().unwrap();
 
         rocwmma_fp8_qk_probe(&q_buffer, &k_buffer, &mut output_buffer, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output = vec![0_u8; output_bytes];
+        output_buffer
+            .copy_to_host(0, &mut output, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let output = le_bytes_to_f32s(&output);
+        assert!(output.iter().all(|value| value.is_finite()));
+        assert!(output.iter().any(|value| *value != 0.0_f32));
+    }
+
+    #[test]
+    fn first_hip_rocwmma_fp8_attn_probe_outputs_finite_nonzero_values_when_available() {
+        let rdna4_device = (1..device_count().unwrap()).find(|&index| {
+            device_info(index)
+                .map(|info| {
+                    info.backend == "hip"
+                        && (info.compute_major == 12 || info.gcn_arch_name.starts_with("gfx12"))
+                })
+                .unwrap_or(false)
+        });
+        let Some(device_index) = rdna4_device else {
+            return;
+        };
+        let mut context = RuntimeContext::create(device_index).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let q_bytes = 16_usize * 16_usize;
+        let k_bytes = 32_usize * 16_usize;
+        let v_elements = 32_usize * 16_usize;
+        let output_bytes = 16_usize * 16_usize * std::mem::size_of::<f32>();
+        let mut q_buffer = context.alloc_buffer(q_bytes).unwrap();
+        let mut k_buffer = context.alloc_buffer(k_bytes).unwrap();
+        let mut v_buffer = context
+            .alloc_buffer(v_elements * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output_buffer = context.alloc_buffer(output_bytes).unwrap();
+
+        let q_input = vec![0x38_u8; q_bytes];
+        let k_input = vec![0x38_u8; k_bytes];
+        let v_input = (0..v_elements)
+            .map(|index| ((index % 23) as f32 - 11.0) * 0.03125)
+            .collect::<Vec<_>>();
+
+        q_buffer
+            .copy_from_host(0, &q_input, Some(&mut stream))
+            .unwrap();
+        k_buffer
+            .copy_from_host(0, &k_input, Some(&mut stream))
+            .unwrap();
+        v_buffer
+            .copy_from_host(0, &f32s_to_le_bytes(&v_input), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        rocwmma_fp8_attn_probe(
+            &q_buffer,
+            &k_buffer,
+            &v_buffer,
+            &mut output_buffer,
+            Some(&mut stream),
+        )
+        .unwrap();
         stream.synchronize().unwrap();
 
         let mut output = vec![0_u8; output_bytes];

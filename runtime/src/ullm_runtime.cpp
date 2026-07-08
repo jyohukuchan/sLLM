@@ -471,6 +471,19 @@ public:
             rocwmma_include_options());
     }
 
+    bool compile_rocwmma_fp8_attn_probe_kernel(
+        const std::string &arch,
+        std::vector<char> *code,
+        std::string *error) {
+        return compile_kernel(
+            arch,
+            rocwmma_fp8_attn_probe_kernel_source(),
+            "ullm_rocwmma_fp8_attn_probe.hip",
+            code,
+            error,
+            rocwmma_include_options());
+    }
+
     bool compile_aq4_kernel(const std::string &arch, std::vector<char> *code, std::string *error) {
         return compile_kernel(arch, aq4_kernel_source(), "ullm_aq4_dequant_f32.hip", code, error);
     }
@@ -1810,6 +1823,134 @@ bool rocwmma_fp8_qk_probe_hip_kernel(
             device_id)) {
         if (error != nullptr) {
             *error = "hipModuleLaunchKernel failed for rocWMMA FP8 QK probe";
+        }
+        return false;
+    }
+    return true;
+}
+
+class HipRocwmmaFp8AttnProbeKernelCache {
+public:
+    void *function_for_device(int device_id, std::string *error) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto found = modules_.find(device_id);
+        if (found != modules_.end()) {
+            return found->second->function;
+        }
+
+        const std::vector<std::string> candidates = hip_arch_candidates(device_id);
+        if (candidates.empty()) {
+            append_error(error, "unable to infer HIP offload architecture for device");
+            return nullptr;
+        }
+
+        std::string compile_errors;
+        for (const std::string &arch : candidates) {
+            std::vector<char> code;
+            std::string compile_error;
+            if (!hiprtc_runtime().compile_rocwmma_fp8_attn_probe_kernel(
+                    arch,
+                    &code,
+                    &compile_error)) {
+                append_error(&compile_errors, compile_error);
+                continue;
+            }
+
+            void *module = nullptr;
+            if (!hip_runtime().module_load_data(&module, code.data(), device_id)) {
+                append_error(&compile_errors, "hipModuleLoadData failed for " + arch);
+                continue;
+            }
+            void *function = nullptr;
+            if (!hip_runtime().module_get_function(
+                    &function,
+                    module,
+                    "ullm_rocwmma_fp8_attn_probe_kernel",
+                    device_id)) {
+                hip_runtime().module_unload(module, device_id);
+                append_error(&compile_errors, "hipModuleGetFunction failed for " + arch);
+                continue;
+            }
+
+            auto loaded = std::make_unique<LoadedModule>();
+            loaded->module = module;
+            loaded->function = function;
+            loaded->arch = arch;
+            void *result = loaded->function;
+            modules_.emplace(device_id, std::move(loaded));
+            return result;
+        }
+        append_error(
+            error,
+            compile_errors.empty() ? "failed to build rocWMMA FP8 attention probe HIP kernel" :
+                                     compile_errors);
+        return nullptr;
+    }
+
+private:
+    struct LoadedModule {
+        void *module = nullptr;
+        void *function = nullptr;
+        std::string arch;
+    };
+
+    static void append_error(std::string *error, const std::string &message) {
+        if (error == nullptr || message.empty()) {
+            return;
+        }
+        if (!error->empty()) {
+            error->append("\n");
+        }
+        error->append(message);
+    }
+
+    std::mutex mutex_;
+    std::unordered_map<int, std::unique_ptr<LoadedModule>> modules_;
+};
+
+HipRocwmmaFp8AttnProbeKernelCache &hip_rocwmma_fp8_attn_probe_kernel_cache() {
+    static HipRocwmmaFp8AttnProbeKernelCache cache;
+    return cache;
+}
+
+bool rocwmma_fp8_attn_probe_hip_kernel(
+    const ullm_runtime_buffer *q_buffer,
+    const ullm_runtime_buffer *k_buffer,
+    const ullm_runtime_buffer *v_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    std::string *error) {
+    const int device_id = output_buffer->hip_device_id;
+    int major = 0;
+    int minor = 0;
+    hip_runtime().device_compute_capability(device_id, &major, &minor);
+    if (major != 12) {
+        if (error != nullptr) {
+            *error = "rocWMMA FP8 attention probe requires RDNA4/gfx12 HIP device";
+        }
+        return false;
+    }
+
+    void *function = hip_rocwmma_fp8_attn_probe_kernel_cache().function_for_device(device_id, error);
+    if (function == nullptr) {
+        return false;
+    }
+
+    const void *q_ptr = q_buffer->ptr;
+    const void *k_ptr = k_buffer->ptr;
+    const void *v_ptr = v_buffer->ptr;
+    void *output_ptr = output_buffer->ptr;
+    void *kernel_params[] = {&q_ptr, &k_ptr, &v_ptr, &output_ptr};
+    void *hip_stream = stream == nullptr ? nullptr : stream->stream;
+    if (!hip_runtime().module_launch_kernel(
+            function,
+            1u,
+            32u,
+            kernel_params,
+            hip_stream,
+            device_id)) {
+        if (error != nullptr) {
+            *error = "hipModuleLaunchKernel failed for rocWMMA FP8 attention probe";
         }
         return false;
     }
@@ -7244,6 +7385,45 @@ void wmma_fp8_qk_probe_host(
                 sum += q_value * k_value;
             }
             output[row * tile + col] = sum;
+        }
+    }
+}
+
+void rocwmma_fp8_attn_probe_host(
+    const uint8_t *q,
+    const uint8_t *k,
+    const float *v,
+    float *output) {
+    constexpr size_t q_tokens = 16;
+    constexpr size_t kv_tokens = 32;
+    constexpr size_t head_dim = 16;
+    for (size_t row = 0; row < q_tokens; ++row) {
+        float scores[kv_tokens];
+        float max_score = -std::numeric_limits<float>::infinity();
+        for (size_t token = 0; token < kv_tokens; ++token) {
+            float score = 0.0f;
+            for (size_t dim = 0; dim < head_dim; ++dim) {
+                const float q_value = fp8_e4m3_to_f32_unscaled(q[row * head_dim + dim]);
+                const float k_value = fp8_e4m3_to_f32_unscaled(k[token * head_dim + dim]);
+                score += q_value * k_value;
+            }
+            scores[token] = score;
+            max_score = std::max(max_score, score);
+        }
+
+        float denominator = 0.0f;
+        for (size_t value = 0; value < head_dim; ++value) {
+            output[row * head_dim + value] = 0.0f;
+        }
+        for (size_t token = 0; token < kv_tokens; ++token) {
+            const float weight = std::exp(scores[token] - max_score);
+            denominator += weight;
+            for (size_t value = 0; value < head_dim; ++value) {
+                output[row * head_dim + value] += weight * v[token * head_dim + value];
+            }
+        }
+        for (size_t value = 0; value < head_dim; ++value) {
+            output[row * head_dim + value] /= denominator;
         }
     }
 }

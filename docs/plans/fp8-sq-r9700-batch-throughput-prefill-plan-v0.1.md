@@ -232,6 +232,28 @@
 2. まず16x16 QK tileを既存cached-prefix/cold-prefill flash2のQK dot部分へ小さい条件で組み込み、sampled diffとtok/sを測る。
 3. その後、online softmaxとV accumulationを同じtile loopへ寄せ、FlashAttention2-likeの実装としてattention matrixを展開しない経路に育てる。
 
+### 2026-07-08 progress: RDNA4 FP8 rocWMMA attention probe v1
+
+前回の要点:
+
+- rocWMMA QK probeで、16x16 FP8 Q*K^Tをrow-major出力として扱えることを確認した。
+- 次はQKだけでなく、online softmaxとV accumulationまで接続できるかをstandalone smokeで確認する段階だった。
+
+今回の変更点:
+
+- C ABI `ullm_runtime_rocwmma_fp8_attn_probe`、Rust FFI `rocwmma_fp8_attn_probe`、CLI `runtime-rocwmma-fp8-attn-probe-smoke [DEVICE_INDEX] [PATTERN=ones|layout]` を追加した。
+- 固定shapeはQ `16x16` FP8、K `32x16` FP8、V `32x16` F32、output `16x16` F32にした。
+- HIPRTC kernelではrocWMMA QK tileを2回実行し、per-row online softmaxでVを畳み込む。
+- R9700 runtime device index `2` で、`ones` はCPU参照diff `0`、`layout` はCPU参照diff `0.000000119` だった。
+- V620/RDNA2 runtime device index `1` ではRDNA4必須として拒否されることを確認した。
+- 結果は `benchmarks/results/2026-07-08/runtime-wmma/phase-c10-rdna4-fp8-rocwmma-attn-probe-v1.md` に保存した。
+
+次の行動:
+
+1. このstandalone attention probeをcached-prefix flash2のQK dot/softmax/V accumulationへ小さい条件で移植する。
+2. 続いてcold-prefill causal flash2へ、causal maskと複数query row/blockの扱いを入れて移植する。
+3. どちらもsampled diffを先に固定し、その後にtok/sを測ってtile sizeやblock割り当てを調整する。
+
 ## Goal
 
 SQ候補を評価するために、R9700上で次を同じ測定基盤から取得できる状態を作る。
