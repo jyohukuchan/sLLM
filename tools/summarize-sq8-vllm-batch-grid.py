@@ -68,6 +68,32 @@ def format_gib(bytes_value: Any) -> str | None:
     return f"{value / 1024 ** 3:.2f}"
 
 
+def format_mib(bytes_value: Any) -> str | None:
+    value = as_int(bytes_value)
+    if value is None:
+        return None
+    return f"{value / 1024 ** 2:.2f}"
+
+
+def format_slash_value(
+    left: Any,
+    right: Any,
+    formatter,
+) -> str:
+    left_present = left is not None
+    right_present = right is not None
+    if not left_present and not right_present:
+        return "-"
+
+    left_text = formatter(left)
+    right_text = formatter(right)
+    if left_text is None:
+        left_text = "?"
+    if right_text is None:
+        right_text = "?"
+    return f"{left_text}/{right_text}"
+
+
 def format_float(value: Any, digits: int = 2) -> str:
     parsed = as_float(value)
     if parsed is None:
@@ -297,6 +323,18 @@ def iter_markdown_rows(
             expected_batch_matvec = as_int(
                 workload.get("sq_fp8_expected_all_batch_matvec_count")
             )
+            host_staging_read_count = workload.get(
+                "sq_diagnostic_host_staging_read_count"
+            )
+            host_staging_write_count = workload.get(
+                "sq_diagnostic_host_staging_write_count"
+            )
+            host_staging_read_bytes = workload.get(
+                "sq_diagnostic_host_staging_read_bytes"
+            )
+            host_staging_write_bytes = workload.get(
+                "sq_diagnostic_host_staging_write_bytes"
+            )
             output.extend(
                 [
                     as_str(workload.get("sq_projection_boundary")),
@@ -304,6 +342,16 @@ def iter_markdown_rows(
                     f"{batch_matvec}/{expected_batch_matvec}"
                     if batch_matvec is not None and expected_batch_matvec is not None
                     else "-",
+                    format_slash_value(
+                        host_staging_read_count,
+                        host_staging_write_count,
+                        as_int,
+                    ),
+                    format_slash_value(
+                        host_staging_read_bytes,
+                        host_staging_write_bytes,
+                        format_mib,
+                    ),
                 ]
             )
         yield output
@@ -326,7 +374,15 @@ def markdown_lines(
         "Decode x GiB",
     ]
     if show_sq_details:
-        header.extend(["SQ boundary", "SQ family", "SQ batch"])
+        header.extend(
+            [
+                "SQ boundary",
+                "SQ family",
+                "SQ batch",
+                "SQ staging ops",
+                "SQ staging MiB",
+            ]
+        )
     yield "| " + " | ".join(header) + " |"
     separator = [
         "---",
@@ -342,7 +398,7 @@ def markdown_lines(
         "---:",
     ]
     if show_sq_details:
-        separator.extend(["---", "---", "---"])
+        separator.extend(["---", "---", "---", "---:", "---:"])
     yield "| " + " | ".join(separator) + " |"
     for row in iter_markdown_rows(rows, show_sq_details=show_sq_details):
         yield (
@@ -779,7 +835,8 @@ def parse_args() -> argparse.Namespace:
         "--show-sq-details",
         action="store_true",
         help=(
-            "show SQ8_0 implementation details columns: SQ boundary, SQ family, SQ batch"
+            "show SQ8_0 implementation details columns: "
+            "SQ boundary, SQ family, SQ batch, SQ staging ops, SQ staging MiB"
         ),
     )
     return parser.parse_args()

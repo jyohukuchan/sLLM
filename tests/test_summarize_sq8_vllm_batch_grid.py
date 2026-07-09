@@ -191,6 +191,10 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_kernel_families="batch=direct",
                                 sq_fp8_batch_matvec_count=6720,
                                 sq_fp8_expected_all_batch_matvec_count=6720,
+                                sq_diagnostic_host_staging_read_count=0,
+                                sq_diagnostic_host_staging_write_count=72,
+                                sq_diagnostic_host_staging_read_bytes=0,
+                                sq_diagnostic_host_staging_write_bytes=1572864,
                             )
                         ),
                         json.dumps(
@@ -237,6 +241,10 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_kernel_families="batch=direct",
                                 sq_fp8_batch_matvec_count=6720,
                                 sq_fp8_expected_all_batch_matvec_count=6720,
+                                sq_diagnostic_host_staging_read_count=0,
+                                sq_diagnostic_host_staging_write_count=72,
+                                sq_diagnostic_host_staging_read_bytes=0,
+                                sq_diagnostic_host_staging_write_bytes=1572864,
                             )
                         ),
                         json.dumps(
@@ -268,21 +276,28 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                 [path], "pp16-tg8", "", {1, 2}, show_sq_details=True
             )
             lines = table.splitlines()
-            self.assertIn("SQ boundary | SQ family | SQ batch", lines[0])
+            self.assertIn(
+                "SQ boundary | SQ family | SQ batch | SQ staging ops | SQ staging MiB",
+                lines[0],
+            )
             self.assertEqual(len(lines), 1 + 1 + 3)
 
             sq8_line = next(
                 line for line in lines if "sq8-mixed-real-batch-no-final-pp16-tg8-b2" in line
             )
             parsed_sq8 = split_markdown_row(sq8_line)
-            self.assertEqual(parsed_sq8[-3], "batch")
-            self.assertEqual(parsed_sq8[-2], "batch=direct")
-            self.assertEqual(parsed_sq8[-1], "6720/6720")
+            self.assertEqual(parsed_sq8[-5], "batch")
+            self.assertEqual(parsed_sq8[-4], "batch=direct")
+            self.assertEqual(parsed_sq8[-3], "6720/6720")
+            self.assertEqual(parsed_sq8[-2], "0/72")
+            self.assertEqual(parsed_sq8[-1], "0.00/1.50")
 
             vllm_line = next(
                 line for line in lines if "vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2" in line
             )
             parsed_vllm = split_markdown_row(vllm_line)
+            self.assertEqual(parsed_vllm[-5], "-")
+            self.assertEqual(parsed_vllm[-4], "-")
             self.assertEqual(parsed_vllm[-3], "-")
             self.assertEqual(parsed_vllm[-2], "-")
             self.assertEqual(parsed_vllm[-1], "-")
@@ -291,6 +306,8 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                 line for line in lines if "sq8-mixed-real-batch-no-final-pp16-tg8-b1" in line
             )
             parsed_missing_sq8 = split_markdown_row(missing_sq8_line)
+            self.assertEqual(parsed_missing_sq8[-5], "-")
+            self.assertEqual(parsed_missing_sq8[-4], "-")
             self.assertEqual(parsed_missing_sq8[-3], "-")
             self.assertEqual(parsed_missing_sq8[-2], "-")
             self.assertEqual(parsed_missing_sq8[-1], "-")
@@ -313,6 +330,10 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_kernel_families="batch=direct",
                                 sq_fp8_batch_matvec_count=6720,
                                 sq_fp8_expected_all_batch_matvec_count=6720,
+                                sq_diagnostic_host_staging_read_count=1,
+                                sq_diagnostic_host_staging_write_count=2,
+                                sq_diagnostic_host_staging_read_bytes=1024,
+                                sq_diagnostic_host_staging_write_bytes=1048576,
                             )
                         ),
                         json.dumps(
@@ -351,9 +372,61 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(stderr.getvalue(), "")
             output = stdout.getvalue()
-            self.assertIn("SQ boundary | SQ family | SQ batch", output)
+            self.assertIn(
+                "SQ boundary | SQ family | SQ batch | SQ staging ops | SQ staging MiB",
+                output,
+            )
             self.assertIn("batch=direct", output)
             self.assertIn("6720/6720", output)
+            self.assertIn("1/2", output)
+            self.assertIn("0.00/1.00", output)
+
+    def test_markdown_table_with_sq_details_shows_missing_host_staging_as_question_mark(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "results.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                format_id="SQ8_0",
+                                sq_projection_boundary="batch",
+                                sq_projection_kernel_families="batch=direct",
+                                sq_fp8_batch_matvec_count=6720,
+                                sq_fp8_expected_all_batch_matvec_count=6720,
+                                sq_diagnostic_host_staging_read_count=12,
+                                sq_diagnostic_host_staging_write_bytes=1048576,
+                            )
+                        )
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            table = TOOL.markdown_table(
+                [path], "pp16-tg8", "", {2}, show_sq_details=True
+            )
+            lines = table.splitlines()
+
+            self.assertIn(
+                "SQ boundary | SQ family | SQ batch | SQ staging ops | SQ staging MiB",
+                lines[0],
+            )
+            sq8_line = next(
+                line for line in lines if "sq8-pp16-tg8-b2" in line
+            )
+            parsed_sq8 = split_markdown_row(sq8_line)
+            self.assertEqual(parsed_sq8[-5], "batch")
+            self.assertEqual(parsed_sq8[-4], "batch=direct")
+            self.assertEqual(parsed_sq8[-3], "6720/6720")
+            self.assertEqual(parsed_sq8[-2], "12/?")
+            self.assertEqual(parsed_sq8[-1], "?/1.00")
 
     def test_parse_requests_filter_rejects_bad_items(self) -> None:
         self.assertEqual(TOOL.parse_requests_filter("2, 4,8"), {2, 4, 8})
