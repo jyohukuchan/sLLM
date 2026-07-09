@@ -1,0 +1,174 @@
+{
+  "aq4_baseline_case_id": "aq4-qkv-layers3-7-baseline",
+  "candidate": {
+    "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-q16-k16-v16-policy-v0.1-artifact",
+    "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-q16-k16-v16"
+  },
+  "finding": "Layer3+7 QKV q16/k16/v16 preserves strict top1 for len4/case_a/case_b with SQ FP8 triple boundary count 46.",
+  "next_action": "Hold layer3+7 QKV q16/k16/v16 as the current QKV triple passing boundary, then test layer11 QKV or split layer11 q/k/v if strict top1 fails.",
+  "per_prompt": [
+    {
+      "aq4_margin_over_sq_top1_in_aq4": 0.0,
+      "aq4_top1": 24218,
+      "aq4_top1_logit_in_aq4": 7.201347828,
+      "aq4_top1_logit_in_sq": 7.107357979,
+      "aq4_top1_rank_in_sq_top8": 1,
+      "aq4_top8_tokens": [
+        24218,
+        41813,
+        88110,
+        14482,
+        81395,
+        61946,
+        56374,
+        60607
+      ],
+      "kind": "per_prompt",
+      "label": "len4",
+      "prompt_token_ids": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "sq_margin_over_aq4_top1_in_sq": 0.0,
+      "sq_top1": 24218,
+      "sq_top1_logit_in_aq4": 7.201347828,
+      "sq_top1_logit_in_sq": 7.107357979,
+      "sq_top1_margin_over_second_in_sq": 0.2976217269999992,
+      "sq_top1_rank_in_aq4_top8": 1,
+      "sq_top8_tokens": [
+        24218,
+        41813,
+        88110,
+        14482,
+        81395,
+        61946,
+        56374,
+        59514
+      ],
+      "strict_top1_match": true,
+      "top8_overlap_count": 7
+    },
+    {
+      "aq4_margin_over_sq_top1_in_aq4": 0.0,
+      "aq4_top1": 4105,
+      "aq4_top1_logit_in_aq4": 4.995436668,
+      "aq4_top1_logit_in_sq": 5.091999054,
+      "aq4_top1_rank_in_sq_top8": 1,
+      "aq4_top8_tokens": [
+        4105,
+        5582,
+        42228,
+        513,
+        200,
+        1119,
+        998,
+        314
+      ],
+      "kind": "per_prompt",
+      "label": "case_a",
+      "prompt_token_ids": [
+        100,
+        200,
+        300,
+        400,
+        500,
+        600,
+        700,
+        800
+      ],
+      "sq_margin_over_aq4_top1_in_sq": 0.0,
+      "sq_top1": 4105,
+      "sq_top1_logit_in_aq4": 4.995436668,
+      "sq_top1_logit_in_sq": 5.091999054,
+      "sq_top1_margin_over_second_in_sq": 0.0030498510000001033,
+      "sq_top1_rank_in_aq4_top8": 1,
+      "sq_top8_tokens": [
+        4105,
+        5582,
+        42228,
+        513,
+        200,
+        1119,
+        314,
+        998
+      ],
+      "strict_top1_match": true,
+      "top8_overlap_count": 8
+    },
+    {
+      "aq4_margin_over_sq_top1_in_aq4": 0.0,
+      "aq4_top1": 329,
+      "aq4_top1_logit_in_aq4": 4.806379318,
+      "aq4_top1_logit_in_sq": 4.833259583,
+      "aq4_top1_rank_in_sq_top8": 1,
+      "aq4_top8_tokens": [
+        329,
+        933,
+        8903,
+        261,
+        294,
+        1547,
+        334,
+        627
+      ],
+      "kind": "per_prompt",
+      "label": "case_b",
+      "prompt_token_ids": [
+        42,
+        314,
+        2718,
+        1618,
+        12345,
+        23456,
+        34567,
+        45678
+      ],
+      "sq_margin_over_aq4_top1_in_sq": 0.0,
+      "sq_top1": 329,
+      "sq_top1_logit_in_aq4": 4.806379318,
+      "sq_top1_logit_in_sq": 4.833259583,
+      "sq_top1_margin_over_second_in_sq": 0.1871395119999999,
+      "sq_top1_rank_in_aq4_top8": 1,
+      "sq_top8_tokens": [
+        329,
+        933,
+        8903,
+        261,
+        294,
+        334,
+        627,
+        1547
+      ],
+      "strict_top1_match": true,
+      "top8_overlap_count": 8
+    }
+  ],
+  "promoted_full_sq_policy": false,
+  "run_id": "phase-t2-sq-fp8-qkv-layers3-7-q16-k16-v16-prompt-bundle-v1",
+  "sq_case_id": "sq-qkv-layers3-7-q16-k16-v16",
+  "summary": {
+    "aq4_decode_tps": 80.883171,
+    "aq4_end_to_end_tps": 35.370726,
+    "aq4_prefill_tps": 66.811351,
+    "aq4_vram_consumed_bytes": 4443144192,
+    "candidate": {
+      "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-q16-k16-v16-policy-v0.1-artifact",
+      "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-q16-k16-v16"
+    },
+    "kind": "summary",
+    "run_id": "phase-t2-sq-fp8-qkv-layers3-7-q16-k16-v16-prompt-bundle-v1",
+    "sq_decode_tps": 77.70748,
+    "sq_end_to_end_tps": 34.095768,
+    "sq_fp8_tensor_count": 6,
+    "sq_fp8_triple_matvec_count": 46,
+    "sq_passthrough_tensor_count": 769,
+    "sq_prefill_tps": 62.866188,
+    "sq_projection_boundary": "triple",
+    "sq_vram_consumed_bytes": 4499853312,
+    "strict_top1_all_match": true,
+    "strict_top1_pass_count": 3,
+    "strict_top1_total": 3
+  }
+}
