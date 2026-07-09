@@ -864,6 +864,8 @@ Expected outputs:
 - JSONL rows in `benchmarks/results/YYYY-MM-DD/external/` or a later SQ8_0 comparison directory.
 - Markdown summary with one table for successful comparable rows and one table for unsupported or
   failed rows.
+- Compact SQ8_0/vLLM batch-grid tables can be regenerated from JSONL with
+  `tools/summarize-sq8-vllm-batch-grid.py`, for example with `--workload-prefix pp16-tg8 --requests 2,4,8`.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
 - The vLLM row should be produced through the derived command template in

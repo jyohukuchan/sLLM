@@ -27,6 +27,12 @@
 
 ## Result
 
+Regenerate the compact batch-grid table:
+
+```bash
+python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8
+```
+
 | Status | Engine | Model | Quant | Config | SQ mode | Target | Workload | Prefill tok/s | Decode tok/s | End-to-end tok/s | Consumed GiB | Decode x GiB |
 | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | ok | uLLM | Qwen3.5-9B | SQ8_0 | native package | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 49.89 | 73.16 | 35.83 | 4.17 | 304.89 |
