@@ -70,6 +70,94 @@ static SQ_FP8_BATCH_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_PAIR_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_TRIPLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 
+const SQ_FP8_PROJECTION_DISPATCH_PHASE: &str = "component";
+const SQ_FP8_PROJECTION_MATVEC_OP: &str = "sq8_0_matvec";
+const SQ_FP8_PROJECTION_MATVEC_BATCH_OP: &str = "sq8_0_matvec_batch";
+const SQ_FP8_PROJECTION_MATVEC_PAIR_OP: &str = "sq8_0_matvec_pair";
+const SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP: &str = "sq8_0_matvec_triple";
+const SQ_FP8_PROJECTION_DISPATCH_IMPLEMENTATIONS: &[BackendImplementation<'static>] = &[
+    BackendImplementation {
+        id: "sq8_0_matvec_generic_direct",
+        operation: SQ_FP8_PROJECTION_MATVEC_OP,
+        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: None,
+        gpu_name: None,
+        priority: 0,
+    },
+    BackendImplementation {
+        id: "sq8_0_matvec_rdna4_direct",
+        operation: SQ_FP8_PROJECTION_MATVEC_OP,
+        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: Some("RDNA4"),
+        gpu_name: None,
+        priority: 10,
+    },
+    BackendImplementation {
+        id: "sq8_0_matvec_batch_generic_direct",
+        operation: SQ_FP8_PROJECTION_MATVEC_BATCH_OP,
+        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: None,
+        gpu_name: None,
+        priority: 0,
+    },
+    BackendImplementation {
+        id: "sq8_0_matvec_batch_rdna4_direct",
+        operation: SQ_FP8_PROJECTION_MATVEC_BATCH_OP,
+        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: Some("RDNA4"),
+        gpu_name: None,
+        priority: 10,
+    },
+    BackendImplementation {
+        id: "sq8_0_matvec_pair_generic_direct",
+        operation: SQ_FP8_PROJECTION_MATVEC_PAIR_OP,
+        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: None,
+        gpu_name: None,
+        priority: 0,
+    },
+    BackendImplementation {
+        id: "sq8_0_matvec_pair_rdna4_direct",
+        operation: SQ_FP8_PROJECTION_MATVEC_PAIR_OP,
+        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: Some("RDNA4"),
+        gpu_name: None,
+        priority: 10,
+    },
+    BackendImplementation {
+        id: "sq8_0_matvec_triple_generic_direct",
+        operation: SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP,
+        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: None,
+        gpu_name: None,
+        priority: 0,
+    },
+    BackendImplementation {
+        id: "sq8_0_matvec_triple_rdna4_direct",
+        operation: SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP,
+        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: Some("RDNA4"),
+        gpu_name: None,
+        priority: 10,
+    },
+];
+
 fn reset_sq_fp8_projection_telemetry() {
     SQ_FP8_SINGLE_MATVEC_COUNT.store(0, Ordering::Relaxed);
     SQ_FP8_BATCH_MATVEC_COUNT.store(0, Ordering::Relaxed);
@@ -104,6 +192,59 @@ fn sq_fp8_projection_boundary(telemetry: SqFp8ProjectionTelemetry) -> String {
         "none".to_string()
     } else {
         boundaries.join("+")
+    }
+}
+
+fn select_sq_fp8_projection_implementation_id(
+    operation: &'static str,
+    info: &ullm_runtime_sys::DeviceInfo,
+) -> &'static str {
+    let request = BackendRequest {
+        operation,
+        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: runtime_device_gpu_arch(info),
+        gpu_name: Some(info.name.as_str()),
+    };
+    select_backend(&request, SQ_FP8_PROJECTION_DISPATCH_IMPLEMENTATIONS)
+        .map(|implementation| implementation.id)
+        .unwrap_or("sq8_0_projection_unresolved")
+}
+
+fn sq_fp8_projection_implementation_ids(
+    telemetry: SqFp8ProjectionTelemetry,
+    info: &ullm_runtime_sys::DeviceInfo,
+) -> String {
+    let mut selected = Vec::new();
+    if telemetry.single_matvec_count > 0 {
+        selected.push(format!(
+            "single={}",
+            select_sq_fp8_projection_implementation_id(SQ_FP8_PROJECTION_MATVEC_OP, info)
+        ));
+    }
+    if telemetry.batch_matvec_count > 0 {
+        selected.push(format!(
+            "batch={}",
+            select_sq_fp8_projection_implementation_id(SQ_FP8_PROJECTION_MATVEC_BATCH_OP, info)
+        ));
+    }
+    if telemetry.pair_matvec_count > 0 {
+        selected.push(format!(
+            "pair={}",
+            select_sq_fp8_projection_implementation_id(SQ_FP8_PROJECTION_MATVEC_PAIR_OP, info)
+        ));
+    }
+    if telemetry.triple_matvec_count > 0 {
+        selected.push(format!(
+            "triple={}",
+            select_sq_fp8_projection_implementation_id(SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP, info)
+        ));
+    }
+    if selected.is_empty() {
+        "none".to_string()
+    } else {
+        selected.join(",")
     }
 }
 

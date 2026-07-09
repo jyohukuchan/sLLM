@@ -948,6 +948,7 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "sq_schema_version",
         "sq_execution_mode",
         "sq_projection_boundary",
+        "sq_projection_implementation_ids",
     ):
         value = report.get(key)
         if isinstance(value, str) and value != "none":

@@ -302,7 +302,9 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_artifact=/tmp/sq-artifact sq_schema_version=sq-fp8-artifact-v0.1 "
             "sq_fp8_tensor_count=22 sq_passthrough_tensor_count=753 sq_row_chunk=256 "
             "sq_execution_mode=materialized_f32_fallback "
-            "sq_projection_boundary=pair sq_fp8_single_matvec_count=0 "
+            "sq_projection_boundary=pair "
+            "sq_projection_implementation_ids=pair=sq8_0_matvec_pair_rdna4_direct "
+            "sq_fp8_single_matvec_count=0 "
             "sq_fp8_batch_matvec_count=0 sq_fp8_pair_matvec_count=8 "
             "sq_fp8_triple_matvec_count=0 "
             "request_batch_executor=true fused_request_batch=false throughput_row=true "
@@ -392,6 +394,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "materialized_f32_fallback",
         )
         self.assertEqual(row["workload"]["sq_projection_boundary"], "pair")
+        self.assertEqual(
+            row["workload"]["sq_projection_implementation_ids"],
+            "pair=sq8_0_matvec_pair_rdna4_direct",
+        )
         self.assertEqual(row["workload"]["sq_fp8_single_matvec_count"], 0)
         self.assertEqual(row["workload"]["sq_fp8_batch_matvec_count"], 0)
         self.assertEqual(row["workload"]["sq_fp8_pair_matvec_count"], 8)

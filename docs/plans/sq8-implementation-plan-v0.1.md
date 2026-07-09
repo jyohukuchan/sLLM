@@ -274,7 +274,7 @@ python3 -m py_compile tools/build-sq-fp8-w8a16-artifact.py tools/ullm_format_ids
 
 ### M3: Library-Side Resident SQ8_0 Loader
 
-Status: planned.
+Status: done for the current v0.1 resident loader boundary.
 
 Deliverables:
 
@@ -286,7 +286,7 @@ Deliverables:
 Verification:
 
 ```text
-cargo test -p ullm-engine sq -- --test-threads=1
+cargo test -p ullm-engine sq_runtime -- --test-threads=1
 cargo check -p ullm-engine
 ```
 
@@ -297,11 +297,13 @@ Status: partial.
 Done:
 
 - single, batch, pair, and triple SQ FP8 matvec APIs exist.
+- mixed request-state rows report the projection boundary counters and the selected SQ8_0 projection
+  implementation IDs resolved through `backend_dispatch`.
 
 Remaining:
 
 - make full model-loop path use direct SQ8_0 projection kernels when tensors are resident SQ8_0;
-- store `sq_fp8_single_matvec_count`, `sq_fp8_batch_matvec_count`, `sq_fp8_pair_matvec_count`, and `sq_fp8_triple_matvec_count` in all relevant throughput rows;
+- store `sq_fp8_single_matvec_count`, `sq_fp8_batch_matvec_count`, `sq_fp8_pair_matvec_count`, and `sq_fp8_triple_matvec_count` in any remaining throughput rows that do not yet expose them;
 - ensure performance summaries reject accidental `materialized_f32_fallback` rows unless explicitly marked as fallback.
 
 Verification:
@@ -347,14 +349,21 @@ Minimum result fields:
 
 ### M6: Dispatch Integration
 
-Status: planned.
+Status: partial.
 
-Deliverables:
+Done:
 
-- connect `backend_dispatch` to at least one production-like runtime path;
-- add registry entries for SQ8_0 RDNA4 projection kernels;
-- add registry entries for cached-prefix FP8 executor;
-- record selected implementation ID in result rows.
+- cached-prefix attention smoke uses `backend_dispatch` when the CLI executor is not explicitly
+  overridden.
+- SQ8_0 projection execution records operation-level implementation IDs for single, batch, pair, and
+  triple matvec boundaries.
+
+Remaining:
+
+- use dispatch-selected SQ8_0 projection implementations for kernel selection semantics, not only
+  reporting;
+- add registry entries for higher-level SQ8_0 fused projection kernels;
+- keep selected implementation IDs in all result rows that represent dispatch-selected execution.
 
 Example intent:
 
@@ -481,13 +490,13 @@ Expected outputs:
 
 ## Immediate Work Queue
 
-1. Add `sq_runtime.rs` or equivalent library boundary.
+1. Add `sq_runtime.rs` or equivalent library boundary. Done.
    - Move SQ resident payload/scale loading and `SqFp8` storage refs out of CLI-local code.
-2. Add an SQ8_0 implementation result label.
+2. Add an SQ8_0 implementation result label. Done.
    - Keep CLI command compatibility, but result rows should report public `format_id = SQ8_0`.
-3. Wire `backend_dispatch` into cached-prefix executor resolution.
+3. Wire `backend_dispatch` into cached-prefix executor resolution. Done.
    - This is the smallest real dispatch connection and exercises GPU arch/name selection.
-4. Wire `backend_dispatch` into SQ8_0 projection execution.
+4. Wire `backend_dispatch` into SQ8_0 projection execution. Partial.
    - Start with operation-level reporting before changing kernel selection semantics.
 5. Generate one fresh SQ8_0 artifact from policy JSON and run:
    - materialize smoke;
