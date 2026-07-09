@@ -16,6 +16,7 @@
 - Qwen3-14B-FP8側のHF設定を固定情報として明記。
   - `model_type=qwen3`, `architectures=Qwen3ForCausalLM`
   - `hidden_size=5120`, `num_hidden_layers=40`, `num_attention_heads=40`, `num_key_value_heads=8`, `head_dim=128`
+  - `rope_theta=1000000`
   - `torch_dtype=bfloat16`, `quantization_config {fmt=e4m3, weight_block_size=[128,128]}`
   - `HF path`: `/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8`
 - 現時点で見つかる `.ullm.d` は `Qwen3.5-9B` 系のみで、`Qwen3-14B` のuLLM packageは未確認/未作成であることを明文化。
@@ -48,19 +49,27 @@
   - 実生成物: `/tmp/ullm-qwen3-14b-fp8-layer0-sq8-artifact`
   - `fp8_tensor_count=7`, `passthrough_tensor_count=716`
 - 薄いpackage + layer0 SQ8_0 artifactで `sq-fp8-token-ids-logits-smoke` が `verified=true` まで到達した。
-  - これはsame-modelの最小接続確認であり、まだ40-layer throughput rowではない。
+  - これはsame-modelの最小接続確認。
+- 同じsourceから40層SQ8_0 sidecar artifactを作成した。
+  - 実生成物: `/tmp/ullm-qwen3-14b-fp8-full-sq8-artifact`
+  - `fp8_tensor_count=281`, `passthrough_tensor_count=442`
+  - artifact sizeは約 `14G`
+- Qwen3-14B-FP8の40-layer `manifest-all` uLLM行を `results.jsonl` に追加した。
+  - preliminary行: `rotary_dim=32`, `rope_base=10000000`
+  - config一致行: `rotary_dim=128`, `rope_base=1000000`
+  - config一致 smoke: `ullm-r9700-qwen3-14b-fp8-sq8-smoke-pp16-tg8-b1-rope128-theta1e6`
+  - config一致 representative: `ullm-r9700-qwen3-14b-fp8-sq8-rep-pp512-tg128-b1-rope128-theta1e6`
+- config一致行はどちらも `status=ok` / `verified=true` / `sq_execution_mode=direct_fp8_dequant_matvec`。
 - Same-model rowの必要条件を列挙
   - FP8/SQ8_0 package import（短期はBF16 thin package + SQ8_0 sidecar overlay、長期はnative `.ullm.d` SQ tensor統合）
-  - SQ8_0 artifact生成/import（layer0は確認済み、40層は未完了）
+  - SQ8_0 artifact生成/import（40層 artifact は完了）
   - tensor-name互換の解消
-  - 40-layer `manifest-all` rowの整備
-  - prompt guard bundleまたは同等のbehavioral guard
-  - vLLMと workload shapeの完全一致（少なくとも `pp/tg/b1` と長さ・シード条件）
+  - 40-layer `manifest-all` rowの整備（smoke / representative とも完了）
+  - prompt guard bundleまたは同等のbehavioral guard（未添付）
+  - vLLMと workload shapeの完全一致（`pp16/tg8/b1` と `pp512/tg128/b1` は完了）
 
 ## 次の行動
 
-- layer0で通った thin package + SQ8_0 sidecar overlay 経路を、40層artifactへ拡張する。
-- 生成済みQwen3-14B thin packageを使って `40-layer manifest-all` のuLLM行を追加する。
-- tensor-nameの整合（`model.*`/`model.language_model.*`）はruntime側で吸収済み。次は実packageで自動検証する。
-- 同条件（`pp16/tg8/b1` を含む）でvLLM smoke/代表bothを再実行し、初めて同一モデルsame-model throughputとして扱う。
-- その時点で、比較結論の表記を「same-model throughput conclusion」として更新できるか判定する。
+- Qwen3-14B-FP8同一モデル行へprompt guard bundleまたは同等のbehavioral guardを添付する。
+- uLLM行は現在token-id model-loop / final logits込み / `prefill_real_batch=false` / `decode_real_batch=false` なので、vLLM serving benchmarkと同格の最終性能結論にはしない。
+- 次の比較昇格には、real-batchまたはserver-style uLLM pathで同じ `pp/tg/b1` を再測定する。

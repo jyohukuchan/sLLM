@@ -4,37 +4,45 @@
 
 - M10 compares uLLM SQ8_0 rows with an external `vLLM + FP8` baseline after uLLM rows become
   implementation-valid.
-- The vLLM smoke template uses `prompt_tokens=16`, `generated_tokens=8`, and
-  `concurrent_requests=1`.
-- The current uLLM SQ8_0 package path is Qwen3.5-9B, while the planned vLLM external baseline is
-  Qwen3-14B-FP8.
+- The first comparison rows used uLLM `Qwen3.5-9B` SQ8_0 and vLLM `Qwen3-14B-FP8`, so they were not
+  same-model throughput evidence.
+- The later work produced a BF16 thin package plus SQ8_0 sidecar artifact for local
+  `Qwen3-14B-FP8`.
 
 ## 今回の変更点
 
-- Added a uLLM SQ8_0 smoke-shape row with `pp16/tg8/b1`.
-- Ran the vLLM Qwen3-14B-FP8 smoke baseline on R9700 with `ROCR_VISIBLE_DEVICES=1`.
-- Ran the vLLM Qwen3-14B-FP8 representative `pp512/tg128/b1` row on R9700.
-- Attached the existing behavioral prompt-suite guard bundle.
-- Preserved both rows in the same `inference-benchmark-result-v0.1` JSONL file.
+- Added full 40-layer uLLM `Qwen3-14B-FP8` SQ8_0 rows with the same smoke and representative shapes
+  as the vLLM FP8 baseline.
+- Added config-aligned uLLM rows using local Qwen3 config values: `rotary_dim=128` and
+  `rope_base=1000000`.
+- Preserved the earlier `rotary_dim=32` / `rope_base=10000000` uLLM rows as preliminary connectivity
+  rows, not final same-model rows.
 
 ## Result
 
-| Status | Engine | Model | Family | Quant | SQ mode | Impl | Target | Workload | Batching | Prefill total tok/s | Decode total tok/s | End-to-end tok/s | Consumed GiB | Decode x GiB |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| ok | uLLM | Qwen3.5-9B | FP8 | SQ8_0 | direct_fp8_dequant_matvec | single=sq8_0_matvec_rdna4_direct,triple=sq8_0_matvec_triple_rdna4_direct | R9700 | pp16/tg8/b1 | single | 49.89 | 73.16 | 35.83 | 4.17 | 304.89 |
-| ok | vLLM | Qwen3-14B-FP8 | FP8 | FP8 | - | - | R9700 | pp16/tg8/b1 | - | 31.19 | 15.59 | 46.78 | 28.71 | 447.63 |
-| ok | vLLM | Qwen3-14B-FP8 | FP8 | FP8 | - | - | R9700 | pp512/tg128/b1 | - | 90.18 | 22.54 | 112.72 | 28.72 | 647.34 |
+| Status | Engine | Model | Quant | Config | SQ mode | Target | Workload | Prefill tok/s | Decode tok/s | End-to-end tok/s | Consumed GiB | Decode x GiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| ok | uLLM | Qwen3.5-9B | SQ8_0 | native package | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 49.89 | 73.16 | 35.83 | 4.17 | 304.89 |
+| ok | vLLM | Qwen3-14B-FP8 | FP8 | HF config | - | R9700 | pp16/tg8/b1 | 31.19 | 15.59 | 46.78 | 28.71 | 447.63 |
+| ok | vLLM | Qwen3-14B-FP8 | FP8 | HF config | - | R9700 | pp512/tg128/b1 | 90.18 | 22.54 | 112.72 | 28.72 | 647.34 |
+| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | preliminary rope32/theta1e7 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 2.77 | 3.02 | 0.33 | 12.82 | 38.69 |
+| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | preliminary rope32/theta1e7 | direct_fp8_dequant_matvec | R9700 | pp512/tg128/b1 | 2.84 | 2.68 | 2.19 | 13.26 | 35.60 |
+| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 3.01 | 3.06 | 0.32 | 12.82 | 39.19 |
+| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp512/tg128/b1 | 2.91 | 2.77 | 2.23 | 13.26 | 36.80 |
 
-uLLM key fields:
+Current same-model uLLM key fields:
 
-- `quality.prompt_suite_regression_status`: `passed`
-- `guards.prompt_guard_bundle.acceptance_mode`: `behavioral`
+- package: `/tmp/ullm-qwen3-14b-fp8-bf16-thin.ullm.d`
+- artifact: `/tmp/ullm-qwen3-14b-fp8-full-sq8-artifact`
+- `workload.sq_fp8_tensor_count`: `281`
+- `workload.sq_passthrough_tensor_count`: `442`
 - `workload.sq_projection_boundary`: `single+triple`
-- `workload.sq_fp8_single_matvec_count`: `24`
-- `workload.sq_fp8_triple_matvec_count`: `120`
-- `metrics.artifact_load_wall_time_seconds`: `11.941487135`
-- `metrics.load_excluded_total_wall_time_seconds`: `0.669757925`
-- `metrics.load_included_total_wall_time_seconds`: `12.868902806`
+- `workload.sq_projection_implementation_ids`:
+  `single=sq8_0_matvec_rdna4_direct,triple=sq8_0_matvec_triple_rdna4_direct`
+- config-aligned smoke row:
+  `ullm-r9700-qwen3-14b-fp8-sq8-smoke-pp16-tg8-b1-rope128-theta1e6`
+- config-aligned representative row:
+  `ullm-r9700-qwen3-14b-fp8-sq8-rep-pp512-tg128-b1-rope128-theta1e6`
 
 vLLM smoke key fields:
 
@@ -57,15 +65,16 @@ vLLM representative key fields:
 
 Important limitation:
 
-- These rows have matching smoke workload shape, target GPU, and result schema, but not matching
-  model architecture/size. Treat this as a local feasibility and measurement-path comparison, not a
-  same-model throughput conclusion.
-- Same-model readiness is tracked in `same-model-readiness.md`; tensor namespace compatibility is
-  handled in runtime lookup. The current blocker has moved from basic package connectivity to a
-  full 40-layer `Qwen3-14B-FP8` uLLM row: the BF16 thin package plus layer0 SQ8_0 sidecar overlay
-  reaches `verified=true`, but no full same-model throughput row has been produced yet.
+- The `rope128/theta1e6` uLLM rows are now same model, same GPU, same prompt/generated shape, and
+  config-aligned with local `Qwen3-14B-FP8`.
+- They are still not a final serving-performance conclusion. uLLM is measured through the current
+  token-id model-loop path with final logits included and `prefill_real_batch=false` /
+  `decode_real_batch=false`, while vLLM is measured through its throughput benchmark.
+- The Qwen3-14B-FP8 uLLM rows have sampled `verified=true`, but the behavioral prompt-suite guard
+  bundle has not yet been attached to these same-model rows.
 
 ## 次の行動
 
-- Build the full 40-layer same-model uLLM SQ8_0 row before making final throughput claims.
-- If same-model uLLM is not ready, keep future rows labeled as external feasibility baselines.
+- Attach a prompt guard bundle or equivalent behavioral guard to the config-aligned same-model rows.
+- Add a server-style or real-batch uLLM path before using the table as final vLLM serving comparison.
+- Keep the preliminary rope32/theta1e7 rows only as connectivity history.

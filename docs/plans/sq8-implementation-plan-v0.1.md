@@ -500,8 +500,9 @@ Important rule:
 
 ### M10: vLLM + FP8 External Baseline Comparison
 
-Status: planned for the later half of the SQ8_0 implementation cycle; harness prerequisites are
-partially prepared.
+Status: partial. The M10 harness now has same-model uLLM and vLLM rows for the smoke and
+representative workloads, but the current uLLM rows are token-id model-loop measurements rather than
+server-style or real-batch serving rows.
 
 Purpose:
 
@@ -551,14 +552,22 @@ Current local baseline state:
 - It also contains a successful vLLM representative row for `prompt_tokens=512`,
   `generated_tokens=128`, and `concurrent_requests=1` with decode `22.54 tok/s` and consumed VRAM
   `30837428224` bytes.
+- It now contains config-aligned same-model uLLM rows for the same local `Qwen3-14B-FP8` target:
+  - smoke `pp16/tg8/b1`, `rotary_dim=128`, `rope_base=1000000`, decode `3.057004 tok/s`,
+    consumed VRAM `13763940352` bytes;
+  - representative `pp512/tg128/b1`, `rotary_dim=128`, `rope_base=1000000`, decode
+    `2.774043 tok/s`, consumed VRAM `14242410496` bytes.
+- Earlier uLLM Qwen3-14B rows with `rotary_dim=32` and `rope_base=10000000` are retained as
+  preliminary connectivity rows only; the config-aligned rows should be used for M10 same-model
+  discussion.
 
 Same-model readiness audit:
 
 - The comparison directory now includes
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/same-model-readiness.md`.
-- No local uLLM `.ullm.d` package for `Qwen3-14B-FP8` has been identified yet. The package
-  directories currently visible under `/tmp` and the repo-local benchmark tree are Qwen3.5-9B
-  artifacts.
+- A local BF16-only thin uLLM package for `Qwen3-14B-FP8` now exists at
+  `/tmp/ullm-qwen3-14b-fp8-bf16-thin.ullm.d`. It is paired with a SQ8_0 sidecar artifact rather
+  than native SQ tensors inside `.ullm.d`.
 - `Qwen3-14B-FP8` source tensor naming uses `model.embed_tokens.weight`, `model.norm.weight`, and
   `model.layers.*`. The current uLLM token-id model-loop runtime uses
   `model.language_model.embed_tokens.weight`, `model.language_model.norm.weight`, and
@@ -584,9 +593,11 @@ Same-model readiness audit:
 - A layer0 SQ8_0 sidecar artifact with `7` FP8 tensors and `716` passthrough metadata entries was
   built from the same Qwen3-14B-FP8 source. Combined with the thin package, it passes
   `sq-fp8-token-ids-logits-smoke` for layer `0` with `verified=true`.
-- The tensor namespace issue is closed for runtime lookup, and the minimum same-model connectivity
-  path is now proven for layer0. Building an AQ4 package directly from `Qwen3-14B-FP8` remains the
-  wrong route.
+- A full 40-layer SQ8_0 sidecar artifact with `281` FP8 tensors and `442` passthrough metadata
+  entries was built at `/tmp/ullm-qwen3-14b-fp8-full-sq8-artifact`.
+- The tensor namespace issue is closed for runtime lookup, and the same-model connectivity path is
+  proven through full 40-layer `manifest-all` uLLM rows. Building an AQ4 package directly from
+  `Qwen3-14B-FP8` remains the wrong route.
 
 Same-model prerequisites:
 
@@ -596,15 +607,15 @@ Same-model prerequisites:
    BF16-only thin `.ullm.d` package plus SQ8_0 sidecar artifact overlay; native FP8 tensors are not
    yet integrated into `.ullm.d`.
 3. Build or import the matching `SQ8_0` artifact and verify the selected FP8 tensor count against
-   the imported package tensors: partial. A layer0 artifact with `7` FP8 tensors is verified; the
-   full 40-layer artifact remains.
+   the imported package tensors: done for sidecar v0.1. The full artifact reports `281` FP8 tensors.
 4. Run a 40-layer `manifest-all` uLLM smoke row with `prompt_tokens=16`, `generated_tokens=8`, and
-   `concurrent_requests=1`.
-5. Attach the prompt guard bundle or an equivalent behavioral guard before comparing against vLLM
+   `concurrent_requests=1`: done for the config-aligned Qwen3-14B-FP8 row.
+5. Attach the prompt guard bundle or an equivalent behavioral guard before final comparison against vLLM
    rows.
-6. Only then add the representative `prompt_tokens=512`, `generated_tokens=128`,
-   `concurrent_requests=1` same-model row and promote the comparison from feasibility to throughput
-   evidence.
+6. Add the representative `prompt_tokens=512`, `generated_tokens=128`, `concurrent_requests=1`
+   same-model row: done for the config-aligned Qwen3-14B-FP8 row.
+7. Add a real-batch or server-style uLLM measurement path before promoting this to a final serving
+   throughput conclusion.
 
 Workload grid:
 
@@ -634,6 +645,10 @@ Comparison rules:
   Selected-layer uLLM rows are path-connectivity diagnostics only.
 - Full-package uLLM rows can be compared against vLLM serving rows when prompt/generation lengths,
   batch/concurrency, KV cache dtype, and model target are documented.
+- Current Qwen3-14B uLLM rows are full 40-layer model-loop rows with direct SQ8_0 projection
+  execution, but `prefill_real_batch=false`, `decode_real_batch=false`, and final logits are included
+  in total latency. Treat them as implementation-valid model-loop comparison rows, not final serving
+  parity rows.
 - Differences in tokenizer/server overhead should be recorded. When possible, keep a raw model-loop
   uLLM row and a server-style vLLM row as separate comparison classes.
 
