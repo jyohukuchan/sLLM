@@ -464,7 +464,8 @@ Done:
   existing default selection behavior is preserved.
 - Active SQ8_0 matvec dispatch now distinguishes Generic, RDNA4, and R9700 direct descriptors while
   preserving the same current direct kernel family. Higher-level fused descriptors have R9700 naming
-  support, but the active fused catalog remains Generic/RDNA4 until fused kernels are ready.
+  support, and `SQ8_0_FUSED_PROJECTION_DESCRIPTOR_CATALOG` now includes matching
+  R9700/RDNA4-specific entries while still remaining out of runtime active dispatch.
 - SQ8_0 projection result rows now report both `sq_projection_implementation_ids` and
   `sq_projection_kernel_families`, so future non-direct/fused C++ kernel families can be separated
   from the current `direct` family without parsing implementation IDs.
