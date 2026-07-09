@@ -31,30 +31,26 @@ pub fn select_backend<'a>(
 ) -> Option<&'a BackendImplementation<'a>> {
     implementations
         .iter()
-        .filter(|implementation| implementation.matches(request))
-        .max_by_key(|implementation| (implementation.specificity(), implementation.priority))
+        .filter_map(|implementation| {
+            implementation
+                .match_score(request)
+                .map(|score| (implementation, score))
+        })
+        .max_by_key(|(implementation, score)| (*score, implementation.priority))
+        .map(|(implementation, _)| implementation)
 }
 
 impl BackendImplementation<'_> {
-    fn matches(&self, request: &BackendRequest<'_>) -> bool {
-        self.operation == request.operation
-            && self.phase == request.phase
-            && optional_match(self.format_id, request.format_id)
-            && optional_match(self.model_arch, request.model_arch)
-            && optional_match(self.gpu_arch, request.gpu_arch)
-            && optional_match(self.gpu_name, request.gpu_name)
-    }
-
-    fn specificity(&self) -> i32 {
-        [
-            self.format_id,
-            self.model_arch,
-            self.gpu_arch,
-            self.gpu_name,
-        ]
-        .into_iter()
-        .filter(|value| value.is_some())
-        .count() as i32
+    fn match_score(&self, request: &BackendRequest<'_>) -> Option<i32> {
+        if self.operation != request.operation || self.phase != request.phase {
+            return None;
+        }
+        Some(
+            optional_match_score(self.format_id, request.format_id)?
+                + optional_match_score(self.model_arch, request.model_arch)?
+                + optional_match_score(self.gpu_arch, request.gpu_arch)?
+                + optional_match_score(self.gpu_name, request.gpu_name)?,
+        )
     }
 }
 
@@ -677,11 +673,51 @@ pub fn sq8_0_projection_descriptor_family(id: &str) -> Option<Sq8ProjectionFamil
     }
 }
 
-fn optional_match(expected: Option<&str>, actual: Option<&str>) -> bool {
+fn optional_match_score(expected: Option<&str>, actual: Option<&str>) -> Option<i32> {
     match expected {
-        Some(expected) => actual == Some(expected),
-        None => true,
+        Some(expected) => actual.and_then(|value| flexible_token_match_score(expected, value)),
+        None => Some(0),
     }
+}
+
+fn flexible_token_match_score(expected: &str, actual: &str) -> Option<i32> {
+    if expected == "*" {
+        return Some(1);
+    }
+    let wildcard = expected.ends_with('*');
+    let normalized_expected = if wildcard {
+        normalize_dispatch_token(&expected[..expected.len().saturating_sub(1)])
+    } else {
+        normalize_dispatch_token(expected)
+    };
+    let normalized_actual = normalize_dispatch_token(actual);
+    if wildcard {
+        normalized_actual
+            .starts_with(&normalized_expected)
+            .then_some(2)
+    } else {
+        (normalized_expected == normalized_actual).then_some(3)
+    }
+}
+
+fn normalize_dispatch_token(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut last_was_sep = false;
+    for ch in value.bytes() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase() as char);
+            last_was_sep = false;
+        } else {
+            if !normalized.is_empty() && !last_was_sep {
+                normalized.push('-');
+                last_was_sep = true;
+            }
+        }
+    }
+    while normalized.ends_with('-') {
+        normalized.pop();
+    }
+    normalized
 }
 
 #[cfg(test)]
@@ -722,6 +758,114 @@ mod tests {
         };
         let selected = select_backend(&request, &implementations).unwrap();
         assert_eq!(selected.id, "decode_A100");
+    }
+
+    #[test]
+    fn flexible_gpu_name_matching_ignores_whitespace_and_punctuation() {
+        let implementations = [
+            BackendImplementation {
+                id: "decode_r9700_named",
+                operation: "attention",
+                phase: "decode",
+                format_id: None,
+                model_arch: None,
+                gpu_arch: Some("RDNA4"),
+                gpu_name: Some("Radeon_AI_PRO_R9700"),
+                priority: 0,
+            },
+            BackendImplementation {
+                id: "decode_rdna4_generic",
+                operation: "attention",
+                phase: "decode",
+                format_id: None,
+                model_arch: None,
+                gpu_arch: Some("RDNA4"),
+                gpu_name: None,
+                priority: 10,
+            },
+        ];
+        let request = BackendRequest {
+            operation: "attention",
+            phase: "decode",
+            format_id: None,
+            model_arch: Some("Qwen3"),
+            gpu_arch: Some("RDNA4"),
+            gpu_name: Some("Radeon AI PRO R9700"),
+        };
+        let selected = select_backend(&request, &implementations).unwrap();
+        assert_eq!(selected.id, "decode_r9700_named");
+    }
+
+    #[test]
+    fn wildcard_model_arch_matching_accepts_prefix() {
+        let implementations = [
+            BackendImplementation {
+                id: "qwen3_projection",
+                operation: "attention",
+                phase: "decode",
+                format_id: None,
+                model_arch: Some("Qwen3*"),
+                gpu_arch: Some("RDNA4"),
+                gpu_name: None,
+                priority: 0,
+            },
+            BackendImplementation {
+                id: "generic_projection",
+                operation: "attention",
+                phase: "decode",
+                format_id: None,
+                model_arch: None,
+                gpu_arch: Some("RDNA4"),
+                gpu_name: None,
+                priority: 0,
+            },
+        ];
+        let request = BackendRequest {
+            operation: "attention",
+            phase: "decode",
+            format_id: None,
+            model_arch: Some("Qwen3.5-9B"),
+            gpu_arch: Some("RDNA4"),
+            gpu_name: None,
+        };
+        let selected = select_backend(&request, &implementations).unwrap();
+        assert_eq!(selected.id, "qwen3_projection");
+    }
+
+    #[test]
+    fn exact_model_arch_match_beats_wildcard_prefix() {
+        let implementations = [
+            BackendImplementation {
+                id: "qwen3_family_projection",
+                operation: "attention",
+                phase: "decode",
+                format_id: None,
+                model_arch: Some("Qwen3*"),
+                gpu_arch: Some("RDNA4"),
+                gpu_name: None,
+                priority: 0,
+            },
+            BackendImplementation {
+                id: "qwen35_exact_projection",
+                operation: "attention",
+                phase: "decode",
+                format_id: None,
+                model_arch: Some("Qwen3.5-9B"),
+                gpu_arch: Some("RDNA4"),
+                gpu_name: None,
+                priority: 0,
+            },
+        ];
+        let request = BackendRequest {
+            operation: "attention",
+            phase: "decode",
+            format_id: None,
+            model_arch: Some("qwen3_5 9b"),
+            gpu_arch: Some("RDNA4"),
+            gpu_name: None,
+        };
+        let selected = select_backend(&request, &implementations).unwrap();
+        assert_eq!(selected.id, "qwen35_exact_projection");
     }
 
     #[test]

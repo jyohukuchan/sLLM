@@ -412,6 +412,10 @@ Done:
 - `tools/summarize-benchmark-results.py` now exposes a compact `Impl` column from
   `sq_projection_implementation_ids`, `dispatch_selected_implementation_id`, or
   `selected_implementation_id`, and classifies `SQ8_0` rows as FP8 family rows.
+- `backend_dispatch` now normalizes optional selector fields for model/GPU matching. It accepts
+  case-insensitive punctuation-insensitive GPU names such as `Radeon_AI_PRO_R9700` vs
+  `Radeon AI PRO R9700`, and implementation-side prefix selectors such as `model_arch=Qwen3*`.
+  Exact normalized matches outrank prefix matches, which outrank broad `*` matches.
 
 Remaining:
 
@@ -688,6 +692,8 @@ Expected outputs:
      allowed (or explicitly saved as selected-layer diagnostics).
    - Benchmark summary tables now exclude unmarked materialized SQ8_0 fallback rows by default and
      show `SQ mode` for retained rows.
+   - Backend selector matching now tolerates GPU/model naming variations and supports
+     implementation-side prefix selectors for future model-family entries.
    - C++ kernel-family switching remains a follow-up.
    - Selected-layer model-loop rows now carry projection boundary and counter telemetry for
      `sq-fp8-token-ids-model-loop-smoke`.
