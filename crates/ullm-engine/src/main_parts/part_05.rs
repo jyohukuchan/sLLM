@@ -4804,6 +4804,7 @@ impl PackageAq4ResidentMatvec {
             &context
                 .device_info()
                 .map_err(|err| format!("failed to query runtime context device: {err}"))?,
+            None,
         );
         Self::load_with_shared_buffers(
             context,
@@ -4952,6 +4953,7 @@ impl PackageAq4ResidentMatvec {
             &context
                 .device_info()
                 .map_err(|err| format!("failed to query runtime context device: {err}"))?,
+            None,
         );
         if let Some(overlay) = sq_overlay {
             match load_sq8_resident_tensor(context, stream, overlay.artifact, tensor_name) {

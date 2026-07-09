@@ -416,6 +416,9 @@ Done:
   case-insensitive punctuation-insensitive GPU names such as `Radeon_AI_PRO_R9700` vs
   `Radeon AI PRO R9700`, and implementation-side prefix selectors such as `model_arch=Qwen3*`.
   Exact normalized matches outrank prefix matches, which outrank broad `*` matches.
+- Qwen3/Qwen3.5 SQ8_0 model-loop projection telemetry now passes `model_arch=Qwen3` into the
+  projection dispatch request. Unknown or non-model-loop SQ projection paths still pass `None`, so
+  existing default selection behavior is preserved.
 
 Remaining:
 
@@ -694,6 +697,8 @@ Expected outputs:
      show `SQ mode` for retained rows.
    - Backend selector matching now tolerates GPU/model naming variations and supports
      implementation-side prefix selectors for future model-family entries.
+   - Qwen3/Qwen3.5 model-loop SQ8_0 rows now feed `model_arch=Qwen3` into projection dispatch
+     selection without changing stdout/JSON schema.
    - C++ kernel-family switching remains a follow-up.
    - Selected-layer model-loop rows now carry projection boundary and counter telemetry for
      `sq-fp8-token-ids-model-loop-smoke`.

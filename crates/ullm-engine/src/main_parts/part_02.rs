@@ -3273,7 +3273,8 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     let final_logits_wall_ms = final_logits_started.elapsed().as_secs_f64() * 1000.0;
     let sq_fp8_projection_telemetry = snapshot_sq_fp8_projection_telemetry();
     let sq_projection_boundary = sq_fp8_projection_boundary(sq_fp8_projection_telemetry);
-    let sq_fp8_projection_dispatches = SqFp8ProjectionDispatches::from_info(&info);
+    let sq_fp8_projection_dispatches =
+        SqFp8ProjectionDispatches::from_info(&info, Some(SQ8_0_MODEL_ARCH_QWEN_FAMILY));
     let sq_projection_implementation_ids =
         sq_fp8_projection_implementation_ids(
             sq_fp8_projection_telemetry,

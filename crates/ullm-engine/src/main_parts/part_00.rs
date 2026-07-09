@@ -107,13 +107,31 @@ struct SqFp8ProjectionDispatches {
     triple: SqFp8ProjectionDispatch,
 }
 
+const SQ8_0_MODEL_ARCH_QWEN_FAMILY: &str = "Qwen3";
+
 impl SqFp8ProjectionDispatches {
-    fn from_info(info: &ullm_runtime_sys::DeviceInfo) -> Self {
+    fn from_info(info: &ullm_runtime_sys::DeviceInfo, model_arch: Option<&str>) -> Self {
         Self {
-            single: sq_fp8_projection_dispatch(SqFp8ProjectionMatvecOperation::Single, info),
-            batch: sq_fp8_projection_dispatch(SqFp8ProjectionMatvecOperation::Batch, info),
-            pair: sq_fp8_projection_dispatch(SqFp8ProjectionMatvecOperation::Pair, info),
-            triple: sq_fp8_projection_dispatch(SqFp8ProjectionMatvecOperation::Triple, info),
+            single: sq_fp8_projection_dispatch(
+                SqFp8ProjectionMatvecOperation::Single,
+                info,
+                model_arch,
+            ),
+            batch: sq_fp8_projection_dispatch(
+                SqFp8ProjectionMatvecOperation::Batch,
+                info,
+                model_arch,
+            ),
+            pair: sq_fp8_projection_dispatch(
+                SqFp8ProjectionMatvecOperation::Pair,
+                info,
+                model_arch,
+            ),
+            triple: sq_fp8_projection_dispatch(
+                SqFp8ProjectionMatvecOperation::Triple,
+                info,
+                model_arch,
+            ),
         }
     }
 
@@ -184,12 +202,13 @@ fn sq_fp8_projection_boundary(telemetry: SqFp8ProjectionTelemetry) -> String {
 fn select_sq_fp8_projection_implementation_id(
     operation: SqFp8ProjectionMatvecOperation,
     info: &ullm_runtime_sys::DeviceInfo,
+    model_arch: Option<&str>,
 ) -> &'static str {
     let request = BackendRequest {
         operation: operation.operation_id(),
         phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
         format_id: Some(FORMAT_SQ8_0),
-        model_arch: None,
+        model_arch,
         gpu_arch: runtime_device_gpu_arch(info),
         gpu_name: Some(info.name.as_str()),
     };
@@ -199,8 +218,9 @@ fn select_sq_fp8_projection_implementation_id(
 fn sq_fp8_projection_dispatch(
     operation: SqFp8ProjectionMatvecOperation,
     info: &ullm_runtime_sys::DeviceInfo,
+    model_arch: Option<&str>,
 ) -> SqFp8ProjectionDispatch {
-    let implementation_id = select_sq_fp8_projection_implementation_id(operation, info);
+    let implementation_id = select_sq_fp8_projection_implementation_id(operation, info, model_arch);
     SqFp8ProjectionDispatch {
         operation,
         implementation_id,
@@ -8735,4 +8755,39 @@ fn package_materialize_matvec_smoke(
         format_f32_preview(&preview)
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ullm_runtime_sys::DeviceInfo;
+
+    #[test]
+    fn sq_fp8_projection_model_arch_does_not_change_default_selection() {
+        let info = DeviceInfo {
+            device_id: 0,
+            backend: "cpu".to_string(),
+            name: "unknown".to_string(),
+            total_global_mem: 0,
+            compute_major: 12,
+            compute_minor: 0,
+            gcn_arch_name: "gfx12".to_string(),
+            flags: 0,
+        };
+        for operation in &[
+            SqFp8ProjectionMatvecOperation::Single,
+            SqFp8ProjectionMatvecOperation::Batch,
+            SqFp8ProjectionMatvecOperation::Pair,
+            SqFp8ProjectionMatvecOperation::Triple,
+        ] {
+            assert_eq!(
+                select_sq_fp8_projection_implementation_id(*operation, &info, None),
+                select_sq_fp8_projection_implementation_id(
+                    *operation,
+                    &info,
+                    Some(SQ8_0_MODEL_ARCH_QWEN_FAMILY)
+                )
+            );
+        }
+    }
 }

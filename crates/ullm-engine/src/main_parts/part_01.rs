@@ -7076,7 +7076,8 @@ impl PackageModelLoopSmokeRun {
         ) = if sq_overlay {
             let sq_fp8_projection_telemetry = snapshot_sq_fp8_projection_telemetry();
             let sq_projection_boundary = sq_fp8_projection_boundary(sq_fp8_projection_telemetry);
-            let sq_fp8_projection_dispatches = SqFp8ProjectionDispatches::from_info(info);
+            let sq_fp8_projection_dispatches =
+                SqFp8ProjectionDispatches::from_info(info, Some(SQ8_0_MODEL_ARCH_QWEN_FAMILY));
             let sq_fp8_projection_implementation_ids =
                 sq_fp8_projection_implementation_ids(
                     sq_fp8_projection_telemetry,
