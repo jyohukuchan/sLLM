@@ -34,9 +34,12 @@
   - `manifest-all` と `manifest-self-attn` のlayer検出は `model.layers.*` に対応した。
 - dry-runで、同一モデル化に必要なmetadata読み取りはpayloadを全量materializeせず進められる見込みを確認。
   - `tools/build-sq-fp8-w8a16-artifact.py --dry-run`: FP8対象 `281`、passthrough `442`、compact resident estimate `15557220864` bytes
-  - `ullm-quant --dry-run`: total tensor `723`、supported tensor `280`、passthrough `443`
+  - 修正前の `ullm-quant --dry-run`: total tensor `723`、supported tensor `280`、passthrough `443`
+  - 修正後の `ullm-quant --dry-run`: total tensor `723`、supported tensor `0`、passthrough `723`
+- `ullm-quant` の修正後分類では、Qwen系FP8の補助テンソル `*.weight_scale_inv` は `family=other` / `action=passthrough` になる。
+- この結果、`Qwen3-14B-FP8` を現在のAQ4 direct package converterで再量子化してuLLM package化する経路は採らない。source matrixが既に `F8_E4M3` で、AQ4 converterはBF16/F16/F32 source matrixを対象にしているため。
 - Same-model rowの必要条件を列挙
-  - package conversion/import（Qwen3-14B→`.ullm.d` 変換または互換import）
+  - FP8/SQ8_0 package import（Qwen3-14B-FP8の`F8_E4M3`本体、BF16 `weight_scale_inv`、BF16 passthroughをAQ再量子化なしで扱う）
   - SQ8_0 artifact生成/import
   - tensor-name互換の解消
   - 40-layer `manifest-all` rowの整備
@@ -45,7 +48,7 @@
 
 ## 次の行動
 
-- まず `Qwen3-14B-FP8` 向けのuLLM package化（`model.layers.*` 系を受ける `.ullm.d`）を完了する。
+- まず `Qwen3-14B-FP8` 向けに、AQ4変換ではなくFP8/SQ8_0 package import経路を作る。
 - 生成済みQwen3-14B packageを使ってSQ8_0 artifactを作成・導入し、`40-layer manifest-all` を追加する。
 - tensor-nameの整合（`model.*`/`model.language_model.*`）はruntime側で吸収済み。次は実packageで自動検証する。
 - 同条件（`pp16/tg8/b1` を含む）でvLLM smoke/代表bothを再実行し、初めて同一モデルsame-model throughputとして扱う。

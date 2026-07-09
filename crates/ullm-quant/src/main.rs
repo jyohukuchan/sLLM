@@ -883,6 +883,9 @@ fn print_help() {
 }
 
 fn family_for_tensor(name: &str) -> &'static str {
+    if name.ends_with(".weight_scale_inv") {
+        return "other";
+    }
     if name.contains("self_attn.q_proj") {
         "attn_q"
     } else if name.contains("self_attn.k_proj") {
@@ -1070,6 +1073,9 @@ fn is_forced_quant_tensor_input(
     tensor_name: &str,
     policy: &AqPolicyPlan,
 ) -> bool {
+    if tensor_name.ends_with(".weight_scale_inv") {
+        return false;
+    }
     is_float_matrix_input(dtype, shape)
         && policy.high_tensors.iter().any(|item| item == tensor_name)
 }
@@ -4412,6 +4418,42 @@ mod tests {
             family_for_tensor("model.language_model.layers.0.mlp.down_proj.weight"),
             "mlp_down"
         );
+        assert_eq!(
+            family_for_tensor("model.language_model.layers.0.self_attn.q_proj.weight_scale_inv"),
+            "other"
+        );
+        assert_eq!(
+            family_for_tensor("model.language_model.layers.0.mlp.down_proj.weight_scale_inv"),
+            "other"
+        );
+        assert!(!is_forced_quant_tensor_input(
+            "BF16",
+            &[1024, 256],
+            "model.language_model.layers.0.mlp.down_proj.weight_scale_inv",
+            &resolve_aq_policy(&test_options("all-g16")).expect("policy")
+        ));
+    }
+
+    #[test]
+    fn qwen_fp8_weight_scale_inv_tensors_are_not_quantized() {
+        let policy = resolve_aq_policy(&test_options("all-g16")).expect("policy");
+        for tensor_name in [
+            "model.language_model.layers.0.self_attn.q_proj.weight_scale_inv",
+            "model.language_model.layers.0.mlp.down_proj.weight_scale_inv",
+        ] {
+            let family = family_for_tensor(tensor_name);
+            let supported = is_supported_input("BF16", &[1024, 1024], family);
+            assert!(
+                !supported,
+                "{tensor_name} should not be treated as supported"
+            );
+            let (format, role) = quant_assignment(supported, tensor_name, family, &policy);
+            assert!(
+                format.is_none(),
+                "{tensor_name} should not get quantize format"
+            );
+            assert!(role.is_none(), "{tensor_name} should not have quant role");
+        }
     }
 
     #[test]

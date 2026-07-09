@@ -561,21 +561,25 @@ Same-model readiness audit:
   and selects `281` FP8 tensors, with `442` passthrough tensors and a compact resident byte estimate
   of `15557220864`. This confirms SQ8_0 artifact metadata generation is plausible, but it does not
   prove the current runtime can execute the package.
-- `ullm-quant --dry-run` sees `723` total tensors, `280` supported quantized tensors, and `443`
-  passthrough tensors for the same source directory. This confirms the package planner can inspect
-  the model without loading full payloads, but the generated names still need to line up with the
-  runtime.
-- Until the package naming/runtime resolver issue is closed, the existing uLLM row is a
-  measurement-path feasibility row and not a same-model throughput comparison against vLLM.
+- `ullm-quant --dry-run` can inspect the same source directory without loading full payloads.
+  After excluding Qwen FP8 auxiliary `*.weight_scale_inv` tensors from AQ quantization, it sees
+  `723` total tensors, `0` supported AQ source tensors, and `723` passthrough tensors. This is the
+  correct classification for the local FP8 artifact: the projection matrices are already
+  `F8_E4M3`, while current AQ direct package conversion only quantizes BF16/F16/F32 source
+  matrices.
+- The tensor namespace issue is closed for runtime lookup, but the same-model uLLM row still needs
+  an FP8/SQ8_0 package import path or an equivalent package manifest mode. Building an AQ4 package
+  directly from `Qwen3-14B-FP8` is not the right route.
 
 Same-model prerequisites:
 
 1. Choose the Qwen3 tensor namespace strategy: Done. Runtime lookup now accepts both `model.*` and
    `model.language_model.*` for Qwen3 layers, embeddings, and final norm.
-2. Build a `Qwen3-14B-FP8` uLLM package with bounded memory conversion and record the package
-   summary.
+2. Add an FP8/SQ8_0 package import path for `Qwen3-14B-FP8`, or define an equivalent package
+   manifest mode that can reference/import `F8_E4M3` weights, BF16 `weight_scale_inv` block scales,
+   and BF16 passthrough tensors without AQ re-quantization.
 3. Build or import the matching `SQ8_0` artifact and verify the selected FP8 tensor count against
-   the package tensors.
+   the imported package tensors.
 4. Run a 40-layer `manifest-all` uLLM smoke row with `prompt_tokens=16`, `generated_tokens=8`, and
    `concurrent_requests=1`.
 5. Attach the prompt guard bundle or an equivalent behavioral guard before comparing against vLLM
