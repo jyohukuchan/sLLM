@@ -588,6 +588,33 @@ def _shape_set_to_text(shapes: set[tuple[int, int]]) -> str:
     return ", ".join(f"{shape}" for shape in sorted(shapes)) or "-"
 
 
+def _context_length_mismatch_failure(
+    workload: dict[str, Any],
+    request_count: int,
+    case_id: str,
+) -> str | None:
+    shape = _per_request_shape_for_row(workload, request_count)
+    if shape is None:
+        return None
+    context_length = as_int(workload.get("context_length"))
+    context_length_raw = as_str(workload.get("context_length"))
+    prompt_tokens, generated_tokens = shape
+    required = prompt_tokens + generated_tokens
+    if context_length is None:
+        return (
+            f"request {request_count} case_id={case_id}: "
+            "workload.context_length is missing or malformed "
+            f"(context_length={context_length_raw}, prompt+generated={required})"
+        )
+    if context_length < required:
+        return (
+            f"request {request_count} case_id={case_id}: "
+            f"workload.context_length={context_length} is smaller than "
+            f"prompt+generated={required}"
+        )
+    return None
+
+
 def _model_name_set_to_text(names: set[str]) -> str:
     return ", ".join(sorted(names)) or "-"
 
@@ -659,7 +686,18 @@ def normalized_throughput_comparison_gate_failures(
         for row in request_rows:
             row_engine = as_str(as_dict(row.get("engine")).get("name"))
             case_id = as_str(row.get("case_id"))
+            workload = as_dict(row.get("workload"))
             prefix = f"request {request_count} case_id={case_id}"
+
+            if row_engine in {"uLLM", "vLLM"}:
+                context_failure = _context_length_mismatch_failure(
+                    workload,
+                    request_count,
+                    case_id,
+                )
+                if context_failure is not None:
+                    failures.append(context_failure)
+
             if row_engine == "vLLM":
                 if harness_class(row) != "serving_throughput_benchmark":
                     failures.append(
@@ -670,7 +708,6 @@ def normalized_throughput_comparison_gate_failures(
             if row_engine != "uLLM":
                 continue
 
-            workload = as_dict(row.get("workload"))
             if harness_class(row) != "cli_model_loop_diagnostic":
                 failures.append(
                     f"{prefix}: uLLM row must be harness.class=cli_model_loop_diagnostic "

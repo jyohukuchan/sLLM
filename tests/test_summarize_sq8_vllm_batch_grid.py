@@ -61,6 +61,7 @@ def make_row(
     model_name: str | None = None,
     model_format: str | None = None,
     model_quantization: str | None = None,
+    context_length: int | None = None,
 ) -> dict:
     row = {
         "case_id": case_id,
@@ -129,6 +130,8 @@ def make_row(
         row.setdefault("model", {})["format"] = model_format
     if model_quantization is not None:
         row.setdefault("model", {})["quantization"] = model_quantization
+    if context_length is not None:
+        row["workload"]["context_length"] = context_length
     return row
 
 
@@ -719,6 +722,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                context_length=1048576,
                                 model_name="Qwen3.5-9B",
                             )
                         ),
@@ -730,6 +734,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 generated_tokens=8,
                                 batch_size=2,
                                 harness={"class": "serving_throughput_benchmark"},
+                                context_length=256,
                                 model_name="Qwen3.5-9B",
                             )
                         ),
@@ -759,6 +764,150 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(stderr.getvalue(), "")
 
+    def test_require_normalized_throughput_comparison_fails_when_context_length_is_too_small(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "normalized_context_length_too_small.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": False,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                                context_length=1024,
+                                model_name="Qwen3.5-9B",
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                                context_length=10,
+                                model_name="Qwen3.5-9B",
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn(
+                "request 2 case_id=vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2: "
+                "workload.context_length=10 is smaller than prompt+generated=12",
+                stderr.getvalue(),
+            )
+            self.assertIn("prompt+generated=12", stderr.getvalue())
+
+    def test_require_normalized_throughput_comparison_fails_when_context_length_missing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "normalized_context_length_missing.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": False,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                                model_name="Qwen3.5-9B",
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                                context_length=256,
+                                model_name="Qwen3.5-9B",
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn(
+                "request 2 case_id=sq8-pp16-tg8-b2: "
+                "workload.context_length is missing or malformed",
+                stderr.getvalue(),
+            )
+
     def test_require_normalized_throughput_comparison_fails_when_per_request_prompt_generated_shape_mismatch(
         self,
     ) -> None:
@@ -785,6 +934,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                context_length=1048576,
                                 model_name="Qwen3.5-9B",
                             )
                         ),
@@ -798,6 +948,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 harness={"class": "serving_throughput_benchmark"},
                                 prompt_tokens_per_request=[9, 9],
                                 generated_tokens_per_request=[4, 4],
+                                context_length=256,
                                 model_name="Qwen3.5-9B",
                             )
                         ),
@@ -856,6 +1007,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                context_length=1048576,
                                 model_name="Qwen3.5-9B",
                             )
                         ),
@@ -867,6 +1019,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 generated_tokens=8,
                                 batch_size=2,
                                 harness={"class": "serving_throughput_benchmark"},
+                                context_length=256,
                                 model_name="Qwen3-14B-FP8",
                             )
                         ),
@@ -923,6 +1076,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                context_length=1048576,
                             )
                         ),
                         json.dumps(
@@ -933,6 +1087,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 generated_tokens=8,
                                 batch_size=2,
                                 harness={"class": "serving_throughput_benchmark"},
+                                context_length=256,
                                 model_name="Qwen3-14B-FP8",
                             )
                         ),
@@ -977,6 +1132,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                         generated_tokens=8,
                         batch_size=2,
                         harness={"class": "serving_throughput_benchmark"},
+                        context_length=256,
                     )
                 )
                 + "\n",
@@ -1025,6 +1181,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                context_length=1048576,
                             )
                         ),
                     ]
@@ -1079,6 +1236,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                context_length=1048576,
                             )
                         ),
                         json.dumps(
@@ -1089,6 +1247,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 generated_tokens=8,
                                 batch_size=2,
                                 harness={"class": "serving_throughput_benchmark"},
+                                context_length=256,
                             )
                         ),
                     ]
@@ -1144,6 +1303,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                context_length=1048576,
                             )
                         ),
                         json.dumps(
@@ -1154,6 +1314,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 generated_tokens=8,
                                 batch_size=2,
                                 harness={"class": "serving_throughput_benchmark"},
+                                context_length=256,
                             )
                         ),
                     ]
@@ -1203,6 +1364,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                context_length=1048576,
                             )
                         ),
                         json.dumps(
@@ -1213,6 +1375,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 generated_tokens=8,
                                 batch_size=2,
                                 harness={"class": "cli_model_loop_diagnostic"},
+                                context_length=256,
                             )
                         ),
                     ]

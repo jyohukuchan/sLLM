@@ -373,7 +373,9 @@ divided by the selected request count. A normalized uLLM/vLLM comparison should 
 derived per-request shapes do not overlap. The same gate also requires overlapping non-empty
 `model.name` values per selected request count. It does not require matching `model.format`,
 `model.quantization`, or `workload.kv_cache_dtype` for SQ8_0-vs-FP8 comparisons because those fields
-can intentionally differ across engines.
+can intentionally differ across engines. The gate requires each selected row to report a
+`workload.context_length` that is at least the derived per-request prompt plus generated token count,
+but it does not require uLLM and vLLM context lengths to be identical.
 
 uLLM may record `batching.mode` outside this generic schema. `logical` means requests are accounted
 as a batch but executed through sequential single-request paths. `hybrid` means only part of the
