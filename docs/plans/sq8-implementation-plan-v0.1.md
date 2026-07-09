@@ -586,6 +586,11 @@ Current local baseline state:
     consumed VRAM `13763940352` bytes;
   - representative `pp512/tg128/b1`, `rotary_dim=128`, `rope_base=1000000`, decode
     `2.774043 tok/s`, consumed VRAM `14242410496` bytes.
+- Refreshed config-aligned same-model uLLM smoke and representative rows were added after R9700
+  projection dispatch descriptors were enabled. They record
+  `sq_projection_implementation_ids=single=sq8_0_matvec_r9700_direct,triple=sq8_0_matvec_triple_r9700_direct`,
+  with smoke decode `2.702039 tok/s` / consumed VRAM `13763952640` bytes and representative decode
+  `2.858786 tok/s` / consumed VRAM `14242406400` bytes.
 - The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
   It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and
@@ -643,13 +648,15 @@ Same-model prerequisites:
 3. Build or import the matching `SQ8_0` artifact and verify the selected FP8 tensor count against
    the imported package tensors: done for sidecar v0.1. The full artifact reports `281` FP8 tensors.
 4. Run a 40-layer `manifest-all` uLLM smoke row with `prompt_tokens=16`, `generated_tokens=8`, and
-   `concurrent_requests=1`: done for the config-aligned Qwen3-14B-FP8 row.
+   `concurrent_requests=1`: done for the config-aligned Qwen3-14B-FP8 row, and refreshed once after
+   R9700 projection dispatch descriptor selection was enabled.
 5. Attach the prompt guard bundle or an equivalent behavioral guard before final comparison against vLLM
    rows: partial. A self-behavioral prompt-suite smoke is attached to the config-aligned rows. A
    non-self behavioral guard or output-health-evaluated prompt suite is still needed before treating
    this as final quality-regression evidence.
 6. Add the representative `prompt_tokens=512`, `generated_tokens=128`, `concurrent_requests=1`
-   same-model row: done for the config-aligned Qwen3-14B-FP8 row.
+   same-model row: done for the config-aligned Qwen3-14B-FP8 row, and refreshed once after R9700
+   projection dispatch descriptor selection was enabled.
 7. Add a real-batch or server-style uLLM measurement path before promoting this to a final serving
    throughput conclusion.
 
@@ -740,6 +747,8 @@ Expected outputs:
    comparison grid and save unsupported/failure rows explicitly when vLLM cannot match the target.
    - Harness support for vLLM throughput parsing and common ROCm unsupported failure messages is
      prepared.
+   - The config-aligned smoke and representative rows have been refreshed after R9700 descriptor
+     selection and now record `*_r9700_direct`.
    - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
      final vLLM serving comparison still needs real-batch or server-style uLLM rows.
 

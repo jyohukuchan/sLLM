@@ -57,8 +57,10 @@
 - Qwen3-14B-FP8の40-layer `manifest-all` uLLM行を `results.jsonl` に追加した。
   - preliminary行: `rotary_dim=32`, `rope_base=10000000`
   - config一致行: `rotary_dim=128`, `rope_base=1000000`
-  - config一致 smoke: `ullm-r9700-qwen3-14b-fp8-sq8-smoke-pp16-tg8-b1-rope128-theta1e6`
-  - config一致 representative: `ullm-r9700-qwen3-14b-fp8-sq8-rep-pp512-tg128-b1-rope128-theta1e6`
+  - config一致 smoke: `ullm-r9700-qwen3-14b-fp8-sq8-smoke-pp16-tg8-b1-rope128-theta1e6-r9700dispatch`
+  - config一致 representative: `ullm-r9700-qwen3-14b-fp8-sq8-rep-pp512-tg128-b1-rope128-theta1e6-r9700dispatch`
+  - R9700 descriptor導入後のconfig-aligned smoke/representative再測定が完了。
+    - 両行とも `sq_projection_implementation_ids` は `*_r9700_direct` 系を記録している。
 - config一致行はどちらも `status=ok` / `verified=true` / `sq_execution_mode=direct_fp8_dequant_matvec`。
 - config一致行へself-behavioral prompt-suite smoke guardを添付した。
   - prompt-suite summary:

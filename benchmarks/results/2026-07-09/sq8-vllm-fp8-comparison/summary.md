@@ -16,6 +16,8 @@
 - Added config-aligned uLLM rows using local Qwen3 config values: `rotary_dim=128` and
   `rope_base=1000000`.
 - Attached a self-behavioral prompt-suite smoke guard to the config-aligned uLLM rows.
+- Refreshed the latest config-aligned smoke and representative rows after R9700 projection dispatch
+  descriptors; both refreshed rows now report `*_r9700_direct` SQ8_0 projection implementation IDs.
 - Preserved the earlier `rotary_dim=32` / `rope_base=10000000` uLLM rows as preliminary connectivity
   rows, not final same-model rows.
 
@@ -28,8 +30,8 @@
 | ok | vLLM | Qwen3-14B-FP8 | FP8 | HF config | - | R9700 | pp512/tg128/b1 | 90.18 | 22.54 | 112.72 | 28.72 | 647.34 |
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | preliminary rope32/theta1e7 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 2.77 | 3.02 | 0.33 | 12.82 | 38.69 |
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | preliminary rope32/theta1e7 | direct_fp8_dequant_matvec | R9700 | pp512/tg128/b1 | 2.84 | 2.68 | 2.19 | 13.26 | 35.60 |
-| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 3.01 | 3.06 | 0.32 | 12.82 | 39.19 |
-| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp512/tg128/b1 | 2.91 | 2.77 | 2.23 | 13.26 | 36.80 |
+| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 2.75 | 2.70 | 0.32 | 12.82 | 34.64 |
+| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp512/tg128/b1 | 2.97 | 2.86 | 2.27 | 13.26 | 37.92 |
 
 Current same-model uLLM key fields:
 
@@ -38,12 +40,12 @@ Current same-model uLLM key fields:
 - `workload.sq_fp8_tensor_count`: `281`
 - `workload.sq_passthrough_tensor_count`: `442`
 - `workload.sq_projection_boundary`: `single+triple`
-- `workload.sq_projection_implementation_ids`:
-  `single=sq8_0_matvec_rdna4_direct,triple=sq8_0_matvec_triple_rdna4_direct`
+- `workload.sq_projection_implementation_ids` (latest config-aligned rows):
+  `single=sq8_0_matvec_r9700_direct,triple=sq8_0_matvec_triple_r9700_direct`
 - config-aligned smoke row:
-  `ullm-r9700-qwen3-14b-fp8-sq8-smoke-pp16-tg8-b1-rope128-theta1e6`
+  `ullm-r9700-qwen3-14b-fp8-sq8-smoke-pp16-tg8-b1-rope128-theta1e6-r9700dispatch`
 - config-aligned representative row:
-  `ullm-r9700-qwen3-14b-fp8-sq8-rep-pp512-tg128-b1-rope128-theta1e6`
+  `ullm-r9700-qwen3-14b-fp8-sq8-rep-pp512-tg128-b1-rope128-theta1e6-r9700dispatch`
 - prompt-suite smoke:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/summary.json`
 - prompt guard bundle:
