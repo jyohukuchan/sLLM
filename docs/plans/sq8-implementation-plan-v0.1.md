@@ -431,6 +431,10 @@ Now:
   execution path now carries the selected family metadata.
 - Done: SQ8_0 matvec runtime helper group is moved to
   `runtime/src/kernels/sq8_0/sq8_0_matvec_runtime.inc`.
+- Done: large runtime-sys Rust test body was split from
+  `crates/ullm-runtime-sys/src/lib_parts/part_01.rs` into
+  `crates/ullm-runtime-sys/src/test_parts/`; managed Rust/C++/`.inc` files are currently below
+  10k lines.
 - Remaining: fused kernel family implementations are still pending.
 
 ### M8: Regression Suite
