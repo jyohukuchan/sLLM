@@ -382,6 +382,12 @@ Done:
   `benchmarks/results/2026-07-09/package-batch-throughput/phase-m5-sq8-guard-attached-full-mixed-v1/results.schema.jsonl`.
   It records `format_id=SQ8_0`, direct `single+triple` projection execution, artifact load vs
   measured-total timing, and behavioral prompt-suite status `passed`.
+- An AQ4-derived self-attention stack real-batch diagnostic was run with the layer3 full-projection
+  SQ8_0 sidecar overlay. The scheduler path reports `batching_mode=real`,
+  `prefill_real_batch=true`, `decode_real_batch=true`, and request parallelism `4`, but the SQ8_0
+  overlay still enters `sq_execution_mode=materialized_f32_fallback` with no direct SQ8_0 projection
+  counters. This proves the existing stack scheduler can carry SQ overlay metadata through a real
+  batch-shaped run, but it is not yet a direct resident SQ8_0 stack execution path.
 
 ### M6: Dispatch Integration
 
@@ -719,6 +725,10 @@ Comparison rules:
   execution, but `prefill_real_batch=false`, `decode_real_batch=false`, and final logits are included
   in total latency. Treat them as implementation-valid model-loop comparison rows, not final serving
   parity rows.
+- AQ4-derived stack real-batch rows with SQ8_0 overlay are not comparable serving rows when they
+  report `sq_execution_mode=materialized_f32_fallback`. They are scheduler-connectivity diagnostics
+  until the stack/model-loop loader uses resident SQ8_0 matvec storage instead of materialized F32
+  runtime weights.
 - Mixed-request-state can group several ready requests at the same timestep, but this is now recorded
   as `batching_mode=grouped` with `*_request_grouped=true`; it must not be promoted to real-batch
   evidence unless `prefill_real_batch` / `decode_real_batch` are true and the relevant batched
@@ -787,6 +797,12 @@ Expected outputs:
      `sq_fp8_batch_matvec_count=14/14`, so the next comparison blocker is no longer layer-local
      batch projection coverage; it is connecting the same direct batch boundary to full-package
      real-batch or server-style rows.
+   - Reusing the existing AQ4 self-attention stack real-batch runner with an SQ8_0 overlay is not
+     sufficient for this blocker: the current `Qwen3PackageModelRuntime::load_with_sq_overlay`
+     path materializes SQ8_0 projection tensors into F32 runtime weights. The next implementation
+     step is to move the stack/model-loop layer runtime onto a resident projection abstraction such
+     as `PackageAq4ResidentMatvec` or a new resident stack-batch layer that can call
+     `matvec_batch` for q/k/v/o/gate/up/down.
    - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
      final vLLM serving comparison still needs real-batch or server-style uLLM rows.
 
