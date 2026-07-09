@@ -1323,6 +1323,14 @@ def classify_benchmark_harness(parse_name: str) -> dict[str, Any]:
             "notes": ["source=ullm_package_batch_cli"],
             "harness_type": "ullm_cli_logical_batch",
         }
+    if parse_name == "ullm-serving-throughput":
+        return {
+            "class": "ullm_serving_throughput_candidate",
+            "serving_parity_candidate": False,
+            "includes_http_server": False,
+            "notes": ["source=ullm_offline_serving_throughput_candidate"],
+            "harness_type": "ullm_offline_serving_throughput_cli",
+        }
     return {
         "class": "unknown_or_unclassified",
         "serving_parity_candidate": False,
@@ -1419,6 +1427,7 @@ def main() -> int:
             "sglang-serving",
             "ullm-token-ids-generate",
             "ullm-package-batch-throughput",
+            "ullm-serving-throughput",
             "ullm-component-prefill",
             "ullm-model-loop-throughput",
         ],
@@ -1488,7 +1497,10 @@ def main() -> int:
     if args.parse == "ullm-token-ids-generate" and status == "ok":
         ullm_report = parse_ullm_token_ids_report(stdout_text, args.result_json)
         metrics = parse_ullm_token_ids_metrics(ullm_report, memory)
-    elif args.parse == "ullm-package-batch-throughput" and status == "ok":
+    elif (
+        args.parse in ("ullm-package-batch-throughput", "ullm-serving-throughput")
+        and status == "ok"
+    ):
         ullm_report = parse_ullm_token_ids_report(stdout_text, args.result_json)
         metrics = parse_ullm_batch_throughput_metrics(ullm_report, memory)
     elif args.parse == "ullm-component-prefill" and status == "ok":
@@ -1622,7 +1634,7 @@ def main() -> int:
         if args.sq_candidate and candidate_id != args.sq_candidate:
             row["candidate"]["legacy_id"] = args.sq_candidate
     ullm_correctness = parse_ullm_token_ids_correctness(ullm_report)
-    if args.parse == "ullm-package-batch-throughput":
+    if args.parse in ("ullm-package-batch-throughput", "ullm-serving-throughput"):
         enrich_ullm_batch_workload(row, ullm_report)
         batching = ullm_report.get("batching")
         if isinstance(batching, dict):
@@ -1690,7 +1702,7 @@ def main() -> int:
         )
     if ullm_correctness is not None:
         row["correctness"] = ullm_correctness
-        if args.parse == "ullm-package-batch-throughput":
+        if args.parse in ("ullm-package-batch-throughput", "ullm-serving-throughput"):
             enrich_ullm_batch_memory(row, ullm_report)
         else:
             raw_memory = ullm_report.get("memory")

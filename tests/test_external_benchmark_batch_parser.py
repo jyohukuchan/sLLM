@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -628,6 +630,133 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertFalse(model_loop["serving_parity_candidate"])
         self.assertFalse(model_loop["includes_http_server"])
         self.assertEqual(model_loop["harness_type"], "ullm_cli_model_loop")
+
+    def test_classifies_benchmark_harness_for_ullm_serving_throughput(self) -> None:
+        serving = TOOL.classify_benchmark_harness("ullm-serving-throughput")
+        self.assertEqual(serving["class"], "ullm_serving_throughput_candidate")
+        self.assertFalse(serving["serving_parity_candidate"])
+        self.assertFalse(serving["includes_http_server"])
+        self.assertEqual(
+            serving["notes"],
+            ["source=ullm_offline_serving_throughput_candidate"],
+        )
+        self.assertEqual(
+            serving["harness_type"], "ullm_offline_serving_throughput_cli"
+        )
+
+    def test_runs_main_with_ullm_serving_throughput_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_jsonl = root / "results.jsonl"
+            stdout_log = root / "stdout.log"
+            stderr_log = root / "stderr.log"
+            memory_log = root / "memory.jsonl"
+            result_json = root / "raw.json"
+            report = {
+                "workload": {
+                    "batch_size": 4,
+                    "concurrent_requests": 3,
+                },
+                "batching": {
+                    "mode": "real",
+                    "prefill_executor": "cached_prefix_rdna4_fp8_auto",
+                    "resolved_prefill_executor": "cached_prefix_flash2_fp8q",
+                },
+                "metrics": {
+                    "prefill_total_input_tps": 100.0,
+                    "decode_total_generated_tps": 200.0,
+                    "end_to_end_total_tps": 80.0,
+                    "prefill_total_input_tokens": 400,
+                    "decode_total_generated_tokens": 240,
+                    "generated_tokens_total": 240,
+                    "end_to_end_total_tokens": 640,
+                    "prefill_wall_ms_sum": 80.0,
+                    "decode_wall_ms_sum": 20.0,
+                    "batch_wall_ms": 150.0,
+                    "request_latency_ms_p50": 75.0,
+                    "request_latency_ms_p95": 100.0,
+                    "time_to_first_token_ms_p50": 40.0,
+                    "time_to_first_token_ms_p95": 70.0,
+                    "time_per_output_token_ms_p50": 10.0,
+                    "time_per_output_token_ms_p95": 12.0,
+                    "per_request_decode_tps_mean": 90.0,
+                },
+                "correctness": {"verified_all": True},
+                "verified": True,
+                "memory": {"kv_cache_bytes_total": 98304},
+            }
+            report_path = root / "report.json"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            command = [
+                sys.executable,
+                str(REPO_ROOT / "tools" / "run-external-benchmark.py"),
+                "--run-id",
+                "serving-throughput-smoke",
+                "--case-id",
+                "serving-throughput-case",
+                "--output-jsonl",
+                str(output_jsonl),
+                "--stdout-log",
+                str(stdout_log),
+                "--stderr-log",
+                str(stderr_log),
+                "--memory-log",
+                str(memory_log),
+                "--engine-name",
+                "uLLM",
+                "--model-name",
+                "Qwen3",
+                "--model-format",
+                "ullm-package",
+                "--model-quantization",
+                "AQ4",
+                "--context-length",
+                "128",
+                "--prompt-tokens",
+                "16",
+                "--generated-tokens",
+                "4",
+                "--batch-size",
+                "1",
+                "--concurrent-requests",
+                "1",
+                "--kv-cache-dtype",
+                "f32",
+                "--parse",
+                "ullm-serving-throughput",
+                "--result-json",
+                str(result_json),
+                "--",
+                sys.executable,
+                "-c",
+                "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))",
+                str(report_path),
+            ]
+            process = subprocess.run(
+                command,
+                check=False,
+                text=True,
+                capture_output=True,
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            row = json.loads(
+                output_jsonl.read_text(encoding="utf-8").strip().splitlines()[-1]
+            )
+
+            self.assertEqual(row["harness"]["class"], "ullm_serving_throughput_candidate")
+            self.assertFalse(row["harness"]["serving_parity_candidate"])
+            self.assertEqual(row["workload"]["batch_size"], 4)
+            self.assertEqual(row["workload"]["concurrent_requests"], 3)
+            self.assertEqual(row["batching"]["mode"], "real")
+            self.assertEqual(
+                row["metrics"]["prefill_total_input_tokens_per_second"], 100.0
+            )
+            self.assertEqual(
+                row["metrics"]["decode_total_generated_tokens_per_second"], 200.0
+            )
+            self.assertEqual(row["memory"]["kv_cache_bytes_total"], 98304)
 
     def test_prompt_guard_bundle_fields_attached_when_token_logits_check_passed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

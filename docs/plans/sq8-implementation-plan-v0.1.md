@@ -892,6 +892,11 @@ Expected outputs:
 - New external benchmark rows carry a machine-readable `harness` object. This distinguishes
   `cli_model_loop_diagnostic` uLLM rows from `serving_throughput_benchmark` vLLM rows and records
   whether the row is a serving-parity candidate without relying only on prose caveats.
+- `tools/run-external-benchmark.py --parse ullm-serving-throughput` now exists as a result-preserving
+  inlet for future uLLM serving-style or offline-serving throughput rows. It records
+  `harness.class=ullm_serving_throughput_candidate` and `serving_parity_candidate=false`, so these
+  rows cannot satisfy the final serving-parity gate until the harness semantics are explicitly
+  promoted.
 - `tools/summarize-sq8-vllm-batch-grid.py --require-serving-parity` is the machine gate for final
   serving-comparison tables. It currently fails the b2/b4/b8 compact table by design because the
   selected uLLM rows are CLI model-loop diagnostics and the selected vLLM rows are serving
@@ -1019,6 +1024,10 @@ Expected outputs:
      `--require-ullm-sq-batch-coverage`, `--require-ullm-sq-kernel-families`, and
      `--require-ullm-sq-no-host-staging`. The no-host-staging gate now fails missing
      `sq_diagnostic_host_staging_*` fields as well as malformed or nonzero values.
+   - A new `ullm-serving-throughput` external-benchmark parse mode can preserve future uLLM
+     serving-style/offline-serving rows under a non-parity candidate harness class. The remaining
+     implementation work is to build the actual runner semantics and then decide when that class can
+     be promoted into the final serving gate.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device

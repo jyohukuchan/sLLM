@@ -383,6 +383,12 @@ path, usually decode, shares kernels or scheduler state across requests. `real` 
 full-package path uses request-batch execution for the relevant phase. Only `real` rows should be
 used to compare production batch throughput against vLLM.
 
+`tools/run-external-benchmark.py --parse ullm-serving-throughput` is reserved for uLLM
+serving-style or offline-serving throughput candidate rows. It emits
+`harness.class="ullm_serving_throughput_candidate"` with `serving_parity_candidate=false` until the
+server or offline-serving semantics are proven equivalent to the final serving comparison harness.
+These rows can exercise result preservation before they are eligible for `--require-serving-parity`.
+
 Raw uLLM package reports may also include `prefill.layer_step_summary`. This is diagnostic data for
 prefill optimization, not a top-level comparison key. It records layer-by-layer token-loop timing and
 optional component timing when component synchronization is enabled.
