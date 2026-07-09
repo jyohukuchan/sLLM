@@ -411,6 +411,74 @@ Important rule:
 - package/model-loop regression suite passes with documented tolerances;
 - docs/specs describe the implementation as adopted SQ8_0, not as an FP8 quality experiment.
 
+### M10: vLLM + FP8 External Baseline Comparison
+
+Status: planned for the later half of the SQ8_0 implementation cycle.
+
+Purpose:
+
+- Compare uLLM `SQ8_0` against an established FP8 serving/runtime baseline.
+- Keep this as a performance and systems comparison, not a proof that FP8 quantization is acceptable.
+- Use `vLLM + Qwen3-14B-FP8` as the primary external baseline because it is the closest existing
+  FP8 runtime target already represented in local plans and benchmark records.
+
+Prerequisites:
+
+- M5 model-loop / batch integration is stable enough to produce repeatable uLLM rows.
+- M6 dispatch records the selected uLLM implementation ID.
+- uLLM rows clearly distinguish native SQ8_0 direct execution from fallback execution.
+- `tools/run-external-benchmark.py` can emit comparable `inference-benchmark-result-v0.1` rows for
+  both uLLM and vLLM.
+
+Baseline target:
+
+```text
+engine: vLLM
+model: Qwen/Qwen3-14B-FP8
+local model path: ~/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8/
+primary GPU: R9700/RDNA4
+environment: build/envs/vllm-rocm-nightly or the current working vLLM ROCm env
+```
+
+Workload grid:
+
+- smoke: prompt `16`, generated `8`, batch/concurrency `1`;
+- representative decode: prompt `512`, generated `128`, batch/concurrency `1`;
+- cached-prefix or long-prefill probe when uLLM has the matching SQ8_0 path;
+- later batch grid: concurrent requests `1, 2, 4, 8` only after uLLM and vLLM rows are both stable.
+
+Metrics:
+
+- prefill tok/s;
+- decode tok/s;
+- total tok/s;
+- latency p50/p95 when available;
+- VRAM baseline, peak, and consumed bytes;
+- decode tok/s times consumed GiB;
+- backend/executor name;
+- model dtype, quantization, KV cache dtype, and failure reason if unsupported.
+
+Comparison rules:
+
+- vLLM comparison happens after uLLM SQ8_0 rows are implementation-valid; it must not block earlier
+  artifact or direct-kernel work.
+- If vLLM cannot run the exact FP8 model or local GPU target, record an `unsupported` or `failed`
+  row rather than omitting it.
+- Do not compare uLLM selected-layer rows against full vLLM serving rows as equivalent results.
+  Selected-layer uLLM rows are path-connectivity diagnostics only.
+- Full-package uLLM rows can be compared against vLLM serving rows when prompt/generation lengths,
+  batch/concurrency, KV cache dtype, and model target are documented.
+- Differences in tokenizer/server overhead should be recorded. When possible, keep a raw model-loop
+  uLLM row and a server-style vLLM row as separate comparison classes.
+
+Expected outputs:
+
+- JSONL rows in `benchmarks/results/YYYY-MM-DD/external/` or a later SQ8_0 comparison directory.
+- Markdown summary with one table for successful comparable rows and one table for unsupported or
+  failed rows.
+- A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
+  vLLM environment used.
+
 ## Immediate Work Queue
 
 1. Add `sq_runtime.rs` or equivalent library boundary.
@@ -428,6 +496,8 @@ Important rule:
 6. Update old docs opportunistically.
    - Do not rewrite all historical T2 logs.
    - New plans/results should use `SQ8_0` terminology.
+7. After the first implementation-valid full-package SQ8_0 rows exist, run the M10 vLLM + FP8
+   comparison grid and save unsupported/failure rows explicitly when vLLM cannot match the target.
 
 ## Risks
 
@@ -439,3 +509,4 @@ Important rule:
 | backend dispatch is added too broadly | hard-to-debug selection bugs | connect one operation at a time with tests |
 | C++ split breaks anonymous namespace/helper ownership | build instability | keep one translation unit until descriptors are stable |
 | strict AQ4 equality blocks valid FP8 behavior | false negatives | keep exact equality as regression diagnostic, use implementation correctness and behavioral suite for gating |
+| vLLM comparison is run before uLLM rows are comparable | misleading performance conclusions | only compare full-package SQ8_0 rows with documented workload and execution mode |
