@@ -253,6 +253,53 @@ ullm_status ullm_runtime_buffer_copy_to_host(
     return ULLM_STATUS_OK;
 }
 
+ullm_status ullm_runtime_buffer_copy(
+    ullm_runtime_buffer *dst_buffer,
+    size_t dst_offset,
+    const ullm_runtime_buffer *src_buffer,
+    size_t src_offset,
+    size_t bytes,
+    ullm_runtime_stream *stream) {
+    if (dst_buffer == nullptr || src_buffer == nullptr) {
+        set_error("buffer copy received a null source or destination buffer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!checked_range(dst_offset, bytes, dst_buffer->bytes) ||
+        !checked_range(src_offset, bytes, src_buffer->bytes)) {
+        set_error("buffer copy range is out of bounds");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(dst_buffer, src_buffer)) {
+        set_error("buffer copy source and destination belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(dst_buffer, stream) || !stream_matches_buffer(src_buffer, stream)) {
+        set_error("buffer copy stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (bytes == 0) {
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    auto *dst = static_cast<unsigned char *>(dst_buffer->ptr) + dst_offset;
+    const auto *src = static_cast<const unsigned char *>(src_buffer->ptr) + src_offset;
+    if (dst_buffer->backend == BackendKind::Cpu) {
+        std::memmove(dst, src, bytes);
+    } else if (!hip_runtime().copy_async(
+                   dst,
+                   src,
+                   bytes,
+                   HIP_MEMCPY_DEVICE_TO_DEVICE,
+                   stream == nullptr ? nullptr : stream->stream,
+                   dst_buffer->hip_device_id)) {
+        set_error("failed to copy HIP buffer data between device buffers");
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
 ullm_status ullm_runtime_stream_create(
     ullm_runtime_context *context,
     ullm_runtime_stream **stream) {

@@ -51,6 +51,38 @@
     }
 
     #[test]
+    fn cpu_buffer_copies_between_runtime_buffers() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut src = context.alloc_buffer(64).unwrap();
+        let mut dst = context.alloc_buffer(64).unwrap();
+        let input: Vec<u8> = (0..64).map(|value| (value * 13 + 5) as u8).collect();
+        src.copy_from_host(0, &input, Some(&mut stream)).unwrap();
+        dst.copy_from_host(0, &[0xff_u8; 64], Some(&mut stream))
+            .unwrap();
+
+        dst.copy_from_buffer(8, &src, 17, 23, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let mut output = vec![0_u8; 64];
+        dst.copy_to_host(0, &mut output, Some(&mut stream)).unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(&output[..8], &[0xff_u8; 8]);
+        assert_eq!(&output[8..31], &input[17..40]);
+        assert_eq!(&output[31..], &[0xff_u8; 33]);
+    }
+
+    #[test]
+    fn cpu_buffer_copy_rejects_out_of_bounds_source_range() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let src = context.alloc_buffer(8).unwrap();
+        let mut dst = context.alloc_buffer(8).unwrap();
+        let err = dst.copy_from_buffer(0, &src, 7, 2, None).unwrap_err();
+        assert!(err.contains("out of bounds"));
+    }
+
+    #[test]
     fn zero_byte_buffer_copy_accepts_end_offset() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut buffer = context.alloc_buffer(8).unwrap();

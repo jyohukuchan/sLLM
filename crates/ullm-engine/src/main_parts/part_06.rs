@@ -2879,22 +2879,6 @@ impl PackageSelfAttnResidentStepBatchLayer {
         let input_normed_elements = self.hidden.checked_mul(batch_count).ok_or_else(|| {
             format!("{label} self-attn resident batch input normed elements overflow")
         })?;
-        let q_projected_elements = q_projected_rows.checked_mul(batch_count).ok_or_else(|| {
-            format!("{label} self-attn resident batch q projected elements overflow")
-        })?;
-        let k_projected_elements = k_projected_rows.checked_mul(batch_count).ok_or_else(|| {
-            format!("{label} self-attn resident batch k projected elements overflow")
-        })?;
-        let v_projected_elements = v_projected_rows.checked_mul(batch_count).ok_or_else(|| {
-            format!("{label} self-attn resident batch v projected elements overflow")
-        })?;
-        let attention_projection_input_elements = attention_elements
-            .checked_mul(batch_count)
-            .ok_or_else(|| {
-                format!(
-                    "{label} self-attn resident batch attention projection input elements overflow"
-                )
-            })?;
         let attention_block_output_elements = self
             .hidden
             .checked_mul(batch_count)
@@ -2908,13 +2892,21 @@ impl PackageSelfAttnResidentStepBatchLayer {
             .ok_or_else(|| {
                 format!("{label} self-attn resident batch MLP activation elements overflow")
             })?;
+        let hidden_bytes = checked_f32_byte_len(hidden_elements, "self-attn resident hidden slice")?;
+        let q_projected_bytes =
+            checked_f32_byte_len(q_projected_rows, "self-attn resident q projected slice")?;
+        let k_projected_bytes =
+            checked_f32_byte_len(k_projected_rows, "self-attn resident k projected slice")?;
+        let v_projected_bytes =
+            checked_f32_byte_len(v_projected_rows, "self-attn resident v projected slice")?;
+        let attention_projection_input_bytes = checked_f32_byte_len(
+            attention_elements,
+            "self-attn resident attention projection input slice",
+        )?;
 
         let mut slots = Vec::with_capacity(batch_count);
         let mut component_step_ms = Vec::with_capacity(batch_count);
-        let mut input_normed_values = vec![0.0_f32; input_normed_elements];
         let mut batch_residual_values = vec![0.0_f32; input_normed_elements];
-        let mut attention_projection_input_values =
-            vec![0.0_f32; attention_projection_input_elements];
         for (batch_index, item) in items.iter().enumerate() {
             if item.residual.len() != self.hidden {
                 return Err(format!(
@@ -2960,20 +2952,24 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 &mut step_ms,
                 &item_label,
             )?;
-            let normed_values = read_runtime_buffer_f32(
-                &layer.input_normed_buffer,
-                stream,
-                self.hidden,
-                &format!("{item_label} self-attn resident input normed"),
-            )?;
-            record_sq_diagnostic_host_staging_f32_read(
-                normed_values.len(),
-                "self-attn resident input normed staging",
-            )?;
             let start = batch_index.checked_mul(self.hidden).ok_or_else(|| {
                 format!("{label} self-attn resident batch input normed offset overflows")
             })?;
-            input_normed_values[start..start + self.hidden].copy_from_slice(&normed_values);
+            let input_normed_dst_offset =
+                checked_f32_byte_len(start, "self-attn resident batch input normed offset")?;
+            self.batch_input_normed_buffer
+                .copy_from_buffer(
+                    input_normed_dst_offset,
+                    &layer.input_normed_buffer,
+                    0,
+                    hidden_bytes,
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to copy {item_label} self-attn resident input normed to batch buffer: {err}"
+                    )
+                })?;
             let residual_start = batch_index.checked_mul(self.hidden).ok_or_else(|| {
                 format!("{label} self-attn resident batch residual offset overflows")
             })?;
@@ -2982,20 +2978,6 @@ impl PackageSelfAttnResidentStepBatchLayer {
             slots.push(slot);
             component_step_ms.push(step_ms);
         }
-
-        self.batch_input_normed_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&input_normed_values),
-                Some(stream),
-            )
-            .map_err(|err| {
-                format!("failed to copy {label} self-attn resident batch input normed: {err}")
-            })?;
-        record_sq_diagnostic_host_staging_f32_write(
-            input_normed_values.len(),
-            "self-attn resident batch input normed staging",
-        )?;
 
         let component_started = Instant::now();
         weights.q_matrix.matvec_batch(
@@ -3031,37 +3013,6 @@ impl PackageSelfAttnResidentStepBatchLayer {
             step_ms.qkv_projection_ms = qkv_projection_ms;
         }
 
-        let q_projected_values = read_runtime_buffer_f32(
-            &self.batch_q_projected_buffer,
-            stream,
-            q_projected_elements,
-            &format!("{label} self-attn resident batch q projected"),
-        )?;
-        record_sq_diagnostic_host_staging_f32_read(
-            q_projected_values.len(),
-            "self-attn resident batch q projected staging",
-        )?;
-        let k_projected_values = read_runtime_buffer_f32(
-            &self.batch_k_projected_buffer,
-            stream,
-            k_projected_elements,
-            &format!("{label} self-attn resident batch k projected"),
-        )?;
-        record_sq_diagnostic_host_staging_f32_read(
-            k_projected_values.len(),
-            "self-attn resident batch k projected staging",
-        )?;
-        let v_projected_values = read_runtime_buffer_f32(
-            &self.batch_v_projected_buffer,
-            stream,
-            v_projected_elements,
-            &format!("{label} self-attn resident batch v projected"),
-        )?;
-        record_sq_diagnostic_host_staging_f32_read(
-            v_projected_values.len(),
-            "self-attn resident batch v projected staging",
-        )?;
-
         for (batch_index, item) in items.iter().enumerate() {
             let item_label = format!(
                 "{label} request={} position={}",
@@ -3089,48 +3040,48 @@ impl PackageSelfAttnResidentStepBatchLayer {
                         "{label} self-attn resident batch attention projection input offset overflows"
                     )
                 })?;
+            let q_src_offset =
+                checked_f32_byte_len(q_start, "self-attn resident batch q projected offset")?;
+            let k_src_offset =
+                checked_f32_byte_len(k_start, "self-attn resident batch k projected offset")?;
+            let v_src_offset =
+                checked_f32_byte_len(v_start, "self-attn resident batch v projected offset")?;
             layer
                 .q_projected_buffer
-                .copy_from_host(
+                .copy_from_buffer(
                     0,
-                    &encode_f32_to_bytes(&q_projected_values[q_start..q_start + q_projected_rows]),
+                    &self.batch_q_projected_buffer,
+                    q_src_offset,
+                    q_projected_bytes,
                     Some(stream),
                 )
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident q projected: {err}")
                 })?;
-            record_sq_diagnostic_host_staging_f32_write(
-                q_projected_rows,
-                "self-attn resident q projected staging",
-            )?;
             layer
                 .k_projected_buffer
-                .copy_from_host(
+                .copy_from_buffer(
                     0,
-                    &encode_f32_to_bytes(&k_projected_values[k_start..k_start + k_projected_rows]),
+                    &self.batch_k_projected_buffer,
+                    k_src_offset,
+                    k_projected_bytes,
                     Some(stream),
                 )
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident k projected: {err}")
                 })?;
-            record_sq_diagnostic_host_staging_f32_write(
-                k_projected_rows,
-                "self-attn resident k projected staging",
-            )?;
             layer
                 .v_projected_buffer
-                .copy_from_host(
+                .copy_from_buffer(
                     0,
-                    &encode_f32_to_bytes(&v_projected_values[v_start..v_start + v_projected_rows]),
+                    &self.batch_v_projected_buffer,
+                    v_src_offset,
+                    v_projected_bytes,
                     Some(stream),
                 )
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident v projected: {err}")
                 })?;
-            record_sq_diagnostic_host_staging_f32_write(
-                v_projected_rows,
-                "self-attn resident v projected staging",
-            )?;
             let projection_input_buffer = layer.run_device_step_after_qkv_projection_input(
                 stream,
                 rotary_dim,
@@ -3145,49 +3096,35 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     })?,
                 &item_label,
             )?;
-            let projection_input_values = match projection_input_buffer {
-                PackageSelfAttnAttentionProjectionInput::AttentionOutput => read_runtime_buffer_f32(
-                    &layer.attention_output_buffer,
-                    stream,
-                    attention_elements,
-                    &format!(
-                        "{item_label} self-attn resident batch attention output",
-                    ),
-                )?,
-                PackageSelfAttnAttentionProjectionInput::AttentionProjectionInput => {
-                    read_runtime_buffer_f32(
-                        &layer.attention_projection_input_buffer,
-                        stream,
-                        attention_elements,
-                        &format!(
-                            "{item_label} self-attn resident batch attention projection input"
-                        ),
-                    )?
-                }
-            };
-            record_sq_diagnostic_host_staging_f32_read(
-                projection_input_values.len(),
-                "self-attn resident attention projection input staging",
+            let projection_input_dst_offset = checked_f32_byte_len(
+                projection_input_start,
+                "self-attn resident batch attention projection input offset",
             )?;
-            attention_projection_input_values
-                [projection_input_start..projection_input_start + attention_elements]
-                .copy_from_slice(&projection_input_values);
+            let (projection_input_source, projection_input_source_label) =
+                match projection_input_buffer {
+                    PackageSelfAttnAttentionProjectionInput::AttentionOutput => (
+                        &layer.attention_output_buffer,
+                        "attention output",
+                    ),
+                    PackageSelfAttnAttentionProjectionInput::AttentionProjectionInput => (
+                        &layer.attention_projection_input_buffer,
+                        "attention projection input",
+                    ),
+                };
+            self.batch_attention_projection_input_buffer
+                .copy_from_buffer(
+                    projection_input_dst_offset,
+                    projection_input_source,
+                    0,
+                    attention_projection_input_bytes,
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!(
+                        "failed to copy {item_label} self-attn resident {projection_input_source_label} to batch attention projection input: {err}"
+                    )
+                })?;
         }
-
-        self.batch_attention_projection_input_buffer.copy_from_host(
-            0,
-            &encode_f32_to_bytes(&attention_projection_input_values),
-            Some(stream),
-        )
-        .map_err(|err| {
-            format!(
-                "failed to copy {label} self-attn resident batch attention projection input: {err}"
-            )
-        })?;
-        record_sq_diagnostic_host_staging_f32_write(
-            attention_projection_input_values.len(),
-            "self-attn resident batch attention projection input staging",
-        )?;
 
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
                                started: Instant,
@@ -3293,7 +3230,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
         .map_err(|err| format!("failed to run {label} self-attn batch MLP SiLU-mul: {err}"))?;
         let mlp_gate_up_activation_ms = if sync_component_timing {
             stream.synchronize().map_err(|err| {
-                format!("failed to synchronize {label} self-attn batch MLP gate/up activation: {err}")
+                format!(
+                    "failed to synchronize {label} self-attn batch MLP gate/up activation: {err}"
+                )
             })?;
             component_started.elapsed().as_secs_f64() * 1000.0
         } else {
@@ -3328,17 +3267,6 @@ impl PackageSelfAttnResidentStepBatchLayer {
             step_ms.mlp_down_residual_ms = mlp_down_residual_ms;
         }
 
-        let layer_output_values = read_runtime_buffer_f32(
-            &self.batch_residual_buffer,
-            stream,
-            attention_block_output_elements,
-            &format!("{label} self-attn resident batch layer output"),
-        )?;
-        record_sq_diagnostic_host_staging_f32_read(
-            layer_output_values.len(),
-            "self-attn resident batch layer output staging",
-        )?;
-
         for (batch_index, item) in items.iter().enumerate() {
             let item_label = format!(
                 "{label} request={} position={}",
@@ -3355,27 +3283,20 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .ok_or_else(|| {
                     format!("{label} self-attn resident batch layer output offset overflows")
                 })?;
-            let layer_output_end = layer_output_start
-                .checked_add(hidden_elements)
-                .ok_or_else(|| {
-                    format!("{label} self-attn resident batch layer output end overflows")
-                })?;
+            let layer_output_src_offset =
+                checked_f32_byte_len(layer_output_start, "self-attn resident batch layer output offset")?;
             layer
                 .layer_output_buffer
-                .copy_from_host(
+                .copy_from_buffer(
                     0,
-                    &encode_f32_to_bytes(
-                        &layer_output_values[layer_output_start..layer_output_end],
-                    ),
+                    &self.batch_residual_buffer,
+                    layer_output_src_offset,
+                    hidden_bytes,
                     Some(stream),
                 )
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident layer output: {err}")
                 })?;
-            record_sq_diagnostic_host_staging_f32_write(
-                hidden_elements,
-                "self-attn resident layer output staging",
-            )?;
             if sync_component_timing {
                 layer.last_component_step_ms = Some(component_step_ms[batch_index]);
             }

@@ -60,6 +60,14 @@ unsafe extern "C" {
         bytes: usize,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_buffer_copy(
+        dst_buffer: *mut RawRuntimeBuffer,
+        dst_offset: usize,
+        src_buffer: *const RawRuntimeBuffer,
+        src_offset: usize,
+        bytes: usize,
+        stream: *mut RawRuntimeStream,
+    ) -> c_int;
     fn ullm_runtime_stream_create(
         context: *mut RawRuntimeContext,
         stream: *mut *mut RawRuntimeStream,
@@ -1023,6 +1031,29 @@ impl RuntimeBuffer {
                 offset,
                 dst.as_mut_ptr().cast::<c_void>(),
                 dst.len(),
+                stream,
+            )
+        })
+    }
+
+    pub fn copy_from_buffer(
+        &mut self,
+        dst_offset: usize,
+        src: &RuntimeBuffer,
+        src_offset: usize,
+        bytes: usize,
+        stream: Option<&mut RuntimeStream>,
+    ) -> Result<(), String> {
+        check_copy_range(dst_offset, bytes, self.size()?)?;
+        check_copy_range(src_offset, bytes, src.size()?)?;
+        let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+        status_to_result(unsafe {
+            ullm_runtime_buffer_copy(
+                self.raw.as_ptr(),
+                dst_offset,
+                src.raw.as_ptr(),
+                src_offset,
+                bytes,
                 stream,
             )
         })

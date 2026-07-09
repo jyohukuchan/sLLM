@@ -1395,6 +1395,7 @@ enum class BackendKind : uint32_t {
 
 constexpr int HIP_MEMCPY_HOST_TO_DEVICE = 1;
 constexpr int HIP_MEMCPY_DEVICE_TO_HOST = 2;
+constexpr int HIP_MEMCPY_DEVICE_TO_DEVICE = 3;
 
 } // namespace
 

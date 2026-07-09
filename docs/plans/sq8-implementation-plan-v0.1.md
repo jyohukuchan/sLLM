@@ -677,6 +677,14 @@ Current local baseline state:
   `sq_diagnostic_host_staging_read_bytes=540672`, and
   `sq_diagnostic_host_staging_write_bytes=737280` by keeping MLP activation and residual add on
   batch device buffers.
+- The D2D pack row at
+  `benchmarks/results/2026-07-09/sq8-host-staging-d2d-pack-smoke/results.jsonl` keeps the same
+  selected-layer `sq_fp8_batch_matvec_count=21/21` and reduces the host-staging diagnostic to
+  `sq_diagnostic_host_staging_read_count=0`,
+  `sq_diagnostic_host_staging_write_count=9`,
+  `sq_diagnostic_host_staging_read_bytes=0`, and
+  `sq_diagnostic_host_staging_write_bytes=196608` by using runtime buffer-to-buffer copies for
+  batch packing and per-request unpacking.
 - The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
   It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and
@@ -878,10 +886,11 @@ Expected outputs:
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device
-     buffers. A second reduction moves the same shape to `24/39` by keeping the MLP gate/up
-     SiLU-mul activation and MLP down residual add on batch device buffers. The next implementation
-     step is still to reduce the remaining counted copies rather than treating the annotation itself
-     as serving parity.
+     buffers. A second reduction moved the same shape to `24/39` by keeping the MLP gate/up
+     SiLU-mul activation and MLP down residual add on batch device buffers. A third reduction moves
+     the shape to `0/9` by adding runtime buffer-to-buffer copy and using it for batch pack/unpack
+     boundaries. The remaining counted writes are host residual inputs in this smoke path; serving
+     parity still needs full-package/server-style rows rather than selected-layer diagnostics.
 
 ## Risks
 
