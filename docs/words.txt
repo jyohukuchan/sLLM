@@ -2,6 +2,7 @@ uLLM-projectで使用される用語とその意味について
 用語:意味
 AQ4_0:既存AQ4 version 0のpublic format identifier。4はおおよそのbit/parameterを表す。
 SQ8_0:FP8 E4M3 SQ version 0のpublic format identifier。8はおおよそのbit/parameterを表す。FP8品質の採否候補ではなく正式採用formatとして扱う。
+SQ8_0 implementation plan:SQ8_0を正式採用formatとして実装するための計画。artifact、runtime resident loader、direct kernel、backend dispatch、回帰診断、完了条件を扱う。
 bpp:bit/parameter
 BF16-error:BF16のraw-valueまたは出力を基準にした誤差
 decode-tps:decode token/s
@@ -37,7 +38,7 @@ AQ4 matvec batch runtime:同じAQ4 resident matrixに対して複数input vector
 package prefill AQ4 matvec batch smoke:package prompt embedding行を[tokens,hidden] device bufferへ載せ、指定AQ4 projection tensorをAQ4 matvec batch runtimeでまとめて実行し、materialized F32 matvec由来のexpected outputと比較するsmoke。attentionやMLP全体ではなくprojection batch kernelの正しさと速度を測る
 package linear attention projection batch smoke:linear attention layerのinput RMSNorm後のhiddenを[tokens,hidden] device bufferとして保持し、in_proj_qkv / in_proj_z / in_proj_a / in_proj_bをAQ4 matvec batch runtimeでまとめて実行するsmoke。recurrent state scanやMLPは含まず、linear attention prefillのprojection batch境界を検証する
 package linear attention qkv prepare batch smoke:linear attention layerのinput RMSNorm後にAQ4 qkv projectionをtoken batch実行し、そのdevice上のqkv outputをbatch qkv prepare runtimeへ渡してconv+SiLU、q/k L2 norm、v split、conv history更新を検証するsmoke。qkv projection自体のF32参照比較はpackage linear attention projection batch smokeに分ける
-fq:推論エンジン上の実測を見て仕様を決める量子化またはformat候補の仮称。意味が確定したらこの定義を更新する
+FQ8_0:会話上のtypo。正式なpublic format identifierとしては使わず、SQ8_0を使う。
 raw-value:scale・codebookを一切考慮しない各パラメータの値
 codebook:LUTによる変換表
 codebook-index:codebookを参照するために保存されるindex値
