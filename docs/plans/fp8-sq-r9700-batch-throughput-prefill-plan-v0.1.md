@@ -3939,6 +3939,43 @@ Inventory:
 2. `q/k/v` の同時適用を維持したまま、`v16` または `q16/v16` などのscale粒度を試す。
 3. `case_a` のtop1 marginを、少なくとも `q/k` pair単体より明確に広げられる候補を優先する。
 
+## 2026-07-09 progress: T2 SQ FP8 qkv scale refinement prompt bundle
+
+前回の要点:
+
+- `q/k` pair単体と `v` 単体はfull mixed prompt bundleでstrict top1を維持した。
+- `q32/k16/v32` は `case_a` のtop1をAQ4 `4105` からSQ `5582` に入れ替えたため、累積・相互作用driftとして扱っていた。
+
+今回の変更点:
+
+- `q32/k16/v16` と `q16/k16/v16` の2つのscale refinement候補を追加した。
+- 両方とも `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL=1` でtriple direct SQ FP8 kernelを必須化して測った。
+- 結果は次に保存した。
+  - `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-full-mixed-qkv-v16-prompt-bundle-v1.md`
+  - `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-full-mixed-qkv-q16-v16-prompt-bundle-v1.md`
+
+実測値:
+
+| candidate | prefill real | decode real | prefill tok/s | decode tok/s | end-to-end tok/s | final top1 | strict top1 | case_a note |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |
+| AQ4 baseline for `q32/k16/v16` | true | true | 67.241771 | 81.154855 | 35.047795 | `24218,4105,329` | reference | reference |
+| SQ `q32/k16/v16` | true | true | 62.908898 | 79.445748 | 34.061110 | `24218,5582,329` | 2 / 3 | SQ `5582` over AQ4 top1 by `0.000260353` |
+| AQ4 baseline for `q16/k16/v16` | true | true | 66.905744 | 81.096744 | 35.521656 | `24218,4105,329` | reference | reference |
+| SQ `q16/k16/v16` | true | true | 62.157419 | 79.459594 | 33.945112 | `24218,4105,329` | 3 / 3 | SQ `4105` over rank2 by `0.002023697` |
+
+判断:
+
+- `q32/k16/v16` は `q32/k16/v32` よりfailure marginを縮めたが、strict top1は戻せなかった。
+- `q16/k16/v16` はfull mixed prompt bundleでstrict top1 `3 / 3` を維持し、triple boundaryも `sq_fp8_triple_matvec_count=23` で確認できた。
+- 現在のlayer3 QKV triple候補では、`q16/k16/v16` を最小のpass boundaryとして扱う。
+- ただし1 layer / 3 tensorだけの診断候補であり、full SQ policyではない。
+
+次の行動:
+
+1. `q16/k16/v16` をlayer3 QKV triple pass boundaryとして保存する。
+2. 同じscale粒度をlayer7以降へ広げる前に、B=1/4/8 short guardまたは追加promptで再確認する。
+3. 速度比較では、通常triple dispatchのままAQ4 baselineと並べる。
+
 ## Risks
 
 | risk | impact | handling |

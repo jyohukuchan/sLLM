@@ -1,0 +1,81 @@
+{
+  "schema_version": "sq-fp8-policy-v0.1",
+  "date": "2026-07-09",
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-qkv-layer3-q16-k16-v16",
+  "policy_id": "qkv_layer3_q16_k16_v16",
+  "status": "qkv_scale_refinement_diagnostic_not_promoted",
+  "target_gpu": "R9700/RDNA4",
+  "scale": {
+    "granularity": "row_block",
+    "block_cols": 16,
+    "dtype": "f32",
+    "overrides": []
+  },
+  "fp8_selection": {
+    "include_regex": "^model\\.language_model\\.layers\\.3\\.self_attn\\.(q_proj|k_proj|v_proj)\\.weight$",
+    "families": [
+      {
+        "family": "self_attn.q_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.v_proj",
+        "layers": [
+          3
+        ],
+        "scale_block_cols": 16
+      }
+    ],
+    "expected_fp8_tensor_count": 3
+  },
+  "fallback_policy": [
+    {
+      "family": "all_other_language_model_tensors",
+      "layers": "all",
+      "reason": "not_selected_in_current_qkv_scale_refinement"
+    },
+    {
+      "family": "visual_mtp_rdna2_tp_targets",
+      "layers": "all",
+      "reason": "deferred_target"
+    }
+  ],
+  "acceptance_rule": {
+    "promotion_rule": "strict_top1",
+    "diagnostic_only": [
+      "topk_common",
+      "baseline_top1_rank_in_sq_topk",
+      "sq_top1_minus_baseline_top1_logit"
+    ]
+  },
+  "prompt_bundle_result": {
+    "strict_top1_pass_count": 3,
+    "case_count": 3,
+    "result_path": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-full-mixed-qkv-q16-v16-prompt-bundle-v1.md",
+    "case_a_sq_top1_margin_over_rank2": 0.002023697,
+    "promoted_full_sq_policy": false
+  },
+  "artifacts": [
+    {
+      "artifact": "/tmp/ullm-sq-fp8-qkv-layer3-q16-k16-v16-policy-v0.1-artifact",
+      "summary_json": "benchmarks/results/2026-07-09/sq-fp8-qkv-layer3-q16-k16-v16-policy-artifact-v0.1.json",
+      "fp8_tensor_count": 3,
+      "passthrough_tensor_count": 772
+    }
+  ],
+  "next_steps": [
+    "Build with tools/build-sq-fp8-w8a16-artifact.py --policy-json.",
+    "Run full mixed request-state smoke with default self-attention q/k/v triple dispatch.",
+    "Compare against q32/k16/v16 and q32/k16/v32 prompt bundle results."
+  ]
+}
