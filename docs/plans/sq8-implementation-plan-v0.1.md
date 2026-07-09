@@ -694,6 +694,16 @@ Current local baseline state:
   `sq_diagnostic_host_staging_write_bytes=6553600`. This shows the remaining full-stack staging is
   dominated by layer-to-layer residual handoff through the host-driven wrapper, not by the
   selected-layer batch pack/unpack boundary.
+- A follow-up full 40-layer device-handoff smoke row at
+  `benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-device-handoff-smoke/results.jsonl`
+  keeps `sq_fp8_batch_matvec_count=560/560` for the same `Qwen3-14B-FP8` shape and records
+  `sq_diagnostic_host_staging_read_count=0`,
+  `sq_diagnostic_host_staging_write_count=6`,
+  `sq_diagnostic_host_staging_read_bytes=0`, and
+  `sq_diagnostic_host_staging_write_bytes=163840`. This removes the measured layer-to-layer
+  residual read staging from the mixed request-state stack while preserving real prefill/decode
+  batching. The remaining counted writes are initial host-side residual inputs for the smoke path,
+  so this is the new full-stack diagnostic baseline before the later vLLM+FP8 comparison rows.
 - The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
   It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and

@@ -208,22 +208,9 @@ fn record_sq_fp8_projection_dispatch(dispatch: SqFp8ProjectionDispatch) {
     }
 }
 
-fn record_sq_diagnostic_host_staging_read_bytes(bytes: usize) {
-    SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT.fetch_add(1, Ordering::Relaxed);
-    SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-
 fn record_sq_diagnostic_host_staging_write_bytes(bytes: usize) {
     SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
     SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-
-fn record_sq_diagnostic_host_staging_f32_read(
-    elements: usize,
-    label: &str,
-) -> Result<(), String> {
-    record_sq_diagnostic_host_staging_read_bytes(checked_f32_byte_len(elements, label)?);
-    Ok(())
 }
 
 fn record_sq_diagnostic_host_staging_f32_write(
