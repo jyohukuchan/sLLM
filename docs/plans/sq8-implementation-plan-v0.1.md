@@ -904,6 +904,9 @@ Expected outputs:
   diagnostic final logits are included in total latency. Runner-provided blockers and parser-derived
   non-serving-like semantics are preserved as explicit candidate blockers instead of being inferred
   from prose.
+- Final serving-parity promotion must reject any selected row with non-empty
+  `harness.ullm_serving_candidate.parity_blockers`, even if the row later opts into
+  `serving_parity_candidate=true`.
 - `tools/summarize-sq8-vllm-batch-grid.py --require-serving-parity` is the machine gate for final
   serving-comparison tables. It currently fails the b2/b4/b8 compact table by design because the
   selected uLLM rows are CLI model-loop diagnostics and the selected vLLM rows are serving

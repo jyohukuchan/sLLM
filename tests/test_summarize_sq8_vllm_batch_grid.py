@@ -527,6 +527,64 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                     status = TOOL.main()
             self.assertEqual(status, 2)
 
+    def test_require_serving_parity_fails_for_ullm_serving_candidate_parity_blockers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "parity_blockers.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="qwen3-14b-sq8-full-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={
+                                    "class": "serving_throughput_benchmark",
+                                    "serving_parity_candidate": True,
+                                    "ullm_serving_candidate": {
+                                        "parity_blockers": ["runner_known_gap"]
+                                    },
+                                },
+                            )
+                        )
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rows = TOOL.selected_rows([path], "pp16-tg8", "", {2, 4, 8})
+            failure_lines = TOOL.serving_parity_gate_failures(rows)
+            self.assertTrue(failure_lines)
+            self.assertIn(
+                "selected rows include uLLM serving candidate parity blockers",
+                "\n".join(failure_lines),
+            )
+            self.assertIn("runner_known_gap", "\n".join(failure_lines))
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2,4,8",
+                    "--require-serving-parity",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("runner_known_gap", stderr.getvalue())
+
     def test_require_serving_parity_and_engines_fails_when_required_engine_missing(
         self,
     ) -> None:

@@ -138,6 +138,27 @@ def serving_parity_candidate(row: dict[str, Any]) -> bool:
     return harness_class(row) == "serving_throughput_benchmark"
 
 
+def serving_candidate_parity_blockers(row: dict[str, Any]) -> list[str]:
+    harness = as_dict(row.get("harness"))
+    candidate = as_dict(harness.get("ullm_serving_candidate"))
+    raw_blockers = candidate.get("parity_blockers")
+    if isinstance(raw_blockers, str):
+        stripped = raw_blockers.strip()
+        if stripped:
+            return [stripped]
+        return []
+    if isinstance(raw_blockers, (list, tuple)):
+        blockers = []
+        for raw in raw_blockers:
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if text:
+                blockers.append(text)
+        return blockers
+    return []
+
+
 def harness_summary(row: dict[str, Any]) -> str:
     requests = requested_concurrency(as_dict(row.get("workload"))) or "-"
     return (
@@ -194,6 +215,20 @@ def serving_parity_gate_failures(rows: list[dict[str, Any]]) -> list[str]:
     if false_candidates:
         failure_reasons.append("selected rows include serving_parity_candidate=false")
         failure_reasons.extend(f"  - {harness_summary(row)}" for row in false_candidates)
+
+    parity_blocker_rows: list[tuple[dict[str, Any], list[str]]] = []
+    for row in rows:
+        blockers = serving_candidate_parity_blockers(row)
+        if blockers:
+            parity_blocker_rows.append((row, blockers))
+    if parity_blocker_rows:
+        failure_reasons.append(
+            "selected rows include uLLM serving candidate parity blockers"
+        )
+        failure_reasons.extend(
+            f"  - {harness_summary(row)} parity_blockers={blockers!r}"
+            for row, blockers in parity_blocker_rows
+        )
 
     classes = {harness_class(row) for row in rows}
     if len(classes) > 1:
