@@ -43,6 +43,9 @@ def make_row(
     harness: dict | None = None,
     format_id: str | None = None,
     sq_projection_kernel_families: str | None = None,
+    sq_projection_boundary: str | None = None,
+    sq_fp8_batch_matvec_count: int | None = None,
+    sq_fp8_expected_all_batch_matvec_count: int | None = None,
 ) -> dict:
     row = {
         "case_id": case_id,
@@ -67,6 +70,14 @@ def make_row(
         row["workload"]["format_id"] = format_id
     if sq_projection_kernel_families is not None:
         row["workload"]["sq_projection_kernel_families"] = sq_projection_kernel_families
+    if sq_projection_boundary is not None:
+        row["workload"]["sq_projection_boundary"] = sq_projection_boundary
+    if sq_fp8_batch_matvec_count is not None:
+        row["workload"]["sq_fp8_batch_matvec_count"] = sq_fp8_batch_matvec_count
+    if sq_fp8_expected_all_batch_matvec_count is not None:
+        row["workload"]["sq_fp8_expected_all_batch_matvec_count"] = (
+            sq_fp8_expected_all_batch_matvec_count
+        )
     return row
 
 
@@ -862,6 +873,157 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                     "--requests",
                     "2",
                     "--require-ullm-sq-kernel-families",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
+
+
+    def test_require_ullm_sq_batch_coverage_fails_when_boundary_missing_or_none(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "missing_boundary.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                format_id="SQ8_0",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2-none",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                format_id="SQ8_0",
+                                sq_projection_boundary="none",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-batch-coverage",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("sq_projection_boundary", stderr.getvalue())
+            self.assertIn(
+                "sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                stderr.getvalue(),
+            )
+
+    def test_require_ullm_sq_batch_coverage_fails_when_counts_insufficient(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "insufficient_batch_counts.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                        sq_projection_boundary="batch",
+                        sq_fp8_batch_matvec_count=9,
+                        sq_fp8_expected_all_batch_matvec_count=14,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-batch-coverage",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn(
+                "lacks full batch projection coverage",
+                stderr.getvalue(),
+            )
+            self.assertIn(
+                "sq_fp8_batch_matvec_count=9 sq_fp8_expected_all_batch_matvec_count=14",
+                stderr.getvalue(),
+            )
+
+    def test_require_ullm_sq_batch_coverage_passes_when_batch_boundary_and_counts_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "valid_batch_coverage.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                        sq_projection_boundary="single+batch",
+                        sq_fp8_batch_matvec_count=21,
+                        sq_fp8_expected_all_batch_matvec_count=14,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-batch-coverage",
                 ],
             ):
                 stdout = StringIO()

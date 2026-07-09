@@ -374,6 +374,60 @@ def ullm_sq_kernel_families_gate_failures(
     return failures
 
 
+def _sq_projection_boundary_has_batch(boundary: Any) -> bool:
+    if not isinstance(boundary, str):
+        return False
+    if not boundary.strip():
+        return False
+    parts = [part.strip().lower() for part in boundary.split("+")]
+    return "batch" in parts
+
+
+def ullm_sq_batch_coverage_gate_failures(
+    rows: list[dict[str, Any]],
+) -> list[str]:
+    failures: list[str] = []
+    for row in rows:
+        engine_name = as_str(as_dict(row.get("engine")).get("name"))
+        workload = as_dict(row.get("workload"))
+        if engine_name != "uLLM":
+            continue
+        if as_str(workload.get("format_id")) != "SQ8_0":
+            continue
+
+        boundary = workload.get("sq_projection_boundary")
+        if not _sq_projection_boundary_has_batch(boundary):
+            failures.append(
+                "selected uLLM SQ8_0 row missing batch projection boundary: "
+                f"{harness_summary(row)} sq_projection_boundary={as_str(boundary)}"
+            )
+            continue
+
+        batch_count = as_int(workload.get("sq_fp8_batch_matvec_count"))
+        expected_batch_count = as_int(
+            workload.get("sq_fp8_expected_all_batch_matvec_count")
+        )
+        if batch_count is None or batch_count <= 0:
+            failures.append(
+                "selected uLLM SQ8_0 row missing or non-positive sq_fp8_batch_matvec_count: "
+                f"{harness_summary(row)} sq_fp8_batch_matvec_count={as_str(workload.get('sq_fp8_batch_matvec_count'))}"
+            )
+            continue
+        if expected_batch_count is None or expected_batch_count <= 0:
+            failures.append(
+                "selected uLLM SQ8_0 row missing or non-positive sq_fp8_expected_all_batch_matvec_count: "
+                f"{harness_summary(row)} sq_fp8_expected_all_batch_matvec_count={as_str(workload.get('sq_fp8_expected_all_batch_matvec_count'))}"
+            )
+            continue
+        if batch_count < expected_batch_count:
+            failures.append(
+                "selected uLLM SQ8_0 row lacks full batch projection coverage: "
+                f"{harness_summary(row)} sq_fp8_batch_matvec_count={batch_count} "
+                f"sq_fp8_expected_all_batch_matvec_count={expected_batch_count}"
+            )
+    return failures
+
+
 def required_engines_grid_gate_failures(
     rows: list[dict[str, Any]],
     required_engines: set[str],
@@ -451,6 +505,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="fail when uLLM SQ8_0 rows miss a non-none workload.sq_projection_kernel_families",
     )
+    parser.add_argument(
+        "--require-ullm-sq-batch-coverage",
+        action="store_true",
+        help=(
+            "fail when uLLM SQ8_0 rows lack batch projection coverage with "
+            "valid sq_projection_boundary and matvec counters"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -473,6 +535,7 @@ def main() -> int:
             args.require_serving_parity
             or bool(required_engines)
             or args.require_ullm_sq_kernel_families
+            or args.require_ullm_sq_batch_coverage
         )
         if requires_gate:
             rows = selected_rows(
@@ -501,6 +564,12 @@ def main() -> int:
                 )
             else:
                 ullm_sq_kernel_families_failures = []
+            if args.require_ullm_sq_batch_coverage:
+                ullm_sq_batch_coverage_failures = (
+                    ullm_sq_batch_coverage_gate_failures(rows)
+                )
+            else:
+                ullm_sq_batch_coverage_failures = []
         else:
             rows = iter_selected_rows(
                 args.jsonl,
@@ -513,12 +582,14 @@ def main() -> int:
             serving_parity_failures = []
             required_engine_failures = []
             ullm_sq_kernel_families_failures = []
+            ullm_sq_batch_coverage_failures = []
         for line in markdown_lines(rows):
             print(line)
         if (
             serving_parity_failures
             or required_engine_failures
             or ullm_sq_kernel_families_failures
+            or ullm_sq_batch_coverage_failures
         ):
             print(
                 f"serving parity gate failed: {selected_count} selected row(s)",
@@ -528,6 +599,7 @@ def main() -> int:
                 serving_parity_failures
                 + required_engine_failures
                 + ullm_sq_kernel_families_failures
+                + ullm_sq_batch_coverage_failures
             ):
                 print(line, file=sys.stderr)
             return 2

@@ -967,6 +967,9 @@ Expected outputs:
    - Comparison scripts should now fail M10 runs unless SQ8_0 uLLM rows pass
      `--require-ullm-sq-kernel-families`, so fallback/no-kernel SQ8_0 rows do not silently leak
      into direct-projection comparison cases.
+   - Same M10 gates should also start requiring
+     `--require-ullm-sq-batch-coverage` so SQ8_0 rows with non-batch projection boundaries or
+     incomplete batch matvec counters are blocked before mixing against serving rows.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device
