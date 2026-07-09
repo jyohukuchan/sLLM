@@ -7,6 +7,7 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from unittest.mock import patch
+from typing import Any
 import unittest
 from pathlib import Path
 
@@ -46,6 +47,11 @@ def make_row(
     sq_projection_boundary: str | None = None,
     sq_fp8_batch_matvec_count: int | None = None,
     sq_fp8_expected_all_batch_matvec_count: int | None = None,
+    batching: dict[str, Any] | None = None,
+    batching_mode: str | None = None,
+    prefill_real_batch: bool | None = None,
+    decode_real_batch: bool | None = None,
+    final_logits_in_total: bool | None = None,
 ) -> dict:
     row = {
         "case_id": case_id,
@@ -78,6 +84,16 @@ def make_row(
         row["workload"]["sq_fp8_expected_all_batch_matvec_count"] = (
             sq_fp8_expected_all_batch_matvec_count
         )
+    if batching is not None:
+        row["batching"] = batching
+    if batching_mode is not None:
+        row["workload"]["batching_mode"] = batching_mode
+    if prefill_real_batch is not None:
+        row["workload"]["prefill_real_batch"] = prefill_real_batch
+    if decode_real_batch is not None:
+        row["workload"]["decode_real_batch"] = decode_real_batch
+    if final_logits_in_total is not None:
+        row["workload"]["final_logits_in_total"] = final_logits_in_total
     return row
 
 
@@ -381,6 +397,348 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                 "request 8 missing required engine(s): uLLM, vLLM",
                 stderr.getvalue(),
             )
+
+    def test_require_normalized_throughput_comparison_passes_for_matching_request_shape(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "normalized_match.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": False,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_require_normalized_throughput_comparison_fails_when_missing_ullm_or_vllm_row(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            missing_ullm_path = Path(workdir) / "missing_ullm.jsonl"
+            missing_ullm_path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                        engine_name="vLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        harness={"class": "serving_throughput_benchmark"},
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(missing_ullm_path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("request 2 missing required uLLM", stderr.getvalue())
+
+            missing_vllm_path = Path(workdir) / "missing_vllm.jsonl"
+            missing_vllm_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": False,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(missing_vllm_path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("request 2 missing required vLLM", stderr.getvalue())
+
+    def test_require_normalized_throughput_comparison_fails_when_final_logits_in_total_true(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "invalid_final_logits.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": True,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("case_id=sq8-pp16-tg8-b2", stderr.getvalue())
+            self.assertIn("final_logits_in_total=false", stderr.getvalue())
+
+    def test_require_normalized_throughput_comparison_fails_when_harness_mismatch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            mismatch_rows_path = Path(workdir) / "harness_mismatch.jsonl"
+            mismatch_rows_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "logical"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": False,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(mismatch_rows_path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("case_id=sq8-pp16-tg8-b2", stderr.getvalue())
+            self.assertIn("cli_model_loop_diagnostic", stderr.getvalue())
+
+            mismatch_rows_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": False,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(mismatch_rows_path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("case_id=vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2", stderr.getvalue())
+            self.assertIn("serving_throughput_benchmark", stderr.getvalue())
 
     def test_require_engines_grid_passes_when_all_request_counts_cover_required_engines(
         self,

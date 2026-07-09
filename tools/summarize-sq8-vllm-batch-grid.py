@@ -53,6 +53,14 @@ def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def as_lower_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    return value.strip().lower()
+
+
 def format_gib(bytes_value: Any) -> str | None:
     value = as_int(bytes_value)
     if value is None:
@@ -383,6 +391,164 @@ def _sq_projection_boundary_has_batch(boundary: Any) -> bool:
     return "batch" in parts
 
 
+def _request_case_ids(rows: list[dict[str, Any]]) -> str:
+    case_ids = {
+        as_str(row.get("case_id")) for row in rows if row.get("case_id") is not None
+    }
+    if not case_ids:
+        return ""
+    return f" (case_ids: {', '.join(sorted(case_ids))})"
+
+
+def _normalized_row_has_real_batch(row: dict[str, Any]) -> bool:
+    workload = as_dict(row.get("workload"))
+    batching = as_dict(row.get("batching"))
+    return as_lower_str(batching.get("mode")) == "real" or (
+        as_lower_str(workload.get("batching_mode")) == "real"
+    )
+
+
+def _normalized_field_true(row: dict[str, Any], field: str) -> bool:
+    workload = as_dict(row.get("workload"))
+    batching = as_dict(row.get("batching"))
+    return as_bool(workload.get(field)) is True or as_bool(batching.get(field)) is True
+
+
+def _normalized_field_false(row: dict[str, Any], field: str) -> bool:
+    workload = as_dict(row.get("workload"))
+    batching = as_dict(row.get("batching"))
+    return as_bool(workload.get(field)) is False or as_bool(batching.get(field)) is False
+
+
+def normalized_throughput_comparison_gate_failures(
+    rows: list[dict[str, Any]],
+    requests_filter: set[int],
+) -> list[str]:
+    if not rows:
+        return ["no selected rows"]
+
+    if requests_filter:
+        request_counts = sorted(requests_filter)
+    else:
+        request_counts = sorted(
+            {
+                requested
+                for row in rows
+                if (requested := requested_concurrency(as_dict(row.get("workload"))))
+                is not None
+            }
+        )
+    if not request_counts:
+        return ["no selected rows with request count"]
+
+    failures: list[str] = []
+    for request_count in request_counts:
+        request_rows = [
+            row
+            for row in rows
+            if requested_concurrency(as_dict(row.get("workload"))) == request_count
+        ]
+        ullm_rows = [
+            row
+            for row in request_rows
+            if as_str(as_dict(row.get("engine")).get("name")) == "uLLM"
+        ]
+        vllm_rows = [
+            row
+            for row in request_rows
+            if as_str(as_dict(row.get("engine")).get("name")) == "vLLM"
+        ]
+        if not ullm_rows:
+            failures.append(
+                f"request {request_count} missing required uLLM row for normalized throughput comparison"
+                f"{_request_case_ids(vllm_rows)}"
+            )
+        if not vllm_rows:
+            failures.append(
+                f"request {request_count} missing required vLLM row for normalized throughput comparison"
+                f"{_request_case_ids(ullm_rows)}"
+            )
+
+        for row in request_rows:
+            row_engine = as_str(as_dict(row.get("engine")).get("name"))
+            case_id = as_str(row.get("case_id"))
+            prefix = f"request {request_count} case_id={case_id}"
+            if row_engine == "vLLM":
+                if harness_class(row) != "serving_throughput_benchmark":
+                    failures.append(
+                        f"{prefix}: vLLM row must be harness.class=serving_throughput_benchmark "
+                        f"(got {harness_class(row)})"
+                    )
+                continue
+            if row_engine != "uLLM":
+                continue
+
+            workload = as_dict(row.get("workload"))
+            if harness_class(row) != "cli_model_loop_diagnostic":
+                failures.append(
+                    f"{prefix}: uLLM row must be harness.class=cli_model_loop_diagnostic "
+                    f"(got {harness_class(row)})"
+                )
+            if as_str(workload.get("format_id")) != "SQ8_0":
+                failures.append(
+                    f"{prefix}: uLLM row format_id must be SQ8_0 "
+                    f"(got {as_str(workload.get('format_id'))})"
+                )
+            if not _normalized_row_has_real_batch(row):
+                failures.append(
+                    f"{prefix}: uLLM row requires batching mode real "
+                    "(from batching.mode or workload.batching_mode)"
+                )
+            if not _normalized_field_true(row, "prefill_real_batch"):
+                failures.append(
+                    f"{prefix}: uLLM row requires prefill_real_batch=true "
+                    "(from workload.prefill_real_batch or batching.prefill_real_batch)"
+                )
+            if not _normalized_field_true(row, "decode_real_batch"):
+                failures.append(
+                    f"{prefix}: uLLM row requires decode_real_batch=true "
+                    "(from workload.decode_real_batch or batching.decode_real_batch)"
+                )
+            if not _normalized_field_false(row, "final_logits_in_total"):
+                failures.append(
+                    f"{prefix}: uLLM row requires final_logits_in_total=false "
+                    "(from workload.final_logits_in_total or batching.final_logits_in_total)"
+                )
+            if not _sq_projection_boundary_has_batch(
+                workload.get("sq_projection_boundary")
+            ):
+                failures.append(
+                    f"{prefix}: uLLM row requires sq_projection_boundary containing 'batch' "
+                    f"(got {as_str(workload.get('sq_projection_boundary'))})"
+                )
+            batch_count = as_int(workload.get("sq_fp8_batch_matvec_count"))
+            expected_batch_count = as_int(
+                workload.get("sq_fp8_expected_all_batch_matvec_count")
+            )
+            if batch_count is None or batch_count <= 0:
+                failures.append(
+                    f"{prefix}: uLLM row requires positive sq_fp8_batch_matvec_count "
+                    f"(got {as_str(workload.get('sq_fp8_batch_matvec_count'))})"
+                )
+            if expected_batch_count is None or expected_batch_count <= 0:
+                failures.append(
+                    f"{prefix}: uLLM row requires positive "
+                    f"sq_fp8_expected_all_batch_matvec_count "
+                    f"(got {as_str(workload.get('sq_fp8_expected_all_batch_matvec_count'))})"
+                )
+            if (
+                batch_count is not None
+                and expected_batch_count is not None
+                and batch_count < expected_batch_count
+            ):
+                failures.append(
+                    f"{prefix}: uLLM row requires sq_fp8_batch_matvec_count >= sq_fp8_expected_all_batch_matvec_count "
+                    f"(got {batch_count}/{expected_batch_count})"
+                )
+
+    return failures
+
+
 def ullm_sq_batch_coverage_gate_failures(
     rows: list[dict[str, Any]],
 ) -> list[str]:
@@ -513,6 +679,14 @@ def parse_args() -> argparse.Namespace:
             "valid sq_projection_boundary and matvec counters"
         ),
     )
+    parser.add_argument(
+        "--require-normalized-throughput-comparison",
+        action="store_true",
+        help=(
+            "require a same-shape normalized throughput comparison shape: "
+            "uLLM cli_model_loop_diagnostic and vLLM serving rows per request count"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -536,6 +710,7 @@ def main() -> int:
             or bool(required_engines)
             or args.require_ullm_sq_kernel_families
             or args.require_ullm_sq_batch_coverage
+            or args.require_normalized_throughput_comparison
         )
         if requires_gate:
             rows = selected_rows(
@@ -570,6 +745,14 @@ def main() -> int:
                 )
             else:
                 ullm_sq_batch_coverage_failures = []
+            if args.require_normalized_throughput_comparison:
+                normalized_throughput_comparison_failures = (
+                    normalized_throughput_comparison_gate_failures(
+                        rows, requests_filter
+                    )
+                )
+            else:
+                normalized_throughput_comparison_failures = []
         else:
             rows = iter_selected_rows(
                 args.jsonl,
@@ -583,6 +766,7 @@ def main() -> int:
             required_engine_failures = []
             ullm_sq_kernel_families_failures = []
             ullm_sq_batch_coverage_failures = []
+            normalized_throughput_comparison_failures = []
         for line in markdown_lines(rows):
             print(line)
         if (
@@ -590,6 +774,7 @@ def main() -> int:
             or required_engine_failures
             or ullm_sq_kernel_families_failures
             or ullm_sq_batch_coverage_failures
+            or normalized_throughput_comparison_failures
         ):
             print(
                 f"serving parity gate failed: {selected_count} selected row(s)",
@@ -600,6 +785,7 @@ def main() -> int:
                 + required_engine_failures
                 + ullm_sq_kernel_families_failures
                 + ullm_sq_batch_coverage_failures
+                + normalized_throughput_comparison_failures
             ):
                 print(line, file=sys.stderr)
             return 2

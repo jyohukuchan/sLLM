@@ -884,6 +884,9 @@ Expected outputs:
   uLLM-vs-vLLM result. Final comparison commands should also use `--require-engines uLLM,vLLM`
   and `--require-engine-grid`, so a serving-only vLLM slice or a partially populated request-count
   grid cannot accidentally satisfy the comparison gate while no uLLM serving-parity row exists.
+- M10 comparison is now defined as a same-shape normalized throughput comparison gate, not serving parity.
+  The gate requires `--require-normalized-throughput-comparison` so `uLLM` (`cli_model_loop_diagnostic`)
+  and `vLLM` (`serving_throughput_benchmark`) rows are validated with explicit shape-homogenizing checks.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
 - The vLLM row should be produced through the derived command template in
