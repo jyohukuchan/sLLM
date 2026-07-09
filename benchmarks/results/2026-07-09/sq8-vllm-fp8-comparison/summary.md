@@ -18,6 +18,8 @@
 - Attached a self-behavioral prompt-suite smoke guard to the config-aligned uLLM rows.
 - Refreshed the latest config-aligned smoke and representative rows after R9700 projection dispatch
   descriptors; both refreshed rows now report `*_r9700_direct` SQ8_0 projection implementation IDs.
+- Added a full 40-layer mixed request-state real-batch uLLM diagnostic row with `TOP_K=0`, so final
+  logits are excluded from total latency.
 - Preserved the earlier `rotary_dim=32` / `rope_base=10000000` uLLM rows as preliminary connectivity
   rows, not final same-model rows.
 
@@ -32,6 +34,7 @@
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | preliminary rope32/theta1e7 | direct_fp8_dequant_matvec | R9700 | pp512/tg128/b1 | 2.84 | 2.68 | 2.19 | 13.26 | 35.60 |
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 2.75 | 2.70 | 0.32 | 12.82 | 34.64 |
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp512/tg128/b1 | 2.97 | 2.86 | 2.27 | 13.26 | 37.92 |
+| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b2 real-batch no-final | 15.42 | 15.71 | 15.51 | 12.49 | 196.19 |
 
 Current same-model uLLM key fields:
 
@@ -54,6 +57,11 @@ Current same-model uLLM key fields:
   `scope=self_behavioral_prompt_suite_smoke`, `output_health=not_evaluated`
 - prompt-suite smoke metrics: `verified_all=true`, `output_not_evaluated_count=1`, generated preview
   `准准`
+- real-batch no-final-logits diagnostic row:
+  `benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl`
+- no-final-logits diagnostic key fields: `final_logits_in_total=false`,
+  `sq_fp8_batch_matvec_count=6720/6720`, `sq_diagnostic_host_staging_read_count=0`,
+  `sq_diagnostic_host_staging_write_count=72`
 
 vLLM smoke key fields:
 
@@ -78,9 +86,11 @@ Important limitation:
 
 - The `rope128/theta1e6` uLLM rows are now same model, same GPU, same prompt/generated shape, and
   config-aligned with local `Qwen3-14B-FP8`.
-- They are still not a final serving-performance conclusion. uLLM is measured through the current
-  token-id model-loop path with final logits included and `prefill_real_batch=false` /
+- They are still not a final serving-performance conclusion. The b1 uLLM rows are measured through
+  the current token-id model-loop path with final logits included and `prefill_real_batch=false` /
   `decode_real_batch=false`, while vLLM is measured through its throughput benchmark.
+- The new `pp16/tg8/b2` uLLM row is real-batch and excludes final logits, but it does not yet have a
+  matching vLLM `concurrent_requests=2` row and still uses the CLI model-loop harness.
 - Multi-request mixed-state uLLM runs are classified as `batching_mode=grouped`, not real-batch,
   until batched projection kernels are actually used.
 - The Qwen3-14B-FP8 uLLM rows have sampled `verified=true`, and the config-aligned rows now have a
@@ -91,5 +101,6 @@ Important limitation:
 
 - Add a non-self behavioral guard or health-evaluated prompt suite before using the rows as final
   quality-regression evidence.
-- Add a server-style or real-batch uLLM path before using the table as final vLLM serving comparison.
+- Add a matched vLLM `concurrent_requests=2` row or a server-style uLLM path before using the
+  real-batch row as final serving comparison.
 - Keep the preliminary rope32/theta1e7 rows only as connectivity history.

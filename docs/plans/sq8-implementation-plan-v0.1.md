@@ -704,6 +704,16 @@ Current local baseline state:
   residual read staging from the mixed request-state stack while preserving real prefill/decode
   batching. The remaining counted writes are initial host-side residual inputs for the smoke path,
   so this is the new full-stack diagnostic baseline before the later vLLM+FP8 comparison rows.
+- Mixed request-state CLI rows now support `TOP_K=0` to skip the final lm_head guard and exclude
+  final logits from measured total latency. The serving-nearer full 40-layer row at
+  `benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl`
+  uses `prompt_tokens=16x2`, `generated_tokens=8x2`, `concurrent_requests=2`, `rotary_dim=128`,
+  and `rope_base=1000000`. It records `final_logits_in_total=false`,
+  `final_lm_head_guard=false`, `sq_fp8_batch_matvec_count=6720/6720`,
+  `sq_diagnostic_host_staging_read_count=0`, `sq_diagnostic_host_staging_write_count=72`,
+  `prefill_total_input_tps=15.417194`, `decode_total_generated_tps=15.709506`, and
+  `end_to_end_total_tps=15.513415`. This is still a model-loop row rather than server parity, but
+  it removes the earlier final-logits latency caveat from the real-batch SQ8_0 diagnostic class.
 - The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
   It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and
@@ -771,8 +781,10 @@ Same-model prerequisites:
    same-model row: done for the config-aligned Qwen3-14B-FP8 row, and refreshed once after R9700
    projection dispatch descriptor selection was enabled.
 7. Add a real-batch or server-style uLLM measurement path before promoting this to a final serving
-   throughput conclusion: partial. A short full 40-layer mixed-request-state real-batch row now
-   proves the model-loop path, but it still includes final logits and diagnostic host staging.
+   throughput conclusion: partial. Full 40-layer mixed-request-state real-batch rows now prove the
+   direct batch model-loop path, and the `TOP_K=0` row removes final logits from total latency.
+   The remaining gap is server-style measurement and matching vLLM rows for the same
+   batch/concurrency class.
 
 Workload grid:
 
@@ -806,10 +818,11 @@ Comparison rules:
   execution, but `prefill_real_batch=false`, `decode_real_batch=false`, and final logits are included
   in total latency. Treat them as implementation-valid model-loop comparison rows, not final serving
   parity rows.
-- The short Qwen3-14B mixed-request-state row reaches `prefill_real_batch=true`,
-  `decode_real_batch=true`, and `sq_fp8_batch_matvec_count=560/560`. Treat it as full model-loop
-  real-batch evidence, but not final serving parity because final logits are included and the
-  resident path still uses diagnostic host staging.
+- The Qwen3-14B mixed-request-state rows reach `prefill_real_batch=true`,
+  `decode_real_batch=true`, and direct SQ8_0 batch projection coverage (`560/560` for the short
+  row, `6720/6720` for the `pp16/tg8/b2` no-final-logits row). Treat them as full model-loop
+  real-batch evidence, but not final serving parity because they are still CLI model-loop rows and
+  do not yet match vLLM's server/throughput harness semantics.
 - SQ8_0 mixed request-state rows may now report `sq_diagnostic_host_staging_*` counters. Nonzero
   values make the host-staging caveat machine-readable and should keep the row outside final serving
   parity comparisons until those copies are removed or the row is explicitly classified as
@@ -898,22 +911,22 @@ Expected outputs:
      `sq_fp8_batch_matvec_count=21/21` for the selected layer3 self-attention projections. The
      remaining blocker is moving from selected-layer diagnostics with host staging to
      full-package/server rows.
-   - A short full 40-layer Qwen3-14B-FP8 mixed-request-state row now reaches
-     `batching_mode=real`, `sq_projection_boundary=batch`, and
-     `sq_fp8_batch_matvec_count=560/560`. The remaining blocker for final vLLM serving comparison is
-     reducing/annotating host staging and adding server-style or serving-equivalent rows.
+   - Full 40-layer Qwen3-14B-FP8 mixed-request-state rows now reach
+     `batching_mode=real`, `sq_projection_boundary=batch`, and direct SQ8_0 batch projection
+     coverage. The `TOP_K=0` `pp16/tg8/b2` row records `final_logits_in_total=false`,
+     `sq_fp8_batch_matvec_count=6720/6720`, and host staging read `0`, giving a serving-nearer
+     model-loop diagnostic. The remaining blocker for final vLLM serving comparison is adding
+     server-style uLLM measurement or a matched vLLM batch/concurrency row.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device
      buffers. A second reduction moved the same shape to `24/39` by keeping the MLP gate/up
      SiLU-mul activation and MLP down residual add on batch device buffers. A third reduction moves
      the shape to `0/9` by adding runtime buffer-to-buffer copy and using it for batch pack/unpack
-     boundaries. The remaining counted writes are host residual inputs in this smoke path; serving
-     parity still needs full-package/server-style rows rather than selected-layer diagnostics. The
-     full 40-layer D2D-pack row keeps `560/560` direct batch projection coverage but still records
-     `156/240` host-staging read/write operations from layer-to-layer residual handoff, so the next
-     implementation step is a true device-to-device stack handoff instead of the current wrapper
-     that reads residuals back to host.
+     boundaries. A subsequent full-stack device handoff removes the layer-to-layer host reads,
+     moving the full 40-layer short row from `156/240` read/write operations to `0/6`. The
+     `TOP_K=0` `pp16/tg8/b2` row records `0/72`; the remaining counted writes are host residual
+     inputs in this smoke path.
 
 ## Risks
 

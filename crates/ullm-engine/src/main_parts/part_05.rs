@@ -3237,13 +3237,16 @@ fn print_help() {
         "package-token-ids-model-loop-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn|manifest-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
-        "package-token-ids-mixed-request-state-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|manifest-all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+        "package-token-ids-mixed-request-state-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|manifest-all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K|0=skip_final_logits] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "sq-fp8-token-ids-model-loop-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|default|all-self-attn|manifest-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
-        "sq-fp8-package-self-attn-stack-batch-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all-self-attn|manifest-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+        "sq-fp8-token-ids-mixed-request-state-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|manifest-all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K|0=skip_final_logits] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+    );
+    eprintln!(
+        "sq-fp8-package-self-attn-stack-batch-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all-self-attn|manifest-self-attn] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K|0=skip_final_logits] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
         "sq-fp8-token-ids-logits-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all|manifest-all] [TOKEN_IDS_CSV|len:N] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"

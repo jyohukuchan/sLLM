@@ -987,6 +987,62 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["prefill_sq_fp8_batch_matvec_count"], 0)
         self.assertEqual(row["workload"]["decode_sq_fp8_batch_matvec_count"], 0)
 
+    def test_parses_model_loop_single_request_with_top_k_zero(self) -> None:
+        stdout = (
+            "package-token-ids-mixed-request-state-smoke "
+            "package=/tmp/model.ullm.d layers=[0,1,2] layers_csv=0,1,2 input_source=embedding_token_ids "
+            "prefill_mode=token_id_full_mixed_request_state "
+            "request_batch_executor=true fused_request_batch=false throughput_row=true "
+            "load_excluded_from_total=true final_logits_in_total=false "
+            "batching_mode=single "
+            "prefill_executor=mixed_request_state_layer_batch_step "
+            "decode_executor=mixed_request_state_layer_batch_step "
+            "prefill_real_batch=false decode_real_batch=false "
+            "mixed_request_state_real_batch_projection_used=false "
+            "prefill_sq_fp8_batch_matvec_count=0 decode_sq_fp8_batch_matvec_count=0 "
+            "prefill_executor_request_parallelism=1 decode_executor_request_parallelism=1 "
+            "final_lm_head_guard=false lm_head_top_k=0 "
+            "final_top1_tokens_csv= final_topk_tokens_csv= final_topk_logits_csv= "
+            "sequence_len=3 request_count=1 concurrent_requests=1 "
+            "prompt_tokens_csv=2 max_new_tokens_csv=1 total_tokens_csv=3 "
+            "prefill_total_input_tokens=2 decode_total_generated_tokens=1 "
+            "end_to_end_total_tokens=3 prefill_wall_ms=88.0 decode_wall_ms=12.0 "
+            "final_logits_wall_ms=0.0 layer_load_ms=9000.0 total_wall_ms=100.0 "
+            "outer_wall_ms=9300.0 prefill_total_input_tps=22.727273 "
+            "decode_total_generated_tps=83.333333 end_to_end_total_tps=10.000000 "
+            "prefill_batch_request_counts_csv=1 decode_batch_request_counts_csv=1 "
+            "backend=hip device_index=2 name=\"AMD Radeon Graphics\" verified=true"
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_model_loop_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 1,
+                "concurrent_requests": 1,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+        TOOL.enrich_ullm_model_loop_row(row, report)
+
+        self.assertIsNone(metrics["artifact_materialization_wall_time_seconds"])
+        self.assertEqual(metrics["final_logits_wall_time_seconds"], 0.0)
+        self.assertEqual(metrics["total_wall_time_seconds"], 0.1)
+        self.assertFalse(row["batching"]["final_logits_in_total"])
+        self.assertEqual(row["batching"]["prefill_batch_request_counts"], [1])
+        self.assertNotIn("final_top1_tokens", row["workload"])
+        self.assertNotIn("final_topk_tokens", row["workload"])
+        self.assertNotIn("final_topk_logits", row["workload"])
+
     def test_parses_model_loop_grouped_request_state_csv_fields(self) -> None:
         stdout = (
             "package-token-ids-mixed-request-state-smoke "
