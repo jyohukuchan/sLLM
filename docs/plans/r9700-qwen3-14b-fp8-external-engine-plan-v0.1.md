@@ -163,6 +163,21 @@ consumed VRAM: 30830026752 bytes
 This confirms local vLLM FP8 smoke execution on R9700. It still should not be interpreted as a
 same-model uLLM-vs-vLLM performance conclusion.
 
+A matching b2 vLLM row has also been recorded for the uLLM real-batch no-final-logits diagnostic:
+
+```text
+case_id: vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr
+status: ok
+prefill tok/s: 34.41438620647337
+decode tok/s: 17.21
+total tok/s: 51.62
+consumed VRAM: 21007855616 bytes
+```
+
+This matches the `prompt_tokens=16x2`, `generated_tokens=8x2`, `concurrent_requests=2` shape used
+by the uLLM SQ8_0 no-final-logits real-batch diagnostic. The harness still differs: vLLM uses
+`vllm bench throughput`, while uLLM currently uses a CLI model-loop diagnostic.
+
 A representative vLLM row has also been recorded:
 
 ```text

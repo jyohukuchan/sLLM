@@ -636,6 +636,10 @@ Current local baseline state:
 - The same JSONL now also contains a successful `vLLM + Qwen3-14B-FP8` R9700 smoke row for the
   same `prompt_tokens=16`, `generated_tokens=8`, `concurrent_requests=1` shape. This proves the
   local vLLM FP8 smoke baseline can run, while preserving the model mismatch limitation.
+- The same JSONL now also contains a successful matching-shape vLLM FP8 row for the uLLM real-batch
+  no-final-logits diagnostic: `prompt_tokens=16x2`, `generated_tokens=8x2`,
+  `concurrent_requests=2`. It records prefill `34.41438620647337` tok/s, decode `17.21` tok/s,
+  total `51.62` tok/s, and consumed VRAM `21007855616` bytes.
 - It also contains a successful vLLM representative row for `prompt_tokens=512`,
   `generated_tokens=128`, and `concurrent_requests=1` with decode `22.54 tok/s` and consumed VRAM
   `30837428224` bytes.
@@ -783,8 +787,8 @@ Same-model prerequisites:
 7. Add a real-batch or server-style uLLM measurement path before promoting this to a final serving
    throughput conclusion: partial. Full 40-layer mixed-request-state real-batch rows now prove the
    direct batch model-loop path, and the `TOP_K=0` row removes final logits from total latency.
-   The remaining gap is server-style measurement and matching vLLM rows for the same
-   batch/concurrency class.
+   A matching-shape vLLM `concurrent_requests=2` row now exists. The remaining gap is server-style
+   uLLM measurement or explicit harness normalization.
 
 Workload grid:
 
@@ -792,6 +796,8 @@ Workload grid:
 - representative decode: prompt `512`, generated `128`, batch/concurrency `1`;
 - cached-prefix or long-prefill probe when uLLM has the matching SQ8_0 path;
 - later batch grid: concurrent requests `1, 2, 4, 8` only after uLLM and vLLM rows are both stable.
+  The `concurrent_requests=2` smoke shape is now recorded for both uLLM and vLLM, but still as
+  different harness classes.
 
 Metrics:
 
@@ -822,7 +828,8 @@ Comparison rules:
   `decode_real_batch=true`, and direct SQ8_0 batch projection coverage (`560/560` for the short
   row, `6720/6720` for the `pp16/tg8/b2` no-final-logits row). Treat them as full model-loop
   real-batch evidence, but not final serving parity because they are still CLI model-loop rows and
-  do not yet match vLLM's server/throughput harness semantics.
+  do not yet match vLLM's server/throughput harness semantics. A matching-shape vLLM
+  `pp16/tg8/b2` row now exists for comparison as a separate harness class.
 - SQ8_0 mixed request-state rows may now report `sq_diagnostic_host_staging_*` counters. Nonzero
   values make the host-staging caveat machine-readable and should keep the row outside final serving
   parity comparisons until those copies are removed or the row is explicitly classified as
@@ -915,8 +922,9 @@ Expected outputs:
      `batching_mode=real`, `sq_projection_boundary=batch`, and direct SQ8_0 batch projection
      coverage. The `TOP_K=0` `pp16/tg8/b2` row records `final_logits_in_total=false`,
      `sq_fp8_batch_matvec_count=6720/6720`, and host staging read `0`, giving a serving-nearer
-     model-loop diagnostic. The remaining blocker for final vLLM serving comparison is adding
-     server-style uLLM measurement or a matched vLLM batch/concurrency row.
+     model-loop diagnostic. The matching vLLM `pp16/tg8/b2` row now records decode `17.21` tok/s
+     and total `51.62` tok/s. The remaining blocker for final vLLM serving comparison is adding
+     server-style uLLM measurement or explicitly normalizing the harness difference.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device
