@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
+from unittest.mock import patch
 import unittest
 from pathlib import Path
 
@@ -124,7 +128,158 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
             path.write_text('{"case_id":"ok"}\n{bad-json}\n', encoding="utf-8")
             with self.assertRaises(ValueError) as cm:
                 TOOL.markdown_table([path], "", "")
-            self.assertIn("results.jsonl:2", str(cm.exception))
+        self.assertIn("results.jsonl:2", str(cm.exception))
+
+    def test_require_serving_parity_fails_for_mixed_harness_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "mixed.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="qwen3-14b-sq8-full-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                # legacy row: no harness object, infer via case_id
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rows = TOOL.selected_rows([path], "pp16-tg8", "", {2, 4, 8})
+            self.assertTrue(TOOL.serving_parity_gate_failures(rows))
+            self.assertIn(
+                "mixed harness.class values",
+                "\n".join(TOOL.serving_parity_gate_failures(rows)),
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2,4,8",
+                    "--require-serving-parity",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+
+    def test_require_serving_parity_passes_for_serving_only_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "serving.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b4-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=4,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rows = TOOL.selected_rows([path], "pp16-tg8", "", {2, 4, 8})
+            self.assertEqual(TOOL.serving_parity_gate_failures(rows), [])
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2,4,8",
+                    "--require-serving-parity",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+
+    def test_require_serving_parity_fails_when_no_rows_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "nomatch.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b1",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=1,
+                            )
+                        )
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rows = TOOL.selected_rows([path], "pp16-tg8", "", {2, 4, 8})
+            self.assertEqual(
+                TOOL.serving_parity_gate_failures(rows), ["no selected rows"]
+            )
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2,4,8",
+                    "--require-serving-parity",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
 
 
 if __name__ == "__main__":

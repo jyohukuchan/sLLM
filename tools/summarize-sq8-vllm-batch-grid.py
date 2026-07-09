@@ -28,6 +28,21 @@ def as_float(value: Any) -> float | None:
         return None
 
 
+def as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off", ""}:
+        return False
+    return None
+
+
 def as_str(value: Any) -> str:
     if value is None:
         return "-"
@@ -60,6 +75,13 @@ def workload_prefix(workload: dict[str, Any]) -> str:
     return f"pp{prompt}-tg{generated}"
 
 
+def requested_concurrency(workload: dict[str, Any]) -> int | None:
+    return (
+        as_int(workload.get("concurrent_requests"))
+        or as_int(workload.get("batch_size"))
+    )
+
+
 def harness_class(row: dict[str, Any]) -> str:
     harness = as_dict(row.get("harness"))
     explicit = harness.get("class")
@@ -72,6 +94,71 @@ def harness_class(row: dict[str, Any]) -> str:
     if "mixed-real-batch-no-final" in case_id:
         return "cli_model_loop_diagnostic"
     return "-"
+
+
+def serving_parity_candidate(row: dict[str, Any]) -> bool:
+    harness = as_dict(row.get("harness"))
+    explicit_candidate = as_bool(harness.get("serving_parity_candidate"))
+    if explicit_candidate is not None:
+        return explicit_candidate
+    return harness_class(row) == "serving_throughput_benchmark"
+
+
+def harness_summary(row: dict[str, Any]) -> str:
+    requests = requested_concurrency(as_dict(row.get("workload"))) or "-"
+    return (
+        f"case_id={as_str(row.get('case_id'))} "
+        f"requests={requests} "
+        f"harness_class={harness_class(row)} "
+        f"serving_parity_candidate={serving_parity_candidate(row)}"
+    )
+
+
+def iter_selected_rows(
+    paths: Iterable[Path],
+    workload_prefix_filter: str,
+    case_substring: str,
+    requests_filter: set[int],
+) -> Iterator[dict[str, Any]]:
+    for row in iter_rows(paths):
+        if should_keep(row, workload_prefix_filter, case_substring, requests_filter):
+            yield row
+
+
+def selected_rows(
+    paths: Iterable[Path],
+    workload_prefix_filter: str,
+    case_substring: str,
+    requests_filter: set[int],
+) -> list[dict[str, Any]]:
+    return list(
+        iter_selected_rows(
+            paths, workload_prefix_filter, case_substring, requests_filter
+        )
+    )
+
+
+def serving_parity_gate_failures(rows: list[dict[str, Any]]) -> list[str]:
+    if not rows:
+        return ["no selected rows"]
+
+    failure_reasons: list[str] = []
+
+    false_candidates = [row for row in rows if not serving_parity_candidate(row)]
+    if false_candidates:
+        failure_reasons.append("selected rows include serving_parity_candidate=false")
+        failure_reasons.extend(f"  - {harness_summary(row)}" for row in false_candidates)
+
+    classes = {harness_class(row) for row in rows}
+    if len(classes) > 1:
+        joined_classes = ", ".join(sorted(classes))
+        failure_reasons.append(
+            f"selected rows include mixed harness.class values: {joined_classes}"
+        )
+        for row in rows:
+            failure_reasons.append(f"  - {harness_summary(row)}")
+
+    return failure_reasons
 
 
 def should_keep(
@@ -137,24 +224,13 @@ def parse_requests_filter(value: str) -> set[int]:
     return requests
 
 
-def iter_markdown_rows(
-    paths: Iterable[Path],
-    workload_prefix_filter: str,
-    case_substring: str,
-    requests_filter: set[int],
-) -> Iterator[list[str]]:
-    for row in iter_rows(paths):
-        if not should_keep(row, workload_prefix_filter, case_substring, requests_filter):
-            continue
+def iter_markdown_rows(rows: Iterable[dict[str, Any]]) -> Iterator[list[str]]:
+    for row in rows:
         workload = as_dict(row.get("workload"))
         metrics = as_dict(row.get("metrics"))
         memory = as_dict(row.get("memory"))
         engine = as_dict(row.get("engine"))
-        requested = (
-            as_int(workload.get("concurrent_requests"))
-            or as_int(workload.get("batch_size"))
-            or 0
-        )
+        requested = requested_concurrency(workload) or 0
         yield [
             as_str(engine.get("name")),
             as_str(row.get("case_id")),
@@ -172,12 +248,7 @@ def iter_markdown_rows(
         ]
 
 
-def markdown_lines(
-    paths: Iterable[Path],
-    workload_prefix_filter: str,
-    case_substring: str,
-    requests_filter: set[int],
-) -> Iterator[str]:
+def markdown_lines(rows: Iterable[dict[str, Any]]) -> Iterator[str]:
     header = [
         "Engine",
         "Case",
@@ -193,9 +264,7 @@ def markdown_lines(
     ]
     yield "| " + " | ".join(header) + " |"
     yield "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
-    for row in iter_markdown_rows(
-        paths, workload_prefix_filter, case_substring, requests_filter
-    ):
+    for row in iter_markdown_rows(rows):
         yield (
             "| "
             + " | ".join(
@@ -223,9 +292,10 @@ def markdown_table(
     case_substring: str,
     requests_filter: set[int] | None = None,
 ) -> str:
-    return "\n".join(
-        markdown_lines(paths, workload_prefix_filter, case_substring, requests_filter or set())
+    rows = selected_rows(
+        paths, workload_prefix_filter, case_substring, requests_filter or set()
     )
+    return "\n".join(markdown_lines(rows))
 
 
 def parse_args() -> argparse.Namespace:
@@ -242,6 +312,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="comma-separated concurrent request counts to keep, for example 2,4,8",
     )
+    parser.add_argument(
+        "--require-serving-parity",
+        action="store_true",
+        help="fail when selected rows are not serving parity candidates",
+    )
     return parser.parse_args()
 
 
@@ -253,13 +328,28 @@ def main() -> int:
             return 1
     try:
         requests_filter = parse_requests_filter(args.requests)
-        for line in markdown_lines(
-            args.jsonl,
-            args.workload_prefix,
-            args.case_substring,
-            requests_filter,
-        ):
+        if args.require_serving_parity:
+            rows = selected_rows(
+                args.jsonl, args.workload_prefix, args.case_substring, requests_filter
+            )
+            selected_count = len(rows)
+            serving_parity_failures = serving_parity_gate_failures(rows)
+        else:
+            rows = iter_selected_rows(
+                args.jsonl, args.workload_prefix, args.case_substring, requests_filter
+            )
+            selected_count = None
+            serving_parity_failures = []
+        for line in markdown_lines(rows):
             print(line)
+        if serving_parity_failures:
+            print(
+                f"serving parity gate failed: {selected_count} selected row(s)",
+                file=sys.stderr,
+            )
+            for line in serving_parity_failures:
+                print(line, file=sys.stderr)
+            return 2
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1

@@ -33,6 +33,15 @@ Regenerate the compact batch-grid table:
 python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8
 ```
 
+Serving-parity gate:
+
+```bash
+python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --require-serving-parity
+```
+
+The gate is expected to fail for the current b2/b4/b8 table because the uLLM rows are
+`cli_model_loop_diagnostic` rows and the vLLM rows are `serving_throughput_benchmark` rows.
+
 Compact batch-grid output:
 
 | Engine | Case | Harness | Requests | Prompt tokens | Generated tokens | Prefill tok/s | Decode tok/s | Total tok/s | Consumed GiB | Decode x GiB |

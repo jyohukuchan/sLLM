@@ -869,6 +869,10 @@ Expected outputs:
 - New external benchmark rows carry a machine-readable `harness` object. This distinguishes
   `cli_model_loop_diagnostic` uLLM rows from `serving_throughput_benchmark` vLLM rows and records
   whether the row is a serving-parity candidate without relying only on prose caveats.
+- `tools/summarize-sq8-vllm-batch-grid.py --require-serving-parity` is the machine gate for final
+  serving-comparison tables. It currently fails the b2/b4/b8 compact table by design because the
+  selected uLLM rows are CLI model-loop diagnostics and the selected vLLM rows are serving
+  throughput benchmark rows.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
 - The vLLM row should be produced through the derived command template in
