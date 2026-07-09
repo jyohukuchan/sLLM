@@ -313,6 +313,35 @@ pub fn select_passthrough_payload_bundle(
     passthrough_payload_bundle_from_manifest(package_dir, tensor_index, tensor)
 }
 
+pub fn select_exact_passthrough_payload_bundle(
+    path: impl AsRef<Path>,
+    tensor_name: &str,
+) -> Result<PassthroughPayloadBundle, String> {
+    let package_dir = path.as_ref();
+    let manifest = read_manifest(package_dir)?;
+    let matches = manifest
+        .passthrough_tensors
+        .iter()
+        .enumerate()
+        .filter(|(_, tensor)| tensor.name.as_deref() == Some(tensor_name))
+        .collect::<Vec<_>>();
+    let (tensor_index, tensor) = match matches.as_slice() {
+        [(tensor_index, tensor)] => (*tensor_index, *tensor),
+        [] => {
+            return Err(format!(
+                "no passthrough tensor has exact name \"{tensor_name}\""
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "passthrough tensor exact name \"{tensor_name}\" is duplicated {} times",
+                matches.len()
+            ));
+        }
+    };
+    passthrough_payload_bundle_from_manifest(package_dir, tensor_index, tensor)
+}
+
 pub fn list_passthrough_payload_bundles(
     path: impl AsRef<Path>,
 ) -> Result<Vec<PassthroughPayloadBundle>, String> {
@@ -1281,6 +1310,14 @@ mod tests {
                 .unwrap_err();
         assert!(ambiguous.contains("matched 2 tensors"));
 
+        let strict = select_exact_passthrough_payload_bundle(
+            &root,
+            "layer.0.post_attention_layernorm.weight",
+        )
+        .unwrap();
+        assert_eq!(strict.tensor_index, 1);
+        assert!(select_exact_passthrough_payload_bundle(&root, "input_layernorm").is_err());
+
         let bundles = list_passthrough_payload_bundles(&root).unwrap();
         assert_eq!(bundles.len(), 2);
         assert_eq!(bundles[0].tensor_name, "layer.0.input_layernorm.weight");
@@ -1288,6 +1325,31 @@ mod tests {
             bundles[1].tensor_name,
             "layer.0.post_attention_layernorm.weight"
         );
+
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "passthrough_tensors": [{
+                "name": "duplicate.weight",
+                "dtype": "BF16",
+                "shape": [2],
+                "elements": 2,
+                "payload_bytes": 4,
+                "payload_file": "passthrough/input.raw"
+              }, {
+                "name": "duplicate.weight",
+                "dtype": "BF16",
+                "shape": [2],
+                "elements": 2,
+                "payload_bytes": 4,
+                "payload_file": "passthrough/post.raw"
+              }]
+            }"#,
+        )
+        .unwrap();
+        let duplicate =
+            select_exact_passthrough_payload_bundle(&root, "duplicate.weight").unwrap_err();
+        assert!(duplicate.contains("duplicated 2 times"));
 
         fs::remove_dir_all(root).unwrap();
     }
