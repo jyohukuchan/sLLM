@@ -4,6 +4,12 @@ enum PackageSelfAttnResidentStepInput<'a> {
     ExternalBuffer(&'a ullm_runtime_sys::RuntimeBuffer),
 }
 
+#[derive(Clone, Copy)]
+enum PackageSelfAttnAttentionProjectionInput {
+    AttentionOutput,
+    AttentionProjectionInput,
+}
+
 struct PackageSelfAttnResidentStepWeights {
     sync_component_timing: bool,
     use_paged_decode_sigmoid_gate: bool,
@@ -927,6 +933,111 @@ impl PackageSelfAttnResidentStepLayer {
         component_step_ms: &mut PackageSelfAttnComponentStepMs,
         label: &str,
     ) -> Result<(), String> {
+        let projection_input_buffer = self
+            .run_device_step_after_qkv_projection_input(
+                stream,
+                rotary_dim,
+                rope_base,
+                rope_position,
+                cache_position,
+                sync_component_timing,
+                component_step_ms,
+                label,
+            )?;
+        let hidden = self.weights.hidden;
+        let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
+                                started: Instant,
+                                component_label: &str|
+         -> Result<f64, String> {
+            if sync_component_timing {
+                stream.synchronize().map_err(|err| {
+                    format!("failed to synchronize {label} self-attn {component_label}: {err}")
+                })?;
+                Ok(started.elapsed().as_secs_f64() * 1000.0)
+            } else {
+                Ok(0.0)
+            }
+        };
+
+        let component_started = Instant::now();
+        let attention_projection_input_buffer = match projection_input_buffer {
+            PackageSelfAttnAttentionProjectionInput::AttentionOutput => {
+                &self.attention_output_buffer
+            }
+            PackageSelfAttnAttentionProjectionInput::AttentionProjectionInput => {
+                &self.attention_projection_input_buffer
+            }
+        };
+        self.weights
+            .o_matrix
+            .matvec_add(
+                attention_projection_input_buffer,
+                match input {
+                    PackageSelfAttnResidentStepInput::InternalInputBuffer => &self.input_buffer,
+                    PackageSelfAttnResidentStepInput::ExternalBuffer(buffer) => buffer,
+                },
+                &mut self.attention_block_output_buffer,
+                stream,
+                "self-attn resident o projection residual",
+            )
+            .map_err(|err| {
+                format!("failed to run {label} self-attn o projection residual: {err}")
+            })?;
+        component_step_ms.o_projection_residual_ms =
+            finish_component(stream, component_started, "o projection residual")?;
+
+        let component_started = Instant::now();
+        ullm_runtime_sys::rmsnorm_f32(
+            &self.attention_block_output_buffer,
+            self.weights.post_norm_weight_buffer.as_ref(),
+            hidden,
+            1e-5_f32,
+            &mut self.post_normed_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn post RMSNorm: {err}"))?;
+        component_step_ms.post_rmsnorm_ms =
+            finish_component(stream, component_started, "post RMSNorm")?;
+
+        let component_started = Instant::now();
+        self.weights.mlp_gate_matrix.matvec_silu_mul_with(
+            &self.weights.mlp_up_matrix,
+            &self.post_normed_buffer,
+            &mut self.mlp_activation_buffer,
+            stream,
+            "self-attn resident MLP gate/up activation",
+        )?;
+        component_step_ms.mlp_gate_up_activation_ms =
+            finish_component(stream, component_started, "MLP gate/up activation")?;
+
+        let component_started = Instant::now();
+        self.weights
+            .mlp_down_matrix
+            .matvec_add(
+                &self.mlp_activation_buffer,
+                &self.attention_block_output_buffer,
+                &mut self.layer_output_buffer,
+                stream,
+                "self-attn resident MLP down residual",
+            )
+            .map_err(|err| format!("failed to run {label} self-attn MLP down residual: {err}"))?;
+        component_step_ms.mlp_down_residual_ms =
+            finish_component(stream, component_started, "MLP down residual")?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_device_step_after_qkv_projection_input(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        rotary_dim: usize,
+        rope_base: f32,
+        rope_position: usize,
+        cache_position: usize,
+        sync_component_timing: bool,
+        component_step_ms: &mut PackageSelfAttnComponentStepMs,
+        label: &str,
+    ) -> Result<PackageSelfAttnAttentionProjectionInput, String> {
         let q_projection_layout = self.weights.q_projection_layout;
         let q_heads = self.weights.q_heads;
         let kv_heads = self.weights.kv_heads;
@@ -934,7 +1045,6 @@ impl PackageSelfAttnResidentStepLayer {
         let value_dim = self.weights.value_dim;
         let block_size = self.weights.block_size;
         let cache_blocks = self.weights.cache_blocks;
-        let hidden = self.weights.hidden;
         let attention_elements = self.weights.attention_elements;
         let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
                                 started: Instant,
@@ -1094,11 +1204,11 @@ impl PackageSelfAttnResidentStepLayer {
 
         let component_started = Instant::now();
         let projection_input_buffer = match q_projection_layout {
-            PackageSelfAttnQProjectionLayout::Plain => &self.attention_output_buffer,
+            PackageSelfAttnQProjectionLayout::Plain => PackageSelfAttnAttentionProjectionInput::AttentionOutput,
             PackageSelfAttnQProjectionLayout::Qwen35Gated
                 if self.weights.use_paged_decode_sigmoid_gate =>
             {
-                &self.attention_output_buffer
+                PackageSelfAttnAttentionProjectionInput::AttentionOutput
             }
             PackageSelfAttnQProjectionLayout::Qwen35Gated
                 if !env_flag_enabled("ULLM_DISABLE_SIGMOID_MUL_IN_PLACE") =>
@@ -1112,7 +1222,7 @@ impl PackageSelfAttnResidentStepLayer {
                 .map_err(|err| {
                     format!("failed to run {label} self-attn output gate in-place: {err}")
                 })?;
-                &self.attention_output_buffer
+                PackageSelfAttnAttentionProjectionInput::AttentionOutput
             }
             PackageSelfAttnQProjectionLayout::Qwen35Gated => {
                 ullm_runtime_sys::sigmoid_mul_f32(
@@ -1123,69 +1233,13 @@ impl PackageSelfAttnResidentStepLayer {
                     Some(stream),
                 )
                 .map_err(|err| format!("failed to run {label} self-attn output gate: {err}"))?;
-                &self.attention_projection_input_buffer
+                PackageSelfAttnAttentionProjectionInput::AttentionProjectionInput
             }
         };
         component_step_ms.output_gate_ms =
             finish_component(stream, component_started, "output gate")?;
 
-        let component_started = Instant::now();
-        self.weights
-            .o_matrix
-            .matvec_add(
-                projection_input_buffer,
-                match input {
-                    PackageSelfAttnResidentStepInput::InternalInputBuffer => &self.input_buffer,
-                    PackageSelfAttnResidentStepInput::ExternalBuffer(buffer) => buffer,
-                },
-                &mut self.attention_block_output_buffer,
-                stream,
-                "self-attn resident o projection residual",
-            )
-            .map_err(|err| {
-                format!("failed to run {label} self-attn o projection residual: {err}")
-            })?;
-        component_step_ms.o_projection_residual_ms =
-            finish_component(stream, component_started, "o projection residual")?;
-
-        let component_started = Instant::now();
-        ullm_runtime_sys::rmsnorm_f32(
-            &self.attention_block_output_buffer,
-            self.weights.post_norm_weight_buffer.as_ref(),
-            hidden,
-            1e-5_f32,
-            &mut self.post_normed_buffer,
-            Some(stream),
-        )
-        .map_err(|err| format!("failed to run {label} self-attn post RMSNorm: {err}"))?;
-        component_step_ms.post_rmsnorm_ms =
-            finish_component(stream, component_started, "post RMSNorm")?;
-
-        let component_started = Instant::now();
-        self.weights.mlp_gate_matrix.matvec_silu_mul_with(
-            &self.weights.mlp_up_matrix,
-            &self.post_normed_buffer,
-            &mut self.mlp_activation_buffer,
-            stream,
-            "self-attn resident MLP gate/up activation",
-        )?;
-        component_step_ms.mlp_gate_up_activation_ms =
-            finish_component(stream, component_started, "MLP gate/up activation")?;
-
-        let component_started = Instant::now();
-        self.weights
-            .mlp_down_matrix
-            .matvec_add(
-                &self.mlp_activation_buffer,
-                &self.attention_block_output_buffer,
-                &mut self.layer_output_buffer,
-                stream,
-                "self-attn resident MLP down residual",
-            )
-            .map_err(|err| format!("failed to run {label} self-attn MLP down residual: {err}"))?;
-        component_step_ms.mlp_down_residual_ms =
-            finish_component(stream, component_started, "MLP down residual")?;
-        Ok(())
+        Ok(projection_input_buffer)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2337,6 +2391,12 @@ struct PackageSelfAttnResidentStepBatchLayer {
     batch_q_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
     batch_k_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
     batch_v_projected_buffer: ullm_runtime_sys::RuntimeBuffer,
+    batch_attention_projection_input_buffer: ullm_runtime_sys::RuntimeBuffer,
+    batch_attention_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
+    batch_post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
+    batch_mlp_gate_buffer: ullm_runtime_sys::RuntimeBuffer,
+    batch_mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
+    batch_layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
 }
 
 #[allow(dead_code)]
@@ -2517,6 +2577,42 @@ impl PackageSelfAttnResidentStepBatchLayer {
                         "self-attn resident batch layer {layer_index} v projected batch overflows"
                     )
                 })?;
+        let batch_attention_projection_input_elements =
+            first_weights
+                .attention_elements
+                .checked_mul(max_batch_count)
+                .ok_or_else(|| {
+                    format!(
+                        "self-attn resident batch layer {layer_index} attention projection input batch overflows"
+                    )
+                })?;
+        let batch_attention_block_output_elements =
+            first_weights
+                .hidden
+                .checked_mul(max_batch_count)
+                .ok_or_else(|| {
+                    format!(
+                        "self-attn resident batch layer {layer_index} attention block output batch overflows"
+                    )
+                })?;
+        let batch_post_normed_elements =
+            first_weights
+                .hidden
+                .checked_mul(max_batch_count)
+                .ok_or_else(|| {
+                    format!(
+                        "self-attn resident batch layer {layer_index} post-normed batch overflows"
+                    )
+                })?;
+        let batch_mlp_intermediate = first_weights
+            .mlp_gate_matrix
+            .rows
+            .checked_mul(max_batch_count)
+            .ok_or_else(|| {
+                format!(
+                    "self-attn resident batch layer {layer_index} MLP activation batch overflows"
+                )
+            })?;
         let batch_input_normed_buffer = context
             .alloc_buffer(checked_f32_byte_len(
                 batch_input_normed_elements,
@@ -2549,6 +2645,59 @@ impl PackageSelfAttnResidentStepBatchLayer {
             .map_err(|err| {
                 format!("failed to allocate self-attn resident batch v projected: {err}")
             })?;
+        let batch_attention_projection_input_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                batch_attention_projection_input_elements,
+                "self-attn resident batch attention projection input",
+            )?)
+            .map_err(|err| {
+                format!(
+                    "failed to allocate self-attn resident batch attention projection input: {err}"
+                )
+            })?;
+        let batch_attention_block_output_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                batch_attention_block_output_elements,
+                "self-attn resident batch attention block output",
+            )?)
+            .map_err(|err| {
+                format!(
+                    "failed to allocate self-attn resident batch attention block output: {err}"
+                )
+            })?;
+        let batch_post_normed_buffer = context
+            .alloc_buffer(checked_f32_byte_len(batch_post_normed_elements, "self-attn resident batch post normed")?)
+            .map_err(|err| {
+                format!("failed to allocate self-attn resident batch post normed: {err}")
+            })?;
+        let batch_mlp_activation_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                batch_mlp_intermediate,
+                "self-attn resident batch MLP activation",
+            )?)
+            .map_err(|err| {
+                format!(
+                    "failed to allocate self-attn resident batch MLP activation: {err}"
+                )
+            })?;
+        let batch_mlp_gate_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                batch_mlp_intermediate,
+                "self-attn resident batch MLP gate",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate self-attn resident batch MLP gate: {err}")
+            })?;
+        let batch_layer_output_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                batch_attention_block_output_elements,
+                "self-attn resident batch layer output",
+            )?)
+            .map_err(|err| {
+                format!(
+                    "failed to allocate self-attn resident batch layer output: {err}"
+                )
+            })?;
         Ok(Self {
             layer_index,
             hidden,
@@ -2573,6 +2722,12 @@ impl PackageSelfAttnResidentStepBatchLayer {
             batch_q_projected_buffer,
             batch_k_projected_buffer,
             batch_v_projected_buffer,
+            batch_attention_projection_input_buffer,
+            batch_attention_block_output_buffer,
+            batch_post_normed_buffer,
+            batch_mlp_gate_buffer,
+            batch_mlp_activation_buffer,
+            batch_layer_output_buffer,
         })
     }
 
@@ -2697,6 +2852,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
         let q_projected_rows = weights.q_matrix.rows;
         let k_projected_rows = weights.k_matrix.rows;
         let v_projected_rows = weights.v_matrix.rows;
+        let attention_elements = weights.attention_elements;
+        let hidden_elements = self.hidden;
+        let mlp_intermediate = weights.mlp_gate_matrix.rows;
         let batch_count = items.len();
         let input_normed_elements = self.hidden.checked_mul(batch_count).ok_or_else(|| {
             format!("{label} self-attn resident batch input normed elements overflow")
@@ -2710,10 +2868,40 @@ impl PackageSelfAttnResidentStepBatchLayer {
         let v_projected_elements = v_projected_rows.checked_mul(batch_count).ok_or_else(|| {
             format!("{label} self-attn resident batch v projected elements overflow")
         })?;
+        let attention_projection_input_elements = attention_elements
+            .checked_mul(batch_count)
+            .ok_or_else(|| {
+                format!(
+                    "{label} self-attn resident batch attention projection input elements overflow"
+                )
+            })?;
+        let attention_block_output_elements = self
+            .hidden
+            .checked_mul(batch_count)
+            .ok_or_else(|| {
+                format!(
+                    "{label} self-attn resident batch attention block output elements overflow"
+                )
+            })?;
+        let post_normed_elements = self
+            .hidden
+            .checked_mul(batch_count)
+            .ok_or_else(|| {
+                format!("{label} self-attn resident batch post normed elements overflow")
+            })?;
+        let mlp_activation_elements = mlp_intermediate
+            .checked_mul(batch_count)
+            .ok_or_else(|| {
+                format!("{label} self-attn resident batch MLP activation elements overflow")
+            })?;
 
         let mut slots = Vec::with_capacity(batch_count);
         let mut component_step_ms = Vec::with_capacity(batch_count);
         let mut input_normed_values = vec![0.0_f32; input_normed_elements];
+        let mut batch_residual_values = vec![0.0_f32; input_normed_elements];
+        let mut attention_projection_input_values = vec![0.0_f32; attention_projection_input_elements];
+        let mut attention_block_output_values = vec![0.0_f32; attention_block_output_elements];
+        let mut post_normed_values = vec![0.0_f32; post_normed_elements];
         for (batch_index, item) in items.iter().enumerate() {
             if item.residual.len() != self.hidden {
                 return Err(format!(
@@ -2765,6 +2953,11 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 format!("{label} self-attn resident batch input normed offset overflows")
             })?;
             input_normed_values[start..start + self.hidden].copy_from_slice(&normed_values);
+            let residual_start = batch_index.checked_mul(self.hidden).ok_or_else(|| {
+                format!("{label} self-attn resident batch residual offset overflows")
+            })?;
+            batch_residual_values[residual_start..residual_start + self.hidden]
+                .copy_from_slice(&item.residual);
             slots.push(slot);
             component_step_ms.push(step_ms);
         }
@@ -2852,6 +3045,13 @@ impl PackageSelfAttnResidentStepBatchLayer {
             let v_start = batch_index.checked_mul(v_projected_rows).ok_or_else(|| {
                 format!("{label} self-attn resident batch v projected offset overflows")
             })?;
+            let projection_input_start = batch_index
+                .checked_mul(attention_elements)
+                .ok_or_else(|| {
+                    format!(
+                        "{label} self-attn resident batch attention projection input offset overflows"
+                    )
+                })?;
             layer
                 .q_projected_buffer
                 .copy_from_host(
@@ -2882,9 +3082,8 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident v projected: {err}")
                 })?;
-            layer.run_device_step_after_qkv_projection(
+            let projection_input_buffer = layer.run_device_step_after_qkv_projection_input(
                 stream,
-                PackageSelfAttnResidentStepInput::InternalInputBuffer,
                 rotary_dim,
                 rope_base,
                 item.rope_position,
@@ -2897,6 +3096,308 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     })?,
                 &item_label,
             )?;
+            let projection_input_values = match projection_input_buffer {
+                PackageSelfAttnAttentionProjectionInput::AttentionOutput => read_runtime_buffer_f32(
+                    &layer.attention_output_buffer,
+                    stream,
+                    attention_elements,
+                    &format!(
+                        "{item_label} self-attn resident batch attention output",
+                    ),
+                )?,
+                PackageSelfAttnAttentionProjectionInput::AttentionProjectionInput => {
+                    read_runtime_buffer_f32(
+                        &layer.attention_projection_input_buffer,
+                        stream,
+                        attention_elements,
+                        &format!(
+                            "{item_label} self-attn resident batch attention projection input"
+                        ),
+                    )?
+                }
+            };
+            attention_projection_input_values
+                [projection_input_start..projection_input_start + attention_elements]
+                .copy_from_slice(&projection_input_values);
+        }
+
+        self.batch_attention_projection_input_buffer.copy_from_host(
+            0,
+            &encode_f32_to_bytes(&attention_projection_input_values),
+            Some(stream),
+        )
+        .map_err(|err| {
+            format!(
+                "failed to copy {label} self-attn resident batch attention projection input: {err}"
+            )
+        })?;
+
+        let component_started = Instant::now();
+        weights.o_matrix.matvec_batch(
+            &self.batch_attention_projection_input_buffer,
+            batch_count,
+            &mut self.batch_attention_block_output_buffer,
+            stream,
+            "self-attn resident batch o projection",
+        )?;
+        let o_projection_residual_ms = if sync_component_timing {
+            stream.synchronize().map_err(|err| {
+                format!(
+                    "failed to synchronize {label} self-attn batch o projection residual: {err}"
+                )
+            })?;
+            component_started.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
+        for step_ms in &mut component_step_ms {
+            step_ms.o_projection_residual_ms = o_projection_residual_ms;
+        }
+
+        let mut attention_projection_output_values = read_runtime_buffer_f32(
+            &self.batch_attention_block_output_buffer,
+            stream,
+            attention_block_output_elements,
+            &format!("{label} self-attn resident batch o projection"),
+        )?;
+        for (attention_index, residual_value) in attention_projection_output_values
+            .iter_mut()
+            .zip(batch_residual_values.iter())
+        {
+            *attention_index += *residual_value;
+        }
+        attention_block_output_values.copy_from_slice(&attention_projection_output_values);
+
+        let finish_component = |stream: &mut ullm_runtime_sys::RuntimeStream,
+                               started: Instant,
+                               sync_component_timing: bool,
+                               component_label: &str|
+         -> Result<f64, String> {
+            if sync_component_timing {
+                stream.synchronize().map_err(|err| {
+                    format!("failed to synchronize {label} self-attn {component_label}: {err}")
+                })?;
+                Ok(started.elapsed().as_secs_f64() * 1000.0)
+            } else {
+                Ok(0.0)
+            }
+        };
+
+        for (batch_index, item) in items.iter().enumerate() {
+            let item_label = format!(
+                "{label} request={} position={}",
+                item.request_id.0, item.rope_position
+            );
+            let layer = self.layers.get_mut(slots[batch_index]).ok_or_else(|| {
+                format!(
+                    "{label} self-attn resident batch missing state slot {} for request {:?}",
+                    slots[batch_index], item.request_id
+                )
+            })?;
+            let attention_output_start = batch_index
+                .checked_mul(hidden_elements)
+                .ok_or_else(|| {
+                    format!(
+                        "{label} self-attn resident batch attention block output offset overflows"
+                    )
+                })?;
+            let attention_output_end = attention_output_start
+                .checked_add(hidden_elements)
+                .ok_or_else(|| {
+                    format!(
+                        "{label} self-attn resident batch attention block output end overflows"
+                    )
+                })?;
+            layer
+                .attention_block_output_buffer
+                .copy_from_host(
+                    0,
+                    &encode_f32_to_bytes(
+                        &attention_block_output_values[attention_output_start..attention_output_end],
+                    ),
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!("failed to copy {item_label} self-attn resident attention output: {err}")
+                })?;
+
+            let component_started = Instant::now();
+            ullm_runtime_sys::rmsnorm_f32(
+                &layer.attention_block_output_buffer,
+                weights.post_norm_weight_buffer.as_ref(),
+                self.hidden,
+                1e-5_f32,
+                &mut layer.post_normed_buffer,
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to run {item_label} self-attn resident post RMSNorm: {err}")
+            })?;
+            let post_normed_ms = finish_component(
+                stream,
+                component_started,
+                sync_component_timing,
+                "post RMSNorm",
+            )?;
+            component_step_ms
+                .get_mut(batch_index)
+                .ok_or_else(|| {
+                    format!("{label} self-attn resident batch component timing is missing")
+                })?
+                .post_rmsnorm_ms = post_normed_ms;
+
+            let post_normed_start = batch_index
+                .checked_mul(hidden_elements)
+                .ok_or_else(|| {
+                    format!("{label} self-attn resident batch post-normed offset overflows")
+                })?;
+            let post_normed_end = post_normed_start
+                .checked_add(hidden_elements)
+                .ok_or_else(|| {
+                    format!("{label} self-attn resident batch post-normed end overflows")
+                })?;
+            post_normed_values[post_normed_start..post_normed_end]
+                .copy_from_slice(&read_runtime_buffer_f32(
+                    &layer.post_normed_buffer,
+                    stream,
+                    self.hidden,
+                    &format!(
+                        "{item_label} self-attn resident batch post normed"
+                    ),
+                )?);
+        }
+        self.batch_post_normed_buffer.copy_from_host(
+            0,
+            &encode_f32_to_bytes(&post_normed_values),
+            Some(stream),
+        )
+        .map_err(|err| {
+            format!("failed to copy {label} self-attn resident batch post normed: {err}")
+        })?;
+
+        let component_started = Instant::now();
+        weights.mlp_gate_matrix.matvec_batch(
+            &self.batch_post_normed_buffer,
+            batch_count,
+            &mut self.batch_mlp_gate_buffer,
+            stream,
+            "self-attn resident batch MLP gate projection",
+        )?;
+        weights.mlp_up_matrix.matvec_batch(
+            &self.batch_post_normed_buffer,
+            batch_count,
+            &mut self.batch_mlp_activation_buffer,
+            stream,
+            "self-attn resident batch MLP up projection",
+        )?;
+        let mlp_gate_up_activation_ms = if sync_component_timing {
+            stream.synchronize().map_err(|err| {
+                format!(
+                    "failed to synchronize {label} self-attn batch MLP gate/up projection: {err}"
+                )
+            })?;
+            component_started.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
+
+        for step_ms in &mut component_step_ms {
+            step_ms.mlp_gate_up_activation_ms = mlp_gate_up_activation_ms;
+        }
+
+        let mut mlp_gate_values = read_runtime_buffer_f32(
+            &self.batch_mlp_gate_buffer,
+            stream,
+            mlp_activation_elements,
+            &format!("{label} self-attn resident batch MLP gate output"),
+        )?;
+        let mlp_up_values = read_runtime_buffer_f32(
+            &self.batch_mlp_activation_buffer,
+            stream,
+            mlp_activation_elements,
+            &format!("{label} self-attn resident batch MLP up output"),
+        )?;
+
+        for (gate_value, up_value) in mlp_gate_values.iter_mut().zip(mlp_up_values.iter()) {
+            let gate = *gate_value;
+            *gate_value = gate * (1.0_f32 / (1.0_f32 + (-gate).exp())) * *up_value;
+        }
+
+        self.batch_mlp_activation_buffer.copy_from_host(
+            0,
+            &encode_f32_to_bytes(&mlp_gate_values),
+            Some(stream),
+        )
+        .map_err(|err| {
+            format!("failed to copy {label} self-attn resident batch MLP activation: {err}")
+        })?;
+
+        let component_started = Instant::now();
+        weights.mlp_down_matrix.matvec_batch(
+            &self.batch_mlp_activation_buffer,
+            batch_count,
+            &mut self.batch_layer_output_buffer,
+            stream,
+            "self-attn resident batch MLP down projection",
+        )?;
+        let mlp_down_residual_ms = if sync_component_timing {
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize {label} self-attn batch MLP down: {err}")
+            })?;
+            component_started.elapsed().as_secs_f64() * 1000.0
+        } else {
+            0.0
+        };
+        for step_ms in &mut component_step_ms {
+            step_ms.mlp_down_residual_ms = mlp_down_residual_ms;
+        }
+
+        let mut mlp_down_output_values = read_runtime_buffer_f32(
+            &self.batch_layer_output_buffer,
+            stream,
+            attention_block_output_elements,
+            &format!("{label} self-attn resident batch MLP down output"),
+        )?;
+        for (output_value, residual_value) in mlp_down_output_values
+            .iter_mut()
+            .zip(attention_block_output_values.iter())
+        {
+            *output_value += *residual_value;
+        }
+
+        for (batch_index, item) in items.iter().enumerate() {
+            let item_label = format!(
+                "{label} request={} position={}",
+                item.request_id.0, item.rope_position
+            );
+            let layer = self.layers.get_mut(slots[batch_index]).ok_or_else(|| {
+                format!(
+                    "{label} self-attn resident batch missing state slot {} for request {:?}",
+                    slots[batch_index], item.request_id
+                )
+            })?;
+            let layer_output_start = batch_index
+                .checked_mul(hidden_elements)
+                .ok_or_else(|| {
+                    format!("{label} self-attn resident batch layer output offset overflows")
+                })?;
+            let layer_output_end = layer_output_start
+                .checked_add(hidden_elements)
+                .ok_or_else(|| {
+                    format!("{label} self-attn resident batch layer output end overflows")
+                })?;
+            layer
+                .layer_output_buffer
+                .copy_from_host(
+                    0,
+                    &encode_f32_to_bytes(
+                        &mlp_down_output_values[layer_output_start..layer_output_end],
+                    ),
+                    Some(stream),
+                )
+                .map_err(|err| {
+                    format!("failed to copy {item_label} self-attn resident layer output: {err}")
+                })?;
             if sync_component_timing {
                 layer.last_component_step_ms = Some(component_step_ms[batch_index]);
             }
@@ -2917,22 +3418,6 @@ impl PackageSelfAttnResidentStepBatchLayer {
         if items.is_empty() {
             return Ok(());
         }
-        if items.len() == 1 {
-            let &(request_id, residual_buffer, rope_position, cache_position) = &items[0];
-            return self.step_from_device_to_device(
-                stream,
-                request_id,
-                residual_buffer,
-                rotary_dim,
-                rope_base,
-                rope_position,
-                cache_position,
-                &format!(
-                    "{label} request={} position={}",
-                    request_id.0, rope_position
-                ),
-            );
-        }
         if items.len() > self.request_count() {
             return Err(format!(
                 "{label} self-attn resident batch item count {} exceeds request slots {}",
@@ -2941,36 +3426,9 @@ impl PackageSelfAttnResidentStepBatchLayer {
             ));
         }
 
-        let weights = self
-            .layers
-            .first()
-            .ok_or_else(|| format!("{label} self-attn resident batch has no states"))?
-            .weights
-            .clone();
-        let sync_component_timing = weights.sync_component_timing;
-        let q_projected_rows = weights.q_matrix.rows;
-        let k_projected_rows = weights.k_matrix.rows;
-        let v_projected_rows = weights.v_matrix.rows;
-        let batch_count = items.len();
-        let input_normed_elements = self.hidden.checked_mul(batch_count).ok_or_else(|| {
-            format!("{label} self-attn resident batch input normed elements overflow")
-        })?;
-        let q_projected_elements = q_projected_rows.checked_mul(batch_count).ok_or_else(|| {
-            format!("{label} self-attn resident batch q projected elements overflow")
-        })?;
-        let k_projected_elements = k_projected_rows.checked_mul(batch_count).ok_or_else(|| {
-            format!("{label} self-attn resident batch k projected elements overflow")
-        })?;
-        let v_projected_elements = v_projected_rows.checked_mul(batch_count).ok_or_else(|| {
-            format!("{label} self-attn resident batch v projected elements overflow")
-        })?;
-
         let expected_input_bytes = checked_f32_byte_len(self.hidden, "self-attn resident batch input")?;
-        let mut slots = Vec::with_capacity(batch_count);
-        let mut component_step_ms = Vec::with_capacity(batch_count);
-        let mut input_normed_values = vec![0.0_f32; input_normed_elements];
-        for (batch_index, item) in items.iter().enumerate() {
-            let &(request_id, residual_buffer, rope_position, cache_position) = item;
+        let mut host_batch_items = Vec::with_capacity(items.len());
+        for &(request_id, residual_buffer, rope_position, cache_position) in items {
             let item_label = format!(
                 "{label} request={} position={}",
                 request_id.0, rope_position
@@ -2983,180 +3441,20 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     "{item_label} self-attn resident residual buffer too small: got {actual_bytes} bytes expected at least {expected_input_bytes}"
                 ));
             }
-            let slot = self.request_slot(request_id)?;
-            let layer = self.layers.get_mut(slot).ok_or_else(|| {
-                format!(
-                    "{label} self-attn resident batch missing state slot {slot} for request {request_id:?}"
-                )
-            })?;
-            if cache_position != layer.written_len {
-                return Err(format!(
-                    "{item_label} self-attn resident cache_position {} does not match written_len {}",
-                    cache_position, layer.written_len
-                ));
-            }
-            layer.last_component_step_ms = None;
-            let mut step_ms = PackageSelfAttnComponentStepMs::default();
-            layer.run_device_step_input(
-                stream,
-                PackageSelfAttnResidentStepInput::ExternalBuffer(residual_buffer),
-                sync_component_timing,
-                &mut step_ms,
-                &item_label,
-            )?;
-            let normed_values = read_runtime_buffer_f32(
-                &layer.input_normed_buffer,
+            let residual = read_runtime_buffer_f32(
+                residual_buffer,
                 stream,
                 self.hidden,
-                &format!("{item_label} self-attn resident input normed"),
+                &format!("{item_label} self-attn resident residual"),
             )?;
-            let start = batch_index.checked_mul(self.hidden).ok_or_else(|| {
-                format!("{label} self-attn resident batch input normed offset overflows")
-            })?;
-            input_normed_values[start..start + self.hidden].copy_from_slice(&normed_values);
-            slots.push(slot);
-            component_step_ms.push(step_ms);
-        }
-
-        self.batch_input_normed_buffer
-            .copy_from_host(
-                0,
-                &encode_f32_to_bytes(&input_normed_values),
-                Some(stream),
-            )
-            .map_err(|err| {
-                format!("failed to copy {label} self-attn resident batch input normed: {err}")
-            })?;
-
-        let component_started = Instant::now();
-        weights.q_matrix.matvec_batch(
-            &self.batch_input_normed_buffer,
-            batch_count,
-            &mut self.batch_q_projected_buffer,
-            stream,
-            "self-attn resident batch q projection",
-        )?;
-        weights.k_matrix.matvec_batch(
-            &self.batch_input_normed_buffer,
-            batch_count,
-            &mut self.batch_k_projected_buffer,
-            stream,
-            "self-attn resident batch k projection",
-        )?;
-        weights.v_matrix.matvec_batch(
-            &self.batch_input_normed_buffer,
-            batch_count,
-            &mut self.batch_v_projected_buffer,
-            stream,
-            "self-attn resident batch v projection",
-        )?;
-        let qkv_projection_ms = if sync_component_timing {
-            stream
-                .synchronize()
-                .map_err(|err| {
-                    format!(
-                        "failed to synchronize {label} self-attn batch q/k/v projection: {err}"
-                    )
-                })?;
-            component_started.elapsed().as_secs_f64() * 1000.0
-        } else {
-            0.0
-        };
-        for step_ms in &mut component_step_ms {
-            step_ms.qkv_projection_ms = qkv_projection_ms;
-        }
-
-        let q_projected_values = read_runtime_buffer_f32(
-            &self.batch_q_projected_buffer,
-            stream,
-            q_projected_elements,
-            &format!("{label} self-attn resident batch q projected"),
-        )?;
-        let k_projected_values = read_runtime_buffer_f32(
-            &self.batch_k_projected_buffer,
-            stream,
-            k_projected_elements,
-            &format!("{label} self-attn resident batch k projected"),
-        )?;
-        let v_projected_values = read_runtime_buffer_f32(
-            &self.batch_v_projected_buffer,
-            stream,
-            v_projected_elements,
-            &format!("{label} self-attn resident batch v projected"),
-        )?;
-
-        for (batch_index, item) in items.iter().enumerate() {
-            let &(request_id, residual_buffer, rope_position, cache_position) = item;
-            let item_label = format!(
-                "{label} request={} position={}",
-                request_id.0, rope_position
-            );
-            let layer = self.layers.get_mut(slots[batch_index]).ok_or_else(|| {
-                format!(
-                    "{label} self-attn resident batch missing state slot {} for request {request_id:?}",
-                    slots[batch_index]
-                )
-            })?;
-            let q_start = batch_index.checked_mul(q_projected_rows).ok_or_else(|| {
-                format!("{label} self-attn resident batch q projected offset overflows")
-            })?;
-            let k_start = batch_index.checked_mul(k_projected_rows).ok_or_else(|| {
-                format!("{label} self-attn resident batch k projected offset overflows")
-            })?;
-            let v_start = batch_index.checked_mul(v_projected_rows).ok_or_else(|| {
-                format!("{label} self-attn resident batch v projected offset overflows")
-            })?;
-            layer
-                .q_projected_buffer
-                .copy_from_host(
-                    0,
-                    &encode_f32_to_bytes(&q_projected_values[q_start..q_start + q_projected_rows]),
-                    Some(stream),
-                )
-                .map_err(|err| {
-                    format!("failed to copy {item_label} self-attn resident q projected: {err}")
-                })?;
-            layer
-                .k_projected_buffer
-                .copy_from_host(
-                    0,
-                    &encode_f32_to_bytes(&k_projected_values[k_start..k_start + k_projected_rows]),
-                    Some(stream),
-                )
-                .map_err(|err| {
-                    format!("failed to copy {item_label} self-attn resident k projected: {err}")
-                })?;
-            layer
-                .v_projected_buffer
-                .copy_from_host(
-                    0,
-                    &encode_f32_to_bytes(&v_projected_values[v_start..v_start + v_projected_rows]),
-                    Some(stream),
-                )
-                .map_err(|err| {
-                    format!("failed to copy {item_label} self-attn resident v projected: {err}")
-                })?;
-            layer.run_device_step_after_qkv_projection(
-                stream,
-                PackageSelfAttnResidentStepInput::ExternalBuffer(residual_buffer),
-                rotary_dim,
-                rope_base,
+            host_batch_items.push(MixedRequestStateBatchStepItem {
+                request_id,
+                residual,
                 rope_position,
                 cache_position,
-                sync_component_timing,
-                component_step_ms
-                    .get_mut(batch_index)
-                    .ok_or_else(|| {
-                        format!("{label} self-attn resident batch component timing is missing")
-                    })?,
-                &item_label,
-            )?;
-            if sync_component_timing {
-                layer.last_component_step_ms = Some(component_step_ms[batch_index]);
-            }
+            });
         }
-
-        Ok(())
+        self.step_batch_from_host_to_device(stream, &host_batch_items, rotary_dim, rope_base, label)
     }
 
     #[allow(clippy::too_many_arguments)]
