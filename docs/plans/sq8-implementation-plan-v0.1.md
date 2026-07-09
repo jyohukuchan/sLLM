@@ -541,6 +541,9 @@ Expected outputs:
   failed rows.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
+- The vLLM row should be produced through the derived command template in
+  `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` so memory and failure semantics
+  match the uLLM rows.
 
 ## Immediate Work Queue
 

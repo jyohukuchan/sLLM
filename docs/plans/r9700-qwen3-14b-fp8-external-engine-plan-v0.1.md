@@ -29,6 +29,113 @@ Measure whether vLLM, SGLang, and ROCm/ATOM can run a smaller FP8 workload on th
 - SGLang: derive from its built-in benchmark or server benchmark.
 - ROCm/ATOM: derive from its documented ROCm benchmark path after confirming the expected model format.
 
+## Derived vLLM Command Template
+
+Use `ROCR_VISIBLE_DEVICES=1` for the current WRX80 host. `HIP_VISIBLE_DEVICES=1` can leave AITER
+seeing a V620/gfx1030 path first and should only be used as an intentional failure probe.
+
+Set shared paths once:
+
+```text
+RESULT_ROOT=benchmarks/results/$(date +%F)/sq8-vllm-fp8-comparison
+MODEL=/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8
+VLLM_BIN=build/envs/vllm-rocm-nightly/bin/vllm
+mkdir -p "${RESULT_ROOT}/logs"
+```
+
+Smoke row:
+
+```text
+ROCR_VISIBLE_DEVICES=1 VLLM_LOGGING_LEVEL=INFO python3 tools/run-external-benchmark.py \
+  --run-id sq8-vllm-fp8-r9700 \
+  --case-id vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-tp1-rocr \
+  --output-jsonl "${RESULT_ROOT}/results.jsonl" \
+  --stdout-log "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-tp1-rocr.stdout.log" \
+  --stderr-log "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-tp1-rocr.stderr.log" \
+  --memory-log "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-tp1-rocr.memory.jsonl" \
+  --engine-name vLLM \
+  --engine-version 0.23.1rc1.dev618+g8cf7c4d8a.rocm723 \
+  --engine-commit 8cf7c4d8ad602d73ff2ec72a101420d47163c136 \
+  --model-name Qwen3-14B-FP8 \
+  --model-format safetensors \
+  --model-quantization FP8 \
+  --gpu-card card2 \
+  --context-length 256 \
+  --prompt-tokens 16 \
+  --generated-tokens 8 \
+  --batch-size 1 \
+  --concurrent-requests 1 \
+  --kv-cache-dtype auto \
+  --parse vllm-throughput \
+  --result-json "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-tp1-rocr.result.json" \
+  --note "M10 vLLM FP8 smoke baseline for SQ8_0 comparison" \
+  -- \
+  "${VLLM_BIN}" bench throughput \
+    --backend vllm \
+    --model "${MODEL}" \
+    --tokenizer "${MODEL}" \
+    --num-prompts 1 \
+    --random-input-len 16 \
+    --random-output-len 8 \
+    --max-model-len 256 \
+    --dtype auto \
+    --kv-cache-dtype auto \
+    --tensor-parallel-size 1 \
+    --pipeline-parallel-size 1 \
+    --gpu-memory-utilization 0.85 \
+    --enforce-eager \
+    --output-json "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-tp1-rocr.result.json"
+```
+
+Representative row:
+
+```text
+ROCR_VISIBLE_DEVICES=1 VLLM_LOGGING_LEVEL=INFO python3 tools/run-external-benchmark.py \
+  --run-id sq8-vllm-fp8-r9700 \
+  --case-id vllm-r9700-qwen3-14b-fp8-rep-pp512-tg128-tp1-rocr \
+  --output-jsonl "${RESULT_ROOT}/results.jsonl" \
+  --stdout-log "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-rep-pp512-tg128-tp1-rocr.stdout.log" \
+  --stderr-log "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-rep-pp512-tg128-tp1-rocr.stderr.log" \
+  --memory-log "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-rep-pp512-tg128-tp1-rocr.memory.jsonl" \
+  --engine-name vLLM \
+  --engine-version 0.23.1rc1.dev618+g8cf7c4d8a.rocm723 \
+  --engine-commit 8cf7c4d8ad602d73ff2ec72a101420d47163c136 \
+  --model-name Qwen3-14B-FP8 \
+  --model-format safetensors \
+  --model-quantization FP8 \
+  --gpu-card card2 \
+  --context-length 4096 \
+  --prompt-tokens 512 \
+  --generated-tokens 128 \
+  --batch-size 1 \
+  --concurrent-requests 1 \
+  --kv-cache-dtype auto \
+  --parse vllm-throughput \
+  --result-json "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-rep-pp512-tg128-tp1-rocr.result.json" \
+  --note "M10 vLLM FP8 representative baseline for SQ8_0 comparison" \
+  -- \
+  "${VLLM_BIN}" bench throughput \
+    --backend vllm \
+    --model "${MODEL}" \
+    --tokenizer "${MODEL}" \
+    --num-prompts 1 \
+    --num-warmups 1 \
+    --random-input-len 512 \
+    --random-output-len 128 \
+    --max-model-len 4096 \
+    --dtype auto \
+    --kv-cache-dtype auto \
+    --tensor-parallel-size 1 \
+    --pipeline-parallel-size 1 \
+    --gpu-memory-utilization 0.85 \
+    --enforce-eager \
+    --output-json "${RESULT_ROOT}/logs/vllm-r9700-qwen3-14b-fp8-rep-pp512-tg128-tp1-rocr.result.json"
+```
+
+These rows are not comparable with selected-layer uLLM diagnostics. Use them only after uLLM has a
+full-package SQ8_0 row with matching prompt length, generated length, concurrency, KV dtype, and
+execution-mode metadata.
+
 ## Notes
 
 - This is not a replacement for MI300X TP/PP testing. It is a local feasibility and baseline pass.
