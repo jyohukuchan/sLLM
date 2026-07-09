@@ -1,5 +1,7 @@
 uLLM-projectで使用される用語とその意味について
 用語:意味
+AQ4_0:既存AQ4 version 0のpublic format identifier。4はおおよそのbit/parameterを表す。
+SQ8_0:FP8 E4M3 SQ version 0のpublic format identifier。8はおおよそのbit/parameterを表す。FP8品質の採否候補ではなく正式採用formatとして扱う。
 bpp:bit/parameter
 BF16-error:BF16のraw-valueまたは出力を基準にした誤差
 decode-tps:decode token/s

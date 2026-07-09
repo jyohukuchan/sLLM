@@ -68,7 +68,7 @@ For R9700 SQ candidate runs, use:
 ```json
 {
   "model_quantization": "SQ-FP8-W8A16",
-  "sq_candidate": "sq-fp8-w8a16-r9700-v0",
+  "sq_candidate": "SQ8_0",
   "candidate_artifact": "artifacts/sq-fp8-w8a16-r9700-v0",
   "prefill_executor": "cached_prefix_rdna4_fp8_auto",
   "resolved_prefill_executor": null

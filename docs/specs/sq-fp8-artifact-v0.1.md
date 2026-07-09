@@ -2,11 +2,11 @@
 
 ## Purpose
 
-This specification defines the first FP8 SQ candidate artifact produced by
+This specification defines the first FP8 SQ8_0 artifact produced by
 `tools/build-sq-fp8-w8a16-artifact.py`.
 
-The first candidate is `sq-fp8-w8a16-r9700-v0`. It is a runtime-evaluation artifact, not the final
-SQ file format.
+The public format ID is `SQ8_0`. The previous `sq-fp8-w8a16-r9700-v0` name is retained as an
+implementation lineage / legacy alias, not as the public format name.
 
 ## Layout
 
@@ -26,7 +26,9 @@ ARTIFACT/
 ```json
 {
   "candidate": {
-    "id": "sq-fp8-w8a16-r9700-v0",
+    "id": "SQ8_0",
+    "format_id": "SQ8_0",
+    "implementation_id": "sq-fp8-w8a16-r9700-v0",
     "weight_payload_dtype": "fp8_e4m3",
     "activation_dtype": "bf16_or_f32",
     "scale_granularity": "row",
@@ -36,7 +38,7 @@ ARTIFACT/
 }
 ```
 
-The initial target is language-model 2D weight tensors:
+The initial SQ8_0 runtime target is language-model 2D weight tensors:
 
 - embedding
 - lm_head

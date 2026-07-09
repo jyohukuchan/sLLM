@@ -2,10 +2,10 @@
 
 ## Purpose
 
-This schema records one runtime comparison row for an `sq` format candidate.
+This schema records one runtime comparison row for an `SQ8_0` implementation or comparison run.
 
-The row is not a general inference benchmark. It is specifically for comparing an `sq` candidate
-against the current AQ4 prototype gate before the `sq` format is accepted as useful.
+The row is not a general inference benchmark. `SQ8_0` is the public FP8 E4M3 format ID; strict
+AQ4-vs-SQ8 logit equality is a diagnostic regression signal rather than a quality proof for FP8.
 
 ## Result Format
 
@@ -23,8 +23,9 @@ R9700/RDNA4 row and, if RDNA2 support is claimed, one V620/RDNA2 row.
   "case_id": "sqv0-a-qwen35-9b-r9700-v03-suite",
   "status": "ok",
   "candidate": {
-    "id": "sq-fp8-w8a16-r9700-v0",
-    "format_version": "sq-fp8-w8a16-r9700-v0",
+    "id": "SQ8_0",
+    "format_version": "SQ8_0",
+    "implementation_id": "sq-fp8-w8a16-r9700-v0",
     "description": "FP8 weight, BF16/F32 activation R9700 baseline candidate",
     "package_or_runtime_artifact": "/tmp/example-sqv0-a.ullm.d",
     "artifact_manifest": "/tmp/example-sqv0-a.ullm.d/sq_manifest.json",
@@ -171,7 +172,7 @@ future `sq` rows have a machine-readable comparison target.
 
 For these rows:
 
-- `candidate.format_version` may be `aq4-prototype-current-runtime`;
+- `candidate.format_version` may be `AQ4_0`;
 - `decision.reason` should state that the row is a baseline anchor;
 - `storage.compact_resident_bytes`, `storage.materialized_working_set_bytes`, and
   `timing.materialization_wall_ms` may be `null` if they were not measured for the current runtime.
@@ -210,7 +211,7 @@ SQ format against vLLM batch throughput.
 - `fp8_tensor_count`: number of tensors stored in the candidate FP8 payload.
 - `passthrough_tensor_count`: number of tensors intentionally left outside the FP8 payload.
 
-For `sq-fp8-w8a16-r9700-v0`, the candidate artifact manifest must record:
+For `SQ8_0`, the candidate artifact manifest must record:
 
 - FP8 format: `fp8_e4m3`.
 - Activation dtype: `bf16_or_f32`.

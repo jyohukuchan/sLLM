@@ -5,8 +5,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from ullm_format_ids import FORMAT_AQ4_0, canonical_or_original, is_legacy_alias
 
 
 SCHEMA_VERSION = "sq-candidate-runtime-result-v0.1"
@@ -158,14 +165,18 @@ def build_row(args: argparse.Namespace) -> dict[str, Any]:
     is_comparable, reason = comparable(args, summary, guard)
     suite = summary.get("suite") if isinstance(summary.get("suite"), dict) else {}
     tokenizer_dir = summary.get("tokenizer_dir")
+    candidate_id = canonical_or_original(args.candidate_id)
+    format_version = canonical_or_original(args.format_version)
+    legacy_candidate_id = args.candidate_id if args.candidate_id != candidate_id else None
+    legacy_format_version = args.format_version if args.format_version != format_version else None
     row = {
         "schema_version": SCHEMA_VERSION,
         "run_id": args.run_id,
         "case_id": args.case_id,
         "status": "ok",
         "candidate": {
-            "id": args.candidate_id,
-            "format_version": args.format_version,
+            "id": candidate_id,
+            "format_version": format_version,
             "description": args.description,
             "package_or_runtime_artifact": args.package_or_runtime_artifact,
             "source_aq_policy": args.source_aq_policy,
@@ -248,6 +259,12 @@ def build_row(args: argparse.Namespace) -> dict[str, Any]:
         },
         "notes": args.note,
     }
+    if legacy_candidate_id is not None:
+        row["candidate"]["legacy_candidate_id"] = legacy_candidate_id
+    if legacy_format_version is not None:
+        row["candidate"]["legacy_format_version"] = legacy_format_version
+    if is_legacy_alias(args.candidate_id, FORMAT_AQ4_0):
+        row["baseline"]["legacy_id"] = args.candidate_id
     return row
 
 

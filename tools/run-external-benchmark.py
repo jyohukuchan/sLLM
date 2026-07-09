@@ -20,6 +20,12 @@ from typing import Any
 
 SCHEMA_VERSION = "inference-benchmark-result-v0.1"
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from ullm_format_ids import canonical_or_original
+
 
 def parse_int(value: Any) -> int | None:
     if value is None:
@@ -44,6 +50,12 @@ def first_non_null(*values: Any) -> Any:
         if value is not None:
             return value
     return None
+
+
+def canonical_with_legacy(value: str) -> tuple[str, str | None]:
+    canonical = canonical_or_original(value)
+    legacy = value if canonical != value else None
+    return canonical, legacy
 
 
 def run_text(command: list[str]) -> str | None:
@@ -935,7 +947,13 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
     ):
         value = report.get(key)
         if isinstance(value, str) and value != "none":
-            row_workload[key] = value
+            if key == "sq_candidate":
+                canonical, legacy = canonical_with_legacy(value)
+                row_workload[key] = canonical
+                if legacy is not None:
+                    row_workload["sq_candidate_legacy"] = legacy
+            else:
+                row_workload[key] = value
     for key in (
         "sq_fp8_tensor_count",
         "sq_passthrough_tensor_count",
@@ -1200,7 +1218,7 @@ def main() -> int:
             "source": args.model_source,
             "revision": args.model_revision,
             "format": args.model_format,
-            "quantization": args.model_quantization,
+            "quantization": canonical_or_original(args.model_quantization),
         },
         "hardware": {
             "host": socket.gethostname(),
@@ -1239,10 +1257,13 @@ def main() -> int:
         "notes": args.note,
     }
     if args.sq_candidate or args.candidate_artifact:
+        candidate_id = canonical_or_original(args.sq_candidate) if args.sq_candidate else None
         row["candidate"] = {
-            "id": args.sq_candidate,
+            "id": candidate_id,
             "artifact": args.candidate_artifact,
         }
+        if args.sq_candidate and candidate_id != args.sq_candidate:
+            row["candidate"]["legacy_id"] = args.sq_candidate
     ullm_correctness = parse_ullm_token_ids_correctness(ullm_report)
     if args.parse == "ullm-package-batch-throughput":
         enrich_ullm_batch_workload(row, ullm_report)

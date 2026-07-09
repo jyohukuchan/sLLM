@@ -1,6 +1,7 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::format_id::{FORMAT_SQ8_0, is_sq8_0_alias};
 use crate::package::TensorSelector;
 use serde::Deserialize;
 use std::fs::File;
@@ -29,6 +30,7 @@ pub struct SqFp8ArtifactManifest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SqFp8Candidate {
     pub id: String,
+    pub format_id: Option<String>,
     pub weight_payload_dtype: String,
     pub activation_dtype: String,
     pub scale_granularity: String,
@@ -153,6 +155,20 @@ pub fn validate_sq_fp8_manifest(
             "SQ FP8 candidate weight_payload_dtype must be {}, got {}",
             SQ_FP8_E4M3_DTYPE, manifest.candidate.weight_payload_dtype
         ));
+    }
+    if !is_sq8_0_alias(&manifest.candidate.id) {
+        return Err(format!(
+            "SQ FP8 candidate id must be {} or a legacy SQ FP8 alias, got {}",
+            FORMAT_SQ8_0, manifest.candidate.id
+        ));
+    }
+    if let Some(format_id) = manifest.candidate.format_id.as_deref() {
+        if !is_sq8_0_alias(format_id) {
+            return Err(format!(
+                "SQ FP8 candidate format_id must be {} or a legacy SQ FP8 alias, got {}",
+                FORMAT_SQ8_0, format_id
+            ));
+        }
     }
     if manifest.candidate.scale_dtype != SQ_F32_SCALE_DTYPE {
         return Err(format!(
@@ -931,6 +947,47 @@ mod tests {
         assert!(fp8_e4m3fn_to_f32(0xff).is_nan());
     }
 
+    fn empty_manifest_for_candidate(id: &str, format_id: Option<&str>) -> SqFp8ArtifactManifest {
+        SqFp8ArtifactManifest {
+            schema_version: SQ_FP8_ARTIFACT_SCHEMA_VERSION.to_string(),
+            candidate: SqFp8Candidate {
+                id: id.to_string(),
+                format_id: format_id.map(str::to_string),
+                weight_payload_dtype: SQ_FP8_E4M3_DTYPE.to_string(),
+                activation_dtype: "bf16_or_f32".to_string(),
+                scale_granularity: "row".to_string(),
+                scale_dtype: SQ_F32_SCALE_DTYPE.to_string(),
+            },
+            source: None,
+            storage: SqFp8Storage {
+                fp8_tensor_count: 0,
+                passthrough_tensor_count: 0,
+                fp8_payload_bytes: 0,
+                fp8_scale_bytes: 0,
+                passthrough_source_bytes_estimate: 0,
+                compact_resident_bytes_estimate: 0,
+                materialized_working_set_bytes_estimate: 0,
+            },
+            fp8_tensors: Vec::new(),
+            passthrough_tensors: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn validates_sq8_public_and_legacy_candidate_ids() {
+        let root = temp_artifact_dir("sq-fp8-format-id-test");
+        let public_manifest = empty_manifest_for_candidate(FORMAT_SQ8_0, Some(FORMAT_SQ8_0));
+        validate_sq_fp8_manifest(&root, &public_manifest).unwrap();
+
+        let legacy_manifest =
+            empty_manifest_for_candidate("sq-fp8-w8a16-r9700-v0", Some("sq-format-v0.1"));
+        validate_sq_fp8_manifest(&root, &legacy_manifest).unwrap();
+
+        let invalid_manifest = empty_manifest_for_candidate("bf16", None);
+        assert!(validate_sq_fp8_manifest(&root, &invalid_manifest).is_err());
+    }
+
     #[test]
     fn materializes_row_scaled_fp8_payload() {
         let root = temp_artifact_dir("sq-fp8-row-materialize-test");
@@ -1078,7 +1135,8 @@ mod tests {
         let manifest = SqFp8ArtifactManifest {
             schema_version: SQ_FP8_ARTIFACT_SCHEMA_VERSION.to_string(),
             candidate: SqFp8Candidate {
-                id: "sq-fp8-w8a16-r9700-v0".to_string(),
+                id: FORMAT_SQ8_0.to_string(),
+                format_id: Some(FORMAT_SQ8_0.to_string()),
                 weight_payload_dtype: SQ_FP8_E4M3_DTYPE.to_string(),
                 activation_dtype: "bf16_or_f32".to_string(),
                 scale_granularity: "row".to_string(),

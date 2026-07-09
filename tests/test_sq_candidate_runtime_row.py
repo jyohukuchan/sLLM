@@ -105,6 +105,10 @@ class SqCandidateRuntimeRowTests(unittest.TestCase):
             )
 
         self.assertEqual(row["schema_version"], TOOL.SCHEMA_VERSION)
+        self.assertEqual(row["candidate"]["id"], "AQ4_0")
+        self.assertEqual(row["candidate"]["format_version"], "AQ4_0")
+        self.assertEqual(row["candidate"]["legacy_candidate_id"], "aq4")
+        self.assertEqual(row["candidate"]["legacy_format_version"], "aq4-prototype-current-runtime")
         self.assertEqual(row["hardware"]["backend"], "hip")
         self.assertEqual(row["hardware"]["device_index"], 2)
         self.assertEqual(row["storage"]["kv_cache_bytes"], 4096)
@@ -160,6 +164,10 @@ class SqCandidateRuntimeRowTests(unittest.TestCase):
                 )
             )
 
+        self.assertEqual(row["candidate"]["id"], "SQ8_0")
+        self.assertEqual(row["candidate"]["format_version"], "SQ8_0")
+        self.assertEqual(row["candidate"]["legacy_candidate_id"], "sq")
+        self.assertEqual(row["candidate"]["legacy_format_version"], "sq-format-v0.1")
         self.assertFalse(row["decision"]["comparable_to_baseline"])
         reason = row["decision"]["reason"]
         self.assertIn("storage.compact_resident_bytes", reason)

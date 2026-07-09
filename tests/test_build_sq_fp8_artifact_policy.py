@@ -76,11 +76,44 @@ class BuildSqFp8ArtifactPolicyTest(unittest.TestCase):
             policy = self.builder.resolve_policy_args(args)
 
         self.assertIsNotNone(policy)
-        self.assertEqual(args.candidate_id, "sq-fp8-w8a16-r9700-v0")
+        self.assertEqual(args.candidate_id, "SQ8_0")
+        self.assertEqual(args.implementation_id, "sq-fp8-w8a16-r9700-v0")
         self.assertEqual(args.scale_granularity, "row_block")
         self.assertEqual(args.scale_block_cols, 32)
         self.assertEqual(len(args.include_regex), 1)
         self.assertIn("kup6_gate5_down5", self.builder.policy_manifest_entry(policy_path, policy)["policy_id"])
+
+    def test_manifest_uses_sq8_public_id_and_preserves_implementation_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            policy_path = self.write_policy(root)
+            args = argparse.Namespace(
+                source_model_dir=root,
+                output_artifact=root / "artifact",
+                policy_json=policy_path,
+                candidate_id=None,
+                base_package=None,
+                include_regex=[],
+                exclude_regex=[],
+                scale_granularity=None,
+                scale_block_cols=None,
+                activation_dtype="bf16_or_f32",
+                row_chunk=256,
+                max_tensors=0,
+                summary_json=None,
+                metadata_only=True,
+                dry_run=True,
+                overwrite=False,
+            )
+            args.policy_payload = self.builder.resolve_policy_args(args)
+            manifest = self.builder.build_manifest(args)
+
+        self.assertEqual(manifest["candidate"]["id"], "SQ8_0")
+        self.assertEqual(manifest["candidate"]["format_id"], "SQ8_0")
+        self.assertEqual(
+            manifest["candidate"]["implementation_id"],
+            "sq-fp8-w8a16-r9700-v0",
+        )
 
     def test_policy_regex_selects_expected_tensor_subset(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,10 +16,16 @@ from typing import Any
 import torch
 from safetensors import safe_open
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from ullm_format_ids import FORMAT_SQ8_0, canonical_or_original, is_legacy_alias
+
 
 SCHEMA_VERSION = "sq-fp8-artifact-v0.1"
 POLICY_SCHEMA_VERSION = "sq-fp8-policy-v0.1"
-DEFAULT_CANDIDATE_ID = "sq-fp8-w8a16-r9700-v0"
+DEFAULT_IMPLEMENTATION_ID = "sq-fp8-w8a16-r9700-v0"
 FP8_E4M3_MAX = 448.0
 
 
@@ -93,12 +100,15 @@ def load_policy(path: Path) -> dict[str, Any]:
 def resolve_policy_args(args: argparse.Namespace) -> dict[str, Any] | None:
     policy = load_policy(args.policy_json) if args.policy_json is not None else None
 
-    if args.candidate_id is None:
-        args.candidate_id = (
+    raw_candidate_id = args.candidate_id
+    if raw_candidate_id is None:
+        raw_candidate_id = (
             str(policy.get("candidate_id"))
             if policy and policy.get("candidate_id")
-            else DEFAULT_CANDIDATE_ID
+            else DEFAULT_IMPLEMENTATION_ID
         )
+    args.implementation_id = raw_candidate_id
+    args.candidate_id = canonical_or_original(raw_candidate_id)
 
     if policy is not None and not args.include_regex:
         fp8_selection = policy.get("fp8_selection")
@@ -579,6 +589,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "candidate": {
             "id": args.candidate_id,
+            "format_id": FORMAT_SQ8_0,
             "weight_payload_dtype": "fp8_e4m3",
             "activation_dtype": args.activation_dtype,
             "scale_granularity": candidate_scale_granularity,
@@ -611,6 +622,8 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         manifest["candidate"]["scale_layout"] = "per_tensor"
     if args.scale_granularity == "row_block":
         manifest["candidate"]["default_scale_block_cols"] = args.scale_block_cols
+    if is_legacy_alias(args.implementation_id, FORMAT_SQ8_0):
+        manifest["candidate"]["implementation_id"] = args.implementation_id
     if getattr(args, "policy_payload", None) is not None and args.policy_json is not None:
         manifest["policy"] = policy_manifest_entry(args.policy_json, args.policy_payload)
     return manifest
