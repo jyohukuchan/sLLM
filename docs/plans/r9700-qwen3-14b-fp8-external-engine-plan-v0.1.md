@@ -136,6 +136,19 @@ These rows are not comparable with selected-layer uLLM diagnostics. Use them onl
 full-package SQ8_0 row with matching prompt length, generated length, concurrency, KV dtype, and
 execution-mode metadata.
 
+## Current uLLM SQ8_0 Smoke-Shape Row
+
+A uLLM SQ8_0 row with the smoke workload shape is available at:
+
+```text
+benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl
+```
+
+It uses `prompt_tokens=16`, `generated_tokens=8`, `concurrent_requests=1`, `kv_cache_dtype=f32`,
+and records direct SQ8_0 `single+triple` projection execution plus the attached behavioral
+prompt-suite guard bundle. This is a measurement-path row for Qwen3.5-9B, not a same-model row for
+the Qwen3-14B-FP8 vLLM target.
+
 ## Notes
 
 - This is not a replacement for MI300X TP/PP testing. It is a local feasibility and baseline pass.

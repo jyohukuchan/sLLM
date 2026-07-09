@@ -532,6 +532,11 @@ Current local baseline state:
 - `tools/run-external-benchmark.py --parse vllm-throughput` already preserves the comparable vLLM
   metrics, and its failure classifier now maps common ROCm no-binary / invalid-device-function
   messages to `unsupported` rows.
+- uLLM now has a guard-attached SQ8_0 smoke-shape row at
+  `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl` for
+  `prompt_tokens=16`, `generated_tokens=8`, and `concurrent_requests=1`. This row uses
+  Qwen3.5-9B, so it fixes the uLLM SQ8_0 measurement path but is not yet a same-model comparison
+  against `Qwen3-14B-FP8`.
 
 Workload grid:
 
