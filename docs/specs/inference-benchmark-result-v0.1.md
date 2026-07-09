@@ -342,7 +342,8 @@ weights and use resident direct projection boundaries. Rows with `batching.mode=
 `prefill_real_batch=true`, and `decode_real_batch=true` prove real-batch projection for the reported
 boundary. If `sq_fp8_batch_matvec_count < sq_fp8_expected_all_batch_matvec_count`, only part of the
 selected SQ8_0 projection set is batched, so the row remains a resident stack diagnostic rather than
-a final real-batch serving row.
+a final all-projection row. Even when those counters match, selected-layer stack rows remain
+diagnostic until the same execution path is represented in full-package or server-style rows.
 
 SQ candidate rows may also carry a top-level `candidate` object:
 

@@ -404,6 +404,14 @@ Done:
   projections use direct SQ8_0 batch matvec in both prefill and decode. The remaining o/gate/up/down
   projections still use direct single boundaries, so it is still a selected-layer resident
   diagnostic rather than the final all-projection/full-serving row.
+- The current resident stack diagnostic row is
+  `benchmarks/results/2026-07-09/sq8-stack-resident-all-batch/results.jsonl`. It reports
+  `batching_mode=real`, `prefill_real_batch=true`, `decode_real_batch=true`,
+  `sq_projection_boundary=batch`, `sq_fp8_single_matvec_count=0`, and
+  `sq_fp8_batch_matvec_count=21/21`. This proves the selected layer3 self-attention q/k/v/o and
+  MLP gate/up/down projections all use direct SQ8_0 batch matvec boundaries. It still uses
+  diagnostic host staging and a selected-layer artifact, so the remaining comparison blocker is a
+  full-package or server-style row with the same execution mode.
 
 ### M6: Dispatch Integration
 
@@ -821,9 +829,10 @@ Expected outputs:
      `matvec_batch` for q/k/v/o/gate/up/down.
    - The new `sq-fp8-package-self-attn-stack-batch-smoke` closes the materialized-F32 side of this
      blocker for a stack-shaped diagnostic by using the resident mixed request-state path. The
-     latest row now closes the q/k/v real-batch side as well with `batching_mode=real` and
-     `sq_fp8_batch_matvec_count=9/21`. The remaining blocker is batching the o/gate/up/down
-     projection boundaries and moving from selected-layer diagnostics to full-package/server rows.
+     latest row now reaches `batching_mode=real`, `sq_projection_boundary=batch`, and
+     `sq_fp8_batch_matvec_count=21/21` for the selected layer3 self-attention projections. The
+     remaining blocker is moving from selected-layer diagnostics with host staging to
+     full-package/server rows.
    - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
      final vLLM serving comparison still needs real-batch or server-style uLLM rows.
 
