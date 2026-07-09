@@ -60,6 +60,74 @@ def parse_bool(value: Any) -> bool | None:
     return None
 
 
+def load_prompt_guard_bundle(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"failed to read prompt guard bundle {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"failed to parse prompt guard bundle {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"prompt guard bundle {path}: expected JSON object")
+    return data
+
+
+def prompt_suite_token_logits_check(bundle: dict[str, Any]) -> dict[str, Any] | None:
+    checks = bundle.get("checks")
+    if not isinstance(checks, list):
+        return None
+    for check in checks:
+        if isinstance(check, dict) and check.get("name") == "prompt_suite_token_logits":
+            return check
+    return None
+
+
+def prompt_suite_regression_status(check: dict[str, Any] | None) -> str:
+    if check is None:
+        return "not_attached"
+    return "passed" if check.get("passed") is True else "failed"
+
+
+def prompt_suite_token_logits_metrics(check: dict[str, Any] | None) -> dict[str, Any]:
+    if check is None:
+        return {}
+    metrics = check.get("metrics")
+    return metrics if isinstance(metrics, dict) else {}
+
+
+def attach_prompt_guard_bundle_fields(
+    row: dict[str, Any], bundle_path: Path, bundle: dict[str, Any]
+) -> None:
+    check = prompt_suite_token_logits_check(bundle)
+    check_metrics = prompt_suite_token_logits_metrics(check)
+    quality = row.setdefault("quality", {})
+    quality["prompt_suite_regression_status"] = prompt_suite_regression_status(check)
+    guards = row.setdefault("guards", {})
+    guards["prompt_guard_bundle"] = {
+        "status": "ok",
+        "artifact": str(bundle_path),
+        "passed": bundle.get("passed"),
+        "acceptance_mode": check_metrics.get("acceptance_mode"),
+        "strict_passed": check_metrics.get("strict_passed"),
+        "behavioral_passed": check_metrics.get("behavioral_passed"),
+        "compared_case_count": check_metrics.get("compared_case_count"),
+        "generated_token_match_count": check_metrics.get("generated_token_match_count"),
+        "generated_text_match_count": check_metrics.get("generated_text_match_count"),
+        "generated_without_stop_text_match_count": check_metrics.get(
+            "generated_without_stop_text_match_count"
+        ),
+        "top_logits_match_count": check_metrics.get("top_logits_match_count"),
+        "max_prefill_top_logit_abs_diff": check_metrics.get(
+            "max_prefill_top_logit_abs_diff"
+        ),
+        "max_decode_last_top_logit_abs_diff": check_metrics.get(
+            "max_decode_last_top_logit_abs_diff"
+        ),
+    }
+    artifacts = row.setdefault("artifacts", {})
+    artifacts["prompt_guard_bundle_json"] = str(bundle_path)
+
+
 def first_non_null(*values: Any) -> Any:
     for value in values:
         if value is not None:
@@ -1271,6 +1339,7 @@ def main() -> int:
         help="Allow materialized_f32_fallback model-loop rows to stay valid.",
     )
     parser.add_argument("--result-json", type=Path)
+    parser.add_argument("--prompt-guard-bundle-json", type=Path)
     parser.add_argument("--timeout-seconds", type=float, default=None)
     parser.add_argument("--memory-sample-interval", type=float, default=1.0)
     parser.add_argument("--note", action="append", default=[])
@@ -1289,6 +1358,9 @@ def main() -> int:
         args.result_json.parent.mkdir(parents=True, exist_ok=True)
         if args.result_json.exists():
             args.result_json.unlink()
+    prompt_guard_bundle = None
+    if args.prompt_guard_bundle_json is not None:
+        prompt_guard_bundle = load_prompt_guard_bundle(args.prompt_guard_bundle_json)
 
     monitor = RocmMemoryMonitor(args.memory_log, args.memory_sample_interval)
     monitor.start()
@@ -1515,6 +1587,11 @@ def main() -> int:
         )
         row["status"] = status
         row["error"] = error
+    if prompt_guard_bundle is not None:
+        assert args.prompt_guard_bundle_json is not None
+        attach_prompt_guard_bundle_fields(
+            row, args.prompt_guard_bundle_json, prompt_guard_bundle
+        )
     if ullm_correctness is not None:
         row["correctness"] = ullm_correctness
         if args.parse == "ullm-package-batch-throughput":

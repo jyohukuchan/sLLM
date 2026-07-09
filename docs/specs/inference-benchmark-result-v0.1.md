@@ -106,6 +106,27 @@ Each line is one benchmark case. A case may be successful, failed, unsupported, 
 }
 ```
 
+### Optional Prompt Guard Bundle Attachment (inference-benchmark-result-v0.1)
+
+`run-external-benchmark` can add a `quality.prompt_suite_regression_status` and guard bundle details when
+`--prompt-guard-bundle-json` is provided.
+
+- `quality.prompt_suite_regression_status`: `passed` / `failed` / `not_attached`
+- `guards.prompt_guard_bundle.status`: `ok`
+- `guards.prompt_guard_bundle.artifact`: path to the prompt-suite guard JSON
+- `guards.prompt_guard_bundle.passed`
+- `guards.prompt_guard_bundle.acceptance_mode`
+- `guards.prompt_guard_bundle.strict_passed`
+- `guards.prompt_guard_bundle.behavioral_passed`
+- `guards.prompt_guard_bundle.compared_case_count`
+- `guards.prompt_guard_bundle.generated_token_match_count`
+- `guards.prompt_guard_bundle.generated_text_match_count`
+- `guards.prompt_guard_bundle.generated_without_stop_text_match_count`
+- `guards.prompt_guard_bundle.top_logits_match_count`
+- `guards.prompt_guard_bundle.max_prefill_top_logit_abs_diff`
+- `guards.prompt_guard_bundle.max_decode_last_top_logit_abs_diff`
+- `artifacts.prompt_guard_bundle_json`
+
 ## Status Values
 
 - `ok`: the benchmark ran and metrics are valid.

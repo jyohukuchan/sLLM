@@ -367,6 +367,9 @@ Done:
 - `build-sq-candidate-runtime-row.py` now preserves prompt-suite regression status and the
   prompt-suite guard metrics (`acceptance_mode`, strict/behavioral pass flags, compared case count,
   generated token/text match counts, and top-logit diff summaries) in candidate runtime rows.
+- `run-external-benchmark.py` can attach an existing prompt-suite guard bundle to
+  `inference-benchmark-result-v0.1` rows via `--prompt-guard-bundle-json`, preserving the same
+  regression status and guard metric summary beside throughput rows.
 
 ### M6: Dispatch Integration
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -606,6 +607,86 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         )
         self.assertEqual(status, "ok")
         self.assertIsNone(error)
+
+    def test_prompt_guard_bundle_fields_attached_when_token_logits_check_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_path = Path(tmpdir) / "prompt_guard_bundle.json"
+            bundle_path.write_text(
+                json.dumps(
+                    {
+                        "passed": True,
+                        "checks": [
+                            {
+                                "name": "prompt_suite_token_logits",
+                                "passed": True,
+                                "metrics": {
+                                    "acceptance_mode": "strict",
+                                    "strict_passed": True,
+                                    "behavioral_passed": True,
+                                    "compared_case_count": 12,
+                                    "generated_token_match_count": 10,
+                                    "generated_text_match_count": 9,
+                                    "generated_without_stop_text_match_count": 8,
+                                    "top_logits_match_count": 7,
+                                    "max_prefill_top_logit_abs_diff": 0.004,
+                                    "max_decode_last_top_logit_abs_diff": 0.005,
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bundle = TOOL.load_prompt_guard_bundle(bundle_path)
+            row = {"artifacts": {}}
+
+            TOOL.attach_prompt_guard_bundle_fields(row, bundle_path, bundle)
+
+            self.assertEqual(
+                row["quality"]["prompt_suite_regression_status"], "passed"
+            )
+            self.assertEqual(row["guards"]["prompt_guard_bundle"]["status"], "ok")
+            self.assertEqual(
+                row["guards"]["prompt_guard_bundle"]["artifact"], str(bundle_path)
+            )
+            self.assertEqual(row["guards"]["prompt_guard_bundle"]["acceptance_mode"], "strict")
+            self.assertEqual(
+                row["guards"]["prompt_guard_bundle"]["compared_case_count"], 12
+            )
+            self.assertEqual(
+                row["guards"]["prompt_guard_bundle"][
+                    "max_decode_last_top_logit_abs_diff"
+                ],
+                0.005,
+            )
+            self.assertTrue(row["guards"]["prompt_guard_bundle"]["passed"])
+            self.assertEqual(
+                row["artifacts"]["prompt_guard_bundle_json"], str(bundle_path)
+            )
+
+    def test_prompt_guard_bundle_fields_attached_when_token_logits_check_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_path = Path(tmpdir) / "prompt_guard_bundle.json"
+            bundle_path.write_text(
+                json.dumps({"passed": False, "checks": [{"name": "other_check"}]}),
+                encoding="utf-8",
+            )
+            bundle = TOOL.load_prompt_guard_bundle(bundle_path)
+            row = {"artifacts": {}}
+
+            TOOL.attach_prompt_guard_bundle_fields(row, bundle_path, bundle)
+
+            self.assertEqual(
+                row["quality"]["prompt_suite_regression_status"], "not_attached"
+            )
+            self.assertFalse(row["guards"]["prompt_guard_bundle"]["passed"])
+            self.assertIsNone(
+                row["guards"]["prompt_guard_bundle"]["acceptance_mode"]
+            )
+            self.assertIsNone(row["guards"]["prompt_guard_bundle"]["strict_passed"])
+            self.assertIsNone(
+                row["guards"]["prompt_guard_bundle"]["max_prefill_top_logit_abs_diff"]
+            )
 
     def test_parses_sq_fp8_selected_layer_model_loop_projection_telemetry(self) -> None:
         stdout = (
