@@ -6,6 +6,8 @@ Date: 2026-07-10
 
 This plan supersedes the execution order in `sq8-implementation-plan-v0.1.md`. The v0.1 document remains as implementation history.
 
+Schedule basis: acceptance-driven. There is no fixed completion deadline. Work advances only when the current phase satisfies its evidence and acceptance requirements.
+
 ## 前回の要点
 
 - resident loader、40層projection接続、real-request batch、D2D handoff、telemetryは再利用できる。
@@ -19,6 +21,7 @@ This plan supersedes the execution order in `sq8-implementation-plan-v0.1.md`. T
 - canonical artifact、device向けprepack、reference execution、optimized executionを別の契約として扱う。
 - full model統合より前に、source round-trip、1 linear oracle、実shape component benchmarkを必須にする。
 - 各phaseに成果物、合格条件、停止条件を設定する。
+- 固定の時間枠は設けず、初期component検証、最低限の機能完成、追加性能改善を分離する。
 
 ## 次の行動
 
@@ -57,7 +60,7 @@ Representative projection shapes:
 | gate/up projection | 17408 | 5120 |
 | down projection | 5120 | 17408 |
 
-The first 10-hour sprint uses only the q/o projection shape. The other shapes are follow-up work because one shape cannot represent KV and MLP behavior.
+The initial component checkpoint uses only the q/o projection shape. The other shapes follow after that checkpoint because one shape cannot represent KV and MLP behavior.
 
 Before each benchmark, record:
 
@@ -67,7 +70,7 @@ Before each benchmark, record:
 - GPU name, arch, clock/temperature observation, and device index;
 - random seed, input hash, warmup count, repeat count, and command line.
 
-## 3. Non-Goals For The First Sprint
+## 3. Non-Goals Before The Initial Component Gate
 
 - 40-layer integration;
 - full artifact generation for every tensor;
@@ -112,8 +115,6 @@ Result rows must identify the profile. A reference profile cannot be promoted as
 
 ### P0: Quarantine And Reproducibility Contract
 
-Timebox: 30-60 minutes
-
 Tasks:
 
 - mark 2026-07-09/10 uLLM Qwen3-14B-FP8 same-model rows as invalid for quality/performance conclusions without deleting history;
@@ -137,8 +138,6 @@ Stop condition:
 - do not begin performance work if model identity or source tensor pairing is ambiguous.
 
 ### P1: Source-Correct Canonical Artifact
-
-Timebox: 2-3 hours for one tensor and schema proof
 
 Tasks:
 
@@ -167,8 +166,6 @@ Stop condition:
 
 ### P2: Reference Correctness Path
 
-Timebox: 2-3 hours
-
 Tasks:
 
 - implement a small CPU oracle for canonical block-scale reconstruction and linear output;
@@ -187,9 +184,7 @@ Stop condition:
 
 - do not start W8A8 optimization until one linear layer matches the oracle.
 
-### P3: R9700 Capability Spike
-
-Timebox: 1 hour
+### P3: R9700 Execution Route Selection
 
 Evaluate in this order:
 
@@ -214,12 +209,12 @@ Acceptance:
 
 Stop condition:
 
-- do not spend the sprint trying libraries without a one-hour decision point;
+- stop evaluating alternatives after one route satisfies the required operation, numerical gate, and P4 performance gate;
+- if no library route supports the operation, record the unsupported constraints and define the smallest direct-kernel work package before implementation;
+- do not evaluate another library merely for theoretical peak performance unless profiler evidence shows that the selected route cannot meet P4;
 - implicit BF16 fallback is not an FP8 performance proof.
 
 ### P4: One-Projection Optimized Component
-
-Timebox: 4-5 hours for the first q/o shape proof
 
 Tasks:
 
@@ -239,18 +234,29 @@ Provisional numerical gate, frozen before GPU result inspection:
 Performance gate:
 
 - report p50 latency and aggregate throughput after fixed warmup/repeats;
-- M=8 aggregate throughput >= `2.5x` M=2 for the first q/o shape;
 - activation quantization time is included in the promotion number;
-- profiler evidence confirms the intended FP8 matrix path and rules out cache-only artifacts.
+- profiler evidence confirms the intended FP8 matrix path and rules out cache-only artifacts;
+- aggregate throughput increases beyond the repeated-measurement noise band from M=2 to M=8;
+- the optimized component is faster than `reference_w8a16` for the same shape and inputs.
+
+Recommended initial target:
+
+- M=8 aggregate throughput >= `2.5x` M=2 for the first q/o shape.
+
+Missing the recommended ratio does not block source-correct functional integration when scaling is non-flat and the remaining bottleneck is explained by profiler evidence. It does block claiming that the target performance has been reached.
 
 Stop condition:
 
-- if b2-b8 remains flat, stop integration work and save the profiler-backed bottleneck result;
+- if b2-b8 remains flat, stop optimized-path integration and save the profiler-backed bottleneck result;
+- a source-correct `reference_w8a16` integration may continue for functional validation, but it must remain labeled as reference;
 - do not compensate for a failed component gate with host-staging, schema, descriptor, or serving work.
 
 ### P5: Shape Expansion And One Decoder Layer
 
-Entry gate: P1-P4 green
+Entry gates:
+
+- functional path: P1 and P2 green, with the P3 route decision recorded;
+- optimized path: the P4 required performance gate is also green.
 
 Tasks:
 
@@ -262,18 +268,23 @@ Tasks:
 
 Acceptance:
 
-- all four projection classes pass frozen numerical gates;
+- all four projection classes pass source-correct numerical gates;
 - no projection uses an unreported fallback;
 - one decoder layer passes intermediate and final-output checks;
-- optimized layer latency improves over the source-correct reference path.
+- any projection labeled optimized has passed the P4 required performance gate;
+- optimized layer latency improves over the source-correct reference path when an optimized layer is present.
 
 Stop condition:
 
-- do not scale to 40 layers while any dominant projection shape is unverified or flat.
+- do not scale an optimized path to 40 layers while any dominant projection shape is unverified or flat;
+- the source-correct reference path may proceed to full-model functional validation without an optimized label.
 
 ### P6: Full Model And Prefill
 
-Entry gate: one decoder layer green
+Entry gates:
+
+- functional path: one source-correct decoder layer green;
+- optimized path: one optimized decoder layer green.
 
 Tasks:
 
@@ -309,30 +320,89 @@ Acceptance:
 - comparison gates verify model identity, workload identity, execution profile, output health, fallback state, and artifact hash;
 - vLLM comparison contains no quarantined uLLM rows.
 
-## 6. First 10-Hour Sprint
+## 6. Initial Validation Checkpoint
 
-The sprint objective is not full-model parity. It is to decide, with reproducible evidence, whether source-correct SQ8_0 can use an efficient FP8 path on the R9700.
+This checkpoint decides, with reproducible evidence, whether source-correct SQ8_0 can use an efficient FP8 path on the R9700. It has no fixed duration.
 
-| elapsed target | work | required output |
-| --- | --- | --- |
-| 0:00-0:30 | P0 contract and quarantine | fixed hashes, input, commands, validity rules |
-| 0:30-3:00 | P1 canonical one-tensor artifact | byte-exact payload/scale round-trip and source golden |
-| 3:00-5:00 | P2 one-linear reference | CPU/GPU correctness report |
-| 5:00-6:00 | P3 capability spike | selected library/kernel route with profiler evidence or explicit blocker |
-| 6:00-9:30 | P4 first component slice | dynamic activation quantization plus first M grid, or a measured blocker |
-| 9:30-10:00 | decision and result freeze | Green/Yellow/Red decision, commands, metrics, profiler record |
+| order | work | required output |
+| ---: | --- | --- |
+| 1 | P0 contract and quarantine | fixed hashes, input, commands, and validity rules |
+| 2 | P1 canonical one-tensor artifact | byte-exact payload/scale round-trip and source golden |
+| 3 | P2 one-linear reference | CPU/GPU correctness report |
+| 4 | P3 capability check | selected library/kernel route with profiler evidence or explicit blocker |
+| 5 | P4 q/o projection component | dynamic activation quantization, M grid, correctness, and batch scaling |
+| 6 | result freeze | commands, metrics, profiler record, and next-route decision |
 
-Expected end states:
+Checkpoint outcomes:
 
-- Green: source-correct artifact plus one q/o projection shows valid FP8 execution and batch scaling.
-- Yellow: artifact/reference are correct, but the available library path is unsupported or does not scale; direct-kernel requirements and profiler evidence are fixed.
-- Red: artifact round-trip is not correct; performance work remains blocked.
+- Green: source-correct artifact plus one q/o projection shows valid FP8 execution and batch scaling. Continue to P5.
+- Yellow: artifact/reference are correct, but available library routes are unsupported or do not scale. Implement the bounded direct-kernel work package, then repeat P4.
+- Red: artifact round-trip or one-linear correctness is not valid. Remain in P1/P2 and do not begin performance integration.
 
-Green does not authorize skipping P5 one-layer validation. Yellow is still a useful outcome because it prevents more full-model integration on an unsuitable kernel contract.
+No later phase may be compressed or skipped because an earlier phase took longer than expected.
 
-These are timebox targets, not permission to skip an entry gate. If an earlier phase consumes the remaining sprint, save its evidence and stop instead of compressing or bypassing the later checks.
+## 7. Minimum Functional Completion
 
-## 7. Global Promotion Rules
+The minimum functional SQ8_0 implementation is complete when all of the following are true:
+
+- the full Qwen3-14B-FP8 canonical artifact accounts for every expected weight/scale pair and passes reconstruction checks;
+- all four representative projection classes pass source-correct numerical gates and use measured dispatch decisions;
+- one complete decoder layer passes independent intermediate and final-output checks;
+- all 40 layers run through resident buffers and D2D handoff without an unreported fallback;
+- the model runs from resident SQ8_0 payload/scale buffers without whole-model F32 expansion;
+- prefill batches or chunks prompt tokens instead of executing only one timestep at a time;
+- lm_head, sampling, next-token feedback, EOS, and request completion are part of the real generation loop;
+- output health, artifact identity, execution profile, fallback state, and request-level metrics are reported through typed results;
+- an implementation-valid uLLM functional baseline is recorded.
+
+The minimum functional completion does not require:
+
+- exact performance parity with vLLM;
+- every possible QKV, gate/up, normalization, or activation fusion;
+- peak tuning for every M and projection shape;
+- HTTP transport;
+- RDNA2/V620 native FP8 optimization.
+
+Performance differences found at this point become measured follow-up work, not reasons to keep changing the minimum implementation without an identified bottleneck.
+
+### 7.1 Optimized v0 Completion
+
+The R9700 optimized v0 is complete when:
+
+- all dominant projection classes use `rdna4_w8a8_block` or another explicitly named native FP8 profile without an unreported fallback;
+- profiler evidence confirms native FP8 matrix instructions;
+- prefill uses token batching or chunking and decode has a measured small-M path;
+- steady-state host staging is zero on the measured path;
+- activation quantization-inclusive execution is faster than `reference_w8a16` and batch scaling is not flat;
+- the recommended M=8/M=2 target is either met or the remaining gap is documented with profiler evidence;
+- a same-condition vLLM result is recorded for context, without requiring exact performance parity.
+
+## 8. Optimization Scope Control
+
+Additional optimization starts only when one of these entry conditions is true:
+
+- an existing P4-P7 performance gate is not met;
+- profiler evidence identifies the operation as at least 10% of measured end-to-end runtime;
+- the current path has a structural defect such as flat batch scaling, repeated full-weight reads, avoidable host synchronization, or an implicit fallback.
+
+Every optimization work package must state before implementation:
+
+- the measured bottleneck;
+- the expected affected metric and minimum useful gain;
+- the files and execution boundary in scope;
+- the correctness tests that must remain green;
+- the rollback condition.
+
+Optimization stops when:
+
+- the functional completion conditions and existing performance gates are satisfied, and the next idea has less than 5% estimated end-to-end impact;
+- two consecutive work packages against the same bottleneck each produce less than 3% repeatable end-to-end improvement;
+- the profiler shows that another subsystem is now dominant;
+- an optimization increases complexity without a repeatable measured gain.
+
+Exceptions require a correctness, compatibility, or maintainability reason recorded before the work begins. Descriptor additions, counter changes, and benchmark-schema changes are not optimization progress by themselves.
+
+## 9. Global Promotion Rules
 
 - Correctness precedes performance.
 - Component evidence precedes layer integration.
@@ -344,7 +414,7 @@ These are timebox targets, not permission to skip an entry gate. If an earlier p
 - A result using an implicit or unreported fallback cannot be labeled native SQ8_0 performance.
 - Any change to artifact semantics, activation quantization, accumulation type, or prepack version reruns the relevant lower-level gates.
 
-## 8. Reusable And Deferred Work
+## 10. Reusable And Deferred Work
 
 Reuse now:
 
@@ -368,9 +438,9 @@ Defer until their entry gates:
 - HTTP serving;
 - final vLLM grid.
 
-## 9. Completion Definition
+## 11. Completion Definition
 
-SQ8_0 recovery is complete when:
+The SQ8_0 functional implementation and R9700 optimized v0 have separate completion states defined above. This recovery plan is complete when both states are satisfied:
 
 - canonical artifacts preserve exact source FP8 payload and 2D block scales;
 - source, CPU reference, GPU reference, and optimized execution have independent passing evidence;
@@ -378,4 +448,5 @@ SQ8_0 recovery is complete when:
 - one decoder layer and the full model pass oracle/output-health checks;
 - prefill uses token batching or chunking and decode uses an appropriate small-M path;
 - real generation drives subsequent token inputs;
-- external comparisons use the same model and workload and exclude quarantined rows.
+- external comparisons use the same model and workload and exclude quarantined rows, without requiring exact vLLM parity;
+- any remaining performance gap is recorded as a profiler-backed backlog item rather than an open-ended completion blocker.
