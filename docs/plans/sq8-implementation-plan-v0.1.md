@@ -388,6 +388,15 @@ Done:
   overlay still enters `sq_execution_mode=materialized_f32_fallback` with no direct SQ8_0 projection
   counters. This proves the existing stack scheduler can carry SQ overlay metadata through a real
   batch-shaped run, but it is not yet a direct resident SQ8_0 stack execution path.
+- A resident stack diagnostic command now exists:
+  `sq-fp8-package-self-attn-stack-batch-smoke`. For the layer3 Qwen3.5 SQ8_0 artifact it reports
+  `sq_execution_mode=direct_fp8_dequant_matvec` and
+  `sq_projection_boundary=single+triple`, proving the mixed request-state stack path can avoid
+  materialized F32 SQ8_0 weights. The first saved row is
+  `benchmarks/results/2026-07-09/sq8-stack-resident-diagnostic/results.jsonl`.
+  It is still `batching_mode=grouped` with `prefill_real_batch=false`,
+  `decode_real_batch=false`, and `sq_fp8_batch_matvec_count=0/21`, so it is a resident
+  stack-connectivity diagnostic rather than the final full-package real-batch row.
 
 ### M6: Dispatch Integration
 
@@ -803,6 +812,10 @@ Expected outputs:
      step is to move the stack/model-loop layer runtime onto a resident projection abstraction such
      as `PackageAq4ResidentMatvec` or a new resident stack-batch layer that can call
      `matvec_batch` for q/k/v/o/gate/up/down.
+   - The new `sq-fp8-package-self-attn-stack-batch-smoke` closes the materialized-F32 side of this
+     blocker for a stack-shaped diagnostic by using the resident mixed request-state path. It does
+     not close the real-batch side yet: the current row is grouped and uses direct `single+triple`
+     projection boundaries, with no SQ8_0 batch matvec calls.
    - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
      final vLLM serving comparison still needs real-batch or server-style uLLM rows.
 

@@ -336,6 +336,14 @@ materialization timer; it must not alias `layer_load_ms`.
 `hybrid` rows are useful for connecting scheduler/runtime request batching to the result schema, but
 they must not be mixed with final `real` full-package throughput rows in SQ/vLLM comparisons.
 
+SQ8_0 resident stack diagnostics, such as `sq-fp8-package-self-attn-stack-batch-smoke`, may also
+use the model-loop parser. These rows prove that the stack path can avoid F32 materialized SQ8_0
+weights and use resident direct projection boundaries. If they report `batching.mode="grouped"`,
+`prefill_real_batch=false`, `decode_real_batch=false`, or
+`sq_fp8_batch_matvec_count < sq_fp8_expected_all_batch_matvec_count`, they are not final real-batch
+serving rows. They should remain in a diagnostic comparison class even when `sq_execution_mode` is
+`direct_fp8_dequant_matvec`.
+
 SQ candidate rows may also carry a top-level `candidate` object:
 
 - `candidate.id`: e.g. `sq-fp8-w8a16-r9700-v0`

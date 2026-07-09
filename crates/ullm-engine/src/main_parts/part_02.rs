@@ -2916,6 +2916,124 @@ fn sq_fp8_token_ids_mixed_request_state_smoke(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn sq_fp8_package_self_attn_stack_batch_smoke(
+    path: Option<String>,
+    artifact_path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    prompt_token_ids_batch: Option<String>,
+    generated_tokens_batch: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("sq-fp8-package-self-attn-stack-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(artifact_path) = artifact_path else {
+        eprintln!("sq-fp8-package-self-attn-stack-batch-smoke requires an SQ FP8 artifact path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_model_loop_layer_indices(
+        &path,
+        layer_indices.or_else(|| Some("all-self-attn".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids_batch = match parse_package_prompt_token_ids_batch(
+        prompt_token_ids_batch.or_else(|| Some("len:2x2".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let generated_tokens_batch = match parse_package_generated_tokens_batch(
+        generated_tokens_batch,
+        prompt_token_ids_batch.len(),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 1, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let artifact = match read_sq_fp8_artifact(&artifact_path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read SQ FP8 artifact: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
+        "sq-fp8-package-self-attn-stack-batch-smoke",
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        Some(&artifact),
+    ) {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn package_token_ids_mixed_request_state_smoke_impl(
     path: &str,
     device_index: u32,
@@ -3346,6 +3464,30 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     let decode_sq_fp8_batch_matvec_count = decode_sq_fp8_projection_telemetry
         .batch_matvec_count
         .saturating_sub(prefill_sq_fp8_projection_telemetry.batch_matvec_count);
+    let expected_sq_fp8_batch_matvec_steps = request_plan
+        .prompt_tokens
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .checked_add(
+            request_plan
+                .max_new_tokens
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0),
+        )
+        .unwrap_or(0);
+    let expected_sq_fp8_batch_matvec_layer_count = layer_kinds
+        .iter()
+        .filter(|kind| **kind == PackageDecoderLayerKind::SelfAttention.as_str())
+        .count();
+    let sq_fp8_expected_all_batch_matvec_count = expected_sq_fp8_batch_matvec_steps
+        .checked_mul(7)
+        .and_then(|value| value.checked_mul(expected_sq_fp8_batch_matvec_layer_count))
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(0);
     let (prefill_real_batch, decode_real_batch, real_batch_projection_used) =
         infer_mixed_request_state_real_batch_flags(
             prefill_request_grouped,
@@ -3406,7 +3548,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     };
 
     Ok(format!(
-        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state format_id={} full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true sq_overlay={} sq_candidate={} sq_candidate_legacy={} sq_format_id={} sq_implementation_id={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_projection_implementation_ids={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} prefill_sq_fp8_batch_matvec_count={} decode_sq_fp8_batch_matvec_count={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} mixed_request_state_real_batch_projection_used={} prefill_request_grouped={} decode_request_grouped={} prefill_grouped_request_parallelism={} decode_grouped_request_parallelism={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state format_id={} full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true sq_overlay={} sq_candidate={} sq_candidate_legacy={} sq_format_id={} sq_implementation_id={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_projection_implementation_ids={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_expected_all_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} prefill_sq_fp8_batch_matvec_count={} decode_sq_fp8_batch_matvec_count={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} mixed_request_state_real_batch_projection_used={} prefill_request_grouped={} decode_request_grouped={} prefill_grouped_request_parallelism={} decode_grouped_request_parallelism={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
         command_name,
         path,
         layer_indices,
@@ -3429,6 +3571,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         sq_projection_implementation_ids,
         sq_fp8_projection_telemetry.single_matvec_count,
         sq_fp8_projection_telemetry.batch_matvec_count,
+        sq_fp8_expected_all_batch_matvec_count,
         sq_fp8_projection_telemetry.pair_matvec_count,
         sq_fp8_projection_telemetry.triple_matvec_count,
         prefill_sq_fp8_batch_matvec_count,
