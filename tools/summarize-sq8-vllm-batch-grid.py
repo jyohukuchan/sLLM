@@ -617,6 +617,44 @@ def ullm_sq_batch_coverage_gate_failures(
     return failures
 
 
+def ullm_sq_no_host_staging_gate_failures(
+    rows: list[dict[str, Any]],
+) -> list[str]:
+    failures: list[str] = []
+    host_staging_fields = (
+        "sq_diagnostic_host_staging_read_count",
+        "sq_diagnostic_host_staging_write_count",
+        "sq_diagnostic_host_staging_read_bytes",
+        "sq_diagnostic_host_staging_write_bytes",
+    )
+    for row in rows:
+        engine_name = as_str(as_dict(row.get("engine")).get("name"))
+        workload = as_dict(row.get("workload"))
+        if engine_name != "uLLM":
+            continue
+        if as_str(workload.get("format_id")) != "SQ8_0":
+            continue
+
+        for field in host_staging_fields:
+            raw_value = workload.get(field)
+            if raw_value is None:
+                continue
+            value = as_int(raw_value)
+            if value is None:
+                failures.append(
+                    f"selected uLLM SQ8_0 row has malformed host staging metric: "
+                    f"{harness_summary(row)} {field}={as_str(raw_value)}"
+                )
+                break
+            if value != 0:
+                failures.append(
+                    f"selected uLLM SQ8_0 row has non-zero host staging metric: "
+                    f"{harness_summary(row)} {field}={as_str(raw_value)}"
+                )
+                break
+    return failures
+
+
 def required_engines_grid_gate_failures(
     rows: list[dict[str, Any]],
     required_engines: set[str],
@@ -703,6 +741,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--require-ullm-sq-no-host-staging",
+        action="store_true",
+        help=(
+            "fail when selected uLLM SQ8_0 rows have non-zero "
+            "workload.sq_diagnostic_host_staging_* values"
+        ),
+    )
+    parser.add_argument(
         "--require-normalized-throughput-comparison",
         action="store_true",
         help=(
@@ -741,6 +787,7 @@ def main() -> int:
             or args.require_ullm_sq_kernel_families
             or args.require_ullm_sq_batch_coverage
             or args.require_normalized_throughput_comparison
+            or args.require_ullm_sq_no_host_staging
         )
         if requires_gate:
             rows = selected_rows(
@@ -775,6 +822,12 @@ def main() -> int:
                 )
             else:
                 ullm_sq_batch_coverage_failures = []
+            if args.require_ullm_sq_no_host_staging:
+                ullm_sq_no_host_staging_failures = (
+                    ullm_sq_no_host_staging_gate_failures(rows)
+                )
+            else:
+                ullm_sq_no_host_staging_failures = []
             if args.require_normalized_throughput_comparison:
                 normalized_throughput_comparison_failures = (
                     normalized_throughput_comparison_gate_failures(
@@ -796,6 +849,7 @@ def main() -> int:
             required_engine_failures = []
             ullm_sq_kernel_families_failures = []
             ullm_sq_batch_coverage_failures = []
+            ullm_sq_no_host_staging_failures = []
             normalized_throughput_comparison_failures = []
         for line in markdown_lines(rows, show_sq_details=args.show_sq_details):
             print(line)
@@ -804,10 +858,11 @@ def main() -> int:
             or required_engine_failures
             or ullm_sq_kernel_families_failures
             or ullm_sq_batch_coverage_failures
+            or ullm_sq_no_host_staging_failures
             or normalized_throughput_comparison_failures
         ):
             print(
-                f"serving parity gate failed: {selected_count} selected row(s)",
+                f"batch-grid gate failed: {selected_count} selected row(s)",
                 file=sys.stderr,
             )
             for line in (
@@ -815,6 +870,7 @@ def main() -> int:
                 + required_engine_failures
                 + ullm_sq_kernel_families_failures
                 + ullm_sq_batch_coverage_failures
+                + ullm_sq_no_host_staging_failures
                 + normalized_throughput_comparison_failures
             ):
                 print(line, file=sys.stderr)

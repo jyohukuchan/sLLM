@@ -52,6 +52,10 @@ def make_row(
     prefill_real_batch: bool | None = None,
     decode_real_batch: bool | None = None,
     final_logits_in_total: bool | None = None,
+    sq_diagnostic_host_staging_read_count: int | None = None,
+    sq_diagnostic_host_staging_write_count: int | None = None,
+    sq_diagnostic_host_staging_read_bytes: int | None = None,
+    sq_diagnostic_host_staging_write_bytes: int | None = None,
 ) -> dict:
     row = {
         "case_id": case_id,
@@ -94,6 +98,22 @@ def make_row(
         row["workload"]["decode_real_batch"] = decode_real_batch
     if final_logits_in_total is not None:
         row["workload"]["final_logits_in_total"] = final_logits_in_total
+    if sq_diagnostic_host_staging_read_count is not None:
+        row["workload"][
+            "sq_diagnostic_host_staging_read_count"
+        ] = sq_diagnostic_host_staging_read_count
+    if sq_diagnostic_host_staging_write_count is not None:
+        row["workload"][
+            "sq_diagnostic_host_staging_write_count"
+        ] = sq_diagnostic_host_staging_write_count
+    if sq_diagnostic_host_staging_read_bytes is not None:
+        row["workload"][
+            "sq_diagnostic_host_staging_read_bytes"
+        ] = sq_diagnostic_host_staging_read_bytes
+    if sq_diagnostic_host_staging_write_bytes is not None:
+        row["workload"][
+            "sq_diagnostic_host_staging_write_bytes"
+        ] = sq_diagnostic_host_staging_write_bytes
     return row
 
 
@@ -1577,6 +1597,165 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                     status = TOOL.main()
             self.assertEqual(status, 0)
             self.assertEqual(stderr.getvalue(), "")
+
+
+    def test_require_ullm_sq_no_host_staging_fails_when_non_zero_read_count(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "non_zero_host_staging.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                        sq_diagnostic_host_staging_read_count=1,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-no-host-staging",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("sq_diagnostic_host_staging_read_count", stderr.getvalue())
+
+    def test_require_ullm_sq_no_host_staging_passes_when_all_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "zero_host_staging.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                format_id="SQ8_0",
+                                sq_diagnostic_host_staging_read_count=0,
+                                sq_diagnostic_host_staging_write_count=0,
+                                sq_diagnostic_host_staging_read_bytes=0,
+                                sq_diagnostic_host_staging_write_bytes=0,
+                            )
+                        )
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-no-host-staging",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_require_ullm_sq_no_host_staging_passes_when_missing_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "missing_host_staging.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-no-host-staging",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_require_ullm_sq_no_host_staging_fails_when_metric_is_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "malformed_host_staging.jsonl"
+            row = make_row(
+                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                engine_name="uLLM",
+                prompt_tokens=16,
+                generated_tokens=8,
+                batch_size=2,
+                format_id="SQ8_0",
+            )
+            row["workload"]["sq_diagnostic_host_staging_write_bytes"] = "unknown"
+            path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-no-host-staging",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("malformed host staging metric", stderr.getvalue())
+            self.assertIn("sq_diagnostic_host_staging_write_bytes=unknown", stderr.getvalue())
 
 
 if __name__ == "__main__":

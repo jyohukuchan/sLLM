@@ -897,6 +897,8 @@ Expected outputs:
   `--require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families`.
   The same summary helper can add `--show-sq-details` to display `SQ boundary`, `SQ family`, and
   `SQ batch` columns in the comparison table.
+- `--require-ullm-sq-no-host-staging` is available as an optional stricter gate for final
+  serving-style comparisons; it is not required for the current normalized model-loop comparison.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
 - The vLLM row should be produced through the derived command template in
