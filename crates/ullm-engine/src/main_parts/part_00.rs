@@ -50,9 +50,10 @@ use ullm_engine::scheduler::{
     SchedulerState,
 };
 use ullm_engine::sq::{
-    materialize_sq_fp8_tensor_rows_to_runtime_f32, read_named_sq_fp8_tensor_compact_bytes,
-    read_sq_fp8_artifact, select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
+    materialize_sq_fp8_tensor_rows_to_runtime_f32, read_sq_fp8_artifact,
+    select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
 };
+use ullm_engine::sq_runtime::{Sq8ResidentRuntimeTensorRef, load_sq8_resident_tensor};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct SqFp8ProjectionTelemetry {

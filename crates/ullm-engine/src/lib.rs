@@ -13,3 +13,4 @@ pub mod package;
 pub mod qwen3_loader;
 pub mod scheduler;
 pub mod sq;
+pub mod sq_runtime;
