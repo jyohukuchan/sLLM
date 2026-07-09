@@ -4540,6 +4540,40 @@ Quality:
 2. 現branchのcoverage拡大はlayer23 `k16` までで止める。
 3. 次はtext-level guardの追加、layer23 q/vの別scale/layout、またはSQ候補の評価基盤側へ戻る。
 
+## 2026-07-09 progress: T2 SQ FP8 qkv layer23 q/v scale prompt bundle
+
+前回の要点:
+
+- layer23 `k16` はprompt bundleとB=1/4/8 short guardでstrict top1を維持した。
+- layer23 `q8` と `v16` は単体でも`case_a`を崩したため、row-block scaleを強めれば回復するかを確認する必要があった。
+
+今回の変更点:
+
+- layer23 `k16` 通過branchをbaseにして、layer23 `q4`、`v8`、`v4` をそれぞれ追加した。
+- SQ側は `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL=1` と `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL=1` でdirect kernelを必須化した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer23-q4-v1.md`、`phase-t2-sq-fp8-qkv-layer23-v8-v1.md`、`phase-t2-sq-fp8-qkv-layer23-v4-v1.md`、および `phase-t2-sq-fp8-qkv-layer23-qv-scale-v1-comparison.json` に保存した。
+
+実測値:
+
+| row | FP8 tensors | prefill tok/s | decode tok/s | end-to-end tok/s | final top1 | strict top1 |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| SQ `layer23 q4` | 17 | 59.477712 | 72.272506 | 31.749085 | `24218,5582,329` | 2 / 3 |
+| SQ `layer23 v8` | 17 | 59.730593 | 73.144428 | 33.132245 | `24218,5582,329` | 2 / 3 |
+| SQ `layer23 v4` | 17 | 59.687315 | 73.212004 | 32.586644 | `24218,5582,329` | 2 / 3 |
+
+判断:
+
+- layer23 `q4` は`case_a`でstrict top1を落とし、q側はrow-block4でも回復しなかった。
+- layer23 `v8` は`case_a`でSQ top1 `5582` とAQ4 top1 `4105` の差が `0.000022412` まで縮まったが、promotion ruleはstrict top1なので失敗として扱う。
+- layer23 `v4` も`case_a`でstrict top1を落としたため、v側はrow-block8/4のscale強化だけでは回復しない。
+- 現branchで通過boundaryとして維持するのはlayer23 `k16` までとし、q/vはfailure guardとして保存する。
+
+次の行動:
+
+1. layer23 `q4` / `v8` / `v4` をfailure guardとして保持する。
+2. q/vをさらに追う場合は、row-block幅だけでなく別format/layout、text-level guard、またはlogit近傍を安定させるSQ基準を検討する。
+3. SQ候補評価基盤側へ戻る場合も、現時点のpassing branchはlayer23 `k16`までとして扱う。
+
 ## Risks
 
 | risk | impact | handling |
