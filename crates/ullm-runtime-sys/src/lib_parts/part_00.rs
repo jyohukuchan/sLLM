@@ -392,6 +392,31 @@ unsafe extern "C" {
         output_buffer: *mut RawRuntimeBuffer,
         stream: *mut RawRuntimeStream,
     ) -> c_int;
+    fn ullm_runtime_sq_fp8_matvec_block2d_f32(
+        payload_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        scale_block_rows: usize,
+        scale_block_cols: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+        execution_path: *mut c_int,
+    ) -> c_int;
+    fn ullm_runtime_sq_fp8_matvec_block2d_batch_f32(
+        payload_buffer: *const RawRuntimeBuffer,
+        scale_buffer: *const RawRuntimeBuffer,
+        input_buffer: *const RawRuntimeBuffer,
+        rows: usize,
+        cols: usize,
+        scale_block_rows: usize,
+        scale_block_cols: usize,
+        batch_count: usize,
+        output_buffer: *mut RawRuntimeBuffer,
+        stream: *mut RawRuntimeStream,
+        execution_path: *mut c_int,
+    ) -> c_int;
     fn ullm_runtime_sq_fp8_matvec_pair_f32(
         left_payload_buffer: *const RawRuntimeBuffer,
         left_scale_buffer: *const RawRuntimeBuffer,
@@ -2561,6 +2586,22 @@ pub fn matvec_f32(
 pub const SQ_FP8_SCALE_TENSOR: u32 = 0;
 pub const SQ_FP8_SCALE_ROW: u32 = 1;
 pub const SQ_FP8_SCALE_ROW_BLOCK: u32 = 2;
+pub const SQ_FP8_EXECUTION_PATH_CPU_REFERENCE: i32 = 0;
+pub const SQ_FP8_EXECUTION_PATH_HIP_KERNEL: i32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqFp8ExecutionPath {
+    CpuReference,
+    HipKernel,
+}
+
+fn sq_fp8_execution_path(raw: c_int) -> Result<SqFp8ExecutionPath, String> {
+    match raw {
+        SQ_FP8_EXECUTION_PATH_CPU_REFERENCE => Ok(SqFp8ExecutionPath::CpuReference),
+        SQ_FP8_EXECUTION_PATH_HIP_KERNEL => Ok(SqFp8ExecutionPath::HipKernel),
+        _ => Err(format!("SQ FP8 runtime returned unknown execution path {raw}")),
+    }
+}
 
 pub fn sq_fp8_matvec_f32(
     payload_buffer: &RuntimeBuffer,
@@ -2706,6 +2747,162 @@ pub fn sq_fp8_matvec_batch_f32(
             stream,
         )
     })
+}
+
+struct SqFp8Block2dBufferLengths {
+    payload: usize,
+    scales: usize,
+    input: usize,
+    output: usize,
+}
+
+fn sq_fp8_block2d_buffer_lengths(
+    rows: usize,
+    cols: usize,
+    scale_block_rows: usize,
+    scale_block_cols: usize,
+    batch_count: usize,
+) -> Result<SqFp8Block2dBufferLengths, String> {
+    if rows == 0 || cols == 0 || batch_count == 0 {
+        return Err(
+            "SQ FP8 block2d matvec rows, cols, and batch count must be greater than zero"
+                .to_string(),
+        );
+    }
+    if scale_block_rows == 0 || scale_block_cols == 0 {
+        return Err(
+            "SQ FP8 block2d matvec scale block rows and cols must be greater than zero"
+                .to_string(),
+        );
+    }
+    let payload = rows
+        .checked_mul(cols)
+        .ok_or_else(|| "SQ FP8 block2d matvec matrix element count overflows".to_string())?;
+    let scale_block_row_count = 1 + (rows - 1) / scale_block_rows;
+    let scale_block_col_count = 1 + (cols - 1) / scale_block_cols;
+    let scale_values = scale_block_row_count
+        .checked_mul(scale_block_col_count)
+        .ok_or_else(|| "SQ FP8 block2d matvec scale count overflows".to_string())?;
+    let scales = scale_values
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 block2d matvec scale byte size overflows".to_string())?;
+    let input_elements = batch_count
+        .checked_mul(cols)
+        .ok_or_else(|| "SQ FP8 block2d matvec input element count overflows".to_string())?;
+    let input = input_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 block2d matvec input byte size overflows".to_string())?;
+    let output_elements = batch_count
+        .checked_mul(rows)
+        .ok_or_else(|| "SQ FP8 block2d matvec output element count overflows".to_string())?;
+    let output = output_elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| "SQ FP8 block2d matvec output byte size overflows".to_string())?;
+    Ok(SqFp8Block2dBufferLengths {
+        payload,
+        scales,
+        input,
+        output,
+    })
+}
+
+fn validate_sq_fp8_block2d_buffers(
+    payload_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    output_buffer: &RuntimeBuffer,
+    lengths: &SqFp8Block2dBufferLengths,
+) -> Result<(), String> {
+    check_copy_range(0, lengths.payload, payload_buffer.size()?)?;
+    check_copy_range(0, lengths.scales, scale_buffer.size()?)?;
+    check_copy_range(0, lengths.input, input_buffer.size()?)?;
+    check_copy_range(0, lengths.output, output_buffer.size()?)?;
+    Ok(())
+}
+
+pub fn sq_fp8_matvec_block2d_f32(
+    payload_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    scale_block_rows: usize,
+    scale_block_cols: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<SqFp8ExecutionPath, String> {
+    let lengths =
+        sq_fp8_block2d_buffer_lengths(rows, cols, scale_block_rows, scale_block_cols, 1)?;
+    validate_sq_fp8_block2d_buffers(
+        payload_buffer,
+        scale_buffer,
+        input_buffer,
+        output_buffer,
+        &lengths,
+    )?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    let mut execution_path = -1;
+    status_to_result(unsafe {
+        ullm_runtime_sq_fp8_matvec_block2d_f32(
+            payload_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            rows,
+            cols,
+            scale_block_rows,
+            scale_block_cols,
+            output_buffer.raw.as_ptr(),
+            stream,
+            &mut execution_path,
+        )
+    })?;
+    sq_fp8_execution_path(execution_path)
+}
+
+pub fn sq_fp8_matvec_block2d_batch_f32(
+    payload_buffer: &RuntimeBuffer,
+    scale_buffer: &RuntimeBuffer,
+    input_buffer: &RuntimeBuffer,
+    rows: usize,
+    cols: usize,
+    scale_block_rows: usize,
+    scale_block_cols: usize,
+    batch_count: usize,
+    output_buffer: &mut RuntimeBuffer,
+    stream: Option<&mut RuntimeStream>,
+) -> Result<SqFp8ExecutionPath, String> {
+    let lengths = sq_fp8_block2d_buffer_lengths(
+        rows,
+        cols,
+        scale_block_rows,
+        scale_block_cols,
+        batch_count,
+    )?;
+    validate_sq_fp8_block2d_buffers(
+        payload_buffer,
+        scale_buffer,
+        input_buffer,
+        output_buffer,
+        &lengths,
+    )?;
+    let stream = stream.map_or(std::ptr::null_mut(), |stream| stream.raw.as_ptr());
+    let mut execution_path = -1;
+    status_to_result(unsafe {
+        ullm_runtime_sq_fp8_matvec_block2d_batch_f32(
+            payload_buffer.raw.as_ptr(),
+            scale_buffer.raw.as_ptr(),
+            input_buffer.raw.as_ptr(),
+            rows,
+            cols,
+            scale_block_rows,
+            scale_block_cols,
+            batch_count,
+            output_buffer.raw.as_ptr(),
+            stream,
+            &mut execution_path,
+        )
+    })?;
+    sq_fp8_execution_path(execution_path)
 }
 
 fn sq_fp8_scale_byte_len(

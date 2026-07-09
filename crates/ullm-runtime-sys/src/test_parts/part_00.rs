@@ -388,6 +388,192 @@
     }
 
     #[test]
+    fn cpu_sq_fp8_matvec_block2d_f32_shares_scales_across_adjacent_rows() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut payload = context.alloc_buffer(9).unwrap();
+        let mut scales = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        payload
+            .copy_from_host(0, &[0x38; 9], Some(&mut stream))
+            .unwrap();
+        scales
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[2.0, 3.0, 5.0, 7.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        input
+            .copy_from_host(0, &f32s_to_le_bytes(&[1.0, 1.0, 1.0]), Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let path = sq_fp8_matvec_block2d_f32(
+            &payload,
+            &scales,
+            &input,
+            3,
+            3,
+            2,
+            2,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        assert_eq!(path, SqFp8ExecutionPath::CpuReference);
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 3 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(le_bytes_to_f32s(&output_bytes), vec![7.0, 7.0, 17.0]);
+    }
+
+    #[test]
+    fn cpu_sq_fp8_matvec_block2d_batch_f32_reports_reference_path() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut payload = context.alloc_buffer(9).unwrap();
+        let mut scales = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        payload
+            .copy_from_host(0, &[0x38; 9], Some(&mut stream))
+            .unwrap();
+        scales
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[2.0, 3.0, 5.0, 7.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        input
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[1.0, 1.0, 1.0, 1.0, 0.0, 1.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let path = sq_fp8_matvec_block2d_batch_f32(
+            &payload,
+            &scales,
+            &input,
+            3,
+            3,
+            2,
+            2,
+            2,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        assert_eq!(path, SqFp8ExecutionPath::CpuReference);
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 6 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(
+            le_bytes_to_f32s(&output_bytes),
+            vec![7.0, 7.0, 17.0, 5.0, 5.0, 12.0]
+        );
+    }
+
+    #[test]
+    fn sq_fp8_matvec_block2d_f32_rejects_invalid_shapes_and_buffers() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let payload = context.alloc_buffer(9).unwrap();
+        let scales = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let input = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(3 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        let zero_block_error = sq_fp8_matvec_block2d_f32(
+            &payload,
+            &scales,
+            &input,
+            3,
+            3,
+            0,
+            2,
+            &mut output,
+            None,
+        )
+        .unwrap_err();
+        assert!(zero_block_error.contains("block rows and cols must be greater than zero"));
+
+        let scale_buffer_error = sq_fp8_matvec_block2d_f32(
+            &payload,
+            &scales,
+            &input,
+            3,
+            3,
+            2,
+            2,
+            &mut output,
+            None,
+        )
+        .unwrap_err();
+        assert!(scale_buffer_error.contains("out of bounds"));
+
+        let matrix_overflow_error = sq_fp8_matvec_block2d_f32(
+            &payload,
+            &scales,
+            &input,
+            usize::MAX,
+            2,
+            2,
+            2,
+            &mut output,
+            None,
+        )
+        .unwrap_err();
+        assert!(matrix_overflow_error.contains("matrix element count overflows"));
+
+        let batch_overflow_error = sq_fp8_matvec_block2d_batch_f32(
+            &payload,
+            &scales,
+            &input,
+            3,
+            3,
+            2,
+            2,
+            usize::MAX,
+            &mut output,
+            None,
+        )
+        .unwrap_err();
+        assert!(batch_overflow_error.contains("input element count overflows"));
+    }
+
+    #[test]
     fn cpu_sq_fp8_matvec_pair_f32_computes_expected_mixed_scale_values() {
         let mut context = RuntimeContext::create(0).unwrap();
         let mut stream = context.create_stream().unwrap();

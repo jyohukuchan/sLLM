@@ -30,6 +30,7 @@ extern "C" __global__ void ullm_sq_fp8_matvec_f32_kernel(
     unsigned long long rows,
     unsigned long long cols,
     unsigned int scale_kind,
+    unsigned long long scale_block_rows,
     unsigned long long scale_block_cols,
     float *output) {
     const unsigned int row = blockIdx.x;
@@ -40,14 +41,15 @@ extern "C" __global__ void ullm_sq_fp8_matvec_f32_kernel(
         const unsigned long long row_offset = static_cast<unsigned long long>(row) * cols;
         unsigned long long blocks_per_row = 1ull;
         if (scale_kind == 2u) {
-            blocks_per_row = (cols + scale_block_cols - 1ull) / scale_block_cols;
+            blocks_per_row = 1ull + (cols - 1ull) / scale_block_cols;
         }
         for (unsigned long long col = tid; col < cols; col += blockDim.x) {
             float scale = scales[0];
             if (scale_kind == 1u) {
                 scale = scales[row];
             } else if (scale_kind == 2u) {
-                scale = scales[static_cast<unsigned long long>(row) * blocks_per_row +
+                scale = scales[(static_cast<unsigned long long>(row) / scale_block_rows) *
+                                   blocks_per_row +
                                (col / scale_block_cols)];
             }
             const float weight = ullm_sq_fp8_e4m3fn_to_f32(payload[row_offset + col]) * scale;
@@ -74,6 +76,7 @@ extern "C" __global__ void ullm_sq_fp8_matvec_batch_f32_kernel(
     unsigned long long rows,
     unsigned long long cols,
     unsigned int scale_kind,
+    unsigned long long scale_block_rows,
     unsigned long long scale_block_cols,
     unsigned long long batch_count,
     float *output) {
@@ -87,14 +90,15 @@ extern "C" __global__ void ullm_sq_fp8_matvec_batch_f32_kernel(
         const unsigned long long input_offset = static_cast<unsigned long long>(batch) * cols;
         unsigned long long blocks_per_row = 1ull;
         if (scale_kind == 2u) {
-            blocks_per_row = (cols + scale_block_cols - 1ull) / scale_block_cols;
+            blocks_per_row = 1ull + (cols - 1ull) / scale_block_cols;
         }
         for (unsigned long long col = tid; col < cols; col += blockDim.x) {
             float scale = scales[0];
             if (scale_kind == 1u) {
                 scale = scales[row];
             } else if (scale_kind == 2u) {
-                scale = scales[static_cast<unsigned long long>(row) * blocks_per_row +
+                scale = scales[(static_cast<unsigned long long>(row) / scale_block_rows) *
+                                   blocks_per_row +
                                (col / scale_block_cols)];
             }
             const float weight = ullm_sq_fp8_e4m3fn_to_f32(payload[row_offset + col]) * scale;

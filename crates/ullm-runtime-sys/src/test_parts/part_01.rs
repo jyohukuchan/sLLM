@@ -651,6 +651,93 @@
     }
 
     #[test]
+    fn first_hip_sq_fp8_matvec_block2d_paths_use_native_kernels_when_available() {
+        if device_count().unwrap() < 2 {
+            return;
+        }
+        let mut context = RuntimeContext::create(1).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let mut payload = context.alloc_buffer(9).unwrap();
+        let mut scales = context
+            .alloc_buffer(4 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut input = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+        let mut output = context
+            .alloc_buffer(6 * std::mem::size_of::<f32>())
+            .unwrap();
+
+        payload
+            .copy_from_host(0, &[0x38; 9], Some(&mut stream))
+            .unwrap();
+        scales
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[2.0, 3.0, 5.0, 7.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        input
+            .copy_from_host(
+                0,
+                &f32s_to_le_bytes(&[1.0, 1.0, 1.0, 1.0, 0.0, 1.0]),
+                Some(&mut stream),
+            )
+            .unwrap();
+        stream.synchronize().unwrap();
+
+        let path = sq_fp8_matvec_block2d_f32(
+            &payload,
+            &scales,
+            &input,
+            3,
+            3,
+            2,
+            2,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        assert_eq!(path, SqFp8ExecutionPath::HipKernel);
+        stream.synchronize().unwrap();
+
+        let mut output_bytes = vec![0_u8; 3 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(&le_bytes_to_f32s(&output_bytes), &[7.0, 7.0, 17.0], 1e-6);
+
+        let batch_path = sq_fp8_matvec_block2d_batch_f32(
+            &payload,
+            &scales,
+            &input,
+            3,
+            3,
+            2,
+            2,
+            2,
+            &mut output,
+            Some(&mut stream),
+        )
+        .unwrap();
+        assert_eq!(batch_path, SqFp8ExecutionPath::HipKernel);
+        stream.synchronize().unwrap();
+
+        let mut batch_output_bytes = vec![0_u8; 6 * std::mem::size_of::<f32>()];
+        output
+            .copy_to_host(0, &mut batch_output_bytes, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_f32s_close(
+            &le_bytes_to_f32s(&batch_output_bytes),
+            &[7.0, 7.0, 17.0, 5.0, 5.0, 12.0],
+            1e-6,
+        );
+    }
+
+    #[test]
     fn first_hip_sq_fp8_matvec_pair_f32_computes_expected_values_when_available() {
         if device_count().unwrap() < 2 {
             return;

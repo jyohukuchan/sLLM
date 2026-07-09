@@ -92,6 +92,7 @@ ullm_status ullm_runtime_sq_fp8_matvec_f32(
                 rows,
                 cols,
                 scale_kind,
+                1,
                 scale_block_cols,
                 output)) {
             set_error("SQ FP8 matvec host path rejected invalid values");
@@ -109,6 +110,7 @@ ullm_status ullm_runtime_sq_fp8_matvec_f32(
             rows,
             cols,
             scale_kind,
+            1,
             scale_block_cols,
             output_buffer,
             stream,
@@ -245,6 +247,7 @@ ullm_status ullm_runtime_sq_fp8_matvec_batch_f32(
                 rows,
                 cols,
                 scale_kind,
+                1,
                 scale_block_cols,
                 batch_count,
                 output)) {
@@ -263,6 +266,7 @@ ullm_status ullm_runtime_sq_fp8_matvec_batch_f32(
             rows,
             cols,
             scale_kind,
+            1,
             scale_block_cols,
             batch_count,
             output_buffer,
@@ -296,6 +300,219 @@ ullm_status ullm_runtime_sq_fp8_matvec_batch_f32(
         required_output_bytes,
         output_buffer,
         stream);
+}
+
+static ullm_status sq_fp8_matvec_block2d_impl(
+    const ullm_runtime_buffer *payload_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t scale_block_rows,
+    size_t scale_block_cols,
+    size_t batch_count,
+    bool use_batch_kernel,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    ullm_sq_fp8_execution_path *execution_path) {
+    if (payload_buffer == nullptr || scale_buffer == nullptr || input_buffer == nullptr ||
+        output_buffer == nullptr || execution_path == nullptr) {
+        set_error("SQ FP8 block2d matvec received a null pointer");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (rows == 0 || cols == 0 || batch_count == 0) {
+        set_error("SQ FP8 block2d matvec rows, cols, and batch count must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_block_rows == 0 || scale_block_cols == 0) {
+        set_error("SQ FP8 block2d matvec scale block rows and cols must be greater than zero");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!buffers_share_backend(payload_buffer, scale_buffer) ||
+        !buffers_share_backend(payload_buffer, input_buffer) ||
+        !buffers_share_backend(payload_buffer, output_buffer)) {
+        set_error("SQ FP8 block2d matvec buffers belong to different backends or devices");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (!stream_matches_buffer(output_buffer, stream)) {
+        set_error("SQ FP8 block2d matvec stream belongs to a different backend or device");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    const size_t max_size = std::numeric_limits<size_t>::max();
+    if (cols > max_size / rows) {
+        set_error("SQ FP8 block2d matvec matrix element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t matrix_elements = rows * cols;
+    const size_t scale_block_row_count = 1 + (rows - 1) / scale_block_rows;
+    const size_t scale_block_col_count = 1 + (cols - 1) / scale_block_cols;
+    if (scale_block_col_count > max_size / scale_block_row_count) {
+        set_error("SQ FP8 block2d matvec scale count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t scale_values = scale_block_row_count * scale_block_col_count;
+    if (cols > max_size / batch_count) {
+        set_error("SQ FP8 block2d matvec input element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t input_elements = batch_count * cols;
+    if (rows > max_size / batch_count) {
+        set_error("SQ FP8 block2d matvec output element count overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t output_elements = batch_count * rows;
+    if (scale_values > max_size / sizeof(float) ||
+        input_elements > max_size / sizeof(float) ||
+        output_elements > max_size / sizeof(float)) {
+        set_error("SQ FP8 block2d matvec byte size overflows");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t required_scale_bytes = scale_values * sizeof(float);
+    const size_t required_input_bytes = input_elements * sizeof(float);
+    const size_t required_output_bytes = output_elements * sizeof(float);
+    if (payload_buffer->bytes < matrix_elements) {
+        set_error("SQ FP8 block2d matvec payload buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (scale_buffer->bytes < required_scale_bytes) {
+        set_error("SQ FP8 block2d matvec scale buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (input_buffer->bytes < required_input_bytes) {
+        set_error("SQ FP8 block2d matvec input buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+    if (output_buffer->bytes < required_output_bytes) {
+        set_error("SQ FP8 block2d matvec output buffer is too small");
+        return ULLM_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (payload_buffer->backend == BackendKind::Cpu) {
+        const auto *payload = static_cast<const uint8_t *>(payload_buffer->ptr);
+        const auto *scales = static_cast<const float *>(scale_buffer->ptr);
+        const auto *input = static_cast<const float *>(input_buffer->ptr);
+        auto *output = static_cast<float *>(output_buffer->ptr);
+        const bool succeeded = use_batch_kernel ?
+            sq_fp8_matvec_batch_f32_host(
+                payload,
+                scales,
+                input,
+                rows,
+                cols,
+                2u,
+                scale_block_rows,
+                scale_block_cols,
+                batch_count,
+                output) :
+            sq_fp8_matvec_f32_host(
+                payload,
+                scales,
+                input,
+                rows,
+                cols,
+                2u,
+                scale_block_rows,
+                scale_block_cols,
+                output);
+        if (!succeeded) {
+            set_error("SQ FP8 block2d matvec CPU reference rejected invalid values");
+            return ULLM_STATUS_INVALID_ARGUMENT;
+        }
+        *execution_path = ULLM_SQ_FP8_EXECUTION_PATH_CPU_REFERENCE;
+        set_error("");
+        return ULLM_STATUS_OK;
+    }
+
+    std::string hip_kernel_error;
+    const bool succeeded = use_batch_kernel ?
+        sq_fp8_matvec_batch_f32_hip_kernel(
+            payload_buffer,
+            scale_buffer,
+            input_buffer,
+            rows,
+            cols,
+            2u,
+            scale_block_rows,
+            scale_block_cols,
+            batch_count,
+            output_buffer,
+            stream,
+            &hip_kernel_error) :
+        sq_fp8_matvec_f32_hip_kernel(
+            payload_buffer,
+            scale_buffer,
+            input_buffer,
+            rows,
+            cols,
+            2u,
+            scale_block_rows,
+            scale_block_cols,
+            output_buffer,
+            stream,
+            &hip_kernel_error);
+    if (!succeeded) {
+        set_error(
+            hip_kernel_error.empty() ? "SQ FP8 block2d matvec HIP kernel is unavailable"
+                                     : hip_kernel_error.c_str());
+        return ULLM_STATUS_RUNTIME_ERROR;
+    }
+    *execution_path = ULLM_SQ_FP8_EXECUTION_PATH_HIP_KERNEL;
+    set_error("");
+    return ULLM_STATUS_OK;
+}
+
+ullm_status ullm_runtime_sq_fp8_matvec_block2d_f32(
+    const ullm_runtime_buffer *payload_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t scale_block_rows,
+    size_t scale_block_cols,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    ullm_sq_fp8_execution_path *execution_path) {
+    return sq_fp8_matvec_block2d_impl(
+        payload_buffer,
+        scale_buffer,
+        input_buffer,
+        rows,
+        cols,
+        scale_block_rows,
+        scale_block_cols,
+        1,
+        false,
+        output_buffer,
+        stream,
+        execution_path);
+}
+
+ullm_status ullm_runtime_sq_fp8_matvec_block2d_batch_f32(
+    const ullm_runtime_buffer *payload_buffer,
+    const ullm_runtime_buffer *scale_buffer,
+    const ullm_runtime_buffer *input_buffer,
+    size_t rows,
+    size_t cols,
+    size_t scale_block_rows,
+    size_t scale_block_cols,
+    size_t batch_count,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    ullm_sq_fp8_execution_path *execution_path) {
+    return sq_fp8_matvec_block2d_impl(
+        payload_buffer,
+        scale_buffer,
+        input_buffer,
+        rows,
+        cols,
+        scale_block_rows,
+        scale_block_cols,
+        batch_count,
+        true,
+        output_buffer,
+        stream,
+        execution_path);
 }
 
 ullm_status ullm_runtime_sq_fp8_matvec_pair_f32(

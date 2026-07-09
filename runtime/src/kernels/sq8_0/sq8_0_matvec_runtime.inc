@@ -26,6 +26,7 @@ bool sq_fp8_matvec_f32_host(
     size_t rows,
     size_t cols,
     uint32_t scale_kind,
+    size_t scale_block_rows,
     size_t scale_block_cols,
     float *output) {
     if (payload == nullptr || scales == nullptr || input == nullptr || output == nullptr) {
@@ -36,7 +37,10 @@ bool sq_fp8_matvec_f32_host(
         if (scale_block_cols == 0) {
             return false;
         }
-        blocks_per_row = (cols + scale_block_cols - 1) / scale_block_cols;
+        if (scale_block_rows == 0) {
+            return false;
+        }
+        blocks_per_row = 1 + (cols - 1) / scale_block_cols;
     }
     for (size_t row = 0; row < rows; ++row) {
         const size_t row_offset = row * cols;
@@ -46,7 +50,8 @@ bool sq_fp8_matvec_f32_host(
             if (scale_kind == 1u) {
                 scale = scales[row];
             } else if (scale_kind == 2u) {
-                scale = scales[row * blocks_per_row + col / scale_block_cols];
+                scale = scales[(row / scale_block_rows) * blocks_per_row +
+                               col / scale_block_cols];
             }
             const float value = sq_fp8_e4m3fn_to_f32(payload[row_offset + col]);
             if (!std::isfinite(value) || !std::isfinite(scale) || scale <= 0.0f) {
@@ -66,6 +71,7 @@ bool sq_fp8_matvec_batch_f32_host(
     size_t rows,
     size_t cols,
     uint32_t scale_kind,
+    size_t scale_block_rows,
     size_t scale_block_cols,
     size_t batch_count,
     float *output) {
@@ -80,6 +86,7 @@ bool sq_fp8_matvec_batch_f32_host(
                 rows,
                 cols,
                 scale_kind,
+                scale_block_rows,
                 scale_block_cols,
                 output + batch * rows)) {
             return false;
@@ -110,6 +117,7 @@ bool sq_fp8_matvec_pair_f32_host(
                left_rows,
                cols,
                left_scale_kind,
+               1,
                left_scale_block_cols,
                left_output) &&
            sq_fp8_matvec_f32_host(
@@ -119,6 +127,7 @@ bool sq_fp8_matvec_pair_f32_host(
                right_rows,
                cols,
                right_scale_kind,
+               1,
                right_scale_block_cols,
                right_output);
 }
@@ -151,6 +160,7 @@ bool sq_fp8_matvec_triple_f32_host(
                first_rows,
                cols,
                first_scale_kind,
+               1,
                first_scale_block_cols,
                first_output) &&
            sq_fp8_matvec_f32_host(
@@ -160,6 +170,7 @@ bool sq_fp8_matvec_triple_f32_host(
                second_rows,
                cols,
                second_scale_kind,
+               1,
                second_scale_block_cols,
                second_output) &&
            sq_fp8_matvec_f32_host(
@@ -169,6 +180,7 @@ bool sq_fp8_matvec_triple_f32_host(
                third_rows,
                cols,
                third_scale_kind,
+               1,
                third_scale_block_cols,
                third_output);
 }
@@ -504,6 +516,7 @@ bool sq_fp8_matvec_f32_hip_kernel(
     size_t rows,
     size_t cols,
     uint32_t scale_kind,
+    size_t scale_block_rows,
     size_t scale_block_cols,
     ullm_runtime_buffer *output_buffer,
     ullm_runtime_stream *stream,
@@ -525,6 +538,8 @@ bool sq_fp8_matvec_f32_hip_kernel(
     unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
     unsigned long long kernel_scale_block_cols =
         static_cast<unsigned long long>(scale_block_cols);
+    unsigned long long kernel_scale_block_rows =
+        static_cast<unsigned long long>(scale_block_rows);
     unsigned int kernel_scale_kind = scale_kind;
     void *payload_ptr = payload_buffer->ptr;
     void *scale_ptr = scale_buffer->ptr;
@@ -537,6 +552,7 @@ bool sq_fp8_matvec_f32_hip_kernel(
         &kernel_rows,
         &kernel_cols,
         &kernel_scale_kind,
+        &kernel_scale_block_rows,
         &kernel_scale_block_cols,
         &output_ptr,
     };
@@ -563,6 +579,7 @@ bool sq_fp8_matvec_batch_f32_hip_kernel(
     size_t rows,
     size_t cols,
     uint32_t scale_kind,
+    size_t scale_block_rows,
     size_t scale_block_cols,
     size_t batch_count,
     ullm_runtime_buffer *output_buffer,
@@ -586,6 +603,8 @@ bool sq_fp8_matvec_batch_f32_hip_kernel(
     unsigned long long kernel_cols = static_cast<unsigned long long>(cols);
     unsigned long long kernel_scale_block_cols =
         static_cast<unsigned long long>(scale_block_cols);
+    unsigned long long kernel_scale_block_rows =
+        static_cast<unsigned long long>(scale_block_rows);
     unsigned long long kernel_batch_count = static_cast<unsigned long long>(batch_count);
     unsigned int kernel_scale_kind = scale_kind;
     void *payload_ptr = payload_buffer->ptr;
@@ -599,6 +618,7 @@ bool sq_fp8_matvec_batch_f32_hip_kernel(
         &kernel_rows,
         &kernel_cols,
         &kernel_scale_kind,
+        &kernel_scale_block_rows,
         &kernel_scale_block_cols,
         &kernel_batch_count,
         &output_ptr,
@@ -855,6 +875,7 @@ ullm_status sq_fp8_matvec_f32_hip_staging(
             rows,
             cols,
             scale_kind,
+            1,
             scale_block_cols,
             host_output.data())) {
         set_error("failed to run SQ FP8 matvec host staging path");
@@ -935,6 +956,7 @@ ullm_status sq_fp8_matvec_batch_f32_hip_staging(
             rows,
             cols,
             scale_kind,
+            1,
             scale_block_cols,
             batch_count,
             host_output.data())) {
