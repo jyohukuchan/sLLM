@@ -3495,7 +3495,9 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
             prefill_sq_fp8_batch_matvec_count,
             decode_sq_fp8_batch_matvec_count,
         );
-    let batching_mode = if prefill_request_grouped || decode_request_grouped {
+    let batching_mode = if real_batch_projection_used {
+        "real"
+    } else if prefill_request_grouped || decode_request_grouped {
         "grouped"
     } else {
         "single"
@@ -3752,40 +3754,113 @@ fn package_mixed_request_state_layers_batch_step(
             let current = current_layers
                 .get_mut(0)
                 .ok_or_else(|| format!("{label} current layer {layer_position} is missing"))?;
-            for item in items {
-                let residual_buffer = previous.output_buffer(item.request_id)?;
-                current.step_from_device_to_device(
-                    stream,
-                    item.request_id,
-                    residual_buffer,
-                    rotary_dim,
-                    rope_base,
-                    item.rope_position,
-                    item.cache_position,
-                    &format!(
-                        "{label} layer {layer_position} request={} position={}",
-                        item.request_id.0, item.rope_position
-                    ),
-                )?;
+            if items.len() > 1 {
+                match current {
+                    PackageMixedRequestStateLayer::SelfAttention(_) => {
+                        let mut step_items = Vec::with_capacity(items.len());
+                        for item in items {
+                            let residual_buffer = previous.output_buffer(item.request_id)?;
+                            step_items.push((
+                                item.request_id,
+                                residual_buffer,
+                                item.rope_position,
+                                item.cache_position,
+                            ));
+                        }
+                        current.step_batch_from_device_to_device(
+                            stream,
+                            &step_items,
+                            rotary_dim,
+                            rope_base,
+                            &format!("{label} layer {layer_position}"),
+                        )?;
+                    }
+                    _ => {
+                        for item in items {
+                            let residual_buffer = previous.output_buffer(item.request_id)?;
+                            current.step_from_device_to_device(
+                                stream,
+                                item.request_id,
+                                residual_buffer,
+                                rotary_dim,
+                                rope_base,
+                                item.rope_position,
+                                item.cache_position,
+                                &format!(
+                                    "{label} layer {layer_position} request={} position={}",
+                                    item.request_id.0, item.rope_position
+                                ),
+                            )?;
+                        }
+                    }
+                }
+            } else {
+                for item in items {
+                    let residual_buffer = previous.output_buffer(item.request_id)?;
+                    current.step_from_device_to_device(
+                        stream,
+                        item.request_id,
+                        residual_buffer,
+                        rotary_dim,
+                        rope_base,
+                        item.rope_position,
+                        item.cache_position,
+                        &format!(
+                            "{label} layer {layer_position} request={} position={}",
+                            item.request_id.0, item.rope_position
+                        ),
+                    )?;
+                }
             }
         } else {
             let current = layers
                 .get_mut(layer_position)
                 .ok_or_else(|| format!("{label} current layer {layer_position} is missing"))?;
-            for item in items {
-                current.step_from_host_to_device(
-                    stream,
-                    item.request_id,
-                    &item.residual,
-                    rotary_dim,
-                    rope_base,
-                    item.rope_position,
-                    item.cache_position,
-                    &format!(
-                        "{label} layer {layer_position} request={} position={}",
-                        item.request_id.0, item.rope_position
-                    ),
-                )?;
+            if items.len() > 1 {
+                match current {
+                    PackageMixedRequestStateLayer::SelfAttention(_) => {
+                        current.step_batch_from_host_to_device(
+                            stream,
+                            items,
+                            rotary_dim,
+                            rope_base,
+                            &format!("{label} layer {layer_position}"),
+                        )?;
+                    }
+                    _ => {
+                        for item in items {
+                            current.step_from_host_to_device(
+                                stream,
+                                item.request_id,
+                                &item.residual,
+                                rotary_dim,
+                                rope_base,
+                                item.rope_position,
+                                item.cache_position,
+                                &format!(
+                                    "{label} layer {layer_position} request={} position={}",
+                                    item.request_id.0, item.rope_position
+                                ),
+                            )?;
+                        }
+                    }
+                }
+            } else {
+                for item in items {
+                    current.step_from_host_to_device(
+                        stream,
+                        item.request_id,
+                        &item.residual,
+                        rotary_dim,
+                        rope_base,
+                        item.rope_position,
+                        item.cache_position,
+                        &format!(
+                            "{label} layer {layer_position} request={} position={}",
+                            item.request_id.0, item.rope_position
+                        ),
+                    )?;
+                }
             }
         }
         residual_device_layer = Some(layer_position);
