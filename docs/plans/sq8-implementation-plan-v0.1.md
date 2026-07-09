@@ -544,6 +544,46 @@ Current local baseline state:
   `generated_tokens=128`, and `concurrent_requests=1` with decode `22.54 tok/s` and consumed VRAM
   `30837428224` bytes.
 
+Same-model readiness audit:
+
+- The comparison directory now includes
+  `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/same-model-readiness.md`.
+- No local uLLM `.ullm.d` package for `Qwen3-14B-FP8` has been identified yet. The package
+  directories currently visible under `/tmp` and the repo-local benchmark tree are Qwen3.5-9B
+  artifacts.
+- `Qwen3-14B-FP8` source tensor naming uses `model.embed_tokens.weight`, `model.norm.weight`, and
+  `model.layers.*`. The current uLLM token-id model-loop runtime uses
+  `model.language_model.embed_tokens.weight`, `model.language_model.norm.weight`, and
+  `model.language_model.layers.*` constants. A same-model row therefore needs either a package
+  conversion rename step or a runtime tensor-namespace resolver before the generated package can be
+  used by the existing Qwen3 path.
+- `tools/build-sq-fp8-w8a16-artifact.py --dry-run` can inspect the local `Qwen3-14B-FP8` directory
+  and selects `281` FP8 tensors, with `442` passthrough tensors and a compact resident byte estimate
+  of `15557220864`. This confirms SQ8_0 artifact metadata generation is plausible, but it does not
+  prove the current runtime can execute the package.
+- `ullm-quant --dry-run` sees `723` total tensors, `280` supported quantized tensors, and `443`
+  passthrough tensors for the same source directory. This confirms the package planner can inspect
+  the model without loading full payloads, but the generated names still need to line up with the
+  runtime.
+- Until the package naming/runtime resolver issue is closed, the existing uLLM row is a
+  measurement-path feasibility row and not a same-model throughput comparison against vLLM.
+
+Same-model prerequisites:
+
+1. Choose the Qwen3 tensor namespace strategy: manifest-time rename to `model.language_model.*`, or
+   runtime lookup that accepts both `model.*` and `model.language_model.*`.
+2. Build a `Qwen3-14B-FP8` uLLM package with bounded memory conversion and record the package
+   summary.
+3. Build or import the matching `SQ8_0` artifact and verify the selected FP8 tensor count against
+   the package tensors.
+4. Run a 40-layer `manifest-all` uLLM smoke row with `prompt_tokens=16`, `generated_tokens=8`, and
+   `concurrent_requests=1`.
+5. Attach the prompt guard bundle or an equivalent behavioral guard before comparing against vLLM
+   rows.
+6. Only then add the representative `prompt_tokens=512`, `generated_tokens=128`,
+   `concurrent_requests=1` same-model row and promote the comparison from feasibility to throughput
+   evidence.
+
 Workload grid:
 
 - smoke: prompt `16`, generated `8`, batch/concurrency `1`;

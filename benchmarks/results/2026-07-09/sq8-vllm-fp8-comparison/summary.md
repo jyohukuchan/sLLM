@@ -60,6 +60,9 @@ Important limitation:
 - These rows have matching smoke workload shape, target GPU, and result schema, but not matching
   model architecture/size. Treat this as a local feasibility and measurement-path comparison, not a
   same-model throughput conclusion.
+- Same-model readiness is tracked in `same-model-readiness.md`; the current blocker is the missing
+  Qwen3-14B uLLM package plus tensor namespace compatibility between `model.*` source names and the
+  current `model.language_model.*` runtime path.
 
 ## 次の行動
 
