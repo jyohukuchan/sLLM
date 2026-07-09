@@ -163,6 +163,17 @@ consumed VRAM: 30830026752 bytes
 This confirms local vLLM FP8 smoke execution on R9700. It still should not be interpreted as a
 same-model uLLM-vs-vLLM performance conclusion.
 
+A representative vLLM row has also been recorded:
+
+```text
+case_id: vllm-r9700-qwen3-14b-fp8-rep-pp512-tg128-tp1-rocr
+status: ok
+prefill tok/s: 90.17614034497254
+decode tok/s: 22.54
+total tok/s: 112.72
+consumed VRAM: 30837428224 bytes
+```
+
 ## Notes
 
 - This is not a replacement for MI300X TP/PP testing. It is a local feasibility and baseline pass.

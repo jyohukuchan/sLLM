@@ -540,6 +540,9 @@ Current local baseline state:
 - The same JSONL now also contains a successful `vLLM + Qwen3-14B-FP8` R9700 smoke row for the
   same `prompt_tokens=16`, `generated_tokens=8`, `concurrent_requests=1` shape. This proves the
   local vLLM FP8 smoke baseline can run, while preserving the model mismatch limitation.
+- It also contains a successful vLLM representative row for `prompt_tokens=512`,
+  `generated_tokens=128`, and `concurrent_requests=1` with decode `22.54 tok/s` and consumed VRAM
+  `30837428224` bytes.
 
 Workload grid:
 
