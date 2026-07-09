@@ -15,6 +15,7 @@
   as the vLLM FP8 baseline.
 - Added config-aligned uLLM rows using local Qwen3 config values: `rotary_dim=128` and
   `rope_base=1000000`.
+- Attached a self-behavioral prompt-suite smoke guard to the config-aligned uLLM rows.
 - Preserved the earlier `rotary_dim=32` / `rope_base=10000000` uLLM rows as preliminary connectivity
   rows, not final same-model rows.
 
@@ -43,6 +44,14 @@ Current same-model uLLM key fields:
   `ullm-r9700-qwen3-14b-fp8-sq8-smoke-pp16-tg8-b1-rope128-theta1e6`
 - config-aligned representative row:
   `ullm-r9700-qwen3-14b-fp8-sq8-rep-pp512-tg128-b1-rope128-theta1e6`
+- prompt-suite smoke:
+  `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/summary.json`
+- prompt guard bundle:
+  `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`
+- guard status: `quality.prompt_suite_regression_status=passed`,
+  `scope=self_behavioral_prompt_suite_smoke`, `output_health=not_evaluated`
+- prompt-suite smoke metrics: `verified_all=true`, `output_not_evaluated_count=1`, generated preview
+  `准准`
 
 vLLM smoke key fields:
 
@@ -70,11 +79,13 @@ Important limitation:
 - They are still not a final serving-performance conclusion. uLLM is measured through the current
   token-id model-loop path with final logits included and `prefill_real_batch=false` /
   `decode_real_batch=false`, while vLLM is measured through its throughput benchmark.
-- The Qwen3-14B-FP8 uLLM rows have sampled `verified=true`, but the behavioral prompt-suite guard
-  bundle has not yet been attached to these same-model rows.
+- The Qwen3-14B-FP8 uLLM rows have sampled `verified=true`, and the config-aligned rows now have a
+  self-behavioral prompt-suite smoke guard. This verifies prompt-suite/guard plumbing only; it is not
+  an external reference quality check because the current smoke suite has `output_health=false`.
 
 ## 次の行動
 
-- Attach a prompt guard bundle or equivalent behavioral guard to the config-aligned same-model rows.
+- Add a non-self behavioral guard or health-evaluated prompt suite before using the rows as final
+  quality-regression evidence.
 - Add a server-style or real-batch uLLM path before using the table as final vLLM serving comparison.
 - Keep the preliminary rope32/theta1e7 rows only as connectivity history.

@@ -60,16 +60,24 @@
   - config一致 smoke: `ullm-r9700-qwen3-14b-fp8-sq8-smoke-pp16-tg8-b1-rope128-theta1e6`
   - config一致 representative: `ullm-r9700-qwen3-14b-fp8-sq8-rep-pp512-tg128-b1-rope128-theta1e6`
 - config一致行はどちらも `status=ok` / `verified=true` / `sq_execution_mode=direct_fp8_dequant_matvec`。
+- config一致行へself-behavioral prompt-suite smoke guardを添付した。
+  - prompt-suite summary:
+    `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/summary.json`
+  - guard bundle:
+    `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`
+  - `quality.prompt_suite_regression_status=passed`, `acceptance_mode=behavioral`,
+    `scope=self_behavioral_prompt_suite_smoke`
+  - これは同じsummaryをreference/candidateにした自己比較なので、prompt-suite/guard配線確認であり、外部参照による品質確認ではない。
 - Same-model rowの必要条件を列挙
   - FP8/SQ8_0 package import（短期はBF16 thin package + SQ8_0 sidecar overlay、長期はnative `.ullm.d` SQ tensor統合）
   - SQ8_0 artifact生成/import（40層 artifact は完了）
   - tensor-name互換の解消
   - 40-layer `manifest-all` rowの整備（smoke / representative とも完了）
-  - prompt guard bundleまたは同等のbehavioral guard（未添付）
+  - prompt guard bundleまたは同等のbehavioral guard（self-behavioral smokeは添付済み、非自己比較またはoutput-health評価は未完了）
   - vLLMと workload shapeの完全一致（`pp16/tg8/b1` と `pp512/tg128/b1` は完了）
 
 ## 次の行動
 
-- Qwen3-14B-FP8同一モデル行へprompt guard bundleまたは同等のbehavioral guardを添付する。
+- Qwen3-14B-FP8同一モデル行へ、非自己比較のbehavioral guardまたはoutput-healthを評価するprompt suiteを追加する。
 - uLLM行は現在token-id model-loop / final logits込み / `prefill_real_batch=false` / `decode_real_batch=false` なので、vLLM serving benchmarkと同格の最終性能結論にはしない。
 - 次の比較昇格には、real-batchまたはserver-style uLLM pathで同じ `pp/tg/b1` を再測定する。

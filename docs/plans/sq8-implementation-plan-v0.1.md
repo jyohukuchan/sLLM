@@ -502,7 +502,8 @@ Important rule:
 
 Status: partial. The M10 harness now has same-model uLLM and vLLM rows for the smoke and
 representative workloads, but the current uLLM rows are token-id model-loop measurements rather than
-server-style or real-batch serving rows.
+server-style or real-batch serving rows. This is intentionally a later-phase comparison after SQ8_0
+artifact loading, runtime dispatch, and implementation-valid model-loop rows are in place.
 
 Purpose:
 
@@ -557,6 +558,11 @@ Current local baseline state:
     consumed VRAM `13763940352` bytes;
   - representative `pp512/tg128/b1`, `rotary_dim=128`, `rope_base=1000000`, decode
     `2.774043 tok/s`, consumed VRAM `14242410496` bytes.
+- The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
+  `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
+  It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and
+  `behavioral_passed=true`. Because the same summary is used as both reference and candidate and the
+  suite has `output_health=false`, this is a guard plumbing smoke, not an external quality guard.
 - Earlier uLLM Qwen3-14B rows with `rotary_dim=32` and `rope_base=10000000` are retained as
   preliminary connectivity rows only; the config-aligned rows should be used for M10 same-model
   discussion.
@@ -611,7 +617,9 @@ Same-model prerequisites:
 4. Run a 40-layer `manifest-all` uLLM smoke row with `prompt_tokens=16`, `generated_tokens=8`, and
    `concurrent_requests=1`: done for the config-aligned Qwen3-14B-FP8 row.
 5. Attach the prompt guard bundle or an equivalent behavioral guard before final comparison against vLLM
-   rows.
+   rows: partial. A self-behavioral prompt-suite smoke is attached to the config-aligned rows. A
+   non-self behavioral guard or output-health-evaluated prompt suite is still needed before treating
+   this as final quality-regression evidence.
 6. Add the representative `prompt_tokens=512`, `generated_tokens=128`, `concurrent_requests=1`
    same-model row: done for the config-aligned Qwen3-14B-FP8 row.
 7. Add a real-batch or server-style uLLM measurement path before promoting this to a final serving
@@ -694,6 +702,8 @@ Expected outputs:
    comparison grid and save unsupported/failure rows explicitly when vLLM cannot match the target.
    - Harness support for vLLM throughput parsing and common ROCm unsupported failure messages is
      prepared.
+   - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
+     final vLLM serving comparison still needs real-batch or server-style uLLM rows.
 
 ## Risks
 

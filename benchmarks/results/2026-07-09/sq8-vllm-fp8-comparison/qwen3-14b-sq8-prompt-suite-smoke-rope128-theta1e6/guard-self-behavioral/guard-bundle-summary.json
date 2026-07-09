@@ -1,0 +1,33 @@
+{
+  "schema_version": "package-prompt-guard-bundle-v0.2",
+  "reference": {
+    "label": "qwen3-14b-sq8-smoke-self-reference",
+    "summary": "benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/summary.json"
+  },
+  "candidate": {
+    "label": "qwen3-14b-sq8-smoke",
+    "summary": "benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/summary.json"
+  },
+  "passed": true,
+  "checks": [
+    {
+      "name": "prompt_suite_token_logits",
+      "json": "benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/prompt-suite-token-logits-guard.json",
+      "md": "benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/prompt-suite-token-logits-guard.md",
+      "passed": true,
+      "metrics": {
+        "exit_code": 0,
+        "acceptance_mode": "behavioral",
+        "strict_passed": true,
+        "behavioral_passed": true,
+        "compared_case_count": 1,
+        "generated_token_match_count": 1,
+        "generated_text_match_count": 1,
+        "generated_without_stop_text_match_count": 1,
+        "top_logits_match_count": 1,
+        "max_prefill_top_logit_abs_diff": 0.0,
+        "max_decode_last_top_logit_abs_diff": 0.0
+      }
+    }
+  ]
+}
