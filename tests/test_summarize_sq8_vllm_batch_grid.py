@@ -293,6 +293,191 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
             self.assertIn("vLLM | vllm-r9700", stdout.getvalue())
             self.assertIn("missing required engine(s): uLLM", stderr.getvalue())
 
+    def test_require_engines_grid_fails_when_any_request_count_missing_required_engine(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "grid_missing.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b4-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=4,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2,4,8",
+                    "--require-engines",
+                    "uLLM,vLLM",
+                    "--require-engine-grid",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn(
+                "request 4 missing required engine(s): uLLM",
+                stderr.getvalue(),
+            )
+            self.assertIn(
+                "request 8 missing required engine(s): uLLM, vLLM",
+                stderr.getvalue(),
+            )
+
+    def test_require_engines_grid_passes_when_all_request_counts_cover_required_engines(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "grid_pass.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b4-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=4,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b4",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=4,
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2,4",
+                    "--require-engines",
+                    "uLLM,vLLM",
+                    "--require-engine-grid",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_require_engine_grid_without_require_engines_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "grid_without_engines.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr",
+                        engine_name="vLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        harness={"class": "serving_throughput_benchmark"},
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--require-engine-grid",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 1)
+            self.assertIn(
+                "--require-engine-grid requires --require-engines to be specified",
+                stderr.getvalue(),
+            )
+
     def test_require_serving_parity_and_engines_passes_when_all_required_present(
         self,
     ) -> None:

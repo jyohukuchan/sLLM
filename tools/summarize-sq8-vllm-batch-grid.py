@@ -352,6 +352,44 @@ def required_engines_gate_failures(
     return [f"missing required engine(s): {', '.join(missing)}"]
 
 
+def required_engines_grid_gate_failures(
+    rows: list[dict[str, Any]],
+    required_engines: set[str],
+    requests_filter: set[int],
+) -> list[str]:
+    if not required_engines:
+        return []
+
+    if requests_filter:
+        request_counts = requests_filter
+    else:
+        request_counts = {
+            requested_concurrency(as_dict(row.get("workload")))
+            for row in rows
+            if requested_concurrency(as_dict(row.get("workload"))) is not None
+        }
+    if not request_counts:
+        return required_engines_gate_failures(rows, required_engines)
+
+    failure_reasons: list[str] = []
+    for request_count in sorted(request_counts):
+        request_rows = [
+            row
+            for row in rows
+            if requested_concurrency(as_dict(row.get("workload"))) == request_count
+        ]
+        available = {
+            as_str(as_dict(row.get("engine")).get("name")) for row in request_rows
+        }
+        missing = sorted(required_engines - available)
+        if missing:
+            failure_reasons.append(
+                f"request {request_count} missing required engine(s): {', '.join(missing)}"
+            )
+
+    return failure_reasons
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("jsonl", nargs="+", type=Path)
@@ -381,6 +419,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="comma-separated required engine names, for example uLLM,vLLM",
     )
+    parser.add_argument(
+        "--require-engine-grid",
+        action="store_true",
+        help="require required engines per request count instead of global coverage",
+    )
     return parser.parse_args()
 
 
@@ -393,6 +436,11 @@ def main() -> int:
     try:
         requests_filter = parse_requests_filter(args.requests)
         required_engines = parse_required_engines_filter(args.require_engines)
+        if args.require_engine_grid and not required_engines:
+            raise ValueError(
+                "--require-engine-grid requires --require-engines to be specified"
+            )
+
         harness_class_filter = args.harness_class
         requires_gate = args.require_serving_parity or bool(required_engines)
         if requires_gate:
@@ -408,9 +456,14 @@ def main() -> int:
                 serving_parity_failures = serving_parity_gate_failures(rows)
             else:
                 serving_parity_failures = []
-            required_engine_failures = required_engines_gate_failures(
-                rows, required_engines
-            )
+            if args.require_engine_grid:
+                required_engine_failures = required_engines_grid_gate_failures(
+                    rows, required_engines, requests_filter
+                )
+            else:
+                required_engine_failures = required_engines_gate_failures(
+                    rows, required_engines
+                )
         else:
             rows = iter_selected_rows(
                 args.jsonl,

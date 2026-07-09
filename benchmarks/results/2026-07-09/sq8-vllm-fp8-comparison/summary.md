@@ -48,7 +48,7 @@ python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8
 Final-comparison engine-presence gate:
 
 ```bash
-python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --harness-class serving_throughput_benchmark --require-serving-parity --require-engines uLLM,vLLM
+python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --harness-class serving_throughput_benchmark --require-serving-parity --require-engines uLLM,vLLM --require-engine-grid
 ```
 
 The gate is expected to fail for the current b2/b4/b8 table because the uLLM rows are
@@ -57,6 +57,8 @@ Adding `--harness-class serving_throughput_benchmark` makes the gate pass, but t
 contains only the vLLM rows and is not a uLLM-vs-vLLM comparison.
 Adding `--require-engines uLLM,vLLM` makes that vLLM-only slice fail with a missing uLLM engine,
 which is the expected state until a uLLM serving-parity row exists.
+`--require-engine-grid` applies the same engine requirement to each requested batch/concurrency
+bucket, so a partial b2-only or b4-only pairing cannot pass the final comparison gate.
 
 Compact batch-grid output:
 
