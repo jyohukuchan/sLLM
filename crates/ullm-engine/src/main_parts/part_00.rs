@@ -8788,6 +8788,22 @@ mod tests {
     };
     use ullm_runtime_sys::DeviceInfo;
 
+    fn sq_fp8_projection_dispatch_non_direct_fixture(
+        operation: SqFp8ProjectionMatvecOperation,
+    ) -> SqFp8ProjectionDispatch {
+        let implementation_id = match operation {
+            SqFp8ProjectionMatvecOperation::Single => "sq8_0_matvec_generic_legacy",
+            SqFp8ProjectionMatvecOperation::Batch => "sq8_0_matvec_batch_generic_legacy",
+            SqFp8ProjectionMatvecOperation::Pair => "sq8_0_matvec_pair_generic_legacy",
+            SqFp8ProjectionMatvecOperation::Triple => "sq8_0_matvec_triple_generic_legacy",
+        };
+        SqFp8ProjectionDispatch {
+            operation,
+            implementation_id,
+            family: sq8_0_projection_descriptor_family(implementation_id),
+        }
+    }
+
     #[test]
     fn sq_fp8_projection_model_arch_does_not_change_default_selection() {
         let info = DeviceInfo {
@@ -8814,6 +8830,25 @@ mod tests {
                     Some(SQ8_0_MODEL_ARCH_QWEN_FAMILY)
                 )
             );
+        }
+    }
+
+    #[test]
+    fn sq_fp8_projection_dispatch_rejects_non_direct_family_for_single_batch_pair_and_triple_boundaries() {
+        for operation in &[
+            SqFp8ProjectionMatvecOperation::Single,
+            SqFp8ProjectionMatvecOperation::Batch,
+            SqFp8ProjectionMatvecOperation::Pair,
+            SqFp8ProjectionMatvecOperation::Triple,
+        ] {
+            let dispatch = sq_fp8_projection_dispatch_non_direct_fixture(*operation);
+            assert_eq!(dispatch.family, None);
+            let err = dispatch
+                .require_direct_family("sq_fp8_projection_boundary")
+                .expect_err("expected non-direct projection family to be rejected");
+            assert!(err.contains("has no direct kernel family"));
+            assert!(err.contains(operation.label()));
+            assert!(err.contains(dispatch.implementation_id));
         }
     }
 

@@ -849,6 +849,56 @@ fn normalize_dispatch_token(value: &str) -> String {
 mod tests {
     use super::*;
 
+    const SQ8_0_MATVEC_NON_DIRECT_TEST_SINGLE_ID: &str = "sq8_0_matvec_generic_legacy";
+    const SQ8_0_MATVEC_NON_DIRECT_TEST_BATCH_ID: &str = "sq8_0_matvec_batch_generic_legacy";
+    const SQ8_0_MATVEC_NON_DIRECT_TEST_PAIR_ID: &str = "sq8_0_matvec_pair_generic_legacy";
+    const SQ8_0_MATVEC_NON_DIRECT_TEST_TRIPLE_ID: &str = "sq8_0_matvec_triple_generic_legacy";
+
+    const SQ8_0_TEST_MATVEC_NON_DIRECT_DISPATCH_IMPLEMENTATIONS: &[BackendImplementation<
+        'static,
+    >] = &[
+        BackendImplementation {
+            id: SQ8_0_MATVEC_NON_DIRECT_TEST_SINGLE_ID,
+            operation: SQ8_0_MATVEC_OPERATION,
+            phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+            format_id: Some(FORMAT_SQ8_0),
+            model_arch: Some("Qwen3*"),
+            gpu_arch: None,
+            gpu_name: None,
+            priority: 0,
+        },
+        BackendImplementation {
+            id: SQ8_0_MATVEC_NON_DIRECT_TEST_BATCH_ID,
+            operation: SQ8_0_MATVEC_BATCH_OPERATION,
+            phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+            format_id: Some(FORMAT_SQ8_0),
+            model_arch: Some("Qwen3*"),
+            gpu_arch: None,
+            gpu_name: None,
+            priority: 0,
+        },
+        BackendImplementation {
+            id: SQ8_0_MATVEC_NON_DIRECT_TEST_PAIR_ID,
+            operation: SQ8_0_MATVEC_PAIR_OPERATION,
+            phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+            format_id: Some(FORMAT_SQ8_0),
+            model_arch: Some("Qwen3*"),
+            gpu_arch: None,
+            gpu_name: None,
+            priority: 0,
+        },
+        BackendImplementation {
+            id: SQ8_0_MATVEC_NON_DIRECT_TEST_TRIPLE_ID,
+            operation: SQ8_0_MATVEC_TRIPLE_OPERATION,
+            phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+            format_id: Some(FORMAT_SQ8_0),
+            model_arch: Some("Qwen3*"),
+            gpu_arch: None,
+            gpu_name: None,
+            priority: 0,
+        },
+    ];
+
     #[test]
     fn concrete_gpu_decode_overrides_arch_decode() {
         let implementations = [
@@ -1291,6 +1341,48 @@ mod tests {
                 Some(Sq8ProjectionFamily::Direct),
                 "failed to resolve family for {}",
                 implementation.id
+            );
+        }
+    }
+
+    #[test]
+    fn sq8_projection_descriptor_family_none_for_test_only_non_direct_matvec_descriptors() {
+        for operation in SQ8_0_TEST_MATVEC_NON_DIRECT_DISPATCH_IMPLEMENTATIONS {
+            assert_eq!(
+                sq8_0_projection_descriptor_family(operation.id),
+                None,
+                "unexpectedly resolved family for {}",
+                operation.id
+            );
+        }
+    }
+
+    #[test]
+    fn sq8_projection_dispatch_catalog_can_select_test_only_non_direct_matvec_descriptors() {
+        for operation in Sq8ProjectionMatvecOperation::all() {
+            let request = BackendRequest {
+                operation: operation.operation_id(),
+                phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+                format_id: Some(FORMAT_SQ8_0),
+                model_arch: Some("Qwen3.5-9B"),
+                gpu_arch: None,
+                gpu_name: None,
+            };
+            let selected = select_backend(
+                &request,
+                SQ8_0_TEST_MATVEC_NON_DIRECT_DISPATCH_IMPLEMENTATIONS,
+            )
+            .expect("failed to select non-direct test fixture");
+            assert_eq!(
+                selected.operation,
+                operation.operation_id(),
+                "failed to select non-direct test fixture for {}",
+                operation.operation_id()
+            );
+            assert_eq!(
+                sq8_0_projection_descriptor_family(selected.id),
+                None,
+                "non-direct fixture unexpectedly resolved as direct",
             );
         }
     }

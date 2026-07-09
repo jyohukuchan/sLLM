@@ -398,6 +398,9 @@ Done:
 - SQ8_0 single/batch/pair/triple direct-matvec entry points now validate that the selected descriptor
   family is `Direct` before calling the kernel; unresolved/non-direct selections return an explicit
   error instead of entering the runtime kernel path.
+- Test-only non-direct SQ8_0 matvec descriptor fixtures now verify both dispatch selection and
+  single/batch/pair/triple boundary rejection. This keeps future non-direct family additions from
+  accidentally entering the current direct-only runtime path.
 - runtime GPU-architecture detection maps `compute_major == 12` to `RDNA4`.
 - SQ8_0 matvec projection dispatch now has active R9700-specific direct descriptor IDs
   (`sq8_0_matvec*_r9700_direct`). Dispatch-only GPU-name canonicalization maps ROCm's generic
@@ -413,6 +416,9 @@ Done:
 - `tools/run-external-benchmark.py --parse ullm-component-prefill` now preserves cached-prefix
   dispatch metadata (`selected_implementation_id`, `executor_selection`, `dispatch_*`) and
   cached-prefix token breakdown fields in result rows.
+- `tools/run-external-benchmark.py` now records SQ8_0 direct-kernel requirement environment
+  variables (`ULLM_REQUIRE_HIP_SQ_FP8_MATVEC*`) in `artifacts.command`, matching the existing AQ4
+  require-flag provenance.
 - `tools/summarize-benchmark-results.py` now exposes a compact `Impl` column from
   `sq_projection_implementation_ids`, `dispatch_selected_implementation_id`, or
   `selected_implementation_id`, and classifies `SQ8_0` rows as FP8 family rows.
@@ -474,6 +480,8 @@ Now:
   `backend_dispatch.rs`, and descriptor naming coverage tests now include fused entries.
 - Done: `backend_dispatch` now exposes `sq8_0_projection_descriptor_family()` and the Rust matvec
   execution path now carries the selected family metadata.
+- Done: test-only non-direct SQ8_0 matvec descriptors exercise `family=None` selection and the
+  Rust-side direct-family guard before any runtime C++ kernel is called.
 - Done: SQ8_0 matvec runtime helper group is moved to
   `runtime/src/kernels/sq8_0/sq8_0_matvec_runtime.inc`.
 - Done: large runtime-sys Rust test body was split from
@@ -713,6 +721,8 @@ Expected outputs:
      conservative dispatch-only canonical name for the local `gfx1201` R9700 device.
    - A short layer0 SQ8_0 mixed-request-state smoke confirms the local R9700 path selects
      `*_r9700_direct` descriptor IDs.
+   - Non-direct descriptor fixtures now prove the current execution boundary fails closed before
+     calling unimplemented C++ families.
    - C++ kernel-family switching remains a follow-up.
    - Selected-layer model-loop rows now carry projection boundary and counter telemetry for
      `sq-fp8-token-ids-model-loop-smoke`.
