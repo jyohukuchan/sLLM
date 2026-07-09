@@ -1,0 +1,12 @@
+/home/homelab1/coding-local/ultimateLLM/uLLM-project/build/envs/vllm-rocm-nightly/lib/python3.12/site-packages/vllm/benchmarks/throughput.py:1159: UserWarning: Both --prefix-len and --random-prefix-len are specified. The random version (--random-prefix-len) will be preferred in this run.
+  validate_args(args)
+[aiter] import [module_aiter_core] under /home/homelab1/coding-local/ultimateLLM/uLLM-project/build/envs/vllm-rocm-nightly/lib/python3.12/site-packages/aiter/jit/module_aiter_core.so
+(EngineCore pid=3516187) Loading safetensors checkpoint shards:   0% Completed | 0/4 [00:00<?, ?it/s]
+(EngineCore pid=3516187) Loading safetensors checkpoint shards:  25% Completed | 1/4 [00:02<00:07,  2.59s/it]
+(EngineCore pid=3516187) Loading safetensors checkpoint shards:  50% Completed | 2/4 [00:05<00:05,  2.84s/it]
+(EngineCore pid=3516187) Loading safetensors checkpoint shards:  75% Completed | 3/4 [00:08<00:02,  2.89s/it]
+(EngineCore pid=3516187) Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:09<00:00,  2.23s/it]
+(EngineCore pid=3516187) Loading safetensors checkpoint shards: 100% Completed | 4/4 [00:09<00:00,  2.44s/it]
+(EngineCore pid=3516187)
+Rendering prompts:   0%|          | 0/4 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 4/4 [00:00<00:00, 281.39it/s]
+Processed prompts:   0%|          | 0/4 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts:  25%|██▌       | 1/4 [00:00<00:01,  2.19it/s, est. speed input: 35.09 toks/s, output: 17.55 toks/s]Processed prompts: 100%|██████████| 4/4 [00:00<00:00,  2.19it/s, est. speed input: 139.63 toks/s, output: 69.81 toks/s]Processed prompts: 100%|██████████| 4/4 [00:00<00:00,  8.72it/s, est. speed input: 139.63 toks/s, output: 69.81 toks/s]

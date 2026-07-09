@@ -20,7 +20,8 @@
   descriptors; both refreshed rows now report `*_r9700_direct` SQ8_0 projection implementation IDs.
 - Added a full 40-layer mixed request-state real-batch uLLM diagnostic row with `TOP_K=0`, so final
   logits are excluded from total latency.
-- Added a matching-shape vLLM `pp16/tg8/b2` FP8 row for the real-batch uLLM diagnostic.
+- Added matching-shape vLLM `pp16/tg8/b2`, `pp16/tg8/b4`, and `pp16/tg8/b8` FP8 rows for the
+  real-batch uLLM diagnostics.
 - Preserved the earlier `rotary_dim=32` / `rope_base=10000000` uLLM rows as preliminary connectivity
   rows, not final same-model rows.
 
@@ -31,12 +32,16 @@
 | ok | uLLM | Qwen3.5-9B | SQ8_0 | native package | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 49.89 | 73.16 | 35.83 | 4.17 | 304.89 |
 | ok | vLLM | Qwen3-14B-FP8 | FP8 | HF config | - | R9700 | pp16/tg8/b1 | 31.19 | 15.59 | 46.78 | 28.71 | 447.63 |
 | ok | vLLM | Qwen3-14B-FP8 | FP8 | HF config | - | R9700 | pp16/tg8/b2 | 34.41 | 17.21 | 51.62 | 19.56 | 336.72 |
+| ok | vLLM | Qwen3-14B-FP8 | FP8 | HF config | - | R9700 | pp16/tg8/b4 | 135.04 | 67.52 | 202.56 | 28.05 | 1894.13 |
+| ok | vLLM | Qwen3-14B-FP8 | FP8 | HF config | - | R9700 | pp16/tg8/b8 | 236.01 | 118.01 | 354.02 | 28.05 | 3310.52 |
 | ok | vLLM | Qwen3-14B-FP8 | FP8 | HF config | - | R9700 | pp512/tg128/b1 | 90.18 | 22.54 | 112.72 | 28.72 | 647.34 |
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | preliminary rope32/theta1e7 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 2.77 | 3.02 | 0.33 | 12.82 | 38.69 |
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | preliminary rope32/theta1e7 | direct_fp8_dequant_matvec | R9700 | pp512/tg128/b1 | 2.84 | 2.68 | 2.19 | 13.26 | 35.60 |
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b1 | 2.75 | 2.70 | 0.32 | 12.82 | 34.64 |
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp512/tg128/b1 | 2.97 | 2.86 | 2.27 | 13.26 | 37.92 |
 | ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b2 real-batch no-final | 15.42 | 15.71 | 15.51 | 12.49 | 196.19 |
+| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b4 real-batch no-final | 16.22 | 16.77 | 16.40 | 13.06 | 218.99 |
+| ok | uLLM | Qwen3-14B-FP8 | SQ8_0 | config rope128/theta1e6 | direct_fp8_dequant_matvec | R9700 | pp16/tg8/b8 real-batch no-final | 16.48 | 16.75 | 16.57 | 13.57 | 227.32 |
 
 Current same-model uLLM key fields:
 
@@ -64,6 +69,16 @@ Current same-model uLLM key fields:
 - no-final-logits diagnostic key fields: `final_logits_in_total=false`,
   `sq_fp8_batch_matvec_count=6720/6720`, `sq_diagnostic_host_staging_read_count=0`,
   `sq_diagnostic_host_staging_write_count=72`
+- b4 no-final-logits diagnostic key fields: `case_id=qwen3-14b-fp8-sq8-full-mixed-real-batch-no-final-pp16-tg8-b4`,
+  `final_logits_in_total=false`, `sq_fp8_batch_matvec_count=6720/6720`,
+  `sq_diagnostic_host_staging_read_count=0`, `sq_diagnostic_host_staging_write_count=120`,
+  `prefill_total_input_tps=16.220953`, `decode_total_generated_tps=16.766274`,
+  `end_to_end_total_tps=16.398742`, `memory.vram_consumed_bytes=14024474624`
+- b8 no-final-logits diagnostic key fields: `case_id=qwen3-14b-fp8-sq8-full-mixed-real-batch-no-final-pp16-tg8-b8`,
+  `final_logits_in_total=false`, `sq_fp8_batch_matvec_count=6720/6720`,
+  `sq_diagnostic_host_staging_read_count=0`, `sq_diagnostic_host_staging_write_count=216`,
+  `prefill_total_input_tps=16.477829`, `decode_total_generated_tps=16.747149`,
+  `end_to_end_total_tps=16.566635`, `memory.vram_consumed_bytes=14574764032`
 
 vLLM smoke key fields:
 
@@ -83,6 +98,24 @@ vLLM b2 smoke key fields:
 - `metrics.total_tokens_per_second`: `51.62`
 - `memory.vram_consumed_bytes`: `21007855616`
 
+vLLM b4 smoke key fields:
+
+- `case_id`: `vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b4-tp1-rocr`
+- `metrics.requests_per_second`: `8.44`
+- `metrics.prefill_tokens_per_second`: `135.04146895989985`
+- `metrics.decode_tokens_per_second`: `67.52`
+- `metrics.total_tokens_per_second`: `202.56`
+- `memory.vram_consumed_bytes`: `30121553920`
+
+vLLM b8 smoke key fields:
+
+- `case_id`: `vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b8-tp1-rocr`
+- `metrics.requests_per_second`: `14.75`
+- `metrics.prefill_tokens_per_second`: `236.01404374447745`
+- `metrics.decode_tokens_per_second`: `118.01`
+- `metrics.total_tokens_per_second`: `354.02`
+- `memory.vram_consumed_bytes`: `30121566208`
+
 vLLM representative key fields:
 
 - `case_id`: `vllm-r9700-qwen3-14b-fp8-rep-pp512-tg128-tp1-rocr`
@@ -100,9 +133,10 @@ Important limitation:
 - They are still not a final serving-performance conclusion. The b1 uLLM rows are measured through
   the current token-id model-loop path with final logits included and `prefill_real_batch=false` /
   `decode_real_batch=false`, while vLLM is measured through its throughput benchmark.
-- The new `pp16/tg8/b2` uLLM row is real-batch and excludes final logits, and there is now a
-  matching-shape vLLM `concurrent_requests=2` row. It is still not final serving parity because
-  uLLM uses the CLI model-loop harness while vLLM uses `vllm bench throughput`.
+- The new `pp16/tg8/b2`, `pp16/tg8/b4`, and `pp16/tg8/b8` uLLM rows are real-batch and exclude
+  final logits, and there are now matching-shape vLLM rows for `concurrent_requests=2`, `4`, and
+  `8`. They are still not final serving parity because uLLM uses the CLI model-loop harness while vLLM uses
+  `vllm bench throughput`.
 - Multi-request mixed-state uLLM runs are classified as `batching_mode=grouped`, not real-batch,
   until batched projection kernels are actually used.
 - The Qwen3-14B-FP8 uLLM rows have sampled `verified=true`, and the config-aligned rows now have a
@@ -113,6 +147,6 @@ Important limitation:
 
 - Add a non-self behavioral guard or health-evaluated prompt suite before using the rows as final
   quality-regression evidence.
-- Add a server-style uLLM path or a documented harness-normalization step before using the b2
-  real-batch row as final serving comparison.
+- Add a server-style uLLM path or a documented harness-normalization step before using the b2, b4,
+  and b8 real-batch rows as final serving comparison.
 - Keep the preliminary rope32/theta1e7 rows only as connectivity history.
