@@ -370,6 +370,10 @@ Done:
 - `run-external-benchmark.py` can attach an existing prompt-suite guard bundle to
   `inference-benchmark-result-v0.1` rows via `--prompt-guard-bundle-json`, preserving the same
   regression status and guard metric summary beside throughput rows.
+- First guard-attached full mixed SQ8_0 row saved at
+  `benchmarks/results/2026-07-09/package-batch-throughput/phase-m5-sq8-guard-attached-full-mixed-v1/results.schema.jsonl`.
+  It records `format_id=SQ8_0`, direct `single+triple` projection execution, artifact load vs
+  measured-total timing, and behavioral prompt-suite status `passed`.
 
 ### M6: Dispatch Integration
 
