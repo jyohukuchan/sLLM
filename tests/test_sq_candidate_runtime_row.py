@@ -73,7 +73,31 @@ class SqCandidateRuntimeRowTests(unittest.TestCase):
                     },
                 },
             )
-            write_json(guard, {"schema_version": "unit", "passed": True})
+            write_json(
+                guard,
+                {
+                    "schema_version": "unit",
+                    "passed": True,
+                    "checks": [
+                        {
+                            "name": "prompt_suite_token_logits",
+                            "passed": True,
+                            "metrics": {
+                                "acceptance_mode": "strict",
+                                "strict_passed": True,
+                                "behavioral_passed": False,
+                                "compared_case_count": 5,
+                                "generated_token_match_count": 5,
+                                "generated_text_match_count": 5,
+                                "generated_without_stop_text_match_count": 5,
+                                "top_logits_match_count": 3,
+                                "max_prefill_top_logit_abs_diff": 0.01,
+                                "max_decode_last_top_logit_abs_diff": 0.02,
+                            },
+                        }
+                    ],
+                },
+            )
 
             row = TOOL.build_row(
                 types.SimpleNamespace(
@@ -116,6 +140,17 @@ class SqCandidateRuntimeRowTests(unittest.TestCase):
         self.assertEqual(row["timing"]["decode_p50_ms_mean"], 50.0)
         self.assertTrue(row["decision"]["comparable_to_baseline"])
         self.assertTrue(row["decision"]["accepted_for_next_iteration"])
+        self.assertEqual(row["quality"]["prompt_suite_regression_status"], "passed")
+        self.assertEqual(row["guards"]["prompt_guard_bundle"]["acceptance_mode"], "strict")
+        self.assertTrue(row["guards"]["prompt_guard_bundle"]["strict_passed"])
+        self.assertFalse(row["guards"]["prompt_guard_bundle"]["behavioral_passed"])
+        self.assertEqual(row["guards"]["prompt_guard_bundle"]["compared_case_count"], 5)
+        self.assertEqual(row["guards"]["prompt_guard_bundle"]["generated_token_match_count"], 5)
+        self.assertEqual(row["guards"]["prompt_guard_bundle"]["generated_text_match_count"], 5)
+        self.assertEqual(row["guards"]["prompt_guard_bundle"]["generated_without_stop_text_match_count"], 5)
+        self.assertEqual(row["guards"]["prompt_guard_bundle"]["top_logits_match_count"], 3)
+        self.assertEqual(row["guards"]["prompt_guard_bundle"]["max_prefill_top_logit_abs_diff"], 0.01)
+        self.assertEqual(row["guards"]["prompt_guard_bundle"]["max_decode_last_top_logit_abs_diff"], 0.02)
 
     def test_non_anchor_row_requires_storage_timing_and_guard_fields(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -133,7 +168,30 @@ class SqCandidateRuntimeRowTests(unittest.TestCase):
                     "metrics": {"decode_tps_mean": 20.0, "verified_all": False},
                 },
             )
-            write_json(guard, {"passed": False})
+            write_json(
+                guard,
+                {
+                    "passed": False,
+                    "checks": [
+                        {
+                            "name": "prompt_suite_token_logits",
+                            "passed": False,
+                            "metrics": {
+                                "acceptance_mode": "behavioral",
+                                "strict_passed": False,
+                                "behavioral_passed": True,
+                                "compared_case_count": 1,
+                                "generated_token_match_count": 1,
+                                "generated_text_match_count": 1,
+                                "generated_without_stop_text_match_count": 1,
+                                "top_logits_match_count": 0,
+                                "max_prefill_top_logit_abs_diff": 0.2,
+                                "max_decode_last_top_logit_abs_diff": 0.4,
+                            },
+                        }
+                    ],
+                },
+            )
 
             row = TOOL.build_row(
                 types.SimpleNamespace(
@@ -175,6 +233,7 @@ class SqCandidateRuntimeRowTests(unittest.TestCase):
         self.assertIn("timing.materialization_wall_ms", reason)
         self.assertIn("quality.verified_all", reason)
         self.assertIn("guards.prompt_guard_bundle.passed", reason)
+        self.assertEqual(row["quality"]["prompt_suite_regression_status"], "failed")
 
 
 if __name__ == "__main__":

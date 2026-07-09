@@ -103,6 +103,29 @@ def metric(summary: dict[str, Any], key: str) -> Any:
     return metrics.get(key)
 
 
+def prompt_suite_token_logits_check(guard_bundle: dict[str, Any]) -> dict[str, Any] | None:
+    checks = guard_bundle.get("checks")
+    if not isinstance(checks, list):
+        return None
+    for check in checks:
+        if isinstance(check, dict) and check.get("name") == "prompt_suite_token_logits":
+            return check
+    return None
+
+
+def prompt_suite_regression_status(check: dict[str, Any] | None) -> str:
+    if check is None:
+        return "not_attached"
+    return "passed" if check.get("passed") is True else "failed"
+
+
+def prompt_suite_token_logits_metrics(check: dict[str, Any] | None) -> dict[str, Any]:
+    if check is None:
+        return {}
+    metrics = check.get("metrics")
+    return metrics if isinstance(metrics, dict) else {}
+
+
 def mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
@@ -163,6 +186,8 @@ def build_row(args: argparse.Namespace) -> dict[str, Any]:
     guard = load_json_object(args.guard_bundle, "guard bundle")
     first_report = load_case_report(args.suite_summary, summary)
     is_comparable, reason = comparable(args, summary, guard)
+    prompt_suite_check = prompt_suite_token_logits_check(guard)
+    prompt_suite_metrics = prompt_suite_token_logits_metrics(prompt_suite_check)
     suite = summary.get("suite") if isinstance(summary.get("suite"), dict) else {}
     tokenizer_dir = summary.get("tokenizer_dir")
     candidate_id = canonical_or_original(args.candidate_id)
@@ -222,6 +247,7 @@ def build_row(args: argparse.Namespace) -> dict[str, Any]:
             "output_warn_count": metric(summary, "output_warn_count"),
             "output_not_evaluated_count": metric(summary, "output_not_evaluated_count"),
             "verified_all": metric(summary, "verified_all"),
+            "prompt_suite_regression_status": prompt_suite_regression_status(prompt_suite_check),
         },
         "guards": {
             "golden_prefix": {
@@ -233,6 +259,24 @@ def build_row(args: argparse.Namespace) -> dict[str, Any]:
                 "status": "ok",
                 "artifact": str(args.guard_bundle),
                 "passed": guard.get("passed"),
+                "acceptance_mode": prompt_suite_metrics.get("acceptance_mode"),
+                "strict_passed": prompt_suite_metrics.get("strict_passed"),
+                "behavioral_passed": prompt_suite_metrics.get("behavioral_passed"),
+                "compared_case_count": prompt_suite_metrics.get("compared_case_count"),
+                "generated_token_match_count": prompt_suite_metrics.get(
+                    "generated_token_match_count"
+                ),
+                "generated_text_match_count": prompt_suite_metrics.get("generated_text_match_count"),
+                "generated_without_stop_text_match_count": prompt_suite_metrics.get(
+                    "generated_without_stop_text_match_count"
+                ),
+                "top_logits_match_count": prompt_suite_metrics.get("top_logits_match_count"),
+                "max_prefill_top_logit_abs_diff": prompt_suite_metrics.get(
+                    "max_prefill_top_logit_abs_diff"
+                ),
+                "max_decode_last_top_logit_abs_diff": prompt_suite_metrics.get(
+                    "max_decode_last_top_logit_abs_diff"
+                ),
             },
             "external_logits": {
                 "status": "deferred",

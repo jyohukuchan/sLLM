@@ -244,6 +244,21 @@ The bundle currently covers:
 - output status agreement;
 - optional standalone logits guard.
 
+`guards.prompt_guard_bundle` also records a machine-readable regression summary from
+`prompt_suite_token_logits`:
+
+- `quality.prompt_suite_regression_status`: `passed` / `failed` / `not_attached`.
+- `guards.prompt_guard_bundle.acceptance_mode`: strict / behavioral.
+- `guards.prompt_guard_bundle.strict_passed`: strict mode pass/fail flag.
+- `guards.prompt_guard_bundle.behavioral_passed`: behavioral mode pass/fail flag.
+- `guards.prompt_guard_bundle.compared_case_count`: number of compared prompt-suite cases.
+- `guards.prompt_guard_bundle.generated_token_match_count`: matching token count.
+- `guards.prompt_guard_bundle.generated_text_match_count`: matching full generated text count.
+- `guards.prompt_guard_bundle.generated_without_stop_text_match_count`: generated-without-stop text match count.
+- `guards.prompt_guard_bundle.top_logits_match_count`: top-logits match count.
+- `guards.prompt_guard_bundle.max_prefill_top_logit_abs_diff`: max abs diff in prefill top logit.
+- `guards.prompt_guard_bundle.max_decode_last_top_logit_abs_diff`: max abs diff in last-step decode top logit.
+
 `external_logits` remains optional in v0.1 because the current CPU full-model logits path is too
 slow for routine use. If it is not run, set `status` to `deferred`.
 

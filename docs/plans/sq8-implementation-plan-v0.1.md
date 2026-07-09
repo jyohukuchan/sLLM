@@ -364,6 +364,9 @@ Done:
 - `--parse ullm-model-loop-throughput` preserves explicit artifact-load, optional
   materialization, load-excluded total, and load-included total wall-time fields without changing
   the legacy `layer_load_wall_time_seconds` / `outer_wall_time_seconds` fields.
+- `build-sq-candidate-runtime-row.py` now preserves prompt-suite regression status and the
+  prompt-suite guard metrics (`acceptance_mode`, strict/behavioral pass flags, compared case count,
+  generated token/text match counts, and top-logit diff summaries) in candidate runtime rows.
 
 ### M6: Dispatch Integration
 
