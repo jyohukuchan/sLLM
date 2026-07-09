@@ -389,7 +389,8 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_projection_boundary=pair "
             "sq_projection_implementation_ids=pair=sq8_0_matvec_pair_rdna4_direct "
             "sq_fp8_single_matvec_count=0 "
-            "sq_fp8_batch_matvec_count=0 sq_fp8_pair_matvec_count=8 "
+            "sq_fp8_batch_matvec_count=0 sq_fp8_expected_all_batch_matvec_count=14 "
+            "sq_fp8_pair_matvec_count=8 "
             "sq_fp8_triple_matvec_count=0 "
             "request_batch_executor=true fused_request_batch=false throughput_row=true "
             "load_excluded_from_total=true final_logits_in_total=true "
@@ -489,6 +490,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         )
         self.assertEqual(row["workload"]["sq_fp8_single_matvec_count"], 0)
         self.assertEqual(row["workload"]["sq_fp8_batch_matvec_count"], 0)
+        self.assertEqual(row["workload"]["sq_fp8_expected_all_batch_matvec_count"], 14)
         self.assertEqual(row["workload"]["sq_fp8_pair_matvec_count"], 8)
         self.assertEqual(row["workload"]["sq_fp8_triple_matvec_count"], 0)
         self.assertEqual(row["workload"]["final_top1_tokens"], [42, 43, 44])

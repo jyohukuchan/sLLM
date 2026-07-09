@@ -1176,6 +1176,7 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "sq_row_chunk",
         "sq_fp8_single_matvec_count",
         "sq_fp8_batch_matvec_count",
+        "sq_fp8_expected_all_batch_matvec_count",
         "sq_fp8_pair_matvec_count",
         "sq_fp8_triple_matvec_count",
         "prefill_sq_fp8_batch_matvec_count",

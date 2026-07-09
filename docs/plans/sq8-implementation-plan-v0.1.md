@@ -453,6 +453,12 @@ Done:
   `sq_fp8_batch_matvec_count=6`, and `sq_fp8_expected_all_batch_matvec_count=14`, proving the
   SQ8_0 batch matvec path is callable inside the self-attention layer batch smoke while still
   recording that the artifact is a partial overlay.
+- A full layer3 projection SQ8_0 artifact for Qwen3.5 self-attention plus MLP now passes the same
+  batch smoke with `real_batch=true`, `sq_projection_boundary=batch`,
+  `sq_projection_implementation_ids=batch=sq8_0_matvec_batch_r9700_direct`,
+  `sq_fp8_batch_matvec_count=14`, and `sq_fp8_expected_all_batch_matvec_count=14`. This proves the
+  local layer-level batch smoke can run every supported projection in that layer through the direct
+  SQ8_0 batch matvec boundary. It is still a selected-layer proof, not a full-package serving row.
 
 Remaining:
 
@@ -771,8 +777,10 @@ Expected outputs:
    - Multi-request mixed-state rows are now classified as grouped, not real-batch, so they cannot
      accidentally satisfy the final serving-comparison gate.
    - A local `sq-fp8-package-self-attn-layer-batch-smoke` now exercises the SQ8_0 batch matvec
-     runtime path with `real_batch=true`, but the checked run is still a partial selected-layer
-     q/k/v overlay, not a full-package serving row.
+     runtime path with `real_batch=true`. The latest full layer3 projection run reaches
+     `sq_fp8_batch_matvec_count=14/14`, so the next comparison blocker is no longer layer-local
+     batch projection coverage; it is connecting the same direct batch boundary to full-package
+     real-batch or server-style rows.
    - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
      final vLLM serving comparison still needs real-batch or server-style uLLM rows.
 
