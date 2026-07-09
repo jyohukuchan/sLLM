@@ -97,6 +97,10 @@ def make_row(
     return row
 
 
+def split_markdown_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
 class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
     def test_table_filter_and_columns_for_pp16_tg8(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:
@@ -147,6 +151,189 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
             self.assertIn("8", table)
             self.assertIn("10.00", table)
             self.assertIn("12.30", table)
+
+    def test_markdown_table_hides_sq_details_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "results.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                format_id="SQ8_0",
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                sq_projection_boundary="batch",
+                                sq_projection_kernel_families="batch=direct",
+                                sq_fp8_batch_matvec_count=6720,
+                                sq_fp8_expected_all_batch_matvec_count=6720,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            table = TOOL.markdown_table([path], "pp16-tg8", "", {2})
+            lines = table.splitlines()
+            self.assertTrue(lines[0].startswith("| Engine | Case | Harness | Requests |"))
+            self.assertNotIn("SQ boundary", lines[0])
+            self.assertNotIn("batch=direct", table)
+            self.assertNotIn("6720", table)
+
+    def test_markdown_table_with_sq_details_enabled_shows_sq_columns_and_values(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "results.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                format_id="SQ8_0",
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                sq_projection_boundary="batch",
+                                sq_projection_kernel_families="batch=direct",
+                                sq_fp8_batch_matvec_count=6720,
+                                sq_fp8_expected_all_batch_matvec_count=6720,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b1",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=1,
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            table = TOOL.markdown_table(
+                [path], "pp16-tg8", "", {1, 2}, show_sq_details=True
+            )
+            lines = table.splitlines()
+            self.assertIn("SQ boundary | SQ family | SQ batch", lines[0])
+            self.assertEqual(len(lines), 1 + 1 + 3)
+
+            sq8_line = next(
+                line for line in lines if "sq8-mixed-real-batch-no-final-pp16-tg8-b2" in line
+            )
+            parsed_sq8 = split_markdown_row(sq8_line)
+            self.assertEqual(parsed_sq8[-3], "batch")
+            self.assertEqual(parsed_sq8[-2], "batch=direct")
+            self.assertEqual(parsed_sq8[-1], "6720/6720")
+
+            vllm_line = next(
+                line for line in lines if "vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2" in line
+            )
+            parsed_vllm = split_markdown_row(vllm_line)
+            self.assertEqual(parsed_vllm[-3], "-")
+            self.assertEqual(parsed_vllm[-2], "-")
+            self.assertEqual(parsed_vllm[-1], "-")
+
+            missing_sq8_line = next(
+                line for line in lines if "sq8-mixed-real-batch-no-final-pp16-tg8-b1" in line
+            )
+            parsed_missing_sq8 = split_markdown_row(missing_sq8_line)
+            self.assertEqual(parsed_missing_sq8[-3], "-")
+            self.assertEqual(parsed_missing_sq8[-2], "-")
+            self.assertEqual(parsed_missing_sq8[-1], "-")
+
+    def test_cli_show_sq_details_adds_sq_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "results.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                format_id="SQ8_0",
+                                sq_projection_boundary="batch",
+                                sq_projection_kernel_families="batch=direct",
+                                sq_fp8_batch_matvec_count=6720,
+                                sq_fp8_expected_all_batch_matvec_count=6720,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--show-sq-details",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            output = stdout.getvalue()
+            self.assertIn("SQ boundary | SQ family | SQ batch", output)
+            self.assertIn("batch=direct", output)
+            self.assertIn("6720/6720", output)
 
     def test_parse_requests_filter_rejects_bad_items(self) -> None:
         self.assertEqual(TOOL.parse_requests_filter("2, 4,8"), {2, 4, 8})

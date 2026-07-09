@@ -268,14 +268,16 @@ def parse_required_engines_filter(value: str) -> set[str]:
     return required
 
 
-def iter_markdown_rows(rows: Iterable[dict[str, Any]]) -> Iterator[list[str]]:
+def iter_markdown_rows(
+    rows: Iterable[dict[str, Any]], show_sq_details: bool = False
+) -> Iterator[list[str]]:
     for row in rows:
         workload = as_dict(row.get("workload"))
         metrics = as_dict(row.get("metrics"))
         memory = as_dict(row.get("memory"))
         engine = as_dict(row.get("engine"))
         requested = requested_concurrency(workload) or 0
-        yield [
+        output = [
             as_str(engine.get("name")),
             as_str(row.get("case_id")),
             harness_class(row),
@@ -290,9 +292,26 @@ def iter_markdown_rows(rows: Iterable[dict[str, Any]]) -> Iterator[list[str]]:
             or "-",
             format_float(metrics.get("decode_tokens_per_second_times_vram_consumed_gib")),
         ]
+        if show_sq_details:
+            batch_matvec = as_int(workload.get("sq_fp8_batch_matvec_count"))
+            expected_batch_matvec = as_int(
+                workload.get("sq_fp8_expected_all_batch_matvec_count")
+            )
+            output.extend(
+                [
+                    as_str(workload.get("sq_projection_boundary")),
+                    as_str(workload.get("sq_projection_kernel_families")),
+                    f"{batch_matvec}/{expected_batch_matvec}"
+                    if batch_matvec is not None and expected_batch_matvec is not None
+                    else "-",
+                ]
+            )
+        yield output
 
 
-def markdown_lines(rows: Iterable[dict[str, Any]]) -> Iterator[str]:
+def markdown_lines(
+    rows: Iterable[dict[str, Any]], show_sq_details: bool = False
+) -> Iterator[str]:
     header = [
         "Engine",
         "Case",
@@ -306,26 +325,29 @@ def markdown_lines(rows: Iterable[dict[str, Any]]) -> Iterator[str]:
         "Consumed GiB",
         "Decode x GiB",
     ]
+    if show_sq_details:
+        header.extend(["SQ boundary", "SQ family", "SQ batch"])
     yield "| " + " | ".join(header) + " |"
-    yield "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
-    for row in iter_markdown_rows(rows):
+    separator = [
+        "---",
+        "---",
+        "---",
+        "---:",
+        "---:",
+        "---:",
+        "---:",
+        "---:",
+        "---:",
+        "---:",
+        "---:",
+    ]
+    if show_sq_details:
+        separator.extend(["---", "---", "---"])
+    yield "| " + " | ".join(separator) + " |"
+    for row in iter_markdown_rows(rows, show_sq_details=show_sq_details):
         yield (
             "| "
-            + " | ".join(
-                [
-                    as_str(row[0]),
-                    as_str(row[1]),
-                    as_str(row[2]),
-                    as_str(row[3]),
-                    as_str(row[4]),
-                    as_str(row[5]),
-                    as_str(row[6]),
-                    as_str(row[7]),
-                    as_str(row[8]),
-                    as_str(row[9]),
-                    as_str(row[10]),
-                ]
-            )
+            + " | ".join(as_str(cell) for cell in row)
             + " |"
         )
 
@@ -336,6 +358,7 @@ def markdown_table(
     case_substring: str,
     requests_filter: set[int] | None = None,
     harness_class_filter: str = "",
+    show_sq_details: bool = False,
 ) -> str:
     rows = selected_rows(
         paths,
@@ -344,7 +367,7 @@ def markdown_table(
         requests_filter or set(),
         harness_class_filter,
     )
-    return "\n".join(markdown_lines(rows))
+    return "\n".join(markdown_lines(rows, show_sq_details=show_sq_details))
 
 
 def required_engines_gate_failures(
@@ -687,6 +710,13 @@ def parse_args() -> argparse.Namespace:
             "uLLM cli_model_loop_diagnostic and vLLM serving rows per request count"
         ),
     )
+    parser.add_argument(
+        "--show-sq-details",
+        action="store_true",
+        help=(
+            "show SQ8_0 implementation details columns: SQ boundary, SQ family, SQ batch"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -767,7 +797,7 @@ def main() -> int:
             ullm_sq_kernel_families_failures = []
             ullm_sq_batch_coverage_failures = []
             normalized_throughput_comparison_failures = []
-        for line in markdown_lines(rows):
+        for line in markdown_lines(rows, show_sq_details=args.show_sq_details):
             print(line)
         if (
             serving_parity_failures

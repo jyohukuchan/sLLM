@@ -54,7 +54,7 @@ python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8
 Current stricter normalized gate with refreshed uLLM kernel-family rows:
 
 ```bash
-python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-10/sq8-qwen3-14b-normalized-kernel-family-refresh/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families
+python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-10/sq8-qwen3-14b-normalized-kernel-family-refresh/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families --show-sq-details
 ```
 
 Final-comparison engine-presence gate:

@@ -894,6 +894,8 @@ Expected outputs:
   and `vLLM` (`serving_throughput_benchmark`) rows are validated with explicit shape-homogenizing checks.
 - The refreshed 2026-07-10 uLLM rows plus the existing 2026-07-09 vLLM b2/b4/b8 rows now pass
   `--require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families`.
+  The same summary helper can add `--show-sq-details` to display `SQ boundary`, `SQ family`, and
+  `SQ batch` columns in the comparison table.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
 - The vLLM row should be produced through the derived command template in
