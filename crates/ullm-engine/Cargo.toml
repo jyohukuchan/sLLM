@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
+[features]
+default = []
+rocm-ck-gfx1201 = ["ullm-runtime-sys/rocm-ck-gfx1201"]
+
 [dependencies]
 memchr = "2.7"
 serde = { version = "1.0", features = ["derive"] }
