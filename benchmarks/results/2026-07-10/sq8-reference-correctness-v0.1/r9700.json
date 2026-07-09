@@ -1,0 +1,70 @@
+{
+  "schema_version": "sq8-reference-correctness-result-v0.1",
+  "artifact": "/tmp/ullm-qwen3-14b-fp8-sq8-canonical-layer0-q-v0.2",
+  "artifact_schema_version": "sq-fp8-artifact-v0.2",
+  "artifact_content_sha256": "29857be65d162ca1150f91e5c159186a0086d0f2eb463b2b113d92db4acd5c6a",
+  "tensor": {
+    "name": "model.layers.0.self_attn.q_proj.weight",
+    "rows": 5120,
+    "cols": 5120,
+    "scale_rows": 40,
+    "scale_cols": 40,
+    "block_rows": 128,
+    "block_cols": 128
+  },
+  "input_f32_le_sha256": "93f05449d07327c1237992938233030f1058dbe965504e343c8ae656dbe2e781",
+  "oracle_output_f32_le_sha256": "24661953d983d9532ef4c3413a420e73f139604762cc07e68eebd09da5b53469",
+  "runtime_output_f32_le_sha256": "b0e845094503cbb3adbfbfa9738a5b17b90f5b526c9e108475eab0a67252fddb",
+  "runtime_execution_path": "hip_kernel",
+  "device": {
+    "requested_index": 2,
+    "runtime_device_id": 1,
+    "backend": "hip",
+    "name": "AMD Radeon Graphics",
+    "compute_major": 12,
+    "compute_minor": 0,
+    "gcn_arch_name": ""
+  },
+  "correctness": {
+    "artifact_content_sha256": "29857be65d162ca1150f91e5c159186a0086d0f2eb463b2b113d92db4acd5c6a",
+    "tensor": "model.layers.0.self_attn.q_proj.weight",
+    "input_f32_le_sha256": "93f05449d07327c1237992938233030f1058dbe965504e343c8ae656dbe2e781",
+    "implementation_profile": "reference_w8a16_block2d",
+    "execution_path": "runtime_hip_kernel",
+    "fallback_state": "not_used",
+    "metrics": {
+      "element_count": 5120,
+      "nonfinite_count": 0,
+      "mse": 1.5194372341518414e-15,
+      "max_abs": 2.384185791015625e-7,
+      "relative_l2": 8.499422347560135e-8,
+      "cosine_similarity": 0.9999999999999909
+    },
+    "thresholds": {
+      "max_abs": 0.00002,
+      "relative_l2": 0.00001,
+      "cosine_similarity": 0.999999
+    },
+    "passed": true
+  },
+  "oracle_preview": [
+    0.5367639,
+    -0.19382165,
+    -0.17158823,
+    -0.5009894,
+    0.32342717,
+    0.46021074,
+    0.45735133,
+    0.26097858
+  ],
+  "runtime_preview": [
+    0.53676385,
+    -0.19382171,
+    -0.1715883,
+    -0.50098944,
+    0.3234272,
+    0.46021068,
+    0.4573513,
+    0.2609786
+  ]
+}

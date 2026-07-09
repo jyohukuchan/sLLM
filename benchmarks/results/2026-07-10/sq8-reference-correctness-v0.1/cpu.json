@@ -1,0 +1,70 @@
+{
+  "schema_version": "sq8-reference-correctness-result-v0.1",
+  "artifact": "/tmp/ullm-qwen3-14b-fp8-sq8-canonical-layer0-q-v0.2",
+  "artifact_schema_version": "sq-fp8-artifact-v0.2",
+  "artifact_content_sha256": "29857be65d162ca1150f91e5c159186a0086d0f2eb463b2b113d92db4acd5c6a",
+  "tensor": {
+    "name": "model.layers.0.self_attn.q_proj.weight",
+    "rows": 5120,
+    "cols": 5120,
+    "scale_rows": 40,
+    "scale_cols": 40,
+    "block_rows": 128,
+    "block_cols": 128
+  },
+  "input_f32_le_sha256": "93f05449d07327c1237992938233030f1058dbe965504e343c8ae656dbe2e781",
+  "oracle_output_f32_le_sha256": "24661953d983d9532ef4c3413a420e73f139604762cc07e68eebd09da5b53469",
+  "runtime_output_f32_le_sha256": "53a88e140dbce3dacf5098701a825090f35e677f92da3d700dd799bdfafce063",
+  "runtime_execution_path": "cpu_reference",
+  "device": {
+    "requested_index": 0,
+    "runtime_device_id": 0,
+    "backend": "cpu",
+    "name": "host CPU fallback",
+    "compute_major": 0,
+    "compute_minor": 0,
+    "gcn_arch_name": ""
+  },
+  "correctness": {
+    "artifact_content_sha256": "29857be65d162ca1150f91e5c159186a0086d0f2eb463b2b113d92db4acd5c6a",
+    "tensor": "model.layers.0.self_attn.q_proj.weight",
+    "input_f32_le_sha256": "93f05449d07327c1237992938233030f1058dbe965504e343c8ae656dbe2e781",
+    "implementation_profile": "reference_w8a16_block2d",
+    "execution_path": "runtime_cpu_reference",
+    "fallback_state": "not_applicable",
+    "metrics": {
+      "element_count": 5120,
+      "nonfinite_count": 0,
+      "mse": 1.2798327411897863e-13,
+      "max_abs": 4.291534423828125e-6,
+      "relative_l2": 7.800539426079679e-7,
+      "cosine_similarity": 0.9999999999996875
+    },
+    "thresholds": {
+      "max_abs": 0.00002,
+      "relative_l2": 0.00001,
+      "cosine_similarity": 0.999999
+    },
+    "passed": true
+  },
+  "oracle_preview": [
+    0.5367639,
+    -0.19382165,
+    -0.17158823,
+    -0.5009894,
+    0.32342717,
+    0.46021074,
+    0.45735133,
+    0.26097858
+  ],
+  "runtime_preview": [
+    0.5367639,
+    -0.19382173,
+    -0.1715882,
+    -0.5009887,
+    0.3234273,
+    0.4602105,
+    0.45735076,
+    0.2609785
+  ]
+}
