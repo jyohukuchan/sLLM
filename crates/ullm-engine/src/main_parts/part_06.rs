@@ -2396,6 +2396,7 @@ struct PackageSelfAttnResidentStepBatchLayer {
     batch_attention_block_output_buffer: ullm_runtime_sys::RuntimeBuffer,
     batch_post_normed_buffer: ullm_runtime_sys::RuntimeBuffer,
     batch_mlp_gate_buffer: ullm_runtime_sys::RuntimeBuffer,
+    batch_mlp_up_buffer: ullm_runtime_sys::RuntimeBuffer,
     batch_mlp_activation_buffer: ullm_runtime_sys::RuntimeBuffer,
     batch_layer_output_buffer: ullm_runtime_sys::RuntimeBuffer,
 }
@@ -2697,6 +2698,14 @@ impl PackageSelfAttnResidentStepBatchLayer {
             .map_err(|err| {
                 format!("failed to allocate self-attn resident batch MLP gate: {err}")
             })?;
+        let batch_mlp_up_buffer = context
+            .alloc_buffer(checked_f32_byte_len(
+                batch_mlp_intermediate,
+                "self-attn resident batch MLP up",
+            )?)
+            .map_err(|err| {
+                format!("failed to allocate self-attn resident batch MLP up: {err}")
+            })?;
         let batch_layer_output_buffer = context
             .alloc_buffer(checked_f32_byte_len(
                 batch_attention_block_output_elements,
@@ -2736,6 +2745,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
             batch_attention_block_output_buffer,
             batch_post_normed_buffer,
             batch_mlp_gate_buffer,
+            batch_mlp_up_buffer,
             batch_mlp_activation_buffer,
             batch_layer_output_buffer,
         })
@@ -3211,15 +3221,15 @@ impl PackageSelfAttnResidentStepBatchLayer {
         weights.o_matrix.matvec_batch(
             &self.batch_attention_projection_input_buffer,
             batch_count,
-            &mut self.batch_attention_block_output_buffer,
+            &mut self.batch_layer_output_buffer,
             stream,
             "self-attn resident batch o projection",
         )?;
         ullm_runtime_sys::add_f32(
-            &self.batch_attention_block_output_buffer,
+            &self.batch_layer_output_buffer,
             &self.batch_residual_buffer,
             attention_block_output_elements,
-            &mut self.batch_layer_output_buffer,
+            &mut self.batch_attention_block_output_buffer,
             Some(stream),
         )
         .map_err(|err| {
@@ -3237,7 +3247,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
 
         let component_started = Instant::now();
         ullm_runtime_sys::segmented_rmsnorm_f32(
-            &self.batch_layer_output_buffer,
+            &self.batch_attention_block_output_buffer,
             weights.post_norm_weight_buffer.as_ref(),
             batch_count,
             self.hidden,
@@ -3258,17 +3268,6 @@ impl PackageSelfAttnResidentStepBatchLayer {
             step_ms.post_rmsnorm_ms = post_normed_ms;
         }
 
-        let attention_block_output_values = read_runtime_buffer_f32(
-            &self.batch_layer_output_buffer,
-            stream,
-            attention_block_output_elements,
-            &format!("{label} self-attn resident batch attention block output"),
-        )?;
-        record_sq_diagnostic_host_staging_f32_read(
-            attention_block_output_values.len(),
-            "self-attn resident batch attention block output staging",
-        )?;
-
         let component_started = Instant::now();
         weights.mlp_gate_matrix.matvec_batch(
             &self.batch_post_normed_buffer,
@@ -3280,15 +3279,21 @@ impl PackageSelfAttnResidentStepBatchLayer {
         weights.mlp_up_matrix.matvec_batch(
             &self.batch_post_normed_buffer,
             batch_count,
-            &mut self.batch_mlp_activation_buffer,
+            &mut self.batch_mlp_up_buffer,
             stream,
             "self-attn resident batch MLP up projection",
         )?;
+        ullm_runtime_sys::silu_mul_f32(
+            &self.batch_mlp_gate_buffer,
+            &self.batch_mlp_up_buffer,
+            mlp_activation_elements,
+            &mut self.batch_mlp_activation_buffer,
+            Some(stream),
+        )
+        .map_err(|err| format!("failed to run {label} self-attn batch MLP SiLU-mul: {err}"))?;
         let mlp_gate_up_activation_ms = if sync_component_timing {
             stream.synchronize().map_err(|err| {
-                format!(
-                    "failed to synchronize {label} self-attn batch MLP gate/up projection: {err}"
-                )
+                format!("failed to synchronize {label} self-attn batch MLP gate/up activation: {err}")
             })?;
             component_started.elapsed().as_secs_f64() * 1000.0
         } else {
@@ -3299,45 +3304,6 @@ impl PackageSelfAttnResidentStepBatchLayer {
             step_ms.mlp_gate_up_activation_ms = mlp_gate_up_activation_ms;
         }
 
-        let mut mlp_gate_values = read_runtime_buffer_f32(
-            &self.batch_mlp_gate_buffer,
-            stream,
-            mlp_activation_elements,
-            &format!("{label} self-attn resident batch MLP gate output"),
-        )?;
-        record_sq_diagnostic_host_staging_f32_read(
-            mlp_gate_values.len(),
-            "self-attn resident batch MLP gate staging",
-        )?;
-        let mlp_up_values = read_runtime_buffer_f32(
-            &self.batch_mlp_activation_buffer,
-            stream,
-            mlp_activation_elements,
-            &format!("{label} self-attn resident batch MLP up output"),
-        )?;
-        record_sq_diagnostic_host_staging_f32_read(
-            mlp_up_values.len(),
-            "self-attn resident batch MLP up staging",
-        )?;
-
-        for (gate_value, up_value) in mlp_gate_values.iter_mut().zip(mlp_up_values.iter()) {
-            let gate = *gate_value;
-            *gate_value = gate * (1.0_f32 / (1.0_f32 + (-gate).exp())) * *up_value;
-        }
-
-        self.batch_mlp_activation_buffer.copy_from_host(
-            0,
-            &encode_f32_to_bytes(&mlp_gate_values),
-            Some(stream),
-        )
-        .map_err(|err| {
-            format!("failed to copy {label} self-attn resident batch MLP activation: {err}")
-        })?;
-        record_sq_diagnostic_host_staging_f32_write(
-            mlp_gate_values.len(),
-            "self-attn resident batch MLP activation staging",
-        )?;
-
         let component_started = Instant::now();
         weights.mlp_down_matrix.matvec_batch(
             &self.batch_mlp_activation_buffer,
@@ -3346,34 +3312,32 @@ impl PackageSelfAttnResidentStepBatchLayer {
             stream,
             "self-attn resident batch MLP down projection",
         )?;
-        let mlp_down_residual_ms = if sync_component_timing {
-            stream.synchronize().map_err(|err| {
-                format!("failed to synchronize {label} self-attn batch MLP down: {err}")
-            })?;
-            component_started.elapsed().as_secs_f64() * 1000.0
-        } else {
-            0.0
-        };
+        ullm_runtime_sys::add_f32(
+            &self.batch_layer_output_buffer,
+            &self.batch_attention_block_output_buffer,
+            attention_block_output_elements,
+            &mut self.batch_residual_buffer,
+            Some(stream),
+        )
+        .map_err(|err| {
+            format!("failed to run {label} self-attn resident batch MLP residual add: {err}")
+        })?;
+        let mlp_down_residual_ms =
+            finish_component(stream, component_started, sync_component_timing, "MLP down")?;
         for step_ms in &mut component_step_ms {
             step_ms.mlp_down_residual_ms = mlp_down_residual_ms;
         }
 
-        let mut mlp_down_output_values = read_runtime_buffer_f32(
-            &self.batch_layer_output_buffer,
+        let layer_output_values = read_runtime_buffer_f32(
+            &self.batch_residual_buffer,
             stream,
             attention_block_output_elements,
-            &format!("{label} self-attn resident batch MLP down output"),
+            &format!("{label} self-attn resident batch layer output"),
         )?;
         record_sq_diagnostic_host_staging_f32_read(
-            mlp_down_output_values.len(),
-            "self-attn resident batch MLP down staging",
+            layer_output_values.len(),
+            "self-attn resident batch layer output staging",
         )?;
-        for (output_value, residual_value) in mlp_down_output_values
-            .iter_mut()
-            .zip(attention_block_output_values.iter())
-        {
-            *output_value += *residual_value;
-        }
 
         for (batch_index, item) in items.iter().enumerate() {
             let item_label = format!(
@@ -3401,7 +3365,7 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .copy_from_host(
                     0,
                     &encode_f32_to_bytes(
-                        &mlp_down_output_values[layer_output_start..layer_output_end],
+                        &layer_output_values[layer_output_start..layer_output_end],
                     ),
                     Some(stream),
                 )

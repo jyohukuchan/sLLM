@@ -586,9 +586,10 @@ Important rule:
 ### M10: vLLM + FP8 External Baseline Comparison
 
 Status: partial. The M10 harness now has same-model uLLM and vLLM rows for the smoke and
-representative workloads, but the current uLLM rows are token-id model-loop measurements rather than
-server-style or real-batch serving rows. This is intentionally a later-phase comparison after SQ8_0
-artifact loading, runtime dispatch, and implementation-valid model-loop rows are in place.
+representative workloads, plus real-batch SQ8_0 diagnostics. The current uLLM rows are still
+model-loop or selected-layer diagnostic measurements rather than server-style serving rows. This is
+intentionally a later-phase comparison after SQ8_0 artifact loading, runtime dispatch, and
+implementation-valid model-loop rows are in place.
 
 Purpose:
 
@@ -668,6 +669,14 @@ Current local baseline state:
   `sq_diagnostic_host_staging_write_count=42`,
   `sq_diagnostic_host_staging_read_bytes=1228800`, and
   `sq_diagnostic_host_staging_write_bytes=1032192`.
+- The MLP device-side reduction row at
+  `benchmarks/results/2026-07-09/sq8-host-staging-mlp-residual-device-smoke/results.jsonl` keeps
+  the same selected-layer `sq_fp8_batch_matvec_count=21/21` and further reduces the shape to
+  `sq_diagnostic_host_staging_read_count=24`,
+  `sq_diagnostic_host_staging_write_count=39`,
+  `sq_diagnostic_host_staging_read_bytes=540672`, and
+  `sq_diagnostic_host_staging_write_bytes=737280` by keeping MLP activation and residual add on
+  batch device buffers.
 - The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
   It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and
@@ -869,8 +878,10 @@ Expected outputs:
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device
-     buffers. The next implementation step is still to reduce the remaining counted copies rather
-     than treating the annotation itself as serving parity.
+     buffers. A second reduction moves the same shape to `24/39` by keeping the MLP gate/up
+     SiLU-mul activation and MLP down residual add on batch device buffers. The next implementation
+     step is still to reduce the remaining counted copies rather than treating the annotation itself
+     as serving parity.
 
 ## Risks
 
