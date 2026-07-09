@@ -1,0 +1,41 @@
+{
+  "schema_version": "sq8-optimized-component-metrics-v0.1",
+  "shape": {"n": 5120, "k": 5120},
+  "thresholds": {
+    "relative_l2_max": 0.005,
+    "cosine_min": 0.9999,
+    "finite_output_required": true,
+    "fallback_required": "not_used",
+    "recommended_m8_over_m2_throughput_ratio_min": 2.5
+  },
+  "points": [
+    {"m": 1, "warm_ms": 0.032260501757264137, "warm_tflops": 1.6251700111327172, "evicted_ms": 0.061161000281572342, "evicted_tflops": 0.85722600609258948, "reference_ms": 0.19170399999999999, "warm_speedup": 5.9423750269734645, "evicted_vs_warm_reference": 3.134415708007312, "relative_l2": 0.0016828584463595105, "cosine": 0.99999858451971568},
+    {"m": 2, "warm_ms": 0.032439999282360077, "warm_tflops": 3.2323551886457191, "evicted_ms": 0.061420999467372894, "evicted_tflops": 1.707194622511814, "reference_ms": 0.326286, "warm_speedup": 10.058138323616573, "evicted_vs_warm_reference": 5.312287374504946, "relative_l2": 0.0016773514704995348, "cosine": 0.9999985934620601},
+    {"m": 4, "warm_ms": 0.032860500738024712, "warm_tflops": 6.3819843060798789, "evicted_ms": 0.061760500073432922, "evicted_tflops": 3.3956201739080751, "reference_ms": 0.598335, "warm_speedup": 18.208334826365967, "evicted_vs_warm_reference": 9.687988265778008, "relative_l2": 0.0016544122661256966, "cosine": 0.99999863148039825},
+    {"m": 8, "warm_ms": 0.033460499718785286, "warm_tflops": 12.535090734599063, "evicted_ms": 0.063000999391078949, "evicted_tflops": 6.6575197862558362, "reference_ms": 1.15428, "warm_speedup": 34.49679501803638, "evicted_vs_warm_reference": 18.321614119718998, "relative_l2": 0.0016583139317995841, "cosine": 0.9999986255665877},
+    {"m": 16, "warm_ms": 0.035620000213384628, "warm_tflops": 23.550274985253601, "evicted_ms": 0.064920000731945038, "evicted_tflops": 12.921453951666757, "reference_ms": 2.2522390000000003, "warm_speedup": 63.22961781324458, "evicted_vs_warm_reference": 34.69252887564658, "relative_l2": 0.0016547057499464294, "cosine": 0.99999863104768105},
+    {"m": 32, "warm_ms": 0.040759999305009842, "warm_tflops": 41.16098205609611, "evicted_ms": 0.069580499082803726, "evicted_tflops": 24.111951223624317, "reference_ms": 4.3558955, "warm_speedup": 106.86691791637527, "evicted_vs_warm_reference": 62.60224570703784, "relative_l2": 0.0016574691258192454, "cosine": 0.99999862655458549},
+    {"m": 128, "warm_ms": 0.099801000207662582, "warm_tflops": 67.242676787168591, "evicted_ms": 0.1166209988296032, "evicted_tflops": 57.544408531480542, "reference_ms": 17.315155, "warm_speedup": 173.49680828820559, "evicted_vs_warm_reference": 148.4737326362592, "relative_l2": 0.0016598437910543017, "cosine": 0.9999986224597911}
+  ],
+  "aggregate": {
+    "warm_m8_over_m2_throughput_ratio": 3.8780053561660006,
+    "evicted_m8_over_m2_throughput_ratio": 3.899684135872309,
+    "maximum_relative_l2": 0.0016828584463595105,
+    "minimum_cosine": 0.99999858451971568,
+    "all_activation_fp8_bytes_exact": true,
+    "all_activation_scale_bits_exact": true,
+    "all_candidates_numerically_valid_per_point": 6,
+    "candidate_count_per_point": 38,
+    "supported_count_per_point": 6,
+    "all_fallback": "not_used",
+    "all_status": "passed"
+  },
+  "gate": {
+    "numerical": "passed",
+    "warm_performance": "passed",
+    "cache_artifact_check": "passed",
+    "recommended_scaling_target": "passed",
+    "p4": "green"
+  },
+  "comparison_note": "Warm optimized versus warm reference is the matched speedup comparison. Evicted optimized versus warm reference is a deliberately conservative cache-artifact check, not a matched-cache speedup claim."
+}
