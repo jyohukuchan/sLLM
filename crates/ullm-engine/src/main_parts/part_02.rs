@@ -2541,10 +2541,7 @@ fn package_model_loop_self_attn_layer_indices(path: &str) -> Result<Vec<usize>, 
 }
 
 fn parse_language_model_layer_tensor_suffix(tensor_name: &str, suffix: &str) -> Option<usize> {
-    let layer = tensor_name
-        .strip_prefix("model.language_model.layers.")?
-        .strip_suffix(suffix)?;
-    layer.parse::<usize>().ok()
+    ullm_engine::qwen3_names::qwen3_layer_index_from_tensor_suffix(tensor_name, suffix)
 }
 
 #[allow(clippy::too_many_arguments)]

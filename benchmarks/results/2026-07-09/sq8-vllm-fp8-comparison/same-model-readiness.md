@@ -27,6 +27,11 @@
     - `model.embed_tokens.weight`
     - `model.layers.*`
   - 対応方針は、変換時リネーム（最も直接的）かruntime側のprefix吸収のどちらか。
+- Runtime側のprefix吸収を実装した。
+  - package quantized tensor selectorは `model.language_model.*` 要求から `model.*` manifestを引ける。
+  - passthrough selectorは `model.language_model.embed_tokens.weight` / `model.language_model.norm.weight` から `model.embed_tokens.weight` / `model.norm.weight` を引ける。
+  - SQ8_0 artifact selectorは `model.language_model.layers.*` 要求から `model.layers.*` artifact entryを引ける。
+  - `manifest-all` と `manifest-self-attn` のlayer検出は `model.layers.*` に対応した。
 - dry-runで、同一モデル化に必要なmetadata読み取りはpayloadを全量materializeせず進められる見込みを確認。
   - `tools/build-sq-fp8-w8a16-artifact.py --dry-run`: FP8対象 `281`、passthrough `442`、compact resident estimate `15557220864` bytes
   - `ullm-quant --dry-run`: total tensor `723`、supported tensor `280`、passthrough `443`
@@ -42,6 +47,6 @@
 
 - まず `Qwen3-14B-FP8` 向けのuLLM package化（`model.layers.*` 系を受ける `.ullm.d`）を完了する。
 - 生成済みQwen3-14B packageを使ってSQ8_0 artifactを作成・導入し、`40-layer manifest-all` を追加する。
-- tensor-nameの整合（`model.*`/`model.language_model.*`）を実運用で自動検証し、runtime側で吸収する場合は最小差分の実装にする。
+- tensor-nameの整合（`model.*`/`model.language_model.*`）はruntime側で吸収済み。次は実packageで自動検証する。
 - 同条件（`pp16/tg8/b1` を含む）でvLLM smoke/代表bothを再実行し、初めて同一モデルsame-model throughputとして扱う。
 - その時点で、比較結論の表記を「same-model throughput conclusion」として更新できるか判定する。

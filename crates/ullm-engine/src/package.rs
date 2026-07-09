@@ -1,6 +1,7 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::qwen3_names::qwen3_tensor_name_alias;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::fs;
@@ -511,6 +512,16 @@ fn select_tensor_index_by_name(manifest: &Manifest, name: &str) -> Result<usize,
     {
         return Ok(index);
     }
+    if let Some(alias) = qwen3_tensor_name_alias(name) {
+        if let Some((index, _)) = manifest
+            .tensors
+            .iter()
+            .enumerate()
+            .find(|(_, tensor)| tensor.name.as_deref() == Some(alias.as_str()))
+        {
+            return Ok(index);
+        }
+    }
 
     let matches: Vec<usize> = manifest
         .tensors
@@ -542,6 +553,16 @@ fn select_passthrough_index_by_name(manifest: &Manifest, name: &str) -> Result<u
         .find(|(_, tensor)| tensor.name.as_deref() == Some(name))
     {
         return Ok(index);
+    }
+    if let Some(alias) = qwen3_tensor_name_alias(name) {
+        if let Some((index, _)) = manifest
+            .passthrough_tensors
+            .iter()
+            .enumerate()
+            .find(|(_, tensor)| tensor.name.as_deref() == Some(alias.as_str()))
+        {
+            return Ok(index);
+        }
     }
 
     let matches: Vec<usize> = manifest
@@ -1078,6 +1099,49 @@ mod tests {
     }
 
     #[test]
+    fn selects_qwen3_tensor_payload_bundle_across_namespaces() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-qwen3-tensor-namespace-selector-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("tensors")).unwrap();
+        fs::create_dir_all(root.join("codebooks")).unwrap();
+        fs::write(root.join("tensors/q.idx4"), [0_u8; 4]).unwrap();
+        fs::write(root.join("tensors/q.scale_u8"), [0_u8; 4]).unwrap();
+        fs::write(root.join("codebooks/q.f32"), [0_u8; 64]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "tensors": [{
+                "name": "model.layers.0.self_attn.q_proj.weight",
+                "shape": [1, 1],
+                "elements": 1,
+                "groups": 1,
+                "index_file": "tensors/q.idx4",
+                "scale_file": "tensors/q.scale_u8",
+                "codebook_file": "codebooks/q.f32"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let bundle = select_tensor_payload_bundle(
+            &root,
+            &TensorSelector::Name(
+                "model.language_model.layers.0.self_attn.q_proj.weight".to_string(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(bundle.tensor_index, 0);
+        assert_eq!(bundle.tensor_name, "model.layers.0.self_attn.q_proj.weight");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn lists_tensor_payload_bundles_in_manifest_order() {
         let root = std::env::temp_dir().join(format!(
             "ullm-engine-tensor-bundle-list-test-{}",
@@ -1224,6 +1288,43 @@ mod tests {
             bundles[1].tensor_name,
             "layer.0.post_attention_layernorm.weight"
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selects_qwen3_passthrough_payload_bundle_across_namespaces() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-qwen3-passthrough-namespace-selector-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("passthrough")).unwrap();
+        fs::write(root.join("passthrough/embed.raw"), [0_u8; 4]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "passthrough_tensors": [{
+                "name": "model.embed_tokens.weight",
+                "dtype": "BF16",
+                "shape": [1, 2],
+                "elements": 2,
+                "payload_bytes": 4,
+                "payload_file": "passthrough/embed.raw"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let bundle = select_passthrough_payload_bundle(
+            &root,
+            &TensorSelector::Name("model.language_model.embed_tokens.weight".to_string()),
+        )
+        .unwrap();
+        assert_eq!(bundle.tensor_index, 0);
+        assert_eq!(bundle.tensor_name, "model.embed_tokens.weight");
 
         fs::remove_dir_all(root).unwrap();
     }

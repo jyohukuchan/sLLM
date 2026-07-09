@@ -554,9 +554,9 @@ Same-model readiness audit:
 - `Qwen3-14B-FP8` source tensor naming uses `model.embed_tokens.weight`, `model.norm.weight`, and
   `model.layers.*`. The current uLLM token-id model-loop runtime uses
   `model.language_model.embed_tokens.weight`, `model.language_model.norm.weight`, and
-  `model.language_model.layers.*` constants. A same-model row therefore needs either a package
-  conversion rename step or a runtime tensor-namespace resolver before the generated package can be
-  used by the existing Qwen3 path.
+  `model.language_model.layers.*` constants. Runtime/package/SQ selector fallback now accepts both
+  namespaces for supported Qwen3 tensor names, while preserving exact-name lookup priority for
+  existing Qwen3.5 packages.
 - `tools/build-sq-fp8-w8a16-artifact.py --dry-run` can inspect the local `Qwen3-14B-FP8` directory
   and selects `281` FP8 tensors, with `442` passthrough tensors and a compact resident byte estimate
   of `15557220864`. This confirms SQ8_0 artifact metadata generation is plausible, but it does not
@@ -570,8 +570,8 @@ Same-model readiness audit:
 
 Same-model prerequisites:
 
-1. Choose the Qwen3 tensor namespace strategy: manifest-time rename to `model.language_model.*`, or
-   runtime lookup that accepts both `model.*` and `model.language_model.*`.
+1. Choose the Qwen3 tensor namespace strategy: Done. Runtime lookup now accepts both `model.*` and
+   `model.language_model.*` for Qwen3 layers, embeddings, and final norm.
 2. Build a `Qwen3-14B-FP8` uLLM package with bounded memory conversion and record the package
    summary.
 3. Build or import the matching `SQ8_0` artifact and verify the selected FP8 tensor count against

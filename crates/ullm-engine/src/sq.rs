@@ -3,6 +3,7 @@
 
 use crate::format_id::{FORMAT_SQ8_0, is_sq8_0_alias};
 use crate::package::TensorSelector;
+use crate::qwen3_names::qwen3_tensor_name_alias;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -670,10 +671,19 @@ pub fn find_sq_fp8_tensor_index_by_exact_name(
     manifest: &SqFp8ArtifactManifest,
     tensor_name: &str,
 ) -> Option<usize> {
-    manifest
+    if let Some(index) = manifest
         .fp8_tensors
         .iter()
         .position(|tensor| tensor.name == tensor_name)
+    {
+        return Some(index);
+    }
+    qwen3_tensor_name_alias(tensor_name).and_then(|alias| {
+        manifest
+            .fp8_tensors
+            .iter()
+            .position(|tensor| tensor.name == alias)
+    })
 }
 
 pub fn sq_fp8_tensor_rows_cols(tensor: &SqFp8TensorEntry) -> Result<(usize, usize), String> {
@@ -838,6 +848,16 @@ fn select_sq_fp8_tensor_index_by_name(
         .find(|(_, tensor)| tensor.name == name)
     {
         return Ok(index);
+    }
+    if let Some(alias) = qwen3_tensor_name_alias(name) {
+        if let Some((index, _)) = manifest
+            .fp8_tensors
+            .iter()
+            .enumerate()
+            .find(|(_, tensor)| tensor.name == alias)
+        {
+            return Ok(index);
+        }
     }
     let matches: Vec<usize> = manifest
         .fp8_tensors
@@ -1208,5 +1228,50 @@ mod tests {
             select_sq_fp8_tensor_index(&manifest, &TensorSelector::Name("layer.0".to_string()))
                 .unwrap_err();
         assert!(err.contains("matched 2 tensors"));
+    }
+
+    #[test]
+    fn selector_accepts_qwen3_namespace_alias() {
+        let mut manifest = empty_manifest_for_candidate(FORMAT_SQ8_0, Some(FORMAT_SQ8_0));
+        manifest.storage.fp8_tensor_count = 1;
+        manifest.storage.fp8_payload_bytes = 1;
+        manifest.storage.fp8_scale_bytes = 4;
+        manifest.fp8_tensors = vec![SqFp8TensorEntry {
+            name: "model.layers.0.self_attn.q_proj.weight".to_string(),
+            family: "attn_q".to_string(),
+            source_dtype: "F32".to_string(),
+            shape: vec![1, 1],
+            elements: 1,
+            source_file: "/tmp/q".to_string(),
+            payload_dtype: SQ_FP8_E4M3_DTYPE.to_string(),
+            payload_file: "fp8/q".to_string(),
+            payload_bytes: 1,
+            scale_granularity: "row".to_string(),
+            scale_dtype: SQ_F32_SCALE_DTYPE.to_string(),
+            scale_file: "scales/q".to_string(),
+            scale_elements: 1,
+            scale_bytes: 4,
+            scale_block_cols: None,
+            payload_sha256: None,
+            scale_sha256: None,
+        }];
+
+        assert_eq!(
+            select_sq_fp8_tensor_index(
+                &manifest,
+                &TensorSelector::Name(
+                    "model.language_model.layers.0.self_attn.q_proj.weight".to_string(),
+                ),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            find_sq_fp8_tensor_index_by_exact_name(
+                &manifest,
+                "model.language_model.layers.0.self_attn.q_proj.weight",
+            ),
+            Some(0)
+        );
     }
 }

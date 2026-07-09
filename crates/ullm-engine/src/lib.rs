@@ -11,6 +11,7 @@ pub mod host_bytes;
 pub mod loader;
 pub mod package;
 pub mod qwen3_loader;
+pub mod qwen3_names;
 pub mod scheduler;
 pub mod sq;
 pub mod sq_runtime;
