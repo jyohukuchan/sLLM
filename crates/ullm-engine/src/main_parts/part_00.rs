@@ -679,6 +679,22 @@ fn main() -> ExitCode {
                 env::args().nth(13),
             )
         }
+        Some("sq-fp8-token-ids-offline-serving-throughput") => {
+            sq_fp8_token_ids_offline_serving_throughput(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+                env::args().nth(8),
+                env::args().nth(9),
+                env::args().nth(10),
+                env::args().nth(11),
+                env::args().nth(12),
+                env::args().nth(13),
+            )
+        }
         Some("sq-fp8-token-ids-model-loop-smoke") => sq_fp8_token_ids_model_loop_smoke(
             env::args().nth(2),
             env::args().nth(3),

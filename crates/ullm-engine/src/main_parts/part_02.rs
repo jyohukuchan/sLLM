@@ -157,6 +157,127 @@ fn package_decoder_layer_kind(
     ))
 }
 
+#[cfg(test)]
+#[test]
+fn sq_fp8_offline_serving_workload_entry_to_report_maps_known_fields() {
+        let line = concat!(
+            "command=sq-fp8-token-ids-offline-serving-throughput ",
+            "package=demo.pkg ",
+            "backend=mock ",
+            "name=MockGPU ",
+            "format_id=fp8 ",
+            "sq_format_id=fp8-1 ",
+            "sq_candidate=8 ",
+            "sq_schema_version=0.1 ",
+            "sq_projection_boundary=8 ",
+            "sq_projection_kernel_families=fam_a,fam_b ",
+            "sq_fp8_batch_matvec_count=128 ",
+            "sq_fp8_expected_all_batch_matvec_count=256 ",
+            "sq_fp8_single_matvec_count=12 ",
+            "sq_diagnostic_host_staging_read_count=3 ",
+            "sq_diagnostic_host_staging_write_count=4 ",
+            "sq_diagnostic_host_staging_read_bytes=1024 ",
+            "sq_diagnostic_host_staging_write_bytes=2048 ",
+            "layers_csv=manifest-all ",
+            "lm_head_top_k=9 ",
+            "rotary_dim=128 ",
+            "rope_base=10000000 ",
+            "position_offset=0 ",
+            "batching_mode=real ",
+            "prefill_executor=mixed_request_state_layer_batch_step ",
+            "prefill_real_batch=true ",
+            "decode_real_batch=true ",
+            "prefill_request_grouped=true ",
+            "decode_request_grouped=true ",
+            "prefill_grouped_request_parallelism=2 ",
+            "decode_grouped_request_parallelism=2 ",
+            "prefill_executor_request_parallelism=4 ",
+            "decode_executor_request_parallelism=4 ",
+            "request_count=2 ",
+            "concurrent_requests=2 ",
+            "prompt_tokens_csv=5,6 ",
+            "max_new_tokens_csv=3,4 ",
+            "prefill_total_input_tokens=11 ",
+            "decode_total_generated_tokens=7 ",
+            "end_to_end_total_tokens=18 ",
+            "prefill_wall_ms=1.2 ",
+            "decode_wall_ms=3.4 ",
+            "total_wall_ms=5.0 ",
+            "outer_wall_ms=4.6 ",
+            "prefill_total_input_tps=1200.5 ",
+            "decode_total_generated_tps=900.25 ",
+            "end_to_end_total_tps=700.1 ",
+            "device_index=2 ",
+            "paged_block_size=128 ",
+            "paged_cache_blocks=256 ",
+            "verified=true ",
+        );
+
+        let report = sq_fp8_offline_serving_workload_entry_to_report(line, 0);
+
+        assert_eq!(report["schema_version"], "inference-benchmark-result-v0.1");
+        assert_eq!(report["package"], "demo.pkg");
+        assert_eq!(
+            report["command"],
+            "sq-fp8-token-ids-offline-serving-throughput"
+        );
+        assert_eq!(report["backend"], "mock");
+        assert_eq!(report["device_index"], 2);
+        assert_eq!(report["device_name"], "MockGPU");
+        assert_eq!(report["top_k"], 9);
+        assert_eq!(report["format_id"], "fp8");
+        assert_eq!(report["sq_format_id"], "fp8-1");
+
+        let workload = report["workload"].as_object().expect("workload dict");
+        assert_eq!(workload["batch_size"], 2);
+        assert_eq!(workload["concurrent_requests"], 2);
+        assert_eq!(
+            workload["prompt_tokens_per_request"],
+            serde_json::json!([5, 6])
+        );
+        assert_eq!(
+            workload["generated_tokens_per_request"],
+            serde_json::json!([3, 4])
+        );
+        assert_eq!(workload["sq_projection_boundary"], "8");
+        assert_eq!(workload["sq_projection_kernel_families"], "fam_a,fam_b");
+        assert_eq!(workload["sq_fp8_batch_matvec_count"], 128);
+        assert_eq!(workload["sq_fp8_expected_all_batch_matvec_count"], 256);
+        assert_eq!(workload["sq_diagnostic_host_staging_read_count"], 3);
+        assert_eq!(workload["sq_diagnostic_host_staging_write_bytes"], 2048);
+
+        let batching = report["batching"].as_object().expect("batching dict");
+        assert_eq!(batching["mode"], "real");
+        assert!(batching["prefill_real_batch"].as_bool().expect("bool"));
+        assert!(batching["decode_real_batch"].as_bool().expect("bool"));
+        assert_eq!(batching["prefill_executor_request_parallelism"], 4);
+
+        let metrics = report["metrics"].as_object().expect("metrics dict");
+        assert_eq!(metrics["prefill_total_input_tokens"], 11);
+        assert_eq!(metrics["decode_total_generated_tokens"], 7);
+        assert_eq!(metrics["prefill_wall_ms_sum"], 1.2);
+
+        let memory = report["memory"].as_object().expect("memory dict");
+        assert_eq!(memory["kv_cache_block_size"], 128);
+        assert_eq!(memory["kv_cache_allocated_blocks"], 256);
+
+        let serving = report["serving"].as_object().expect("serving dict");
+        assert_eq!(serving["candidate_contract_version"], "0.1");
+        assert_eq!(serving["tokenizer_included"], false);
+        assert_eq!(serving["http_server_included"], false);
+        assert_eq!(serving["runtime_reused_across_requests"], true);
+        assert_eq!(
+            serving["parity_blockers"],
+            serde_json::json!(["tokenizer_not_included", "http_server_not_included"])
+        );
+
+        let correctness = report["correctness"].as_object().expect("correctness dict");
+        assert_eq!(correctness["verified"], true);
+        assert_eq!(correctness["top_k"], 9);
+        assert_eq!(correctness["nan_or_inf_detected"], false);
+        assert_eq!(report["verified"], true);
+}
+
 fn package_linear_attn_candidate_ids(path: &str, layer_index: usize) -> Vec<String> {
     [
         format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight"),
@@ -224,6 +345,625 @@ fn package_runtime_line_metric_key(key: &str) -> bool {
         || key.ends_with("_mse")
         || key.ends_with("_mean_abs_diff")
         || key.ends_with("_cosine_similarity")
+}
+
+fn parse_offline_serving_candidate_value_map(line: &str) -> std::collections::HashMap<String, String> {
+    let mut values = std::collections::HashMap::new();
+    for token in line.split_whitespace() {
+        let Some((key, raw_value)) = token.split_once('=') else {
+            continue;
+        };
+        let value = raw_value.trim_matches('"').trim_end_matches(',');
+        match key {
+            "command"
+            | "package"
+            | "format_id"
+            | "sq_candidate"
+            | "sq_candidate_legacy"
+            | "sq_format_id"
+            | "sq_implementation_id"
+            | "sq_artifact"
+            | "sq_schema_version"
+            | "sq_projection_boundary"
+            | "sq_projection_implementation_ids"
+            | "sq_projection_kernel_families"
+            | "sq_overlay"
+            | "layers_csv"
+            | "backend"
+            | "name"
+            | "top_k"
+            | "lm_head_top_k"
+            | "rotary_dim"
+            | "position_offset"
+            | "rope_base"
+            | "batching_mode"
+            | "prefill_mode"
+            | "prefill_executor"
+            | "prefill_request_grouped"
+            | "decode_request_grouped"
+            | "prefill_real_batch"
+            | "decode_real_batch"
+            | "prefill_grouped_request_parallelism"
+            | "decode_grouped_request_parallelism"
+            | "prefill_executor_request_parallelism"
+            | "decode_executor_request_parallelism"
+            | "request_batch_executor"
+            | "fused_request_batch"
+            | "throughput_row"
+            | "load_excluded_from_total"
+            | "final_logits_in_total"
+            | "mixed_request_state_real_batch_projection_used"
+            | "device_index"
+            | "lm_head_chunk_rows"
+            | "prompt_tokens_csv"
+            | "max_new_tokens_csv"
+            | "total_tokens_csv"
+            | "prefill_tokens_per_request"
+            | "prompt_tokens"
+            | "prompt_tokens_per_request"
+            | "generated_tokens"
+            | "generated_tokens_per_request"
+            | "prompt_token_ids_csv"
+            | "decode_token_ids_csv"
+            | "prefill_total_input_tokens"
+            | "decode_total_generated_tokens"
+            | "end_to_end_total_tokens"
+            | "prefill_wall_ms"
+            | "decode_wall_ms"
+            | "final_logits_wall_ms"
+            | "layer_load_ms"
+            | "total_wall_ms"
+            | "outer_wall_ms"
+            | "prefill_total_input_tps"
+            | "decode_total_generated_tps"
+            | "end_to_end_total_tps"
+            | "prefill_sq_fp8_batch_matvec_count"
+            | "decode_sq_fp8_batch_matvec_count"
+            | "sq_fp8_single_matvec_count"
+            | "sq_fp8_batch_matvec_count"
+            | "sq_fp8_expected_all_batch_matvec_count"
+            | "sq_fp8_pair_matvec_count"
+            | "sq_fp8_triple_matvec_count"
+            | "sq_fp8_tensor_count"
+            | "sq_passthrough_tensor_count"
+            | "sq_row_chunk"
+            | "sq_execution_mode"
+            | "sq_diagnostic_host_staging_read_count"
+            | "sq_diagnostic_host_staging_write_count"
+            | "sq_diagnostic_host_staging_read_bytes"
+            | "sq_diagnostic_host_staging_write_bytes"
+            | "request_count"
+            | "concurrent_requests"
+            | "final_top1_tokens_csv"
+            | "final_topk_tokens_csv"
+            | "final_topk_logits_csv"
+            | "paged_block_size"
+            | "paged_cache_blocks"
+            | "sequence_len"
+            | "prefill_batch_request_counts_csv"
+            | "decode_batch_request_counts_csv"
+            | "verified"
+            | "self_attn_weight_bundle_shared"
+            | "linear_attn_weight_bundle_shared"
+            | "sq_fp8_projection_kernel_families" => {
+                values.insert(key.to_string(), value.to_string());
+            }
+            _ => {}
+        }
+    }
+    values
+}
+
+fn parse_flat_usize(value: Option<&String>) -> Option<usize> {
+    value.and_then(|value| value.parse::<usize>().ok())
+}
+
+fn parse_flat_u64(value: Option<&String>) -> Option<u64> {
+    value.and_then(|value| value.parse::<u64>().ok())
+}
+
+fn parse_flat_f64(value: Option<&String>) -> Option<f64> {
+    match value {
+        Some(value) => {
+            if value == "null" {
+                None
+            } else {
+                value.parse::<f64>().ok()
+            }
+        }
+        None => None,
+    }
+}
+
+fn parse_flat_bool(value: Option<&String>) -> Option<bool> {
+    value.and_then(|value| match value.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    })
+}
+
+fn parse_flat_usize_csv(value: Option<&String>) -> Vec<usize> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let mut parsed = Vec::new();
+    for raw in value.split(',') {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            return Vec::new();
+        }
+        let parsed_entry = match entry.parse::<usize>() {
+            Ok(value) => value,
+            Err(_) => return Vec::new(),
+        };
+        parsed.push(parsed_entry);
+    }
+    parsed
+}
+
+fn parse_flat_float_matrix(value: Option<&String>) -> Vec<Vec<f64>> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let mut parsed = Vec::new();
+    for row in value.split(';') {
+        let row = row.trim();
+        if row.is_empty() {
+            return Vec::new();
+        }
+        let mut parsed_row = Vec::new();
+        for raw in row.split([',', ':']) {
+            let entry = raw.trim();
+            if entry.is_empty() {
+                return Vec::new();
+            }
+            let parsed_entry = match entry.parse::<f64>() {
+                Ok(value) => value,
+                Err(_) => return Vec::new(),
+            };
+            parsed_row.push(parsed_entry);
+        }
+        parsed.push(parsed_row);
+    }
+    parsed
+}
+
+fn sq_fp8_offline_serving_workload_entry_to_report(
+    line: &str,
+    top_k_override: usize,
+) -> serde_json::Value {
+    let fields = parse_offline_serving_candidate_value_map(line);
+    let parse_usize = |key: &str| parse_flat_usize(fields.get(key));
+    let parse_u64 = |key: &str| parse_flat_u64(fields.get(key));
+    let parse_f64 = |key: &str| parse_flat_f64(fields.get(key));
+    let parse_bool = |key: &str| parse_flat_bool(fields.get(key));
+
+    let command = fields
+        .get("command")
+        .cloned()
+        .unwrap_or_else(|| "sq-fp8-token-ids-offline-serving-throughput".to_string());
+    let package = fields
+        .get("package")
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+    let backend = fields.get("backend").cloned().unwrap_or_else(|| "unknown".to_string());
+    let device_name = fields.get("name").cloned().unwrap_or_else(|| "unknown".to_string());
+    let top_k = parse_usize("lm_head_top_k")
+        .or_else(|| parse_usize("top_k"))
+        .unwrap_or(top_k_override);
+    let verified = parse_bool("verified").unwrap_or(false);
+    let prefill_total_input_tokens = parse_u64("prefill_total_input_tokens")
+        .unwrap_or_else(|| parse_usize("prefill_total_input_tokens").unwrap_or(0) as u64);
+    let decode_total_generated_tokens = parse_u64("decode_total_generated_tokens")
+        .unwrap_or_else(|| parse_usize("decode_total_generated_tokens").unwrap_or(0) as u64);
+    let end_to_end_total_tokens = parse_u64("end_to_end_total_tokens")
+        .unwrap_or(prefill_total_input_tokens.saturating_add(decode_total_generated_tokens));
+    let prefill_wall_ms = parse_f64("prefill_wall_ms").unwrap_or(0.0);
+    let decode_wall_ms = parse_f64("decode_wall_ms").unwrap_or(0.0);
+    let total_wall_ms = parse_f64("total_wall_ms").unwrap_or(0.0);
+    let batch_wall_ms = parse_f64("outer_wall_ms").unwrap_or(total_wall_ms);
+    let prompt_tokens_per_request = parse_flat_usize_csv(fields.get("prompt_tokens_csv"));
+    let generated_tokens_per_request = parse_flat_usize_csv(fields.get("max_new_tokens_csv"));
+    let total_tokens_per_request = parse_flat_usize_csv(fields.get("total_tokens_csv"));
+    let prompt_tokens_per_request = if prompt_tokens_per_request.is_empty() {
+        Vec::new()
+    } else {
+        prompt_tokens_per_request
+    };
+    let generated_tokens_per_request = if generated_tokens_per_request.is_empty() {
+        vec![0; prompt_tokens_per_request.len()]
+    } else {
+        generated_tokens_per_request
+    };
+    let total_tokens_per_request = if total_tokens_per_request.is_empty() {
+        prompt_tokens_per_request
+            .iter()
+            .zip(generated_tokens_per_request.iter())
+            .map(|(prompt, generated)| prompt.saturating_add(*generated))
+            .collect()
+    } else {
+        total_tokens_per_request
+    };
+    let request_count = parse_usize("request_count")
+        .or_else(|| parse_usize("concurrent_requests"))
+        .unwrap_or(prompt_tokens_per_request.len())
+        .max(prompt_tokens_per_request.len())
+        .max(generated_tokens_per_request.len())
+        .max(total_tokens_per_request.len())
+        .max(1);
+
+    let prefill_total_input_tps = parse_f64("prefill_total_input_tps");
+    let decode_total_generated_tps = parse_f64("decode_total_generated_tps");
+    let end_to_end_total_tps = parse_f64("end_to_end_total_tps");
+
+    let prefill_real_batch = parse_bool("prefill_real_batch").unwrap_or(false);
+    let decode_real_batch = parse_bool("decode_real_batch").unwrap_or(false);
+    let mixed_request_state_real_batch_projection_used = parse_bool(
+        "mixed_request_state_real_batch_projection_used",
+    )
+    .unwrap_or(false);
+    let prefill_request_grouped = parse_bool("prefill_request_grouped").unwrap_or(false);
+    let decode_request_grouped = parse_bool("decode_request_grouped").unwrap_or(false);
+    let throughput_row = parse_bool("throughput_row").unwrap_or(false);
+    let load_excluded_from_total = parse_bool("load_excluded_from_total").unwrap_or(true);
+    let final_logits_in_total = parse_bool("final_logits_in_total").unwrap_or(top_k > 0);
+    let request_batch_executor = parse_bool("request_batch_executor").unwrap_or(false);
+    let fused_request_batch = parse_bool("fused_request_batch").unwrap_or(false);
+    let prefill_executor = fields
+        .get("prefill_executor")
+        .cloned()
+        .unwrap_or_else(|| "mixed_request_state_layer_batch_step".to_string());
+
+    let batching_mode = fields
+        .get("batching_mode")
+        .cloned()
+        .unwrap_or_else(|| if prefill_real_batch || decode_real_batch { "real".to_string() } else { "grouped".to_string() });
+
+    let cached_prefix_tokens_per_request = vec![0_usize; request_count];
+    let prompt_tokens = u64::try_from(prompt_tokens_per_request.iter().sum::<usize>()).unwrap_or(0);
+    let generated_tokens = u64::try_from(generated_tokens_per_request.iter().sum::<usize>()).unwrap_or(0);
+    let estimated_prefill_attention_work_tokens = cold_prefill_attention_work_tokens_from_lengths(
+        &prompt_tokens_per_request,
+    )
+    .ok();
+
+    let mut workload = serde_json::Map::new();
+    insert_json_detail(&mut workload, "batch_size", request_count);
+    insert_json_detail(&mut workload, "concurrent_requests", request_count);
+    insert_json_detail(&mut workload, "prefill_mode", "token_id_full_mixed_request_state");
+    insert_json_detail(
+        &mut workload,
+        "prompt_tokens_per_request",
+        prompt_tokens_per_request.clone(),
+    );
+    insert_json_detail(
+        &mut workload,
+        "cached_prefix_tokens_per_request",
+        cached_prefix_tokens_per_request,
+    );
+    insert_json_detail(
+        &mut workload,
+        "new_prefill_tokens_per_request",
+        prompt_tokens_per_request.clone(),
+    );
+    insert_json_detail(
+        &mut workload,
+        "total_context_tokens_after_prefill_per_request",
+        total_tokens_per_request,
+    );
+    insert_json_detail(
+        &mut workload,
+        "generated_tokens_per_request",
+        generated_tokens_per_request,
+    );
+    insert_json_detail(&mut workload, "fixed_decode_steps", true);
+    insert_json_detail(&mut workload, "prompt_tokens", prompt_tokens);
+    insert_json_detail(&mut workload, "generated_tokens", generated_tokens);
+    insert_json_detail(&mut workload, "layers_csv", fields.get("layers_csv").cloned().unwrap_or_default());
+    insert_json_detail(&mut workload, "input_source", fields.get("input_source").cloned().unwrap_or_else(|| "mixed_request_state".to_string()));
+    insert_json_detail(&mut workload, "first_layer_input_source", fields.get("first_layer_input_source").cloned().unwrap_or_else(|| "unknown".to_string()));
+    insert_json_detail(&mut workload, "context_length", fields.get("sequence_len").and_then(|value| value.parse::<usize>().ok()).unwrap_or(0));
+
+    for (key, map_key) in [
+        ("format_id", "format_id"),
+        ("sq_candidate", "sq_candidate"),
+        ("sq_candidate_legacy", "sq_candidate_legacy"),
+        ("sq_format_id", "sq_format_id"),
+        ("sq_implementation_id", "sq_implementation_id"),
+        ("sq_artifact", "sq_artifact"),
+        ("sq_schema_version", "sq_schema_version"),
+        ("sq_execution_mode", "sq_execution_mode"),
+        ("sq_projection_boundary", "sq_projection_boundary"),
+        ("sq_projection_implementation_ids", "sq_projection_implementation_ids"),
+        ("sq_projection_kernel_families", "sq_projection_kernel_families"),
+    ] {
+        if let Some(value) = fields.get(key) {
+            if value != "none" {
+                insert_json_detail(&mut workload, map_key, value);
+            }
+        }
+    }
+
+    for (key, target) in [
+        ("sq_fp8_tensor_count", "sq_fp8_tensor_count"),
+        ("sq_passthrough_tensor_count", "sq_passthrough_tensor_count"),
+        ("sq_row_chunk", "sq_row_chunk"),
+        ("sq_fp8_single_matvec_count", "sq_fp8_single_matvec_count"),
+        ("sq_fp8_batch_matvec_count", "sq_fp8_batch_matvec_count"),
+        ("sq_fp8_expected_all_batch_matvec_count", "sq_fp8_expected_all_batch_matvec_count"),
+        ("sq_fp8_pair_matvec_count", "sq_fp8_pair_matvec_count"),
+        ("sq_fp8_triple_matvec_count", "sq_fp8_triple_matvec_count"),
+        ("sq_diagnostic_host_staging_read_count", "sq_diagnostic_host_staging_read_count"),
+        ("sq_diagnostic_host_staging_write_count", "sq_diagnostic_host_staging_write_count"),
+        ("sq_diagnostic_host_staging_read_bytes", "sq_diagnostic_host_staging_read_bytes"),
+        ("sq_diagnostic_host_staging_write_bytes", "sq_diagnostic_host_staging_write_bytes"),
+        ("prefill_sq_fp8_batch_matvec_count", "prefill_sq_fp8_batch_matvec_count"),
+        ("decode_sq_fp8_batch_matvec_count", "decode_sq_fp8_batch_matvec_count"),
+    ] {
+        if let Some(value) = parse_u64(key) {
+            insert_json_detail(&mut workload, target, value);
+        }
+    }
+
+    insert_json_detail(
+        &mut workload,
+        "cached_prefix_total_tokens",
+        0_u64,
+    );
+    if let Some(estimated_prefill_attention_work_tokens) =
+        estimated_prefill_attention_work_tokens
+    {
+        insert_json_detail(
+            &mut workload,
+            "estimated_prefill_attention_work_tokens",
+            estimated_prefill_attention_work_tokens,
+        );
+    }
+
+    insert_json_detail(&mut workload, "final_top1_tokens", parse_flat_usize_csv(fields.get("final_top1_tokens_csv")));
+    insert_json_detail(
+        &mut workload,
+        "final_topk_tokens",
+        parse_flat_float_matrix(fields.get("final_topk_tokens_csv")),
+    );
+    insert_json_detail(
+        &mut workload,
+        "final_topk_logits",
+        parse_flat_float_matrix(fields.get("final_topk_logits_csv")),
+    );
+
+    let mut metrics = serde_json::Map::new();
+    insert_json_detail(
+        &mut metrics,
+        "prefill_total_input_tokens",
+        prefill_total_input_tokens,
+    );
+    insert_json_detail(&mut metrics, "cached_prefix_total_tokens", 0_u64);
+    insert_json_detail(
+        &mut metrics,
+        "total_context_tokens_after_prefill",
+        prompt_tokens,
+    );
+    if let Some(estimated_prefill_attention_work_tokens) =
+        estimated_prefill_attention_work_tokens
+    {
+        insert_json_detail(
+            &mut metrics,
+            "estimated_prefill_attention_work_tokens",
+            estimated_prefill_attention_work_tokens,
+        );
+    }
+    insert_json_detail(
+        &mut metrics,
+        "decode_total_generated_tokens",
+        decode_total_generated_tokens,
+    );
+    insert_json_detail(
+        &mut metrics,
+        "generated_tokens_total",
+        decode_total_generated_tokens,
+    );
+    insert_json_detail(&mut metrics, "end_to_end_total_tokens", end_to_end_total_tokens);
+    insert_json_detail(&mut metrics, "prefill_wall_ms_sum", prefill_wall_ms);
+    insert_json_detail(&mut metrics, "decode_wall_ms_sum", decode_wall_ms);
+    insert_json_detail(&mut metrics, "batch_wall_ms", batch_wall_ms);
+    insert_json_detail(
+        &mut metrics,
+        "prefill_total_input_tps",
+        prefill_total_input_tps.unwrap_or(0.0),
+    );
+    insert_json_detail(
+        &mut metrics,
+        "decode_total_generated_tps",
+        decode_total_generated_tps.unwrap_or(0.0),
+    );
+    insert_json_detail(
+        &mut metrics,
+        "end_to_end_total_tps",
+        end_to_end_total_tps.unwrap_or(0.0),
+    );
+    if let Some(prefill_total_input_tps) = prefill_total_input_tps {
+        insert_json_detail(
+            &mut metrics,
+            "prefill_tokens_per_second",
+            prefill_total_input_tps,
+        );
+        insert_json_detail(
+            &mut metrics,
+            "prefill_total_input_tokens_per_second",
+            prefill_total_input_tps,
+        );
+    }
+    if let Some(decode_total_generated_tps) = decode_total_generated_tps {
+        insert_json_detail(
+            &mut metrics,
+            "decode_tokens_per_second",
+            decode_total_generated_tps,
+        );
+        insert_json_detail(
+            &mut metrics,
+            "decode_total_generated_tokens_per_second",
+            decode_total_generated_tps,
+        );
+        insert_json_detail(
+            &mut metrics,
+            "time_per_output_token_ms",
+            1000.0 / decode_total_generated_tps,
+        );
+        insert_json_detail(
+            &mut metrics,
+            "time_per_output_token_ms_p50",
+            1000.0 / decode_total_generated_tps,
+        );
+        insert_json_detail(
+            &mut metrics,
+            "time_per_output_token_ms_p95",
+            1000.0 / decode_total_generated_tps,
+        );
+    }
+    if let Some(end_to_end_total_tps) = end_to_end_total_tps {
+        insert_json_detail(
+            &mut metrics,
+            "total_tokens_per_second",
+            end_to_end_total_tps,
+        );
+    }
+    insert_json_detail(&mut metrics, "time_to_first_token_ms_p50", prefill_wall_ms);
+    insert_json_detail(&mut metrics, "time_to_first_token_ms_p95", prefill_wall_ms);
+    insert_json_detail(&mut metrics, "request_latency_ms_p50", batch_wall_ms);
+    insert_json_detail(&mut metrics, "request_latency_ms_p95", batch_wall_ms);
+
+    let mut memory = serde_json::Map::new();
+    if let Some(kv_cache_block_size) = parse_u64("paged_block_size") {
+        insert_json_detail(&mut memory, "kv_cache_block_size", kv_cache_block_size);
+    }
+    if let Some(kv_cache_allocated_blocks) = parse_u64("paged_cache_blocks") {
+        insert_json_detail(
+            &mut memory,
+            "kv_cache_allocated_blocks",
+            kv_cache_allocated_blocks,
+        );
+    }
+
+    let mut serving = serde_json::Map::new();
+    insert_json_detail(&mut serving, "candidate_contract_version", "0.1");
+    insert_json_detail(&mut serving, "serving_loop_kind", "mixed_request_state_ready_batch");
+    insert_json_detail(&mut serving, "scheduler_policy", "model_loop_ready_batch");
+    insert_json_detail(&mut serving, "request_source", "token_ids_batch");
+    insert_json_detail(&mut serving, "request_arrival_pattern", "synchronous_batch");
+    insert_json_detail(&mut serving, "tokenizer_included", false);
+    insert_json_detail(&mut serving, "http_server_included", false);
+    insert_json_detail(&mut serving, "runtime_reused_across_requests", true);
+    insert_json_detail(&mut serving, "weights_reloaded_per_request", false);
+    insert_json_detail(&mut serving, "load_excluded_from_total", load_excluded_from_total);
+    insert_json_detail(&mut serving, "final_logits_in_total", final_logits_in_total);
+    insert_json_detail(
+        &mut serving,
+        "parity_blockers",
+        vec![
+            "tokenizer_not_included".to_string(),
+            "http_server_not_included".to_string(),
+        ],
+    );
+
+    let mut batching = serde_json::Map::new();
+    insert_json_detail(&mut batching, "mode", batching_mode);
+    insert_json_detail(&mut batching, "prefill_executor", prefill_executor);
+    insert_json_detail(&mut batching, "prefill_real_batch", prefill_real_batch);
+    insert_json_detail(
+        &mut batching,
+        "prefill_executor_request_parallelism",
+        parse_usize("prefill_executor_request_parallelism").unwrap_or(1),
+    );
+    insert_json_detail(
+        &mut batching,
+        "prefill_request_grouped",
+        prefill_request_grouped,
+    );
+    insert_json_detail(
+        &mut batching,
+        "prefill_grouped_request_parallelism",
+        parse_usize("prefill_grouped_request_parallelism").unwrap_or(0),
+    );
+    insert_json_detail(
+        &mut batching,
+        "prefill_sq_fp8_batch_matvec_count",
+        parse_u64("prefill_sq_fp8_batch_matvec_count").unwrap_or(0),
+    );
+    insert_json_detail(&mut batching, "decode_executor", "mixed_request_state_layer_batch_step");
+    insert_json_detail(&mut batching, "decode_real_batch", decode_real_batch);
+    insert_json_detail(
+        &mut batching,
+        "decode_executor_request_parallelism",
+        parse_usize("decode_executor_request_parallelism").unwrap_or(1),
+    );
+    insert_json_detail(
+        &mut batching,
+        "decode_request_grouped",
+        decode_request_grouped,
+    );
+    insert_json_detail(
+        &mut batching,
+        "decode_grouped_request_parallelism",
+        parse_usize("decode_grouped_request_parallelism").unwrap_or(0),
+    );
+    insert_json_detail(
+        &mut batching,
+        "decode_sq_fp8_batch_matvec_count",
+        parse_u64("decode_sq_fp8_batch_matvec_count").unwrap_or(0),
+    );
+    insert_json_detail(
+        &mut batching,
+        "mixed_request_state_real_batch_projection_used",
+        mixed_request_state_real_batch_projection_used,
+    );
+    insert_json_detail(&mut batching, "request_batch_executor", request_batch_executor);
+    insert_json_detail(&mut batching, "fused_request_batch", fused_request_batch);
+    insert_json_detail(&mut batching, "throughput_row", throughput_row);
+    insert_json_detail(
+        &mut batching,
+        "load_excluded_from_total",
+        load_excluded_from_total,
+    );
+    insert_json_detail(
+        &mut batching,
+        "final_logits_in_total",
+        final_logits_in_total,
+    );
+    insert_json_detail(&mut batching, "scheduler_policy", "model_loop_ready_batch");
+
+    serde_json::json!({
+        "schema_version": "inference-benchmark-result-v0.1",
+        "command": command,
+        "package": package,
+        "backend": backend,
+        "device_index": parse_usize("device_index").unwrap_or(0),
+        "device_name": device_name,
+        "top_k": top_k,
+        "format_id": fields.get("format_id").cloned().unwrap_or_else(|| "unknown".to_string()),
+        "sq_format_id": fields
+            .get("sq_format_id")
+            .cloned()
+            .unwrap_or_else(|| fields.get("format_id").cloned().unwrap_or_else(|| "unknown".to_string())),
+        "workload": workload,
+        "batching": batching,
+        "metrics": metrics,
+        "memory": memory,
+        "correctness": {
+            "verified": verified,
+            "top_k": top_k,
+            "nan_or_inf_detected": false,
+        },
+        "serving": serving,
+        "verified": verified,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2900,6 +3640,128 @@ fn sq_fp8_token_ids_mixed_request_state_smoke(
             println!("{line}");
             ExitCode::SUCCESS
         }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sq_fp8_token_ids_offline_serving_throughput(
+    path: Option<String>,
+    artifact_path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    prompt_token_ids_batch: Option<String>,
+    generated_tokens_batch: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("sq-fp8-token-ids-offline-serving-throughput requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(artifact_path) = artifact_path else {
+        eprintln!("sq-fp8-token-ids-offline-serving-throughput requires an SQ FP8 artifact path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices = match parse_package_token_ids_layer_indices_for_package(
+        &path,
+        layer_indices.or_else(|| Some("manifest-all".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids_batch = match parse_package_prompt_token_ids_batch(
+        prompt_token_ids_batch.or_else(|| Some("len:2x2".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let generated_tokens_batch = match parse_package_generated_tokens_batch(
+        generated_tokens_batch,
+        prompt_token_ids_batch.len(),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 0, "top k") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) if value > 1.0 => value,
+        Ok(_) => {
+            eprintln!("rope base must be greater than one");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let artifact = match read_sq_fp8_artifact(&artifact_path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read SQ FP8 artifact: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
+        "sq-fp8-token-ids-offline-serving-throughput",
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids_batch,
+        generated_tokens_batch,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        Some(&artifact),
+    ) {
+        Ok(line) => match serde_json::to_string_pretty(
+            &sq_fp8_offline_serving_workload_entry_to_report(&line, top_k),
+        ) {
+            Ok(report) => {
+                println!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("failed to format offline serving throughput report: {err}");
+                ExitCode::from(1)
+            }
+        },
         Err(err) => {
             eprintln!("{err}");
             ExitCode::from(1)
