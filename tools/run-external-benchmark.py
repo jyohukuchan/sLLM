@@ -1205,6 +1205,8 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         row_workload["layers_csv"] = layers_csv
     if isinstance(report.get("input_source"), str):
         row_workload["input_source"] = report.get("input_source")
+    if isinstance(report.get("first_layer_input_source"), str):
+        row_workload["first_layer_input_source"] = report.get("first_layer_input_source")
     executor = report.get("executor")
     real_batch = parse_bool(report.get("real_batch")) is True
     request_parallelism = parse_int(report.get("request_parallelism"))

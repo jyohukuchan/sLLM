@@ -3207,6 +3207,35 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     };
 
     let prefill_started = Instant::now();
+    let mut first_layer_device_embedding_runtime = PackageEmbeddingRuntime::load_if_available(
+        &mut context,
+        &mut stream,
+        path,
+        chunk_bytes,
+        hidden,
+    )?;
+    let first_layer_device_embedding_buffer_bytes =
+        checked_f32_byte_len(hidden, "mixed request-state first layer device embedding")?;
+    let mut first_layer_device_embedding_inputs = if first_layer_device_embedding_runtime.is_some() {
+        let mut buffers = Vec::with_capacity(request_plan.request_count());
+        for index in 0..request_plan.request_count() {
+            buffers.push(context
+                .alloc_buffer(first_layer_device_embedding_buffer_bytes)
+                .map_err(|err| {
+                    format!(
+                        "failed to allocate mixed request-state first layer device embedding buffer {index}: {err}"
+                    )
+                })?);
+        }
+        Some(buffers)
+    } else {
+        None
+    };
+    let first_layer_device_embedding_input_source = if first_layer_device_embedding_runtime.is_some() {
+        "device_embedding"
+    } else {
+        "host_residual"
+    };
     let mut prefill_batch_request_counts = Vec::new();
     for timestep in 0..request_plan
         .prompt_tokens
@@ -3216,6 +3245,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         .unwrap_or(0)
     {
         let mut batch_items = Vec::new();
+        let mut first_layer_input_indices = Vec::<(RequestId, usize, usize, usize)>::new();
         for (request_index, request) in request_plan.requests.iter().enumerate() {
             if timestep >= request.prompt_tokens {
                 continue;
@@ -3232,9 +3262,48 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
             let rope_position = request_position_base
                 .checked_add(timestep)
                 .ok_or_else(|| "mixed request-state prefill position overflows".to_string())?;
-            let residual =
+            let residual = if first_layer_device_embedding_inputs.is_none() {
                 mixed_request_state_residual_slice(&request_plan, request_index, timestep, hidden)?
-                    .to_vec();
+                    .to_vec()
+            } else {
+                Vec::new()
+            };
+            if let Some(runtime) = first_layer_device_embedding_runtime.as_mut() {
+                let token_id = request_plan
+                    .prompt_token_ids_by_request
+                    .get(request_index)
+                    .ok_or_else(|| {
+                        format!(
+                            "mixed request-state prompt token list missing for request index {request_index}"
+                        )
+                    })?
+                    .get(timestep)
+                    .copied()
+                    .ok_or_else(|| {
+                        "mixed request-state prompt token index out of range".to_string()
+                    })?;
+                let input_buffer = first_layer_device_embedding_inputs
+                    .as_mut()
+                    .and_then(|buffers| buffers.get_mut(first_layer_input_indices.len()))
+                    .ok_or_else(|| {
+                        "mixed request-state missing first-layer device embedding buffer".to_string()
+                    })?;
+                runtime.gather_token_to_buffer(
+                    &mut stream,
+                    token_id,
+                    input_buffer,
+                    &format!(
+                        "mixed request-state prefill device embedding request={} timestep={timestep}",
+                        request.id.0
+                    ),
+                )?;
+                first_layer_input_indices.push((
+                    request.id,
+                    first_layer_input_indices.len(),
+                    rope_position,
+                    timestep,
+                ));
+            }
             batch_items.push(MixedRequestStateBatchStepItem {
                 request_id: request.id,
                 residual,
@@ -3242,6 +3311,35 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
                 cache_position: timestep,
             });
         }
+        let first_layer_device_inputs = if let Some(input_buffers) =
+            first_layer_device_embedding_inputs.as_ref()
+        {
+            if first_layer_input_indices.is_empty() {
+                None
+            } else {
+                let mut input_items =
+                    Vec::<(RequestId, &ullm_runtime_sys::RuntimeBuffer, usize, usize)>::with_capacity(
+                        first_layer_input_indices.len(),
+                    );
+                for (request_id, index, rope_position, cache_position) in
+                    first_layer_input_indices.iter().copied()
+                {
+                    input_items.push((
+                        request_id,
+                        input_buffers.get(index).ok_or_else(|| {
+                            format!(
+                                "mixed request-state missing first-layer device embedding buffer {index}"
+                            )
+                        })?,
+                        rope_position,
+                        cache_position,
+                    ));
+                }
+                Some(input_items)
+            }
+        } else {
+            None
+        };
         let count = package_mixed_request_state_layers_batch_step(
             &mut stream,
             &mut layers,
@@ -3250,6 +3348,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
             rotary_dim_value,
             rope_base,
             &format!("mixed request-state prefill batch timestep={timestep}"),
+            first_layer_device_inputs.as_deref(),
         )?;
         if count > 0 {
             prefill_batch_request_counts.push(count);
@@ -3271,6 +3370,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         .unwrap_or(0)
     {
         let mut batch_items = Vec::new();
+        let mut first_layer_input_indices = Vec::<(RequestId, usize, usize, usize)>::new();
         for (request_index, request) in request_plan.requests.iter().enumerate() {
             if decode_index >= request.max_new_tokens {
                 continue;
@@ -3291,13 +3391,53 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
             let rope_position = request_position_base
                 .checked_add(token_index)
                 .ok_or_else(|| "mixed request-state decode position overflows".to_string())?;
-            let residual = mixed_request_state_residual_slice(
-                &request_plan,
-                request_index,
-                token_index,
-                hidden,
-            )?
-            .to_vec();
+            let residual = if first_layer_device_embedding_inputs.is_none() {
+                mixed_request_state_residual_slice(
+                    &request_plan,
+                    request_index,
+                    token_index,
+                    hidden,
+                )?
+                .to_vec()
+            } else {
+                Vec::new()
+            };
+            if let Some(runtime) = first_layer_device_embedding_runtime.as_mut() {
+                let token_id = request_plan
+                    .decode_token_ids_by_request
+                    .get(request_index)
+                    .ok_or_else(|| {
+                        format!(
+                            "mixed request-state decode token list missing for request index {request_index}"
+                        )
+                    })?
+                    .get(decode_index)
+                    .copied()
+                    .ok_or_else(|| {
+                        "mixed request-state decode token index out of range".to_string()
+                    })?;
+                let input_buffer = first_layer_device_embedding_inputs
+                    .as_mut()
+                    .and_then(|buffers| buffers.get_mut(first_layer_input_indices.len()))
+                    .ok_or_else(|| {
+                        "mixed request-state missing first-layer device embedding buffer".to_string()
+                    })?;
+                runtime.gather_token_to_buffer(
+                    &mut stream,
+                    token_id,
+                    input_buffer,
+                    &format!(
+                        "mixed request-state decode device embedding request={} decode_index={decode_index}",
+                        request.id.0
+                    ),
+                )?;
+                first_layer_input_indices.push((
+                    request.id,
+                    first_layer_input_indices.len(),
+                    rope_position,
+                    token_index,
+                ));
+            }
             batch_items.push(MixedRequestStateBatchStepItem {
                 request_id: request.id,
                 residual,
@@ -3305,6 +3445,35 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
                 cache_position: token_index,
             });
         }
+        let first_layer_device_inputs = if let Some(input_buffers) =
+            first_layer_device_embedding_inputs.as_ref()
+        {
+            if first_layer_input_indices.is_empty() {
+                None
+            } else {
+                let mut input_items =
+                    Vec::<(RequestId, &ullm_runtime_sys::RuntimeBuffer, usize, usize)>::with_capacity(
+                        first_layer_input_indices.len(),
+                    );
+                for (request_id, index, rope_position, cache_position) in
+                    first_layer_input_indices.iter().copied()
+                {
+                    input_items.push((
+                        request_id,
+                        input_buffers.get(index).ok_or_else(|| {
+                            format!(
+                                "mixed request-state missing first-layer device embedding buffer {index}"
+                            )
+                        })?,
+                        rope_position,
+                        cache_position,
+                    ));
+                }
+                Some(input_items)
+            }
+        } else {
+            None
+        };
         let count = package_mixed_request_state_layers_batch_step(
             &mut stream,
             &mut layers,
@@ -3313,6 +3482,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
             rotary_dim_value,
             rope_base,
             &format!("mixed request-state decode batch decode_index={decode_index}"),
+            first_layer_device_inputs.as_deref(),
         )?;
         if count > 0 {
             decode_batch_request_counts.push(count);
@@ -3558,13 +3728,14 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     };
 
     Ok(format!(
-        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state format_id={} full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total={} sq_overlay={} sq_candidate={} sq_candidate_legacy={} sq_format_id={} sq_implementation_id={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_projection_implementation_ids={} sq_projection_kernel_families={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_expected_all_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} sq_diagnostic_host_staging_read_count={} sq_diagnostic_host_staging_write_count={} sq_diagnostic_host_staging_read_bytes={} sq_diagnostic_host_staging_write_bytes={} prefill_sq_fp8_batch_matvec_count={} decode_sq_fp8_batch_matvec_count={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} mixed_request_state_real_batch_projection_used={} prefill_request_grouped={} decode_request_grouped={} prefill_grouped_request_parallelism={} decode_grouped_request_parallelism={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard={} lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} first_layer_input_source={} prefill_mode=token_id_full_mixed_request_state format_id={} full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total={} sq_overlay={} sq_candidate={} sq_candidate_legacy={} sq_format_id={} sq_implementation_id={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_projection_implementation_ids={} sq_projection_kernel_families={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_expected_all_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} sq_diagnostic_host_staging_read_count={} sq_diagnostic_host_staging_write_count={} sq_diagnostic_host_staging_read_bytes={} sq_diagnostic_host_staging_write_bytes={} prefill_sq_fp8_batch_matvec_count={} decode_sq_fp8_batch_matvec_count={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} mixed_request_state_real_batch_projection_used={} prefill_request_grouped={} decode_request_grouped={} prefill_grouped_request_parallelism={} decode_grouped_request_parallelism={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard={} lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
         command_name,
         path,
         layer_indices,
         usize_csv(&layer_indices),
         layer_kinds,
         request_plan.input_source,
+        first_layer_device_embedding_input_source,
         format_id,
         final_logits_in_total,
         sq_overlay_enabled,
@@ -3740,6 +3911,7 @@ fn package_mixed_request_state_layers_batch_step(
     rotary_dim: usize,
     rope_base: f32,
     label: &str,
+    first_layer_input_items: Option<&[(RequestId, &ullm_runtime_sys::RuntimeBuffer, usize, usize)]>,
 ) -> Result<usize, String> {
     if items.is_empty() {
         return Ok(0);
@@ -3749,13 +3921,15 @@ fn package_mixed_request_state_layers_batch_step(
             "{label} mixed request-state layer batch requires at least one layer"
         ));
     }
-    for item in items {
-        if item.residual.len() != hidden {
-            return Err(format!(
-                "{label} request {:?} residual length {} does not match hidden {hidden}",
-                item.request_id,
-                item.residual.len()
-            ));
+    if first_layer_input_items.is_none() {
+        for item in items {
+            if item.residual.len() != hidden {
+                return Err(format!(
+                    "{label} request {:?} residual length {} does not match hidden {hidden}",
+                    item.request_id,
+                    item.residual.len()
+                ));
+            }
         }
     }
 
@@ -3831,7 +4005,49 @@ fn package_mixed_request_state_layers_batch_step(
             let current = layers
                 .get_mut(layer_position)
                 .ok_or_else(|| format!("{label} current layer {layer_position} is missing"))?;
-            if items.len() > 1 {
+            if let Some(first_layer_input_items) = first_layer_input_items {
+                if layer_position != 0 {
+                    return Err(format!(
+                        "{label} first-layer device input provided for layer_position {layer_position}, expected 0"
+                    ));
+                }
+                if first_layer_input_items.len() != items.len() {
+                    return Err(format!(
+                        "{label} mixed request-state first layer input count {} does not match active item count {}",
+                        first_layer_input_items.len(),
+                        items.len()
+                    ));
+                }
+                if first_layer_input_items.len() > 1 {
+                    current.step_batch_from_device_to_device(
+                        stream,
+                        first_layer_input_items,
+                        rotary_dim,
+                        rope_base,
+                        &format!("{label} layer {layer_position}"),
+                    )?;
+                } else {
+                    let (request_id, residual_buffer, rope_position, cache_position) =
+                        first_layer_input_items
+                            .first()
+                            .ok_or_else(|| format!(
+                                "{label} mixed request-state first layer input is empty"
+                            ))?;
+                    current.step_from_device_to_device(
+                        stream,
+                        *request_id,
+                        residual_buffer,
+                        rotary_dim,
+                        rope_base,
+                        *rope_position,
+                        *cache_position,
+                        &format!(
+                            "{label} layer {layer_position} request={} position={}",
+                            request_id.0, rope_position
+                        ),
+                    )?;
+                }
+            } else if items.len() > 1 {
                 match current {
                     PackageMixedRequestStateLayer::SelfAttention(_) => {
                         current.step_batch_from_host_to_device(

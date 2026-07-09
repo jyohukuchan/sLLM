@@ -5330,6 +5330,47 @@ impl PackageEmbeddingRuntime {
         }
     }
 
+    fn gather_token_to_buffer(
+        &mut self,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        token_id: usize,
+        output_buffer: &mut ullm_runtime_sys::RuntimeBuffer,
+        label: &str,
+    ) -> Result<(), String> {
+        let required_bytes = checked_f32_byte_len(self.hidden, "mixed request-state embedding output")?;
+        let actual_bytes = output_buffer.size().map_err(|err| {
+            format!("failed to query {label} mixed request-state embedding output buffer size: {err}")
+        })?;
+        if actual_bytes < required_bytes {
+            return Err(format!(
+                "{label} mixed request-state embedding output buffer is too small: got {actual_bytes} bytes expected at least {required_bytes}"
+            ));
+        }
+        if token_id >= self.vocab {
+            return Err(format!(
+                "{label} token id {token_id} is out of resident embedding range 0..{}",
+                self.vocab
+            ));
+        }
+        match &self.storage {
+            PackageEmbeddingStorage::Bf16 { matrix_buffer, .. } => ullm_runtime_sys::bf16_row_f32(
+                matrix_buffer,
+                self.vocab,
+                self.hidden,
+                token_id,
+                output_buffer,
+                Some(stream),
+            )
+            .map_err(|err| format!("failed to gather {label} resident BF16 embedding row: {err}")),
+            PackageEmbeddingStorage::Aq4 { matrix } => matrix.row_f32(
+                token_id,
+                output_buffer,
+                stream,
+                &format!("{label} resident AQ4 embedding"),
+            ),
+        }
+    }
+
     fn gather_token_values(
         &mut self,
         stream: &mut ullm_runtime_sys::RuntimeStream,

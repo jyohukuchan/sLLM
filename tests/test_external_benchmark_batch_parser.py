@@ -1022,6 +1022,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         stdout = (
             "package-token-ids-mixed-request-state-smoke "
             "package=/tmp/model.ullm.d layers_csv=0,1,2 input_source=embedding_token_ids "
+            "first_layer_input_source=device_embedding "
             "prefill_mode=token_id_full_mixed_request_state "
             "request_batch_executor=true fused_request_batch=false throughput_row=true "
             "load_excluded_from_total=true final_logits_in_total=true "
@@ -1070,6 +1071,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(metrics["load_excluded_total_wall_time_seconds"], 0.3)
         self.assertEqual(metrics["load_included_total_wall_time_seconds"], 9.3)
         self.assertEqual(row["workload"]["prompt_tokens_per_request"], [2])
+        self.assertEqual(row["workload"]["first_layer_input_source"], "device_embedding")
         self.assertEqual(row["workload"]["generated_tokens_per_request"], [1])
         self.assertEqual(row["workload"]["total_context_tokens_after_prefill_per_request"], [3])
         self.assertEqual(row["workload"]["final_top1_tokens"], [151353])

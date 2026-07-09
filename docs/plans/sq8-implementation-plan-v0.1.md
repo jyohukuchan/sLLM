@@ -1008,7 +1008,11 @@ Expected outputs:
      device-to-device slice copies to each layer input, reducing host residual writes to 1 per
      timestep. The short layer3 `len:2x2` smoke now records `0/3` read/write operations and `98304`
      write bytes, and the refreshed full 40-layer `pp16/tg8` rows record `0/24` read/write
-     operations for b2, b4, and b8.
+     operations for b2, b4, and b8. A follow-up first-layer device embedding path now gathers
+     resident embedding rows into per-request device buffers and feeds the first layer through the
+     existing device-to-device batch input path. The short layer3 smoke and the full 40-layer
+     `pp16/tg8/b2` direct run both record `first_layer_input_source=device_embedding` and `0/0`
+     host staging read/write operations.
 
 ## Risks
 
