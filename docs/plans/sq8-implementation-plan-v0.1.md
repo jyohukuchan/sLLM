@@ -750,6 +750,11 @@ Current local baseline state:
   re-ran the b2/b4/b8 uLLM rows after `sq_projection_kernel_families` telemetry was added. The
   refreshed rows record `sq_projection_kernel_families=batch=direct`,
   `sq_fp8_batch_matvec_count=6720/6720`, and `final_logits_in_total=false`.
+- A second 2026-07-10 refresh at
+  `benchmarks/results/2026-07-10/sq8-qwen3-14b-post-host-pack-refresh/results.jsonl` re-ran the
+  same b2/b4/b8 uLLM rows after first-layer residual host packing was reduced to once per
+  timestep. The rows still pass the normalized M10 gate and now record host staging `0/24` for b2,
+  b4, and b8.
 
 Same-model readiness audit:
 
@@ -893,7 +898,7 @@ Expected outputs:
 - M10 comparison is now defined as a same-shape normalized throughput comparison gate, not serving parity.
   The gate requires `--require-normalized-throughput-comparison` so `uLLM` (`cli_model_loop_diagnostic`)
   and `vLLM` (`serving_throughput_benchmark`) rows are validated with explicit shape-homogenizing checks.
-- The refreshed 2026-07-10 uLLM rows plus the existing 2026-07-09 vLLM b2/b4/b8 rows now pass
+- The post-host-pack 2026-07-10 uLLM rows plus the existing 2026-07-09 vLLM b2/b4/b8 rows now pass
   `--require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families`.
   The same summary helper can add `--show-sq-details` to display `SQ boundary`, `SQ family`,
   `SQ batch`, `SQ staging ops`, and `SQ staging MiB` in the comparison table.
@@ -974,7 +979,8 @@ Expected outputs:
      `batching_mode=real`, `sq_projection_boundary=batch`, and direct SQ8_0 batch projection
      coverage. The `TOP_K=0` `pp16/tg8/b2`, `pp16/tg8/b4`, and `pp16/tg8/b8` rows record
      `final_logits_in_total=false`, `sq_fp8_batch_matvec_count=6720/6720`, and host staging read `0`,
-     giving serving-nearer model-loop diagnostics. The matching vLLM rows now record decode
+     giving serving-nearer model-loop diagnostics. The post-host-pack refresh now records host
+     staging `0/24` for all three request counts. The matching vLLM rows now record decode
      `17.21` tok/s and total `51.62` tok/s for b2, and decode `67.52` tok/s and total `202.56`
      tok/s for b4, and decode `118.01` tok/s and total `354.02` tok/s for b8. The remaining blocker
      for final vLLM serving comparison is adding server-style uLLM measurement or explicitly
@@ -985,7 +991,7 @@ Expected outputs:
    - Same M10 gates should also start requiring
      `--require-ullm-sq-batch-coverage` so SQ8_0 rows with non-batch projection boundaries or
      incomplete batch matvec counters are blocked before mixing against serving rows.
-   - The 2026-07-10 b2/b4/b8 refresh now satisfies the normalized comparison gate together with
+   - The 2026-07-10 post-host-pack b2/b4/b8 refresh now satisfies the normalized comparison gate together with
      `--require-ullm-sq-batch-coverage` and `--require-ullm-sq-kernel-families`.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
@@ -995,11 +1001,13 @@ Expected outputs:
      the shape to `0/9` by adding runtime buffer-to-buffer copy and using it for batch pack/unpack
      boundaries. A subsequent full-stack device handoff removes the layer-to-layer host reads,
      moving the full 40-layer short row from `156/240` read/write operations to `0/6`. The
-     `TOP_K=0` rows record `0/72` for `pp16/tg8/b2`, `0/120` for `pp16/tg8/b4`, and `0/216` for
-     `pp16/tg8/b8`; the remaining counted writes were host residual inputs in this smoke path, but
-     SQ8_0 mixed request-state now packs per-timestep residuals once and uses device-to-device slice
-     copies to each layer input, reducing host residual writes to 1 per timestep. The short layer3
-     `len:2x2` smoke now records `0/3` read/write operations and `98304` write bytes.
+     earlier `TOP_K=0` rows recorded `0/72` for `pp16/tg8/b2`, `0/120` for `pp16/tg8/b4`, and
+     `0/216` for `pp16/tg8/b8`; the remaining counted writes were host residual inputs in this
+     smoke path. SQ8_0 mixed request-state now packs per-timestep residuals once and uses
+     device-to-device slice copies to each layer input, reducing host residual writes to 1 per
+     timestep. The short layer3 `len:2x2` smoke now records `0/3` read/write operations and `98304`
+     write bytes, and the refreshed full 40-layer `pp16/tg8` rows record `0/24` read/write
+     operations for b2, b4, and b8.
 
 ## Risks
 
