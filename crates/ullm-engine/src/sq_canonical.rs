@@ -25,6 +25,7 @@ pub const SQ8_CANONICAL_BLOCK_SHAPE: [u64; 2] = [128, 128];
 pub const SQ8_CANONICAL_MAX_VERIFY_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 pub const SQ8_CANONICAL_MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 pub const SQ8_CANONICAL_MAX_RECONSTRUCT_ROW_ELEMENTS: usize = 1024 * 1024;
+pub const SQ8_CANONICAL_MAX_SCALE_READ_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Sq8CanonicalArtifactManifest {
@@ -157,6 +158,19 @@ pub struct Sq8CanonicalChecksumReport {
     pub scale_payload_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sq8CanonicalTensorPayloadPaths {
+    pub weight: PathBuf,
+    pub scale: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sq8CanonicalTensorChecksumReport {
+    pub tensor_name: String,
+    pub weight_payload_bytes: u64,
+    pub scale_payload_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sq8CanonicalReconstructedBlock {
     pub tensor_name: String,
@@ -180,6 +194,79 @@ impl Sq8CanonicalArtifact {
 
     pub fn checksum_report(&self) -> Sq8CanonicalChecksumReport {
         self.verified.checksum_report
+    }
+
+    pub fn tensor_pair(&self, tensor_name: &str) -> Result<&Sq8CanonicalTensorPair, String> {
+        find_tensor_pair(self, tensor_name)
+    }
+
+    pub fn tensor_payload_paths(
+        &self,
+        tensor_name: &str,
+    ) -> Result<Sq8CanonicalTensorPayloadPaths, String> {
+        let pair = find_tensor_pair(self, tensor_name)?;
+        Ok(Sq8CanonicalTensorPayloadPaths {
+            weight: canonical_artifact_file(
+                &self.artifact_dir,
+                &pair.weight.file,
+                &format!("{} weight", pair.name),
+            )?,
+            scale: canonical_artifact_file(
+                &self.artifact_dir,
+                &pair.scale.file,
+                &format!("{} scale", pair.name),
+            )?,
+        })
+    }
+
+    pub fn verify_tensor_payloads(
+        &self,
+        tensor_name: &str,
+        chunk_bytes: usize,
+    ) -> Result<Sq8CanonicalTensorChecksumReport, String> {
+        if chunk_bytes == 0 {
+            return Err("SQ8 canonical checksum chunk_bytes must be greater than zero".to_string());
+        }
+        let pair = find_tensor_pair(self, tensor_name)?;
+        verify_sq8_canonical_tensor_pair_payloads(
+            &self.artifact_dir,
+            pair,
+            chunk_bytes.min(SQ8_CANONICAL_MAX_VERIFY_CHUNK_BYTES),
+        )?;
+        Ok(Sq8CanonicalTensorChecksumReport {
+            tensor_name: pair.name.clone(),
+            weight_payload_bytes: pair.weight.bytes,
+            scale_payload_bytes: pair.scale.bytes,
+        })
+    }
+
+    pub fn read_tensor_scales_f32(
+        &self,
+        tensor_name: &str,
+        chunk_bytes: usize,
+    ) -> Result<Vec<f32>, String> {
+        if chunk_bytes == 0 {
+            return Err("SQ8 canonical scale chunk_bytes must be greater than zero".to_string());
+        }
+        let pair = find_tensor_pair(self, tensor_name)?;
+        if pair.scale.bytes > SQ8_CANONICAL_MAX_SCALE_READ_BYTES {
+            return Err(format!(
+                "SQ8 canonical tensor {} scale payload has {} bytes, exceeding compact read limit {SQ8_CANONICAL_MAX_SCALE_READ_BYTES}",
+                pair.name, pair.scale.bytes
+            ));
+        }
+        let scale_path = canonical_artifact_file(
+            &self.artifact_dir,
+            &pair.scale.file,
+            &format!("{} scale", pair.name),
+        )?;
+        read_verified_positive_bf16_payload(
+            &scale_path,
+            pair.scale.bytes,
+            &pair.scale.sha256,
+            chunk_bytes.min(SQ8_CANONICAL_MAX_VERIFY_CHUNK_BYTES),
+            &format!("{} scale", pair.name),
+        )
     }
 }
 
@@ -1138,6 +1225,100 @@ fn verify_payload_file(
     Ok(())
 }
 
+fn read_verified_positive_bf16_payload(
+    path: &Path,
+    expected_bytes: u64,
+    expected_sha256: &str,
+    chunk_bytes: usize,
+    label: &str,
+) -> Result<Vec<f32>, String> {
+    let mut file = File::open(path)
+        .map_err(|err| format!("failed to open {} for verified read: {err}", path.display()))?;
+    let opened_bytes = file
+        .metadata()
+        .map_err(|err| format!("failed to stat opened {}: {err}", path.display()))?
+        .len();
+    if opened_bytes != expected_bytes {
+        return Err(format!(
+            "SQ8 canonical {label} byte length mismatch before verified read: manifest={expected_bytes} file={opened_bytes}"
+        ));
+    }
+    let value_count = usize::try_from(expected_bytes / std::mem::size_of::<u16>() as u64)
+        .map_err(|_| format!("SQ8 canonical {label} element count does not fit usize"))?;
+    let file_chunk_bytes = usize::try_from(expected_bytes.min(chunk_bytes as u64))
+        .map_err(|_| format!("SQ8 canonical {label} chunk length does not fit usize"))?
+        .max(2)
+        & !1;
+    let mut buffer = vec![0_u8; file_chunk_bytes];
+    let mut values = Vec::with_capacity(value_count);
+    let mut remaining = expected_bytes;
+    let mut offset = 0_u64;
+    let mut digest = Sha256::new();
+    while remaining > 0 {
+        let read_len = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| format!("SQ8 canonical {label} read length does not fit usize"))?;
+        file.read_exact(&mut buffer[..read_len]).map_err(|err| {
+            format!(
+                "failed to read SQ8 canonical {label} at byte {offset} from {}: {err}",
+                path.display()
+            )
+        })?;
+        if !read_len.is_multiple_of(std::mem::size_of::<u16>()) {
+            return Err(format!(
+                "SQ8 canonical {label} BF16 chunk has odd byte length {read_len}"
+            ));
+        }
+        let chunk = &buffer[..read_len];
+        digest.update(chunk);
+        for (index, raw) in chunk.chunks_exact(2).enumerate() {
+            let value = bf16_le_to_f32([raw[0], raw[1]]);
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!(
+                    "SQ8 canonical {label} contains invalid BF16 scale {value} at byte offset {}",
+                    offset + (index * 2) as u64
+                ));
+            }
+            values.push(value);
+        }
+        remaining -= read_len as u64;
+        offset += read_len as u64;
+    }
+    let mut trailing = [0_u8; 1];
+    let trailing_bytes = file.read(&mut trailing).map_err(|err| {
+        format!(
+            "failed to verify EOF for SQ8 canonical {label} after byte {expected_bytes} from {}: {err}",
+            path.display()
+        )
+    })?;
+    if trailing_bytes != 0 {
+        return Err(format!(
+            "SQ8 canonical {label} has trailing data after declared {expected_bytes} bytes"
+        ));
+    }
+    let final_bytes = file
+        .metadata()
+        .map_err(|err| format!("failed to re-stat opened {}: {err}", path.display()))?
+        .len();
+    if final_bytes != expected_bytes {
+        return Err(format!(
+            "SQ8 canonical {label} byte length changed during verified read: manifest={expected_bytes} before={opened_bytes} after={final_bytes}"
+        ));
+    }
+    let actual_sha256 = format!("{:x}", digest.finalize());
+    if actual_sha256 != expected_sha256 {
+        return Err(format!(
+            "SQ8 canonical {label} checksum mismatch: manifest={expected_sha256} file={actual_sha256}"
+        ));
+    }
+    if values.len() != value_count {
+        return Err(format!(
+            "SQ8 canonical {label} decoded element count mismatch: expected={value_count} actual={}",
+            values.len()
+        ));
+    }
+    Ok(values)
+}
+
 fn first_non_finite_fp8_byte(bytes: &[u8]) -> Option<usize> {
     memchr::memchr2(0x7f, 0xff, bytes)
 }
@@ -1381,12 +1562,25 @@ mod tests {
     fn validates_and_verifies_streamed_canonical_payloads() {
         let (fixture, weight, scale) = write_fixture();
         let artifact = read_sq8_canonical_artifact(&fixture.root).unwrap();
+        let tensor_name = "model.layers.0.self_attn.q_proj.weight";
         let report = artifact.checksum_report();
         assert_eq!(report.selected_pair_count, 1);
         assert_eq!(report.weight_payload_bytes, weight.len() as u64);
         assert_eq!(report.scale_payload_bytes, scale.len() as u64);
         assert_eq!(artifact.manifest().format_id, FORMAT_SQ8_0);
         assert_eq!(artifact.artifact_dir(), fixture.root);
+        assert_eq!(artifact.tensor_pair(tensor_name).unwrap().name, tensor_name);
+        let paths = artifact.tensor_payload_paths(tensor_name).unwrap();
+        assert_eq!(paths.weight, fixture.root.join("weights/q.f8_e4m3"));
+        assert_eq!(paths.scale, fixture.root.join("scales/q.bf16"));
+        let tensor_report = artifact.verify_tensor_payloads(tensor_name, 17).unwrap();
+        assert_eq!(tensor_report.tensor_name, tensor_name);
+        assert_eq!(tensor_report.weight_payload_bytes, weight.len() as u64);
+        assert_eq!(tensor_report.scale_payload_bytes, scale.len() as u64);
+        assert_eq!(
+            artifact.read_tensor_scales_f32(tensor_name, 3).unwrap(),
+            [1.0, 2.0, 4.0, 8.0]
+        );
     }
 
     #[test]

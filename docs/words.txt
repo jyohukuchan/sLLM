@@ -235,6 +235,7 @@ mixed request-state layer enum:linear-attention request state ownerとself-atten
 package mixed request-state smoke:package-token-ids-mixed-request-state-smokeで実packageのlinear-attention層とself-attention層を混在実行し、token ID embedding入力、request-state dispatch、final RMSNorm、lm_head top1 guardを確認するsmoke。現在はrequest_state_interleavedであり、real batch throughput比較には使わない
 SQ8 canonical artifact:source checkpointのFP8 weight payloadとblock scale payloadを再量子化せずbyte-exactに保持するSQ8_0 artifact。GPU固有prepackとは分離し、source tensor名、shape、dtype、block shape、復元式、payload hashを固定する
 SQ8 block-2D scale:weightの行blockと列blockの2軸で共有するscale layout。weight座標`[row,col]`には`scale[row/block_rows,col/block_cols]`をdequant multiplierとして掛ける
-SQ8 reference W8A16 profile:canonical SQ8 artifactのFP8 weightとblock-2D scaleを正しく復元し、BF16またはF32 activationで実行する正しさ確認用profile。R9700向けoptimized性能を意味しない
+SQ8 reference W8A16 profile:canonical SQ8 artifactのFP8 weightを固定上限のbufferで読み、compact BF16 block-2D scaleを使い、F64 accumulatorからF32出力を作る正しさ確認用profile。payload全体やF32 weight matrixは展開せず、R9700向けoptimized性能を意味しない
+SQ8 correctness report:canonical artifact hash、tensor名、F32-LE input hash、reference implementation profile、execution path、fallback状態、nonfinite数、MSE、最大絶対誤差、relative L2、cosine similarity、固定閾値の判定結果を保持する型付きJSON report
 mixed request-state manifest smoke:package-token-ids-mixed-request-state-smokeをmanifest-allで実行し、full mixed-attention packageのlayer order全体をrequest-state dispatchで通すsmoke。throughput rowではなく、shared-weight real batch runnerへ進む前のfull-order guardとして扱う
 slot AQ4 payload registry sharing:同一resident batch layer内の複数request slotが同じWeightRegistryを使い、同名AQ4 tensorのindex/scale/codebook runtime bufferを共有する中間段階。完全なshared resident weightsではなく、scale_values、passthrough weights、workspace、state/cacheはまだslotごとに残る

@@ -15,4 +15,5 @@ pub mod qwen3_names;
 pub mod scheduler;
 pub mod sq;
 pub mod sq_canonical;
+pub mod sq_reference;
 pub mod sq_runtime;
