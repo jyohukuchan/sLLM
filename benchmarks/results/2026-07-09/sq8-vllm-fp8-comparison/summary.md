@@ -45,10 +45,18 @@ Serving-parity gate:
 python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --require-serving-parity
 ```
 
+Final-comparison engine-presence gate:
+
+```bash
+python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --harness-class serving_throughput_benchmark --require-serving-parity --require-engines uLLM,vLLM
+```
+
 The gate is expected to fail for the current b2/b4/b8 table because the uLLM rows are
 `cli_model_loop_diagnostic` rows and the vLLM rows are `serving_throughput_benchmark` rows.
 Adding `--harness-class serving_throughput_benchmark` makes the gate pass, but that filtered table
 contains only the vLLM rows and is not a uLLM-vs-vLLM comparison.
+Adding `--require-engines uLLM,vLLM` makes that vLLM-only slice fail with a missing uLLM engine,
+which is the expected state until a uLLM serving-parity row exists.
 
 Compact batch-grid output:
 

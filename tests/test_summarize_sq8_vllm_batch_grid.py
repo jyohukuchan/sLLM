@@ -122,6 +122,15 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TOOL.parse_requests_filter("0")
 
+    def test_parse_required_engines_filter(self) -> None:
+        self.assertEqual(
+            TOOL.parse_required_engines_filter("uLLM,vLLM"), {"uLLM", "vLLM"}
+        )
+        with self.assertRaises(ValueError):
+            TOOL.parse_required_engines_filter("uLLM,,vLLM")
+        with self.assertRaises(ValueError):
+            TOOL.parse_required_engines_filter("uLLM,")
+
     def test_invalid_json_reports_line_number(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:
             path = Path(workdir) / "results.jsonl"
@@ -186,6 +195,161 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     status = TOOL.main()
             self.assertEqual(status, 2)
+
+    def test_require_serving_parity_and_engines_fails_when_required_engine_missing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "serving_filter.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2,4,8",
+                    "--harness-class",
+                    "serving_throughput_benchmark",
+                    "--require-serving-parity",
+                    "--require-engines",
+                    "uLLM,vLLM",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("missing required engine(s): uLLM", stderr.getvalue())
+
+    def test_require_engines_only_fails_when_required_engine_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "vllm_only.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr",
+                        engine_name="vLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        harness={"class": "serving_throughput_benchmark"},
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-engines",
+                    "uLLM,vLLM",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("vLLM | vllm-r9700", stdout.getvalue())
+            self.assertIn("missing required engine(s): uLLM", stderr.getvalue())
+
+    def test_require_serving_parity_and_engines_passes_when_all_required_present(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "serving_both.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-qwen3-14b-sq8-full-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2,4,8",
+                    "--harness-class",
+                    "serving_throughput_benchmark",
+                    "--require-serving-parity",
+                    "--require-engines",
+                    "uLLM,vLLM",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
 
     def test_require_serving_parity_passes_for_serving_only_rows(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:

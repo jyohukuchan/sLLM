@@ -876,7 +876,9 @@ Expected outputs:
   selected uLLM rows are CLI model-loop diagnostics and the selected vLLM rows are serving
   throughput benchmark rows. Filtering with `--harness-class serving_throughput_benchmark` makes the
   current gate pass only for the vLLM slice, which is useful as a sanity check but not a comparative
-  uLLM-vs-vLLM result.
+  uLLM-vs-vLLM result. Final comparison commands should also use `--require-engines uLLM,vLLM`,
+  so a serving-only vLLM slice cannot accidentally satisfy the comparison gate while no uLLM
+  serving-parity row exists.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
 - The vLLM row should be produced through the derived command template in

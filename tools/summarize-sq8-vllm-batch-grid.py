@@ -248,6 +248,18 @@ def parse_requests_filter(value: str) -> set[int]:
     return requests
 
 
+def parse_required_engines_filter(value: str) -> set[str]:
+    if not value:
+        return set()
+    required: set[str] = set()
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            raise ValueError("--require-engines contains an empty item")
+        required.add(item)
+    return required
+
+
 def iter_markdown_rows(rows: Iterable[dict[str, Any]]) -> Iterator[list[str]]:
     for row in rows:
         workload = as_dict(row.get("workload"))
@@ -327,6 +339,19 @@ def markdown_table(
     return "\n".join(markdown_lines(rows))
 
 
+def required_engines_gate_failures(
+    rows: list[dict[str, Any]],
+    required_engines: set[str],
+) -> list[str]:
+    if not required_engines:
+        return []
+    available = {as_str(as_dict(row.get("engine")).get("name")) for row in rows}
+    missing = sorted(required_engines - available)
+    if not missing:
+        return []
+    return [f"missing required engine(s): {', '.join(missing)}"]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("jsonl", nargs="+", type=Path)
@@ -351,6 +376,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="filter by harness class, for example serving_throughput_benchmark",
     )
+    parser.add_argument(
+        "--require-engines",
+        default="",
+        help="comma-separated required engine names, for example uLLM,vLLM",
+    )
     return parser.parse_args()
 
 
@@ -362,8 +392,10 @@ def main() -> int:
             return 1
     try:
         requests_filter = parse_requests_filter(args.requests)
+        required_engines = parse_required_engines_filter(args.require_engines)
         harness_class_filter = args.harness_class
-        if args.require_serving_parity:
+        requires_gate = args.require_serving_parity or bool(required_engines)
+        if requires_gate:
             rows = selected_rows(
                 args.jsonl,
                 args.workload_prefix,
@@ -372,7 +404,13 @@ def main() -> int:
                 harness_class_filter,
             )
             selected_count = len(rows)
-            serving_parity_failures = serving_parity_gate_failures(rows)
+            if args.require_serving_parity:
+                serving_parity_failures = serving_parity_gate_failures(rows)
+            else:
+                serving_parity_failures = []
+            required_engine_failures = required_engines_gate_failures(
+                rows, required_engines
+            )
         else:
             rows = iter_selected_rows(
                 args.jsonl,
@@ -383,14 +421,15 @@ def main() -> int:
             )
             selected_count = None
             serving_parity_failures = []
+            required_engine_failures = []
         for line in markdown_lines(rows):
             print(line)
-        if serving_parity_failures:
+        if serving_parity_failures or required_engine_failures:
             print(
                 f"serving parity gate failed: {selected_count} selected row(s)",
                 file=sys.stderr,
             )
-            for line in serving_parity_failures:
+            for line in serving_parity_failures + required_engine_failures:
                 print(line, file=sys.stderr)
             return 2
     except ValueError as exc:
