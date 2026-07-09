@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -598,6 +599,73 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["prefill_mode"], "token_id_layer_stack")
         self.assertEqual(row["workload"]["format_id"], "SQ8_0")
         self.assertTrue(row["workload"]["sq_overlay"])
+
+    def test_parses_vllm_throughput_metrics_with_json_and_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "vllm_output.json"
+            output_path.write_text(
+                (
+                    "{"
+                    '"elapsed_time": 5.5, '
+                    '"requests_per_second": 18.5, '
+                    '"tokens_per_second": 2400.0, '
+                    '"total_num_tokens": 13200'
+                    "}"
+                ),
+                encoding="utf-8",
+            )
+
+            stdout = (
+                "Some benchmark startup logs...\n"
+                "Throughput: 18.5 requests/s, 2400.0 total tokens/s, 900.0 output tokens/s\n"
+                "Total num prompt tokens: 11000\n"
+            )
+            memory = {
+                "baseline_total_bytes": 1_000,
+                "peak_total_bytes": 3_000,
+                "consumed_total_bytes": 2 * 1024**3,
+            }
+
+            metrics = TOOL.parse_vllm_metrics(stdout, output_path, memory)
+            self.assertAlmostEqual(metrics["prefill_tokens_per_second"], 2000.0, places=7)
+            self.assertAlmostEqual(metrics["decode_tokens_per_second"], 900.0, places=7)
+            self.assertAlmostEqual(metrics["total_tokens_per_second"], 2400.0, places=7)
+            self.assertAlmostEqual(metrics["requests_per_second"], 18.5, places=7)
+            self.assertEqual(metrics["vram_consumed_bytes"], 2 * 1024**3)
+            self.assertEqual(metrics["vram_baseline_bytes"], 1_000)
+            self.assertEqual(metrics["vram_peak_bytes"], 3_000)
+            self.assertAlmostEqual(
+                metrics["decode_tokens_per_second_times_vram_consumed_gib"], 1800.0, places=7
+            )
+
+    def test_classifies_rocm_fp8_unsupported_runtime_patterns(self) -> None:
+        cases = (
+            "not supported",
+            "unsupported",
+            "no kernel image is available",
+            "hipErrorNoBinaryForGpu",
+            "invalid device function",
+            "not compiled for this GPU",
+            "gfx1201 is not supported",
+        )
+        for text in cases:
+            status, error = TOOL.classify_failure(1, False, text)
+            self.assertEqual(status, "unsupported", text)
+            self.assertEqual(error["type"], "unsupported_runtime", text)
+            self.assertEqual(
+                error["message"],
+                "Benchmark command reported unsupported runtime or model path.",
+                text,
+            )
+
+    def test_classify_failure_preserves_oom_and_timeout(self) -> None:
+        status, error = TOOL.classify_failure(1, False, "RuntimeError: CUDA out of memory")
+        self.assertEqual(status, "oom")
+        self.assertEqual(error["type"], "oom")
+
+        status, error = TOOL.classify_failure(1, True, "hipErrorNoBinaryForGpu")
+        self.assertEqual(status, "failed")
+        self.assertEqual(error["type"], "timeout")
 
     def test_parses_model_loop_single_request_csv_fields(self) -> None:
         stdout = (

@@ -462,7 +462,8 @@ Important rule:
 
 ### M10: vLLM + FP8 External Baseline Comparison
 
-Status: planned for the later half of the SQ8_0 implementation cycle.
+Status: planned for the later half of the SQ8_0 implementation cycle; harness prerequisites are
+partially prepared.
 
 Purpose:
 
@@ -488,6 +489,19 @@ local model path: ~/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8/
 primary GPU: R9700/RDNA4
 environment: build/envs/vllm-rocm-nightly or the current working vLLM ROCm env
 ```
+
+Current local baseline state:
+
+- `Qwen/Qwen3-14B-FP8` exists at the planned local model path.
+- `build/envs/vllm-rocm-nightly` is the current known-good vLLM ROCm environment for this target.
+- Existing 2026-06-30 rows show vLLM can run the smoke and representative workloads on R9700 when
+  the GPU is selected with `ROCR_VISIBLE_DEVICES=1`.
+- `HIP_VISIBLE_DEVICES=1` is not sufficient for this comparison on the current host because AITER
+  can still observe a V620/gfx1030 path first; this failure mode should remain recorded as a raw
+  failed or unsupported row when it is intentionally probed.
+- `tools/run-external-benchmark.py --parse vllm-throughput` already preserves the comparable vLLM
+  metrics, and its failure classifier now maps common ROCm no-binary / invalid-device-function
+  messages to `unsupported` rows.
 
 Workload grid:
 
@@ -557,6 +571,8 @@ Expected outputs:
    - New plans/results should use `SQ8_0` terminology.
 7. After the first implementation-valid full-package SQ8_0 rows exist, run the M10 vLLM + FP8
    comparison grid and save unsupported/failure rows explicitly when vLLM cannot match the target.
+   - Harness support for vLLM throughput parsing and common ROCm unsupported failure messages is
+     prepared.
 
 ## Risks
 

@@ -1088,7 +1088,16 @@ def classify_failure(returncode: int, timed_out: bool, text: str) -> tuple[str, 
         return "failed", {"type": "timeout", "message": "Benchmark command timed out."}
     if "out of memory" in lowered or "memoryerror" in lowered or "hip out of memory" in lowered:
         return "oom", {"type": "oom", "message": "Benchmark command reported out-of-memory."}
-    if "unsupported" in lowered or "not supported" in lowered:
+    unsupported_tokens = (
+        "unsupported",
+        "not supported",
+        "no kernel image is available",
+        "hiperrornobinaryforgpu",
+        "invalid device function",
+        "not compiled for this gpu",
+        "no binary for gpu",
+    )
+    if any(token in lowered for token in unsupported_tokens):
         return "unsupported", {"type": "unsupported_runtime", "message": "Benchmark command reported unsupported runtime or model path."}
     return "failed", {"type": "command_failed", "message": f"Benchmark command exited with code {returncode}."}
 
