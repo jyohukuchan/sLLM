@@ -45,6 +45,12 @@ Serving-parity gate:
 python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --require-serving-parity
 ```
 
+Same-shape normalized throughput gate:
+
+```bash
+python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --require-normalized-throughput-comparison --require-ullm-sq-batch-coverage
+```
+
 Final-comparison engine-presence gate:
 
 ```bash
@@ -59,6 +65,9 @@ Adding `--require-engines uLLM,vLLM` makes that vLLM-only slice fail with a miss
 which is the expected state until a uLLM serving-parity row exists.
 `--require-engine-grid` applies the same engine requirement to each requested batch/concurrency
 bucket, so a partial b2-only or b4-only pairing cannot pass the final comparison gate.
+The same-shape normalized throughput gate passes for the current b2/b4/b8 table while preserving
+the `cli_model_loop_diagnostic` vs `serving_throughput_benchmark` harness distinction. It should be
+read as an interim M10 comparison, not strict serving parity.
 
 Compact batch-grid output:
 
@@ -195,6 +204,6 @@ Important limitation:
 
 - Add a non-self behavioral guard or health-evaluated prompt suite before using the rows as final
   quality-regression evidence.
-- Add a server-style uLLM path or a documented harness-normalization step before using the b2, b4,
-  and b8 real-batch rows as final serving comparison.
+- Use the documented same-shape normalized throughput gate for interim M10 comparisons, and still
+  add a server-style uLLM path before claiming strict serving parity.
 - Keep the preliminary rope32/theta1e7 rows only as connectivity history.
