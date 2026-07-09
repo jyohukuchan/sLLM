@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
+use ullm_engine::backend_dispatch::{BackendImplementation, BackendRequest, select_backend};
 use ullm_engine::decode_runner::{
     Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerDecodeInputLayout,
     Qwen3DecoderLayerDecodeSequenceView, Qwen3DecoderLayerRequestDecodeRunner,
@@ -2398,6 +2399,31 @@ fn runtime_decode_attn_smoke(device_index: Option<String>) -> ExitCode {
 
 const RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD: usize = 64;
 
+const RUNTIME_CACHED_PREFIX_DISPATCH_OPERATION: &str = "cached_prefix_attention";
+const RUNTIME_CACHED_PREFIX_DISPATCH_PHASE: &str = "prefill";
+const RUNTIME_CACHED_PREFIX_DISPATCH_IMPLEMENTATIONS: &[BackendImplementation<'static>] = &[
+    BackendImplementation {
+        id: "cached_prefix_chunked",
+        operation: RUNTIME_CACHED_PREFIX_DISPATCH_OPERATION,
+        phase: RUNTIME_CACHED_PREFIX_DISPATCH_PHASE,
+        format_id: None,
+        model_arch: None,
+        gpu_arch: None,
+        gpu_name: None,
+        priority: 0,
+    },
+    BackendImplementation {
+        id: "cached_prefix_rdna4_fp8_auto",
+        operation: RUNTIME_CACHED_PREFIX_DISPATCH_OPERATION,
+        phase: RUNTIME_CACHED_PREFIX_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: Some("RDNA4"),
+        gpu_name: None,
+        priority: 10,
+    },
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeCachedPrefixAttnExecutor {
     Chunked,
@@ -2409,8 +2435,8 @@ enum RuntimeCachedPrefixAttnExecutor {
 }
 
 impl RuntimeCachedPrefixAttnExecutor {
-    fn parse(value: Option<String>) -> Result<Self, String> {
-        match value.as_deref().unwrap_or("cached_prefix_chunked") {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
             "cached_prefix_chunked" | "chunked" => Ok(Self::Chunked),
             "cached_prefix_flash2" | "flash2" => Ok(Self::Flash2),
             "cached_prefix_flash2_fp8q" | "flash2_fp8q" | "fp8q_flash2" => Ok(Self::Flash2Fp8Q),
@@ -2438,9 +2464,20 @@ impl RuntimeCachedPrefixAttnExecutor {
         }
     }
 
-    fn resolved_label(self, new_tokens: usize) -> &'static str {
+    fn resolved_label(
+        self,
+        new_tokens: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+    ) -> &'static str {
         match self {
-            Self::Rdna4Fp8Auto if new_tokens < RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD => {
+            Self::Rdna4Fp8Auto
+                if !rdna4_fp8_auto_uses_rocwmma(
+                    new_tokens, q_heads, kv_heads, head_dim, value_dim,
+                ) =>
+            {
                 Self::Flash2Fp8Q.label()
             }
             Self::Rdna4Fp8Auto => Self::RocwmmaFp8.label(),
@@ -2462,17 +2499,48 @@ impl RuntimeCachedPrefixAttnExecutor {
         )
     }
 
-    fn resolves_to_flash2_fp8q(self, new_tokens: usize) -> bool {
+    fn resolves_to_flash2_fp8q(
+        self,
+        new_tokens: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+    ) -> bool {
         matches!(self, Self::Flash2Fp8Q)
             || matches!(self, Self::Rdna4Fp8Auto)
-                && new_tokens < RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD
+                && !rdna4_fp8_auto_uses_rocwmma(
+                    new_tokens, q_heads, kv_heads, head_dim, value_dim,
+                )
     }
 
-    fn resolves_to_rocwmma_fp8(self, new_tokens: usize) -> bool {
+    fn resolves_to_rocwmma_fp8(
+        self,
+        new_tokens: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        value_dim: usize,
+    ) -> bool {
         matches!(self, Self::RocwmmaFp8)
             || matches!(self, Self::Rdna4Fp8Auto)
-                && new_tokens >= RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD
+                && rdna4_fp8_auto_uses_rocwmma(
+                    new_tokens, q_heads, kv_heads, head_dim, value_dim,
+                )
     }
+}
+
+fn rdna4_fp8_auto_uses_rocwmma(
+    new_tokens: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    value_dim: usize,
+) -> bool {
+    new_tokens >= RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD
+        && head_dim.is_multiple_of(16)
+        && value_dim.is_multiple_of(16)
+        && (q_heads / kv_heads).is_multiple_of(16)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2502,6 +2570,67 @@ impl RuntimeCachedPrefixKvCacheDtype {
             Self::Fp8E4m3 => "fp8_e4m3",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RuntimeCachedPrefixDispatchSelection {
+    executor: RuntimeCachedPrefixAttnExecutor,
+    source: &'static str,
+    implementation_id: &'static str,
+    request_format_id: Option<&'static str>,
+    request_gpu_arch: Option<&'static str>,
+}
+
+fn runtime_device_gpu_arch(info: &ullm_runtime_sys::DeviceInfo) -> Option<&'static str> {
+    let gcn_arch = info.gcn_arch_name.to_ascii_lowercase();
+    let name = info.name.to_ascii_lowercase();
+    if gcn_arch.starts_with("gfx12") || name.contains("r9700") {
+        Some("RDNA4")
+    } else if gcn_arch.starts_with("gfx10") || name.contains("v620") {
+        Some("RDNA2")
+    } else {
+        None
+    }
+}
+
+fn select_runtime_cached_prefix_executor(
+    requested: Option<RuntimeCachedPrefixAttnExecutor>,
+    kv_cache_dtype: RuntimeCachedPrefixKvCacheDtype,
+    info: &ullm_runtime_sys::DeviceInfo,
+) -> Result<RuntimeCachedPrefixDispatchSelection, String> {
+    if let Some(executor) = requested {
+        return Ok(RuntimeCachedPrefixDispatchSelection {
+            executor,
+            source: "cli_override",
+            implementation_id: executor.label(),
+            request_format_id: None,
+            request_gpu_arch: runtime_device_gpu_arch(info),
+        });
+    }
+
+    let request_format_id = match kv_cache_dtype {
+        RuntimeCachedPrefixKvCacheDtype::F32 => None,
+        RuntimeCachedPrefixKvCacheDtype::Fp8E4m3 => Some(FORMAT_SQ8_0),
+    };
+    let request_gpu_arch = runtime_device_gpu_arch(info);
+    let request = BackendRequest {
+        operation: RUNTIME_CACHED_PREFIX_DISPATCH_OPERATION,
+        phase: RUNTIME_CACHED_PREFIX_DISPATCH_PHASE,
+        format_id: request_format_id,
+        model_arch: None,
+        gpu_arch: request_gpu_arch,
+        gpu_name: Some(info.name.as_str()),
+    };
+    let implementation = select_backend(&request, RUNTIME_CACHED_PREFIX_DISPATCH_IMPLEMENTATIONS)
+        .ok_or_else(|| "no cached-prefix attention backend implementation matched".to_string())?;
+    let executor = RuntimeCachedPrefixAttnExecutor::parse(implementation.id)?;
+    Ok(RuntimeCachedPrefixDispatchSelection {
+        executor,
+        source: "backend_dispatch",
+        implementation_id: implementation.id,
+        request_format_id,
+        request_gpu_arch,
+    })
 }
 
 fn runtime_cached_prefix_attn_smoke(
@@ -2579,12 +2708,15 @@ fn runtime_cached_prefix_attn_smoke(
         }
         (executor, kv_cache_dtype) => (executor, kv_cache_dtype),
     };
-    let executor = match RuntimeCachedPrefixAttnExecutor::parse(executor_arg) {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            return ExitCode::from(2);
-        }
+    let executor = match executor_arg {
+        Some(value) => match RuntimeCachedPrefixAttnExecutor::parse(&value) {
+            Ok(value) => Some(value),
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
     };
     let kv_cache_dtype = match RuntimeCachedPrefixKvCacheDtype::parse(kv_cache_dtype_arg) {
         Ok(value) => value,
@@ -2627,7 +2759,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
     kv_heads: usize,
     head_dim: usize,
     value_dim: usize,
-    executor: RuntimeCachedPrefixAttnExecutor,
+    executor: Option<RuntimeCachedPrefixAttnExecutor>,
     kv_cache_dtype: RuntimeCachedPrefixKvCacheDtype,
 ) -> Result<String, String> {
     if !q_heads.is_multiple_of(kv_heads) {
@@ -2635,6 +2767,13 @@ fn runtime_cached_prefix_attn_smoke_impl(
             "runtime cached prefix attention requires q_heads to be a multiple of kv_heads: q_heads={q_heads} kv_heads={kv_heads}"
         ));
     }
+    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
+        .map_err(|err| format!("failed to create runtime context: {err}"))?;
+    let info = context
+        .device_info()
+        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
+    let dispatch_selection = select_runtime_cached_prefix_executor(executor, kv_cache_dtype, &info)?;
+    let executor = dispatch_selection.executor;
     if executor == RuntimeCachedPrefixAttnExecutor::DecodeLoop
         && kv_cache_dtype != RuntimeCachedPrefixKvCacheDtype::F32
     {
@@ -2649,7 +2788,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
             executor.label()
         ));
     }
-    if executor.resolves_to_flash2_fp8q(new_tokens) {
+    if executor.resolves_to_flash2_fp8q(new_tokens, q_heads, kv_heads, head_dim, value_dim) {
         if kv_cache_dtype != RuntimeCachedPrefixKvCacheDtype::Fp8E4m3 {
             return Err(
                 "runtime cached prefix attention flash2_fp8q executor requires fp8_e4m3 kv cache"
@@ -2663,7 +2802,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
             );
         }
     }
-    if executor.resolves_to_rocwmma_fp8(new_tokens) {
+    if executor.resolves_to_rocwmma_fp8(new_tokens, q_heads, kv_heads, head_dim, value_dim) {
         if !head_dim.is_multiple_of(16) || !value_dim.is_multiple_of(16) {
             return Err(
                 "runtime cached prefix attention rocwmma_fp8 executor currently requires head_dim and value_dim to be multiples of 16"
@@ -2774,11 +2913,6 @@ fn runtime_cached_prefix_attn_smoke_impl(
         v_cache.as_slice()
     };
 
-    let mut context = ullm_runtime_sys::RuntimeContext::create(device_index)
-        .map_err(|err| format!("failed to create runtime context: {err}"))?;
-    let info = context
-        .device_info()
-        .map_err(|err| format!("failed to query runtime context device: {err}"))?;
     let mut stream = context
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
@@ -3050,7 +3184,9 @@ fn runtime_cached_prefix_attn_smoke_impl(
                         })?;
                     }
                     RuntimeCachedPrefixAttnExecutor::Rdna4Fp8Auto => {
-                        if new_tokens < RDNA4_FP8_AUTO_ROCWMMA_NEW_TOKEN_THRESHOLD {
+                        if !executor.resolves_to_rocwmma_fp8(
+                            new_tokens, q_heads, kv_heads, head_dim, value_dim,
+                        ) {
                             ullm_runtime_sys::cached_prefix_attn_fp8_e4m3_flash2_fp8q(
                                 &q_sequence_buffer,
                                 &k_cache_buffer,
@@ -3183,7 +3319,7 @@ fn runtime_cached_prefix_attn_smoke_impl(
     } else {
         None
     };
-    let resolved_executor = executor.resolved_label(new_tokens);
+    let resolved_executor = executor.resolved_label(new_tokens, q_heads, kv_heads, head_dim, value_dim);
     for (sample_index, token_index) in sample_steps.iter().copied().enumerate() {
         let output = if let Some(output_sequence) = chunked_output_sequence.as_ref() {
             let output_start = token_index.checked_mul(output_elements).ok_or_else(|| {
@@ -3302,14 +3438,22 @@ fn runtime_cached_prefix_attn_smoke_impl(
     } else {
         None
     };
+    let dispatch_format_id = dispatch_selection.request_format_id.unwrap_or("none");
+    let dispatch_gpu_arch = dispatch_selection.request_gpu_arch.unwrap_or("unknown");
 
     Ok(format!(
-        "runtime-cached-prefix-attn-smoke backend={} device_index={} name=\"{}\" prefill_mode=cached_prefix executor={} resolved_executor={} kv_cache_dtype={} cached_prefix_tokens={} new_prefill_tokens={} total_context_tokens_after_prefill={} q_heads={} kv_heads={} head_dim={} value_dim={} softmax_scale={softmax_scale:.9} q_sequence_scale={q_sequence_scale:.9} k_cache_scale={k_cache_scale:.9} v_cache_scale={v_cache_scale:.9} estimated_prefill_attention_work_tokens={} cache_kv_bytes_total={} q_bytes_total={} output_bytes_total={} warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} prefill_total_input_tps={} attention_pair_tps_mean={} verification=sampled sample_count={} sampled_max_abs_diff={max_abs_diff:.9} output_preview={} verified=true",
+        "runtime-cached-prefix-attn-smoke backend={} device_index={} name=\"{}\" prefill_mode=cached_prefix executor={} resolved_executor={} executor_selection={} selected_implementation_id={} dispatch_operation={} dispatch_phase={} dispatch_format_id={} dispatch_gpu_arch={} kv_cache_dtype={} cached_prefix_tokens={} new_prefill_tokens={} total_context_tokens_after_prefill={} q_heads={} kv_heads={} head_dim={} value_dim={} softmax_scale={softmax_scale:.9} q_sequence_scale={q_sequence_scale:.9} k_cache_scale={k_cache_scale:.9} v_cache_scale={v_cache_scale:.9} estimated_prefill_attention_work_tokens={} cache_kv_bytes_total={} q_bytes_total={} output_bytes_total={} warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} prefill_total_input_tps={} attention_pair_tps_mean={} verification=sampled sample_count={} sampled_max_abs_diff={max_abs_diff:.9} output_preview={} verified=true",
         info.backend,
         device_index,
         info.name,
         executor.label(),
         resolved_executor,
+        dispatch_selection.source,
+        dispatch_selection.implementation_id,
+        RUNTIME_CACHED_PREFIX_DISPATCH_OPERATION,
+        RUNTIME_CACHED_PREFIX_DISPATCH_PHASE,
+        dispatch_format_id,
+        dispatch_gpu_arch,
         kv_cache_dtype.label(),
         cached_prefix_tokens,
         new_tokens,
