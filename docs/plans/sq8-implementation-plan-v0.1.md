@@ -661,6 +661,13 @@ Current local baseline state:
   `sq_diagnostic_host_staging_write_count=48`,
   `sq_diagnostic_host_staging_read_bytes=1327104`, and
   `sq_diagnostic_host_staging_write_bytes=1130496`.
+- The first host-staging reduction row at
+  `benchmarks/results/2026-07-09/sq8-host-staging-reduced-smoke/results.jsonl` keeps
+  `sq_fp8_batch_matvec_count=21/21` and reduces the same selected-layer shape to
+  `sq_diagnostic_host_staging_read_count=33`,
+  `sq_diagnostic_host_staging_write_count=42`,
+  `sq_diagnostic_host_staging_read_bytes=1228800`, and
+  `sq_diagnostic_host_staging_write_bytes=1032192`.
 - The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
   It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and
@@ -860,7 +867,9 @@ Expected outputs:
      `sq_fp8_batch_matvec_count=560/560`. The remaining blocker for final vLLM serving comparison is
      reducing/annotating host staging and adding server-style or serving-equivalent rows.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
-     request-state rows. The next implementation step is still to reduce the counted copies rather
+     request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
+     read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device
+     buffers. The next implementation step is still to reduce the remaining counted copies rather
      than treating the annotation itself as serving parity.
 
 ## Risks
