@@ -6,6 +6,7 @@ use crate::package::{
     RowScaleOverrideEntry, TensorPayloadBundle, TensorSelector, list_tensor_payload_bundles,
     select_passthrough_payload_bundle, select_tensor_payload_bundle,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -81,6 +82,28 @@ pub struct PassthroughF32RowRange {
     pub start_row: usize,
     pub row_count: usize,
     pub columns: usize,
+}
+
+#[derive(Debug)]
+pub struct PassthroughBf16ResidentData {
+    pub tensor_name: String,
+    pub shape: Vec<u64>,
+    pub elements: u64,
+    pub payload_bytes: u64,
+    pub payload_sha256: String,
+    pub upload_chunks: u64,
+    pub buffer: RuntimeBuffer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassthroughPayloadVerification {
+    pub tensor_name: String,
+    pub dtype: String,
+    pub shape: Vec<u64>,
+    pub elements: u64,
+    pub payload_bytes: u64,
+    pub payload_sha256: String,
+    pub verified_chunks: u64,
 }
 
 pub fn effective_rmsnorm_weight_values(tensor_name: &str, values: &[f32]) -> Vec<f32> {
@@ -265,6 +288,266 @@ pub fn read_named_passthrough_f32_row_range(
         start_row,
         row_count,
         columns,
+    })
+}
+
+pub fn load_named_passthrough_bf16_resident(
+    context: &mut RuntimeContext,
+    stream: &mut RuntimeStream,
+    package_path: impl AsRef<Path>,
+    tensor_name: &str,
+    chunk_bytes: usize,
+) -> Result<PassthroughBf16ResidentData, String> {
+    if chunk_bytes == 0 {
+        return Err("resident BF16 passthrough chunk_bytes must be greater than zero".into());
+    }
+    let selector = TensorSelector::Name(tensor_name.to_string());
+    let bundle = select_passthrough_payload_bundle(package_path, &selector).map_err(|err| {
+        format!("failed to select resident BF16 passthrough tensor {tensor_name}: {err}")
+    })?;
+    validate_passthrough_shape_elements(&bundle)
+        .map_err(|err| format!("invalid passthrough shape for {tensor_name}: {err}"))?;
+    validate_passthrough_payload_encoding(&bundle)?;
+    let dtype = resolve_passthrough_dtype(&bundle, tensor_name)?;
+    if dtype != "BF16" {
+        return Err(format!(
+            "resident passthrough tensor {tensor_name} must have BF16 dtype, got {dtype}"
+        ));
+    }
+
+    let expected_bytes = bundle
+        .elements
+        .checked_mul(std::mem::size_of::<u16>() as u64)
+        .ok_or_else(|| format!("resident BF16 tensor {tensor_name} byte count overflows"))?;
+    let declared_bytes = if bundle.payload_bytes == 0 {
+        bundle.payload_file.bytes
+    } else {
+        bundle.payload_bytes
+    };
+    if declared_bytes != expected_bytes || bundle.payload_file.bytes != expected_bytes {
+        return Err(format!(
+            "resident BF16 tensor {tensor_name} byte mismatch: elements={} expected={expected_bytes} declared={declared_bytes} file={}",
+            bundle.elements, bundle.payload_file.bytes
+        ));
+    }
+    if expected_bytes == 0 {
+        return Err(format!(
+            "resident BF16 tensor {tensor_name} must not be empty"
+        ));
+    }
+    let expected_sha256 = bundle
+        .payload_sha256
+        .as_deref()
+        .ok_or_else(|| format!("resident BF16 tensor {tensor_name} must declare payload_sha256"))?
+        .to_ascii_lowercase();
+    if expected_sha256.len() != 64 || !expected_sha256.as_bytes().iter().all(u8::is_ascii_hexdigit)
+    {
+        return Err(format!(
+            "resident BF16 tensor {tensor_name} has invalid payload_sha256 {expected_sha256}"
+        ));
+    }
+
+    let buffer_bytes = usize::try_from(expected_bytes)
+        .map_err(|_| format!("resident BF16 tensor {tensor_name} is too large for this host"))?;
+    let mut buffer = context
+        .alloc_buffer(buffer_bytes)
+        .map_err(|err| format!("failed to allocate resident BF16 tensor {tensor_name}: {err}"))?;
+    let mut file = File::open(&bundle.payload_file.absolute_path).map_err(|err| {
+        format!(
+            "failed to open resident BF16 tensor {}: {err}",
+            bundle.payload_file.absolute_path.display()
+        )
+    })?;
+    let opened_bytes = file
+        .metadata()
+        .map_err(|err| format!("failed to stat resident BF16 tensor {tensor_name}: {err}"))?
+        .len();
+    if opened_bytes != expected_bytes {
+        return Err(format!(
+            "resident BF16 tensor {tensor_name} changed before upload: expected={expected_bytes} actual={opened_bytes}"
+        ));
+    }
+
+    let staging_bytes = buffer_bytes.min(chunk_bytes).max(1);
+    let mut staging = vec![0_u8; staging_bytes];
+    let mut digest = Sha256::new();
+    let mut offset = 0_usize;
+    let mut chunks = 0_u64;
+    while offset < buffer_bytes {
+        let read_len = (buffer_bytes - offset).min(staging.len());
+        file.read_exact(&mut staging[..read_len]).map_err(|err| {
+            format!("failed to read resident BF16 tensor {tensor_name} at {offset}: {err}")
+        })?;
+        digest.update(&staging[..read_len]);
+        buffer
+            .copy_from_host(offset, &staging[..read_len], Some(stream))
+            .map_err(|err| {
+                format!("failed to upload resident BF16 tensor {tensor_name} at {offset}: {err}")
+            })?;
+        stream.synchronize().map_err(|err| {
+            format!(
+                "failed to synchronize resident BF16 tensor {tensor_name} upload at {offset}: {err}"
+            )
+        })?;
+        offset += read_len;
+        chunks += 1;
+    }
+    let mut trailing = [0_u8; 1];
+    if file
+        .read(&mut trailing)
+        .map_err(|err| format!("failed to verify resident BF16 tensor {tensor_name} EOF: {err}"))?
+        != 0
+    {
+        return Err(format!(
+            "resident BF16 tensor {tensor_name} has trailing payload data"
+        ));
+    }
+    let final_bytes = file
+        .metadata()
+        .map_err(|err| format!("failed to re-stat resident BF16 tensor {tensor_name}: {err}"))?
+        .len();
+    if final_bytes != opened_bytes || final_bytes != expected_bytes {
+        return Err(format!(
+            "resident BF16 tensor {tensor_name} byte length changed during upload: expected={expected_bytes} before={opened_bytes} after={final_bytes}"
+        ));
+    }
+    let actual_sha256 = format!("{:x}", digest.finalize());
+    if actual_sha256 != expected_sha256 {
+        return Err(format!(
+            "resident BF16 tensor {tensor_name} checksum mismatch: manifest={expected_sha256} file={actual_sha256}"
+        ));
+    }
+
+    Ok(PassthroughBf16ResidentData {
+        tensor_name: bundle.tensor_name,
+        shape: bundle.shape,
+        elements: bundle.elements,
+        payload_bytes: expected_bytes,
+        payload_sha256: actual_sha256,
+        upload_chunks: chunks,
+        buffer,
+    })
+}
+
+pub fn verify_named_passthrough_payload(
+    package_path: impl AsRef<Path>,
+    tensor_name: &str,
+    chunk_bytes: usize,
+) -> Result<PassthroughPayloadVerification, String> {
+    if chunk_bytes == 0 {
+        return Err(
+            "passthrough payload verification chunk_bytes must be greater than zero".into(),
+        );
+    }
+    let selector = TensorSelector::Name(tensor_name.to_string());
+    let bundle = select_passthrough_payload_bundle(package_path, &selector).map_err(|err| {
+        format!("failed to select passthrough tensor {tensor_name} for verification: {err}")
+    })?;
+    validate_passthrough_shape_elements(&bundle)
+        .map_err(|err| format!("invalid passthrough shape for {tensor_name}: {err}"))?;
+    validate_passthrough_payload_encoding(&bundle)?;
+    let dtype = resolve_passthrough_dtype(&bundle, tensor_name)?.to_string();
+    let declared_bytes = if bundle.payload_bytes == 0 {
+        bundle.payload_file.bytes
+    } else {
+        bundle.payload_bytes
+    };
+    if declared_bytes == 0 || declared_bytes != bundle.payload_file.bytes {
+        return Err(format!(
+            "passthrough tensor {tensor_name} payload byte mismatch: declared={declared_bytes} file={}",
+            bundle.payload_file.bytes
+        ));
+    }
+    let element_size = passthrough_element_size(&dtype, tensor_name)? as u64;
+    let expected_bytes = bundle
+        .elements
+        .checked_mul(element_size)
+        .ok_or_else(|| format!("passthrough tensor {tensor_name} byte count overflows"))?;
+    if expected_bytes != declared_bytes {
+        return Err(format!(
+            "passthrough tensor {tensor_name} element byte mismatch: elements={} dtype={dtype} expected={expected_bytes} declared={declared_bytes}",
+            bundle.elements
+        ));
+    }
+    let expected_sha256 = bundle
+        .payload_sha256
+        .as_deref()
+        .ok_or_else(|| format!("passthrough tensor {tensor_name} must declare payload_sha256"))?
+        .to_ascii_lowercase();
+    if expected_sha256.len() != 64 || !expected_sha256.as_bytes().iter().all(u8::is_ascii_hexdigit)
+    {
+        return Err(format!(
+            "passthrough tensor {tensor_name} has invalid payload_sha256 {expected_sha256}"
+        ));
+    }
+
+    let mut file = File::open(&bundle.payload_file.absolute_path).map_err(|err| {
+        format!(
+            "failed to open passthrough tensor {} for verification: {err}",
+            bundle.payload_file.absolute_path.display()
+        )
+    })?;
+    let opened_bytes = file
+        .metadata()
+        .map_err(|err| format!("failed to stat passthrough tensor {tensor_name}: {err}"))?
+        .len();
+    if opened_bytes != expected_bytes {
+        return Err(format!(
+            "passthrough tensor {tensor_name} changed before verification: expected={expected_bytes} actual={opened_bytes}"
+        ));
+    }
+    let staging_len = usize::try_from(expected_bytes.min(chunk_bytes as u64))
+        .map_err(|_| format!("passthrough tensor {tensor_name} chunk size does not fit usize"))?
+        .max(1);
+    let mut staging = vec![0_u8; staging_len];
+    let mut digest = Sha256::new();
+    let mut remaining = expected_bytes;
+    let mut chunks = 0_u64;
+    while remaining > 0 {
+        let read_len = usize::try_from(remaining.min(staging.len() as u64)).map_err(|_| {
+            format!("passthrough tensor {tensor_name} read length does not fit usize")
+        })?;
+        file.read_exact(&mut staging[..read_len]).map_err(|err| {
+            format!("failed to read passthrough tensor {tensor_name} during verification: {err}")
+        })?;
+        digest.update(&staging[..read_len]);
+        remaining -= read_len as u64;
+        chunks += 1;
+    }
+    let mut trailing = [0_u8; 1];
+    if file
+        .read(&mut trailing)
+        .map_err(|err| format!("failed to verify passthrough tensor {tensor_name} EOF: {err}"))?
+        != 0
+    {
+        return Err(format!(
+            "passthrough tensor {tensor_name} has trailing payload data"
+        ));
+    }
+    let final_bytes = file
+        .metadata()
+        .map_err(|err| format!("failed to re-stat passthrough tensor {tensor_name}: {err}"))?
+        .len();
+    if final_bytes != opened_bytes || final_bytes != expected_bytes {
+        return Err(format!(
+            "passthrough tensor {tensor_name} byte length changed during verification: expected={expected_bytes} before={opened_bytes} after={final_bytes}"
+        ));
+    }
+    let actual_sha256 = format!("{:x}", digest.finalize());
+    if actual_sha256 != expected_sha256 {
+        return Err(format!(
+            "passthrough tensor {tensor_name} checksum mismatch: manifest={expected_sha256} file={actual_sha256}"
+        ));
+    }
+
+    Ok(PassthroughPayloadVerification {
+        tensor_name: bundle.tensor_name,
+        dtype,
+        shape: bundle.shape,
+        elements: bundle.elements,
+        payload_bytes: expected_bytes,
+        payload_sha256: actual_sha256,
+        verified_chunks: chunks,
     })
 }
 
@@ -1525,6 +1808,115 @@ mod tests {
         assert_eq!(f32.dtype, "F32");
         assert_eq!(f32.shape, vec![2]);
         assert_eq!(f32.values, vec![1.25_f32, -0.5_f32]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_named_passthrough_bf16_resident_streams_and_verifies_payload() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-resident-bf16-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("passthrough")).unwrap();
+        let payload = [0x80_u8, 0x3f, 0x00, 0xc0, 0x40, 0x40, 0x80, 0xbf];
+        let payload_sha256 = format!("{:x}", Sha256::digest(payload));
+        fs::write(root.join("passthrough/head.raw"), payload).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            format!(
+                r#"{{
+                  "passthrough_tensors": [{{
+                    "name": "lm_head.weight",
+                    "dtype": "BF16",
+                    "shape": [2, 2],
+                    "elements": 4,
+                    "payload_bytes": 8,
+                    "payload_encoding": "raw_safetensors_payload",
+                    "payload_sha256": "{payload_sha256}",
+                    "payload_file": "passthrough/head.raw"
+                  }}]
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let verification = verify_named_passthrough_payload(&root, "lm_head.weight", 3).unwrap();
+        assert_eq!(verification.tensor_name, "lm_head.weight");
+        assert_eq!(verification.dtype, "BF16");
+        assert_eq!(verification.shape, vec![2, 2]);
+        assert_eq!(verification.elements, 4);
+        assert_eq!(verification.payload_bytes, 8);
+        assert_eq!(verification.payload_sha256, payload_sha256);
+        assert_eq!(verification.verified_chunks, 3);
+        let resident = load_named_passthrough_bf16_resident(
+            &mut context,
+            &mut stream,
+            &root,
+            "lm_head.weight",
+            3,
+        )
+        .unwrap();
+        assert_eq!(resident.tensor_name, "lm_head.weight");
+        assert_eq!(resident.shape, vec![2, 2]);
+        assert_eq!(resident.elements, 4);
+        assert_eq!(resident.payload_bytes, 8);
+        assert_eq!(resident.payload_sha256, payload_sha256);
+        assert_eq!(resident.upload_chunks, 3);
+        let mut copied = [0_u8; 8];
+        resident
+            .buffer
+            .copy_to_host(0, &mut copied, Some(&mut stream))
+            .unwrap();
+        stream.synchronize().unwrap();
+        assert_eq!(copied, payload);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn load_named_passthrough_bf16_resident_rejects_checksum_mismatch() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-loader-resident-bf16-checksum-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("passthrough")).unwrap();
+        fs::write(root.join("passthrough/head.raw"), [0x80_u8, 0x3f]).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "passthrough_tensors": [{
+                "name": "lm_head.weight",
+                "dtype": "BF16",
+                "shape": [1, 1],
+                "elements": 1,
+                "payload_bytes": 2,
+                "payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "payload_file": "passthrough/head.raw"
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let err = load_named_passthrough_bf16_resident(
+            &mut context,
+            &mut stream,
+            &root,
+            "lm_head.weight",
+            1,
+        )
+        .unwrap_err();
+        assert!(err.contains("checksum mismatch"));
 
         fs::remove_dir_all(root).unwrap();
     }
