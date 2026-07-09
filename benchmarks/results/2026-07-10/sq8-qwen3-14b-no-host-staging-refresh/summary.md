@@ -1,5 +1,9 @@
 # SQ8_0 Qwen3-14B No-Host-Staging Refresh
 
+> **Quarantined:** these uLLM rows used an invalid v0.1 sidecar that omitted source
+> `weight_scale_inv`. Keep them as connection diagnostics only. See the
+> [quarantine record](../sq8-qwen3-14b-invalid-sidecar-quarantine.md).
+
 Date: 2026-07-10
 
 ## 前回の要点

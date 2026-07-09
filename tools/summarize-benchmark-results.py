@@ -54,10 +54,29 @@ def explicit_sq_fallback(row: dict[str, Any]) -> bool:
     return workload.get("fallback_allowed") is True or workload.get("diagnostic") is True
 
 
-def valid_default_summary_row(row: dict[str, Any]) -> bool:
+def quarantined(row: dict[str, Any]) -> bool:
+    validity = row.get("result_validity")
+    return isinstance(validity, dict) and validity.get("state") == "quarantined"
+
+
+def validity_label(row: dict[str, Any]) -> str:
+    validity = row.get("result_validity")
+    if not isinstance(validity, dict):
+        return "unknown"
+    state = validity.get("state") or "unknown"
+    classification = validity.get("classification")
+    return f"{state}/{classification}" if classification else str(state)
+
+
+def valid_default_summary_row(
+    row: dict[str, Any],
+    include_quarantined: bool = False,
+) -> bool:
     if row.get("status") != "ok":
         return False
     if materialized_sq_fallback(row) and not explicit_sq_fallback(row):
+        return False
+    if quarantined(row) and not include_quarantined:
         return False
     return True
 
@@ -109,8 +128,21 @@ def target_label(row: dict[str, Any]) -> str:
     return "+".join(compact)
 
 
-def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
-    selected = rows if include_failed else [row for row in rows if valid_default_summary_row(row)]
+def markdown_table(
+    rows: list[dict[str, Any]],
+    include_failed: bool,
+    include_quarantined: bool = False,
+) -> str:
+    selected = rows if include_failed else [
+        row
+        for row in rows
+        if valid_default_summary_row(
+            row,
+            include_quarantined=include_quarantined,
+        )
+    ]
+    if not include_quarantined:
+        selected = [row for row in selected if not quarantined(row)]
     selected.sort(
         key=lambda row: (
             row.get("engine", {}).get("name") or "",
@@ -122,9 +154,19 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
             row.get("workload", {}).get("generated_tokens") or 0,
         )
     )
+    header = [
+        "Status", "Engine", "Model", "Family", "Quant", "SQ mode", "Impl", "Target",
+        "Workload", "Batching", "Prefill total tok/s", "Decode total tok/s",
+        "End-to-end tok/s", "Consumed GiB", "Decode x GiB", "Source",
+    ]
+    if include_quarantined:
+        header.append("Validity")
     lines = [
-        "| Status | Engine | Model | Family | Quant | SQ mode | Impl | Target | Workload | Batching | Prefill total tok/s | Decode total tok/s | End-to-end tok/s | Consumed GiB | Decode x GiB | Source |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join("---:" if item in {
+            "Prefill total tok/s", "Decode total tok/s", "End-to-end tok/s",
+            "Consumed GiB", "Decode x GiB",
+        } else "---" for item in header) + " |",
     ]
     for row in selected:
         metrics = row.get("metrics") or {}
@@ -134,10 +176,7 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
         consumed_bytes = metrics.get("vram_consumed_bytes")
         consumed_gib = gib(consumed_bytes)
         product = metrics.get("decode_tokens_per_second_times_vram_consumed_gib")
-        lines.append(
-            "| "
-            + " | ".join(
-                [
+        cells = [
                     row.get("status") or "-",
                     row.get("engine", {}).get("name") or "-",
                     model.get("name") or "-",
@@ -173,9 +212,9 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
                     fmt(product),
                     f"`{Path(row.get('_source_file', '-')).name}`",
                 ]
-            )
-            + " |"
-        )
+        if include_quarantined:
+            cells.append(validity_label(row))
+        lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
@@ -183,8 +222,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("jsonl", nargs="+", type=Path)
     parser.add_argument("--include-failed", action="store_true")
+    parser.add_argument("--include-quarantined", action="store_true")
     args = parser.parse_args()
-    print(markdown_table(load_rows(args.jsonl), args.include_failed))
+    print(
+        markdown_table(
+            load_rows(args.jsonl),
+            args.include_failed,
+            args.include_quarantined,
+        )
+    )
     return 0
 
 

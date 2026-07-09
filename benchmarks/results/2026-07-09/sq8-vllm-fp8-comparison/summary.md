@@ -1,5 +1,9 @@
 # SQ8 vLLM FP8 Smoke Comparison
 
+> **Partial quarantine:** all Qwen3-14B-FP8 uLLM rows used an invalid v0.1 sidecar that omitted
+> source `weight_scale_inv`; they are connection diagnostics only. The vLLM rows remain valid.
+> See the [quarantine record](../../2026-07-10/sq8-qwen3-14b-invalid-sidecar-quarantine.md).
+
 ## 前回の要点
 
 - M10 compares uLLM SQ8_0 rows with an external `vLLM + FP8` baseline after uLLM rows become

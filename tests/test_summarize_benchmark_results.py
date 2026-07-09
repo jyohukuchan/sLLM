@@ -80,6 +80,31 @@ class SummarizeBenchmarkResultsTests(unittest.TestCase):
         self.assertIn("unmarked-fallback.jsonl", table)
         self.assertIn("materialized_f32_fallback", table)
 
+    def test_quarantined_row_is_hidden_by_default_and_visible_for_audit(self) -> None:
+        invalid = row(
+            "invalid-source-scale",
+            workload={"sq_execution_mode": "direct_fp8_dequant_matvec"},
+        )
+        invalid["result_validity"] = {
+            "state": "quarantined",
+            "classification": "connection_diagnostic",
+            "implementation_valid": False,
+            "quality_comparison_valid": False,
+            "performance_comparison_valid": False,
+            "reason_codes": ["source_fp8_weight_scale_inv_not_applied"],
+        }
+
+        default_table = TOOL.markdown_table([invalid], include_failed=False)
+        audit_table = TOOL.markdown_table(
+            [invalid],
+            include_failed=False,
+            include_quarantined=True,
+        )
+
+        self.assertNotIn("invalid-source-scale.jsonl", default_table)
+        self.assertIn("invalid-source-scale.jsonl", audit_table)
+        self.assertIn("quarantined/connection_diagnostic", audit_table)
+
     def test_table_includes_sq_projection_and_dispatch_implementation_ids(self) -> None:
         projection = row(
             "projection",

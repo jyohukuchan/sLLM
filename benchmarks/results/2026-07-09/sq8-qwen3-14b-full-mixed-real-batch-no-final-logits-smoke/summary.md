@@ -1,5 +1,9 @@
 # SQ8_0 Qwen3-14B Full Mixed Real-Batch No-Final-Logits Smoke
 
+> **Quarantined:** the uLLM rows used an invalid v0.1 sidecar that omitted source
+> `weight_scale_inv`. Keep them as connection diagnostics only. See the
+> [quarantine record](../../2026-07-10/sq8-qwen3-14b-invalid-sidecar-quarantine.md).
+
 Date: 2026-07-09
 
 ## b2 Command

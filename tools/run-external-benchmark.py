@@ -1184,6 +1184,7 @@ def enrich_ullm_sq_projection_workload(
         "sq_format_id",
         "sq_implementation_id",
         "sq_artifact",
+        "sq_artifact_manifest_sha256",
         "sq_schema_version",
         "sq_execution_mode",
         "sq_projection_boundary",
@@ -1207,9 +1208,15 @@ def enrich_ullm_sq_projection_workload(
             "sq_projection_kernel_families",
         }:
             row_workload[key] = value
+    source_semantics_verified = parse_bool(
+        report.get("sq_source_semantics_verified")
+    )
+    if source_semantics_verified is not None:
+        row_workload["sq_source_semantics_verified"] = source_semantics_verified
     for key in (
         "sq_fp8_tensor_count",
         "sq_passthrough_tensor_count",
+        "sq_source_weight_scale_pair_count",
         "sq_row_chunk",
         "sq_fp8_single_matvec_count",
         "sq_fp8_batch_matvec_count",

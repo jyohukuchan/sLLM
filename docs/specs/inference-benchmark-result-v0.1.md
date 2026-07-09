@@ -135,6 +135,34 @@ Each line is one benchmark case. A case may be successful, failed, unsupported, 
 - `failed`: the case failed for another reason.
 - `skipped`: intentionally not run.
 
+`status` records whether the command ran successfully. It does not prove that the implementation,
+quality comparison, or performance comparison is valid.
+
+## Optional Result Validity
+
+Rows that have been independently classified may include:
+
+```json
+{
+  "result_validity": {
+    "state": "valid",
+    "classification": "source_correct_reference",
+    "implementation_valid": true,
+    "quality_comparison_valid": false,
+    "performance_comparison_valid": false,
+    "artifact_manifest_sha256": "64 lowercase hexadecimal characters",
+    "reason_codes": [],
+    "evidence": []
+  }
+}
+```
+
+Allowed `state` values are `valid` and `quarantined`. A strict gate treats a missing or malformed
+`result_validity` as unknown and fails closed. `implementation_valid=true` requires a canonical
+artifact manifest SHA-256. Reference execution may be implementation-valid while its performance
+comparison remains invalid. A quarantined row keeps its original `status`, metrics, logs, and
+command so execution history is not rewritten as a runtime failure.
+
 ## Unsupported Cases
 
 Unsupported cases must still be written as JSONL rows. This matters for TP/PP, multi-GPU, and V620 limitations.

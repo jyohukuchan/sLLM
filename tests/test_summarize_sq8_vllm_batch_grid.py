@@ -62,6 +62,7 @@ def make_row(
     model_format: str | None = None,
     model_quantization: str | None = None,
     context_length: int | None = None,
+    result_validity: dict[str, Any] | None = None,
 ) -> dict:
     row = {
         "case_id": case_id,
@@ -132,6 +133,8 @@ def make_row(
         row.setdefault("model", {})["quantization"] = model_quantization
     if context_length is not None:
         row["workload"]["context_length"] = context_length
+    if result_validity is not None:
+        row["result_validity"] = result_validity
     return row
 
 
@@ -782,6 +785,15 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_fp8_expected_all_batch_matvec_count=14,
                                 context_length=1048576,
                                 model_name="Qwen3.5-9B",
+                                result_validity={
+                                    "state": "valid",
+                                    "classification": "optimized_component",
+                                    "implementation_valid": True,
+                                    "quality_comparison_valid": True,
+                                    "performance_comparison_valid": True,
+                                    "artifact_manifest_sha256": "a" * 64,
+                                    "reason_codes": [],
+                                },
                             )
                         ),
                         json.dumps(
@@ -821,6 +833,108 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                     status = TOOL.main()
             self.assertEqual(status, 0)
             self.assertEqual(stderr.getvalue(), "")
+
+    def test_normalized_comparison_rejects_quarantined_ullm_row(self) -> None:
+        ullm_row = make_row(
+            case_id="sq8-pp16-tg8-b2",
+            engine_name="uLLM",
+            prompt_tokens=16,
+            generated_tokens=8,
+            batch_size=2,
+            harness={"class": "cli_model_loop_diagnostic"},
+            format_id="SQ8_0",
+            batching={
+                "mode": "real",
+                "prefill_real_batch": True,
+                "decode_real_batch": True,
+                "final_logits_in_total": False,
+            },
+            sq_projection_boundary="batch",
+            sq_fp8_batch_matvec_count=14,
+            sq_fp8_expected_all_batch_matvec_count=14,
+            context_length=1024,
+            model_name="Qwen3-14B-FP8",
+            result_validity={
+                "state": "quarantined",
+                "classification": "connection_diagnostic",
+                "implementation_valid": False,
+                "quality_comparison_valid": False,
+                "performance_comparison_valid": False,
+                "reason_codes": ["source_fp8_weight_scale_inv_not_applied"],
+            },
+        )
+        vllm_row = make_row(
+            case_id="vllm-pp16-tg8-b2",
+            engine_name="vLLM",
+            prompt_tokens=16,
+            generated_tokens=8,
+            batch_size=2,
+            harness={"class": "serving_throughput_benchmark"},
+            context_length=1024,
+            model_name="Qwen3-14B-FP8",
+        )
+
+        failures = TOOL.normalized_throughput_comparison_gate_failures(
+            [ullm_row, vllm_row],
+            {2},
+        )
+
+        self.assertTrue(
+            any("not implementation-valid" in failure for failure in failures),
+            failures,
+        )
+        self.assertTrue(
+            any("not performance-comparison-valid" in failure for failure in failures),
+            failures,
+        )
+        self.assertTrue(
+            any("source_fp8_weight_scale_inv_not_applied" in failure for failure in failures),
+            failures,
+        )
+
+    def test_implementation_validity_gate_requires_exact_true_and_manifest_hash(self) -> None:
+        row = make_row(
+            case_id="sq8-component",
+            engine_name="uLLM",
+            prompt_tokens=1,
+            generated_tokens=0,
+            batch_size=1,
+            format_id="SQ8_0",
+            result_validity={
+                "state": "valid",
+                "classification": "source_correct_reference",
+                "implementation_valid": True,
+                "quality_comparison_valid": True,
+                "performance_comparison_valid": False,
+                "artifact_manifest_sha256": "b" * 64,
+                "reason_codes": [],
+            },
+        )
+
+        self.assertEqual(
+            TOOL.ullm_sq_result_validity_gate_failures(
+                [row],
+                require_performance_comparison=False,
+            ),
+            [],
+        )
+        performance_failures = TOOL.ullm_sq_result_validity_gate_failures(
+            [row],
+            require_performance_comparison=True,
+        )
+        self.assertTrue(
+            any("not performance-comparison-valid" in failure for failure in performance_failures)
+        )
+
+        row["result_validity"]["implementation_valid"] = "true"
+        row["result_validity"]["artifact_manifest_sha256"] = "not-a-hash"
+        implementation_failures = TOOL.ullm_sq_result_validity_gate_failures(
+            [row],
+            require_performance_comparison=False,
+        )
+        self.assertTrue(
+            any("not implementation-valid" in failure for failure in implementation_failures)
+        )
 
     def test_require_normalized_throughput_comparison_fails_when_context_length_is_too_small(
         self,

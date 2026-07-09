@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Iterable, Iterator
+
+
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def as_int(value: Any) -> int | None:
@@ -59,6 +63,27 @@ def as_lower_str(value: Any) -> str | None:
     if not isinstance(value, str):
         value = str(value)
     return value.strip().lower()
+
+
+def result_validity(row: dict[str, Any]) -> dict[str, Any]:
+    return as_dict(row.get("result_validity"))
+
+
+def row_is_quarantined(row: dict[str, Any]) -> bool:
+    return as_lower_str(result_validity(row).get("state")) == "quarantined"
+
+
+def result_validity_label(row: dict[str, Any]) -> str:
+    validity = result_validity(row)
+    state = validity.get("state")
+    classification = validity.get("classification")
+    if state is None and classification is None:
+        return "unknown"
+    if state is None:
+        return str(classification)
+    if classification is None:
+        return str(state)
+    return f"{state}/{classification}"
 
 
 def format_gib(bytes_value: Any) -> str | None:
@@ -175,6 +200,7 @@ def iter_selected_rows(
     case_substring: str,
     requests_filter: set[int],
     harness_class_filter: str = "",
+    include_quarantined: bool = False,
 ) -> Iterator[dict[str, Any]]:
     for row in iter_rows(paths):
         if should_keep(
@@ -183,6 +209,7 @@ def iter_selected_rows(
             case_substring,
             requests_filter,
             harness_class_filter,
+            include_quarantined,
         ):
             yield row
 
@@ -193,6 +220,7 @@ def selected_rows(
     case_substring: str,
     requests_filter: set[int],
     harness_class_filter: str = "",
+    include_quarantined: bool = False,
 ) -> list[dict[str, Any]]:
     return list(
         iter_selected_rows(
@@ -201,6 +229,7 @@ def selected_rows(
             case_substring,
             requests_filter,
             harness_class_filter,
+            include_quarantined,
         )
     )
 
@@ -248,6 +277,7 @@ def should_keep(
     case_substring: str,
     requests_filter: set[int],
     harness_class_filter: str = "",
+    include_quarantined: bool = False,
 ) -> bool:
     case_id = as_str(row.get("case_id"))
     workload = as_dict(row.get("workload"))
@@ -287,6 +317,7 @@ def should_keep(
         and requests_match
         and status_match
         and harness_match
+        and (include_quarantined or not row_is_quarantined(row))
     )
 
 
@@ -330,7 +361,9 @@ def parse_required_engines_filter(value: str) -> set[str]:
 
 
 def iter_markdown_rows(
-    rows: Iterable[dict[str, Any]], show_sq_details: bool = False
+    rows: Iterable[dict[str, Any]],
+    show_sq_details: bool = False,
+    show_validity: bool = False,
 ) -> Iterator[list[str]]:
     for row in rows:
         workload = as_dict(row.get("workload"))
@@ -353,6 +386,8 @@ def iter_markdown_rows(
             or "-",
             format_float(metrics.get("decode_tokens_per_second_times_vram_consumed_gib")),
         ]
+        if show_validity:
+            output.append(result_validity_label(row))
         if show_sq_details:
             batch_matvec = as_int(workload.get("sq_fp8_batch_matvec_count"))
             expected_batch_matvec = as_int(
@@ -393,7 +428,9 @@ def iter_markdown_rows(
 
 
 def markdown_lines(
-    rows: Iterable[dict[str, Any]], show_sq_details: bool = False
+    rows: Iterable[dict[str, Any]],
+    show_sq_details: bool = False,
+    show_validity: bool = False,
 ) -> Iterator[str]:
     header = [
         "Engine",
@@ -408,6 +445,8 @@ def markdown_lines(
         "Consumed GiB",
         "Decode x GiB",
     ]
+    if show_validity:
+        header.append("Validity")
     if show_sq_details:
         header.extend(
             [
@@ -435,7 +474,11 @@ def markdown_lines(
     if show_sq_details:
         separator.extend(["---", "---", "---", "---:", "---:"])
     yield "| " + " | ".join(separator) + " |"
-    for row in iter_markdown_rows(rows, show_sq_details=show_sq_details):
+    for row in iter_markdown_rows(
+        rows,
+        show_sq_details=show_sq_details,
+        show_validity=show_validity,
+    ):
         yield (
             "| "
             + " | ".join(as_str(cell) for cell in row)
@@ -450,6 +493,7 @@ def markdown_table(
     requests_filter: set[int] | None = None,
     harness_class_filter: str = "",
     show_sq_details: bool = False,
+    include_quarantined: bool = False,
 ) -> str:
     rows = selected_rows(
         paths,
@@ -457,8 +501,61 @@ def markdown_table(
         case_substring,
         requests_filter or set(),
         harness_class_filter,
+        include_quarantined,
     )
-    return "\n".join(markdown_lines(rows, show_sq_details=show_sq_details))
+    return "\n".join(
+        markdown_lines(
+            rows,
+            show_sq_details=show_sq_details,
+            show_validity=include_quarantined,
+        )
+    )
+
+
+def ullm_sq_result_validity_gate_failures(
+    rows: list[dict[str, Any]],
+    *,
+    require_performance_comparison: bool,
+) -> list[str]:
+    failures: list[str] = []
+    for row in rows:
+        engine_name = as_str(as_dict(row.get("engine")).get("name"))
+        workload = as_dict(row.get("workload"))
+        if engine_name != "uLLM" or as_str(workload.get("format_id")) != "SQ8_0":
+            continue
+
+        validity = result_validity(row)
+        prefix = harness_summary(row)
+        if not validity:
+            failures.append(
+                "selected uLLM SQ8_0 row has unknown result_validity: " + prefix
+            )
+            continue
+        if validity.get("implementation_valid") is not True:
+            failures.append(
+                "selected uLLM SQ8_0 row is not implementation-valid: "
+                f"{prefix} state={as_str(validity.get('state'))} "
+                f"reason_codes={validity.get('reason_codes', [])!r}"
+            )
+        if (
+            require_performance_comparison
+            and validity.get("performance_comparison_valid") is not True
+        ):
+            failures.append(
+                "selected uLLM SQ8_0 row is not performance-comparison-valid: "
+                f"{prefix} state={as_str(validity.get('state'))} "
+                f"reason_codes={validity.get('reason_codes', [])!r}"
+            )
+        manifest_sha256 = validity.get("artifact_manifest_sha256")
+        if validity.get("implementation_valid") is True and (
+            not isinstance(manifest_sha256, str)
+            or SHA256_PATTERN.fullmatch(manifest_sha256) is None
+        ):
+            failures.append(
+                "selected implementation-valid uLLM SQ8_0 row is missing a valid "
+                f"result_validity.artifact_manifest_sha256: {prefix}"
+            )
+    return failures
 
 
 def required_engines_gate_failures(
@@ -690,7 +787,10 @@ def normalized_throughput_comparison_gate_failures(
     if not request_counts:
         return ["no selected rows with request count"]
 
-    failures: list[str] = []
+    failures = ullm_sq_result_validity_gate_failures(
+        rows,
+        require_performance_comparison=True,
+    )
     for request_count in request_counts:
         request_rows = [
             row
@@ -1067,12 +1167,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--require-implementation-valid",
+        action="store_true",
+        help=(
+            "fail when selected uLLM SQ8_0 rows do not explicitly carry "
+            "result_validity.implementation_valid=true and an artifact manifest SHA-256"
+        ),
+    )
+    parser.add_argument(
         "--require-normalized-throughput-comparison",
         action="store_true",
         help=(
             "require a same-shape normalized throughput comparison shape: "
             "uLLM cli_model_loop_diagnostic and vLLM serving rows per request count"
         ),
+    )
+    parser.add_argument(
+        "--include-quarantined",
+        action="store_true",
+        help="include quarantined rows and show their validity classification",
     )
     parser.add_argument(
         "--show-sq-details",
@@ -1114,6 +1227,7 @@ def main() -> int:
             or args.require_ullm_sq_batch_coverage
             or args.require_normalized_throughput_comparison
             or args.require_ullm_sq_no_host_staging
+            or args.require_implementation_valid
             or args.max_ullm_sq_host_staging_write_count is not None
         )
         if requires_gate:
@@ -1123,6 +1237,7 @@ def main() -> int:
                 args.case_substring,
                 requests_filter,
                 harness_class_filter,
+                True,
             )
             selected_count = len(rows)
             if args.require_serving_parity:
@@ -1174,6 +1289,15 @@ def main() -> int:
                 )
             else:
                 normalized_throughput_comparison_failures = []
+            if args.require_implementation_valid:
+                implementation_validity_failures = (
+                    ullm_sq_result_validity_gate_failures(
+                        rows,
+                        require_performance_comparison=False,
+                    )
+                )
+            else:
+                implementation_validity_failures = []
         else:
             rows = iter_selected_rows(
                 args.jsonl,
@@ -1181,6 +1305,7 @@ def main() -> int:
                 args.case_substring,
                 requests_filter,
                 harness_class_filter,
+                args.include_quarantined,
             )
             selected_count = None
             serving_parity_failures = []
@@ -1190,7 +1315,12 @@ def main() -> int:
             ullm_sq_no_host_staging_failures = []
             ullm_sq_host_staging_write_count_failures = []
             normalized_throughput_comparison_failures = []
-        for line in markdown_lines(rows, show_sq_details=args.show_sq_details):
+            implementation_validity_failures = []
+        for line in markdown_lines(
+            rows,
+            show_sq_details=args.show_sq_details,
+            show_validity=args.include_quarantined,
+        ):
             print(line)
         if (
             serving_parity_failures
@@ -1200,6 +1330,7 @@ def main() -> int:
             or ullm_sq_no_host_staging_failures
             or ullm_sq_host_staging_write_count_failures
             or normalized_throughput_comparison_failures
+            or implementation_validity_failures
         ):
             print(
                 f"batch-grid gate failed: {selected_count} selected row(s)",
@@ -1213,6 +1344,7 @@ def main() -> int:
                 + ullm_sq_no_host_staging_failures
                 + ullm_sq_host_staging_write_count_failures
                 + normalized_throughput_comparison_failures
+                + implementation_validity_failures
             ):
                 print(line, file=sys.stderr)
             return 2
