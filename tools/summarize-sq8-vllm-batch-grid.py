@@ -518,6 +518,76 @@ def _normalized_field_false(row: dict[str, Any], field: str) -> bool:
     return as_bool(workload.get(field)) is False or as_bool(batching.get(field)) is False
 
 
+def _all_equal_integer_from_list(values: Any) -> int | None:
+    if not isinstance(values, list):
+        return None
+    if not values:
+        return None
+
+    first: int | None = None
+    for raw in values:
+        current = as_int(raw)
+        if current is None:
+            return None
+        if first is None:
+            first = current
+        elif current != first:
+            return None
+    return first
+
+
+def _per_request_shape_for_row(
+    workload: dict[str, Any],
+    request_count: int,
+) -> tuple[int, int] | None:
+    prompt_per_request = workload.get("prompt_tokens_per_request")
+    generated_per_request = workload.get("generated_tokens_per_request")
+    has_explicit_shape = (
+        "prompt_tokens_per_request" in workload
+        or "generated_tokens_per_request" in workload
+    )
+
+    if has_explicit_shape:
+        prompt_value = _all_equal_integer_from_list(prompt_per_request)
+        generated_value = _all_equal_integer_from_list(generated_per_request)
+        if prompt_value is None or generated_value is None:
+            return None
+        return (prompt_value, generated_value)
+
+    if request_count <= 0:
+        return None
+
+    prompt_tokens = as_int(workload.get("prompt_tokens"))
+    generated_tokens = as_int(workload.get("generated_tokens"))
+    if (
+        prompt_tokens is None
+        or generated_tokens is None
+        or prompt_tokens % request_count != 0
+        or generated_tokens % request_count != 0
+    ):
+        return None
+
+    return (prompt_tokens // request_count, generated_tokens // request_count)
+
+
+def _per_request_shapes_for_rows(
+    rows: list[dict[str, Any]],
+    request_count: int,
+) -> set[tuple[int, int]]:
+    return {
+        shape
+        for row in rows
+        for shape in (
+            _per_request_shape_for_row(as_dict(row.get("workload")), request_count),
+        )
+        if shape is not None
+    }
+
+
+def _shape_set_to_text(shapes: set[tuple[int, int]]) -> str:
+    return ", ".join(f"{shape}" for shape in sorted(shapes)) or "-"
+
+
 def normalized_throughput_comparison_gate_failures(
     rows: list[dict[str, Any]],
     requests_filter: set[int],
@@ -612,9 +682,7 @@ def normalized_throughput_comparison_gate_failures(
                     f"{prefix}: uLLM row requires final_logits_in_total=false "
                     "(from workload.final_logits_in_total or batching.final_logits_in_total)"
                 )
-            if not _sq_projection_boundary_has_batch(
-                workload.get("sq_projection_boundary")
-            ):
+            if not _sq_projection_boundary_has_batch(workload.get("sq_projection_boundary")):
                 failures.append(
                     f"{prefix}: uLLM row requires sq_projection_boundary containing 'batch' "
                     f"(got {as_str(workload.get('sq_projection_boundary'))})"
@@ -642,6 +710,31 @@ def normalized_throughput_comparison_gate_failures(
                 failures.append(
                     f"{prefix}: uLLM row requires sq_fp8_batch_matvec_count >= sq_fp8_expected_all_batch_matvec_count "
                     f"(got {batch_count}/{expected_batch_count})"
+                )
+
+        if ullm_rows and vllm_rows:
+            ullm_shapes = _per_request_shapes_for_rows(ullm_rows, request_count)
+            vllm_shapes = _per_request_shapes_for_rows(vllm_rows, request_count)
+
+            if not ullm_shapes:
+                failures.append(
+                    f"request {request_count}: missing per-request prompt/generated shape for uLLM "
+                    f"(uLLM shapes={_shape_set_to_text(ullm_shapes)} "
+                    f"vLLM shapes={_shape_set_to_text(vllm_shapes)})"
+                )
+            if not vllm_shapes:
+                failures.append(
+                    f"request {request_count}: missing per-request prompt/generated shape for vLLM "
+                    f"(uLLM shapes={_shape_set_to_text(ullm_shapes)} "
+                    f"vLLM shapes={_shape_set_to_text(vllm_shapes)})"
+                )
+
+            shape_intersection = ullm_shapes.intersection(vllm_shapes)
+            if ullm_shapes and vllm_shapes and not shape_intersection:
+                failures.append(
+                    "request "
+                    f"{request_count} per-request prompt/generated shape mismatch: "
+                    f"uLLM={sorted(ullm_shapes)} vLLM={sorted(vllm_shapes)}"
                 )
 
     return failures

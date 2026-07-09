@@ -47,6 +47,8 @@ def make_row(
     sq_projection_boundary: str | None = None,
     sq_fp8_batch_matvec_count: int | None = None,
     sq_fp8_expected_all_batch_matvec_count: int | None = None,
+    prompt_tokens_per_request: list[int] | None = None,
+    generated_tokens_per_request: list[int] | None = None,
     batching: dict[str, Any] | None = None,
     batching_mode: str | None = None,
     prefill_real_batch: bool | None = None,
@@ -88,6 +90,10 @@ def make_row(
         row["workload"]["sq_fp8_expected_all_batch_matvec_count"] = (
             sq_fp8_expected_all_batch_matvec_count
         )
+    if prompt_tokens_per_request is not None:
+        row["workload"]["prompt_tokens_per_request"] = prompt_tokens_per_request
+    if generated_tokens_per_request is not None:
+        row["workload"]["generated_tokens_per_request"] = generated_tokens_per_request
     if batching is not None:
         row["batching"] = batching
     if batching_mode is not None:
@@ -741,6 +747,75 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                     status = TOOL.main()
             self.assertEqual(status, 0)
             self.assertEqual(stderr.getvalue(), "")
+
+    def test_require_normalized_throughput_comparison_fails_when_per_request_prompt_generated_shape_mismatch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "normalized_shape_mismatch.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp24-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=24,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": False,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp24-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=24,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                                prompt_tokens_per_request=[9, 9],
+                                generated_tokens_per_request=[4, 4],
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp24-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn(
+                "request 2 per-request prompt/generated shape mismatch",
+                stderr.getvalue(),
+            )
 
     def test_require_normalized_throughput_comparison_fails_when_missing_ullm_or_vllm_row(
         self,

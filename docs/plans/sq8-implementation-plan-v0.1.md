@@ -903,6 +903,9 @@ Expected outputs:
 - M10 comparison is now defined as a same-shape normalized throughput comparison gate, not serving parity.
   The gate requires `--require-normalized-throughput-comparison` so `uLLM` (`cli_model_loop_diagnostic`)
   and `vLLM` (`serving_throughput_benchmark`) rows are validated with explicit shape-homogenizing checks.
+  The normalized gate now derives per-request prompt/generated shape from explicit per-request
+  arrays or from total tokens divided by request count, and fails when the selected uLLM/vLLM shape
+  sets do not overlap.
 - The no-host-staging 2026-07-10 uLLM rows plus the existing 2026-07-09 vLLM b2/b4/b8 rows now pass
   `--require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families --require-ullm-sq-no-host-staging`.
   The same summary helper can add `--show-sq-details` to display `SQ boundary`, `SQ family`,
@@ -997,6 +1000,9 @@ Expected outputs:
    - Comparison scripts should now fail M10 runs unless SQ8_0 uLLM rows pass
      `--require-ullm-sq-kernel-families`, so fallback/no-kernel SQ8_0 rows do not silently leak
      into direct-projection comparison cases.
+   - The normalized comparison gate now also checks per-request prompt/generated shape by request
+     count, so a row selected only by `case_id` or workload prefix cannot pass if its token shape is
+     not actually the same as the paired engine row.
    - Same M10 gates should also start requiring
      `--require-ullm-sq-batch-coverage` so SQ8_0 rows with non-batch projection boundaries or
      incomplete batch matvec counters are blocked before mixing against serving rows.
