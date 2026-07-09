@@ -255,11 +255,7 @@ fn main() -> Result<(), String> {
         Sq8LayerExecutionProfile::ReferenceW8a16Block2d,
         &mut stream,
     )?;
-    let reference_output = read_f32_buffer(
-        workspace.output_buffer(),
-        options.m * QWEN3_14B_HIDDEN_SIZE,
-        &mut stream,
-    )?;
+    let reference_output = workspace.read_trace(&mut stream)?.output;
     let reference_vs_optimized_oracle_final_check =
         tensor_check(&oracle.output, &reference_output, 2.0e-2, 0.999)?;
 
@@ -862,20 +858,6 @@ fn output_health(values: &[f32]) -> Result<OutputHealth, String> {
         max_abs,
         f32_le_sha256: sq8_f32_le_sha256(values)?,
     })
-}
-
-fn read_f32_buffer(
-    buffer: &RuntimeBuffer,
-    elements: usize,
-    stream: &mut RuntimeStream,
-) -> Result<Vec<f32>, String> {
-    let mut bytes = vec![0_u8; elements * std::mem::size_of::<f32>()];
-    buffer.copy_to_host(0, &mut bytes, Some(stream))?;
-    stream.synchronize()?;
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
-        .collect())
 }
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {

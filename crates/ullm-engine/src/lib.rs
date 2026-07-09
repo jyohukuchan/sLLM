@@ -16,6 +16,7 @@ pub mod scheduler;
 pub mod sq;
 pub mod sq8_layer_oracle;
 pub mod sq8_layer_runtime;
+pub mod sq8_stack_runtime;
 pub mod sq_canonical;
 pub mod sq_optimized_reference;
 pub mod sq_reference;

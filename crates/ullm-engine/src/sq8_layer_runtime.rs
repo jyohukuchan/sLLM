@@ -270,6 +270,7 @@ pub fn load_qwen3_14b_sq8_layer_weights(
 pub struct Qwen3Sq8LayerWorkspace {
     config: Qwen3Sq8LayerConfig,
     last_profile: Option<Sq8LayerExecutionProfile>,
+    poison_reason: Option<String>,
     input_normed: RuntimeBuffer,
     q_projected: RuntimeBuffer,
     k_projected: RuntimeBuffer,
@@ -335,6 +336,7 @@ impl Qwen3Sq8LayerWorkspace {
         Ok(Self {
             config,
             last_profile: None,
+            poison_reason: None,
             input_normed,
             q_projected,
             k_projected,
@@ -364,8 +366,16 @@ impl Qwen3Sq8LayerWorkspace {
         self.config
     }
 
-    pub fn output_buffer(&self) -> &RuntimeBuffer {
+    pub(crate) fn output_buffer(&self) -> &RuntimeBuffer {
         &self.output
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.poison_reason.is_some()
+    }
+
+    pub fn poison_reason(&self) -> Option<&str> {
+        self.poison_reason.as_deref()
     }
 
     pub fn run_synchronized(
@@ -375,23 +385,35 @@ impl Qwen3Sq8LayerWorkspace {
         profile: Sq8LayerExecutionProfile,
         stream: &mut RuntimeStream,
     ) -> Result<Sq8LayerExecutionReport, String> {
-        let report = self.enqueue(weights, input, profile, stream)?;
+        self.validate_synchronized_preconditions(weights, input)?;
+        let report = match self.enqueue(weights, input, profile, stream) {
+            Ok(report) => report,
+            Err(operation_error) => {
+                let error = match stream.synchronize() {
+                    Ok(()) => operation_error,
+                    Err(sync_error) => format!(
+                        "{operation_error}; subsequent Qwen3-14B SQ8 layer stream recovery failed: {sync_error}"
+                    ),
+                };
+                return Err(self.poison(error));
+            }
+        };
         if let Err(err) = stream.synchronize() {
-            self.last_profile = None;
-            return Err(format!(
+            return Err(self.poison(format!(
                 "failed to synchronize Qwen3-14B SQ8 layer execution: {err}"
-            ));
+            )));
         }
         Ok(report)
     }
 
-    fn enqueue(
+    pub(crate) fn enqueue(
         &mut self,
         weights: &Qwen3Sq8LayerWeights,
         input: &RuntimeBuffer,
         profile: Sq8LayerExecutionProfile,
         stream: &mut RuntimeStream,
     ) -> Result<Sq8LayerExecutionReport, String> {
+        self.ensure_usable()?;
         self.last_profile = None;
         self.config.validate()?;
         validate_no_host_staging_contract()?;
@@ -588,6 +610,9 @@ impl Qwen3Sq8LayerWorkspace {
             Some(&mut *stream),
         )?;
 
+        let fallback_used = [q, k, v, o, gate, up, down]
+            .into_iter()
+            .any(projection_fallback_used);
         let report = Sq8LayerExecutionReport {
             profile,
             q,
@@ -599,13 +624,27 @@ impl Qwen3Sq8LayerWorkspace {
             down,
             activation_quantizations: quantization_count,
             projection_calls: QWEN3_14B_SQ8_LAYER_PROJECTIONS,
-            fallback_used: false,
+            fallback_used,
         };
         self.last_profile = Some(profile);
         Ok(report)
     }
 
-    pub fn read_trace(&self, stream: &mut RuntimeStream) -> Result<Sq8LayerRuntimeTrace, String> {
+    pub fn read_trace(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8LayerRuntimeTrace, String> {
+        self.ensure_usable()?;
+        match self.read_trace_inner(stream) {
+            Ok(trace) => Ok(trace),
+            Err(err) => {
+                Err(self.poison(format!("failed to read Qwen3-14B SQ8 layer trace: {err}")))
+            }
+        }
+    }
+
+    fn read_trace_inner(&self, stream: &mut RuntimeStream) -> Result<Sq8LayerRuntimeTrace, String> {
+        self.ensure_usable()?;
         let profile = self
             .last_profile
             .ok_or_else(|| "Qwen3-14B SQ8 layer trace requires one successful run".to_string())?;
@@ -676,6 +715,106 @@ impl Qwen3Sq8LayerWorkspace {
             gate_up_activation,
             down_activation,
         })
+    }
+
+    fn validate_synchronized_preconditions(
+        &self,
+        weights: &Qwen3Sq8LayerWeights,
+        input: &RuntimeBuffer,
+    ) -> Result<(), String> {
+        self.ensure_usable()?;
+        self.config.validate()?;
+        validate_no_host_staging_contract()?;
+        let hidden_bytes =
+            checked_elements(self.config.sequence_len, QWEN3_14B_HIDDEN_SIZE, "input")?
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "Qwen3-14B SQ8 layer input byte size overflows".to_string())?;
+        let actual_input_bytes = input.size()?;
+        if actual_input_bytes != hidden_bytes {
+            return Err(format!(
+                "Qwen3-14B SQ8 layer input byte size mismatch: expected={hidden_bytes} actual={actual_input_bytes}"
+            ));
+        }
+        validate_resident_shape(
+            &weights.q,
+            QWEN3_14B_HIDDEN_SIZE,
+            QWEN3_14B_HIDDEN_SIZE,
+            "q",
+        )?;
+        validate_resident_shape(
+            &weights.k,
+            QWEN3_14B_KV_HEADS * QWEN3_14B_HEAD_DIM,
+            QWEN3_14B_HIDDEN_SIZE,
+            "k",
+        )?;
+        validate_resident_shape(
+            &weights.v,
+            QWEN3_14B_KV_HEADS * QWEN3_14B_VALUE_DIM,
+            QWEN3_14B_HIDDEN_SIZE,
+            "v",
+        )?;
+        validate_resident_shape(
+            &weights.o,
+            QWEN3_14B_HIDDEN_SIZE,
+            QWEN3_14B_HIDDEN_SIZE,
+            "o",
+        )?;
+        validate_resident_shape(
+            &weights.gate,
+            QWEN3_14B_INTERMEDIATE_SIZE,
+            QWEN3_14B_HIDDEN_SIZE,
+            "gate",
+        )?;
+        validate_resident_shape(
+            &weights.up,
+            QWEN3_14B_INTERMEDIATE_SIZE,
+            QWEN3_14B_HIDDEN_SIZE,
+            "up",
+        )?;
+        validate_resident_shape(
+            &weights.down,
+            QWEN3_14B_HIDDEN_SIZE,
+            QWEN3_14B_INTERMEDIATE_SIZE,
+            "down",
+        )?;
+        for (label, buffer, expected_elements) in [
+            ("input norm", &weights.input_norm, QWEN3_14B_HIDDEN_SIZE),
+            (
+                "post-attention norm",
+                &weights.post_attention_norm,
+                QWEN3_14B_HIDDEN_SIZE,
+            ),
+            ("q norm", &weights.q_norm, QWEN3_14B_HEAD_DIM),
+            ("k norm", &weights.k_norm, QWEN3_14B_HEAD_DIM),
+        ] {
+            let expected_bytes = expected_elements
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| format!("Qwen3-14B SQ8 layer {label} byte size overflows"))?;
+            let actual_bytes = buffer.size()?;
+            if actual_bytes != expected_bytes {
+                return Err(format!(
+                    "Qwen3-14B SQ8 layer {label} byte size mismatch: expected={expected_bytes} actual={actual_bytes}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_usable(&self) -> Result<(), String> {
+        match &self.poison_reason {
+            Some(reason) => Err(format!(
+                "Qwen3-14B SQ8 layer workspace is permanently poisoned: {reason}"
+            )),
+            None => Ok(()),
+        }
+    }
+
+    fn poison(&mut self, error: String) -> String {
+        self.last_profile = None;
+        if self.poison_reason.is_none() {
+            self.poison_reason = Some(error.clone());
+        }
+        error
     }
 }
 
@@ -788,7 +927,14 @@ fn run_projection(
     }
 }
 
-fn validate_norm_values(norms: &Qwen3Sq8LayerNormValues) -> Result<(), String> {
+fn projection_fallback_used(execution: Sq8LayerProjectionExecution) -> bool {
+    matches!(
+        execution,
+        Sq8LayerProjectionExecution::Reference(path) if path != SqFp8ExecutionPath::HipKernel
+    )
+}
+
+pub(crate) fn validate_norm_values(norms: &Qwen3Sq8LayerNormValues) -> Result<(), String> {
     for (name, values, expected) in [
         ("input", norms.input.as_slice(), QWEN3_14B_HIDDEN_SIZE),
         (
@@ -991,5 +1137,35 @@ mod tests {
             workspace.output_buffer().size().unwrap(),
             QWEN3_14B_HIDDEN_SIZE * std::mem::size_of::<f32>()
         );
+    }
+
+    #[test]
+    fn workspace_poison_is_permanent() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let config = Qwen3Sq8LayerConfig::qwen3_14b(1, 0).unwrap();
+        let mut workspace = Qwen3Sq8LayerWorkspace::allocate(&mut context, config).unwrap();
+        assert!(!workspace.is_poisoned());
+        assert_eq!(
+            workspace.poison("stream failure".to_string()),
+            "stream failure"
+        );
+        assert!(workspace.is_poisoned());
+        assert_eq!(workspace.poison_reason(), Some("stream failure"));
+        assert!(workspace.ensure_usable().is_err());
+        workspace.poison("replacement".to_string());
+        assert_eq!(workspace.poison_reason(), Some("stream failure"));
+    }
+
+    #[test]
+    fn reference_cpu_execution_is_reported_as_fallback() {
+        assert!(!projection_fallback_used(
+            Sq8LayerProjectionExecution::Reference(SqFp8ExecutionPath::HipKernel)
+        ));
+        assert!(projection_fallback_used(
+            Sq8LayerProjectionExecution::Reference(SqFp8ExecutionPath::CpuReference)
+        ));
+        assert!(!projection_fallback_used(Sq8LayerProjectionExecution::Ck(
+            Sq8CkImplementation::MemV1DefaultTile16x128x128
+        )));
     }
 }
