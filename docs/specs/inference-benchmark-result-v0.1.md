@@ -293,6 +293,17 @@ ready-batch executor. Such rows must preserve:
 - `metrics.prefill_total_input_tokens_per_second`
 - `metrics.decode_total_generated_tokens_per_second`
 - `metrics.end_to_end_total_tokens_per_second`
+- `metrics.artifact_load_wall_time_seconds`
+- `metrics.artifact_materialization_wall_time_seconds`
+- `metrics.load_excluded_total_wall_time_seconds`
+- `metrics.load_included_total_wall_time_seconds`
+
+For model-loop rows, `load_excluded_total_wall_time_seconds` is the measured command section used
+for throughput, while `load_included_total_wall_time_seconds` includes the surrounding layer or
+artifact load section when the runner reports it. `artifact_load_wall_time_seconds` should use an
+explicit artifact-load timer when present and may fall back to the legacy `layer_load_ms` timer.
+`artifact_materialization_wall_time_seconds` is only populated when the runner reports a separate
+materialization timer; it must not alias `layer_load_ms`.
 
 `hybrid` rows are useful for connecting scheduler/runtime request batching to the result schema, but
 they must not be mixed with final `real` full-package throughput rows in SQ/vLLM comparisons.

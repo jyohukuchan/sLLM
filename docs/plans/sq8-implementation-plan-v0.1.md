@@ -351,9 +351,19 @@ Minimum result fields:
 - `sq_passthrough_tensor_count`;
 - `sq_execution_mode`;
 - projection boundary counters;
-- artifact load/materialization wall time;
+- artifact load/materialization wall time:
+  - `metrics.artifact_load_wall_time_seconds`;
+  - `metrics.artifact_materialization_wall_time_seconds`;
+  - `metrics.load_excluded_total_wall_time_seconds`;
+  - `metrics.load_included_total_wall_time_seconds`;
 - prefill/decode/end-to-end total tok/s;
 - prompt-suite regression status.
+
+Done:
+
+- `--parse ullm-model-loop-throughput` preserves explicit artifact-load, optional
+  materialization, load-excluded total, and load-included total wall-time fields without changing
+  the legacy `layer_load_wall_time_seconds` / `outer_wall_time_seconds` fields.
 
 ### M6: Dispatch Integration
 

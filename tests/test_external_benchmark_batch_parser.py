@@ -407,6 +407,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "end_to_end_total_tokens=7 prefill_wall_ms=47.124272 "
             "decode_wall_ms=35.822329 final_logits_wall_ms=12.000000 "
             "layer_load_ms=34.000000 total_wall_ms=94.946601 outer_wall_ms=128.946601 "
+            "artifact_materialization_ms=7.500000 "
             "prefill_total_input_tps=84.881948 "
             "decode_total_generated_tps=83.746649 "
             "end_to_end_total_tps=73.725646 "
@@ -446,6 +447,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(metrics["end_to_end_total_tokens_per_second"], 73.725646)
         self.assertEqual(metrics["final_logits_wall_time_seconds"], 0.012)
         self.assertEqual(metrics["layer_load_wall_time_seconds"], 0.034)
+        self.assertEqual(metrics["artifact_load_wall_time_seconds"], 0.034)
+        self.assertEqual(metrics["artifact_materialization_wall_time_seconds"], 0.0075)
+        self.assertEqual(metrics["load_excluded_total_wall_time_seconds"], 0.094946601)
+        self.assertEqual(metrics["load_included_total_wall_time_seconds"], 0.128946601)
         self.assertEqual(metrics["total_wall_time_seconds"], 0.094946601)
         self.assertEqual(metrics["outer_wall_time_seconds"], 0.128946601)
         self.assertEqual(row["workload"]["batch_size"], 3)
@@ -794,6 +799,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         }
         TOOL.enrich_ullm_model_loop_row(row, report)
 
+        self.assertEqual(metrics["artifact_load_wall_time_seconds"], 9.0)
+        self.assertIsNone(metrics["artifact_materialization_wall_time_seconds"])
+        self.assertEqual(metrics["load_excluded_total_wall_time_seconds"], 0.3)
+        self.assertEqual(metrics["load_included_total_wall_time_seconds"], 9.3)
         self.assertEqual(row["workload"]["prompt_tokens_per_request"], [2])
         self.assertEqual(row["workload"]["generated_tokens_per_request"], [1])
         self.assertEqual(row["workload"]["total_context_tokens_after_prefill_per_request"], [3])

@@ -699,6 +699,16 @@ def parse_ullm_model_loop_metrics(
     decode_ms = parse_float(report.get("decode_wall_ms"))
     final_logits_ms = parse_float(report.get("final_logits_wall_ms"))
     layer_load_ms = parse_float(report.get("layer_load_ms"))
+    artifact_load_ms = first_non_null(
+        parse_float(report.get("artifact_load_ms")),
+        layer_load_ms,
+    )
+    artifact_materialization_ms = first_non_null(
+        parse_float(report.get("artifact_materialization_ms")),
+        parse_float(report.get("materialization_ms")),
+        parse_float(report.get("materialize_ms")),
+        parse_float(report.get("sq_materialization_ms")),
+    )
     total_ms = parse_float(report.get("total_wall_ms"))
     outer_ms = parse_float(report.get("outer_wall_ms"))
     consumed_bytes = memory.get("consumed_total_bytes")
@@ -723,10 +733,24 @@ def parse_ullm_model_loop_metrics(
         "final_logits_wall_time_seconds": (
             final_logits_ms / 1000.0 if final_logits_ms is not None else None
         ),
+        "artifact_load_wall_time_seconds": (
+            artifact_load_ms / 1000.0 if artifact_load_ms is not None else None
+        ),
+        "artifact_materialization_wall_time_seconds": (
+            artifact_materialization_ms / 1000.0
+            if artifact_materialization_ms is not None
+            else None
+        ),
         "layer_load_wall_time_seconds": (
             layer_load_ms / 1000.0 if layer_load_ms is not None else None
         ),
         "total_wall_time_seconds": total_ms / 1000.0 if total_ms is not None else None,
+        "load_excluded_total_wall_time_seconds": (
+            total_ms / 1000.0 if total_ms is not None else None
+        ),
+        "load_included_total_wall_time_seconds": (
+            outer_ms / 1000.0 if outer_ms is not None else None
+        ),
         "outer_wall_time_seconds": outer_ms / 1000.0 if outer_ms is not None else None,
         "time_to_first_token_ms": prefill_ms,
         "time_per_output_token_ms": (
