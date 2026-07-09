@@ -588,6 +588,25 @@ def _shape_set_to_text(shapes: set[tuple[int, int]]) -> str:
     return ", ".join(f"{shape}" for shape in sorted(shapes)) or "-"
 
 
+def _model_name_set_to_text(names: set[str]) -> str:
+    return ", ".join(sorted(names)) or "-"
+
+
+def _model_name_set(rows: list[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for row in rows:
+        model = as_dict(row.get("model"))
+        raw_name = model.get("name")
+        if raw_name is None:
+            continue
+        if not isinstance(raw_name, str):
+            raw_name = str(raw_name)
+        name = raw_name.strip()
+        if name:
+            names.add(name)
+    return names
+
+
 def normalized_throughput_comparison_gate_failures(
     rows: list[dict[str, Any]],
     requests_filter: set[int],
@@ -715,6 +734,8 @@ def normalized_throughput_comparison_gate_failures(
         if ullm_rows and vllm_rows:
             ullm_shapes = _per_request_shapes_for_rows(ullm_rows, request_count)
             vllm_shapes = _per_request_shapes_for_rows(vllm_rows, request_count)
+            ullm_model_names = _model_name_set(ullm_rows)
+            vllm_model_names = _model_name_set(vllm_rows)
 
             if not ullm_shapes:
                 failures.append(
@@ -728,6 +749,12 @@ def normalized_throughput_comparison_gate_failures(
                     f"(uLLM shapes={_shape_set_to_text(ullm_shapes)} "
                     f"vLLM shapes={_shape_set_to_text(vllm_shapes)})"
                 )
+            if not ullm_model_names or not vllm_model_names:
+                failures.append(
+                    f"request {request_count}: missing model.name for normalized model comparison "
+                    f"(uLLM={_model_name_set_to_text(ullm_model_names)} "
+                    f"vLLM={_model_name_set_to_text(vllm_model_names)})"
+                )
 
             shape_intersection = ullm_shapes.intersection(vllm_shapes)
             if ullm_shapes and vllm_shapes and not shape_intersection:
@@ -735,6 +762,13 @@ def normalized_throughput_comparison_gate_failures(
                     "request "
                     f"{request_count} per-request prompt/generated shape mismatch: "
                     f"uLLM={sorted(ullm_shapes)} vLLM={sorted(vllm_shapes)}"
+                )
+            model_name_intersection = ullm_model_names.intersection(vllm_model_names)
+            if ullm_model_names and vllm_model_names and not model_name_intersection:
+                failures.append(
+                    f"request {request_count}: model.name mismatch "
+                    f"uLLM={_model_name_set_to_text(ullm_model_names)} "
+                    f"vLLM={_model_name_set_to_text(vllm_model_names)}"
                 )
 
     return failures

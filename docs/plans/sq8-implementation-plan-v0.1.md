@@ -905,7 +905,9 @@ Expected outputs:
   and `vLLM` (`serving_throughput_benchmark`) rows are validated with explicit shape-homogenizing checks.
   The normalized gate now derives per-request prompt/generated shape from explicit per-request
   arrays or from total tokens divided by request count, and fails when the selected uLLM/vLLM shape
-  sets do not overlap.
+  sets do not overlap. It also requires overlapping `model.name` values per request count while
+  intentionally leaving quantization, package format, and KV-cache dtype out of the equality gate
+  for now.
 - The no-host-staging 2026-07-10 uLLM rows plus the existing 2026-07-09 vLLM b2/b4/b8 rows now pass
   `--require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families --require-ullm-sq-no-host-staging`.
   The same summary helper can add `--show-sq-details` to display `SQ boundary`, `SQ family`,
@@ -1003,6 +1005,8 @@ Expected outputs:
    - The normalized comparison gate now also checks per-request prompt/generated shape by request
      count, so a row selected only by `case_id` or workload prefix cannot pass if its token shape is
      not actually the same as the paired engine row.
+   - The same gate now checks `model.name` overlap per request count, so a Qwen3.5 diagnostic row
+     cannot be paired with a Qwen3-14B-FP8 vLLM row under the normalized M10 gate.
    - Same M10 gates should also start requiring
      `--require-ullm-sq-batch-coverage` so SQ8_0 rows with non-batch projection boundaries or
      incomplete batch matvec counters are blocked before mixing against serving rows.

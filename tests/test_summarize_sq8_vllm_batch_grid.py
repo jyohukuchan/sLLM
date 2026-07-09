@@ -58,6 +58,9 @@ def make_row(
     sq_diagnostic_host_staging_write_count: int | None = None,
     sq_diagnostic_host_staging_read_bytes: int | None = None,
     sq_diagnostic_host_staging_write_bytes: int | None = None,
+    model_name: str | None = None,
+    model_format: str | None = None,
+    model_quantization: str | None = None,
 ) -> dict:
     row = {
         "case_id": case_id,
@@ -120,6 +123,12 @@ def make_row(
         row["workload"][
             "sq_diagnostic_host_staging_write_bytes"
         ] = sq_diagnostic_host_staging_write_bytes
+    if model_name is not None:
+        row["model"] = {"name": model_name}
+    if model_format is not None:
+        row.setdefault("model", {})["format"] = model_format
+    if model_quantization is not None:
+        row.setdefault("model", {})["quantization"] = model_quantization
     return row
 
 
@@ -710,6 +719,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                model_name="Qwen3.5-9B",
                             )
                         ),
                         json.dumps(
@@ -720,6 +730,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 generated_tokens=8,
                                 batch_size=2,
                                 harness={"class": "serving_throughput_benchmark"},
+                                model_name="Qwen3.5-9B",
                             )
                         ),
                     ]
@@ -774,6 +785,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 sq_projection_boundary="batch",
                                 sq_fp8_batch_matvec_count=14,
                                 sq_fp8_expected_all_batch_matvec_count=14,
+                                model_name="Qwen3.5-9B",
                             )
                         ),
                         json.dumps(
@@ -786,6 +798,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                                 harness={"class": "serving_throughput_benchmark"},
                                 prompt_tokens_per_request=[9, 9],
                                 generated_tokens_per_request=[4, 4],
+                                model_name="Qwen3.5-9B",
                             )
                         ),
                     ]
@@ -816,6 +829,139 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                 "request 2 per-request prompt/generated shape mismatch",
                 stderr.getvalue(),
             )
+
+    def test_require_normalized_throughput_comparison_fails_when_model_name_mismatch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "normalized_model_name_mismatch.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": False,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                                model_name="Qwen3.5-9B",
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                                model_name="Qwen3-14B-FP8",
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("model.name mismatch", stderr.getvalue())
+            self.assertIn("uLLM=Qwen3.5-9B", stderr.getvalue())
+
+    def test_require_normalized_throughput_comparison_fails_when_model_name_missing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "normalized_model_name_missing.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                                format_id="SQ8_0",
+                                batching={
+                                    "mode": "real",
+                                    "prefill_real_batch": True,
+                                    "decode_real_batch": True,
+                                    "final_logits_in_total": False,
+                                },
+                                sq_projection_boundary="batch",
+                                sq_fp8_batch_matvec_count=14,
+                                sq_fp8_expected_all_batch_matvec_count=14,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                                model_name="Qwen3-14B-FP8",
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-normalized-throughput-comparison",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("missing model.name", stderr.getvalue())
+            self.assertIn("uLLM=-", stderr.getvalue())
 
     def test_require_normalized_throughput_comparison_fails_when_missing_ullm_or_vllm_row(
         self,

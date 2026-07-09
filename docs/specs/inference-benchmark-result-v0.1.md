@@ -370,7 +370,10 @@ Normalized comparison gates derive per-request prompt/generated shape from
 `workload.prompt_tokens_per_request` and `workload.generated_tokens_per_request` when those arrays
 are present and uniform, otherwise from `workload.prompt_tokens` and `workload.generated_tokens`
 divided by the selected request count. A normalized uLLM/vLLM comparison should fail when the
-derived per-request shapes do not overlap.
+derived per-request shapes do not overlap. The same gate also requires overlapping non-empty
+`model.name` values per selected request count. It does not require matching `model.format`,
+`model.quantization`, or `workload.kv_cache_dtype` for SQ8_0-vs-FP8 comparisons because those fields
+can intentionally differ across engines.
 
 uLLM may record `batching.mode` outside this generic schema. `logical` means requests are accounted
 as a batch but executed through sequential single-request paths. `hybrid` means only part of the
