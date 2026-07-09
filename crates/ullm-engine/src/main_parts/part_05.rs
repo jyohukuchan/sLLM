@@ -4145,6 +4145,7 @@ struct PackageAq4ResidentMatvec {
     tensor_scale: f32,
     scale_count: usize,
     row_scale_count: usize,
+    projection_dispatches: SqFp8ProjectionDispatches,
     storage: PackageResidentMatvecStorage,
 }
 
@@ -4799,6 +4800,11 @@ impl PackageAq4ResidentMatvec {
         tensor_name: &str,
         chunk_bytes: usize,
     ) -> Result<Self, String> {
+        let projection_dispatches = SqFp8ProjectionDispatches::from_info(
+            &context
+                .device_info()
+                .map_err(|err| format!("failed to query runtime context device: {err}"))?,
+        );
         Self::load_with_shared_buffers(
             context,
             stream,
@@ -4807,6 +4813,7 @@ impl PackageAq4ResidentMatvec {
             path,
             tensor_name,
             chunk_bytes,
+            projection_dispatches,
         )
     }
 
@@ -4818,6 +4825,7 @@ impl PackageAq4ResidentMatvec {
         path: &str,
         tensor_name: &str,
         chunk_bytes: usize,
+        projection_dispatches: SqFp8ProjectionDispatches,
     ) -> Result<Self, String> {
         let selector = TensorSelector::Name(tensor_name.to_string());
         let bundle = select_tensor_payload_bundle(path, &selector)
@@ -4919,6 +4927,7 @@ impl PackageAq4ResidentMatvec {
             tensor_scale: materialize.tensor_scale,
             scale_count: materialize.scale_values.len(),
             row_scale_count: if row_scale_buffer.is_some() { rows } else { 0 },
+            projection_dispatches,
             storage: PackageResidentMatvecStorage::Aq4 {
                 index_buffer: loaded.index.buffer.clone(),
                 scale_buffer: loaded.scale.buffer.clone(),
@@ -4939,6 +4948,11 @@ impl PackageAq4ResidentMatvec {
         chunk_bytes: usize,
         sq_overlay: Option<&Qwen3PackageSqOverlay<'_>>,
     ) -> Result<Self, String> {
+        let projection_dispatches = SqFp8ProjectionDispatches::from_info(
+            &context
+                .device_info()
+                .map_err(|err| format!("failed to query runtime context device: {err}"))?,
+        );
         if let Some(overlay) = sq_overlay {
             match load_sq8_resident_tensor(context, stream, overlay.artifact, tensor_name) {
                 Ok(Some(resident)) => {
@@ -4954,6 +4968,7 @@ impl PackageAq4ResidentMatvec {
                         tensor_scale: 1.0,
                         scale_count,
                         row_scale_count: 0,
+                        projection_dispatches,
                         storage: PackageResidentMatvecStorage::SqFp8 {
                             payload_buffer: std::sync::Arc::new(resident.payload_buffer),
                             scale_buffer: std::sync::Arc::new(resident.scale_buffer),
@@ -4978,6 +4993,7 @@ impl PackageAq4ResidentMatvec {
             path,
             tensor_name,
             chunk_bytes,
+            projection_dispatches,
         )
     }
 
@@ -5026,6 +5042,13 @@ impl PackageAq4ResidentMatvec {
                 None
             }
         }
+    }
+
+    fn projection_dispatch(
+        &self,
+        operation: SqFp8ProjectionMatvecOperation,
+    ) -> SqFp8ProjectionDispatch {
+        self.projection_dispatches.for_operation(operation)
     }
 
     fn row_f32(
@@ -5122,6 +5145,7 @@ impl PackageAq4ResidentMatvec {
                 scale_kind,
                 scale_block_cols,
             } => {
+                let dispatch = self.projection_dispatch(SqFp8ProjectionMatvecOperation::Single);
                 ullm_runtime_sys::sq_fp8_matvec_f32(
                     payload_buffer.as_ref(),
                     scale_buffer.as_ref(),
@@ -5134,7 +5158,7 @@ impl PackageAq4ResidentMatvec {
                     Some(stream),
                 )
                 .map_err(|err| format!("failed to run {label} SQ FP8 matvec: {err}"))?;
-                SQ_FP8_SINGLE_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+                record_sq_fp8_projection_dispatch(dispatch);
                 Ok(())
             }
         }
@@ -5176,6 +5200,7 @@ impl PackageAq4ResidentMatvec {
                 scale_kind,
                 scale_block_cols,
             } => {
+                let dispatch = self.projection_dispatch(SqFp8ProjectionMatvecOperation::Batch);
                 ullm_runtime_sys::sq_fp8_matvec_batch_f32(
                     payload_buffer.as_ref(),
                     scale_buffer.as_ref(),
@@ -5189,7 +5214,7 @@ impl PackageAq4ResidentMatvec {
                     Some(stream),
                 )
                 .map_err(|err| format!("failed to run {label} SQ FP8 matvec batch: {err}"))?;
-                SQ_FP8_BATCH_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+                record_sq_fp8_projection_dispatch(dispatch);
                 Ok(())
             }
             PackageResidentMatvecStorage::F32 { .. } => {
@@ -5289,6 +5314,7 @@ impl PackageAq4ResidentMatvec {
             ));
         }
         if let (Some(left_sq), Some(right_sq)) = (self.sq_fp8_storage(), right.sq_fp8_storage()) {
+            let dispatch = self.projection_dispatch(SqFp8ProjectionMatvecOperation::Pair);
             ullm_runtime_sys::sq_fp8_matvec_pair_f32(
                 left_sq.payload_buffer,
                 left_sq.scale_buffer,
@@ -5307,7 +5333,7 @@ impl PackageAq4ResidentMatvec {
                 Some(stream),
             )
             .map_err(|err| format!("failed to run {label} SQ FP8 matvec pair: {err}"))?;
-            SQ_FP8_PAIR_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+            record_sq_fp8_projection_dispatch(dispatch);
             return Ok(());
         }
         if self.is_f32() || right.is_f32() {
@@ -5378,6 +5404,7 @@ impl PackageAq4ResidentMatvec {
             second.sq_fp8_storage(),
             third.sq_fp8_storage(),
         ) {
+            let dispatch = self.projection_dispatch(SqFp8ProjectionMatvecOperation::Triple);
             ullm_runtime_sys::sq_fp8_matvec_triple_f32(
                 first_sq.payload_buffer,
                 first_sq.scale_buffer,
@@ -5402,7 +5429,7 @@ impl PackageAq4ResidentMatvec {
                 Some(stream),
             )
             .map_err(|err| format!("failed to run {label} SQ FP8 matvec triple: {err}"))?;
-            SQ_FP8_TRIPLE_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+            record_sq_fp8_projection_dispatch(dispatch);
             return Ok(());
         }
         if self.is_f32() || second.is_f32() || third.is_f32() {

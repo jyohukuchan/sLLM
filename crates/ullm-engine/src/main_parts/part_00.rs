@@ -158,6 +158,74 @@ const SQ_FP8_PROJECTION_DISPATCH_IMPLEMENTATIONS: &[BackendImplementation<'stati
     },
 ];
 
+#[derive(Clone, Copy, Debug)]
+enum SqFp8ProjectionMatvecOperation {
+    Single,
+    Batch,
+    Pair,
+    Triple,
+}
+
+impl SqFp8ProjectionMatvecOperation {
+    const fn operation(&self) -> &'static str {
+        match self {
+            Self::Single => SQ_FP8_PROJECTION_MATVEC_OP,
+            Self::Batch => SQ_FP8_PROJECTION_MATVEC_BATCH_OP,
+            Self::Pair => SQ_FP8_PROJECTION_MATVEC_PAIR_OP,
+            Self::Triple => SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP,
+        }
+    }
+
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::Batch => "batch",
+            Self::Pair => "pair",
+            Self::Triple => "triple",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SqFp8ProjectionDispatch {
+    operation: SqFp8ProjectionMatvecOperation,
+    implementation_id: &'static str,
+}
+
+impl SqFp8ProjectionDispatch {
+    fn label(&self) -> &'static str {
+        self.operation.label()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SqFp8ProjectionDispatches {
+    single: SqFp8ProjectionDispatch,
+    batch: SqFp8ProjectionDispatch,
+    pair: SqFp8ProjectionDispatch,
+    triple: SqFp8ProjectionDispatch,
+}
+
+impl SqFp8ProjectionDispatches {
+    fn from_info(info: &ullm_runtime_sys::DeviceInfo) -> Self {
+        Self {
+            single: sq_fp8_projection_dispatch(SqFp8ProjectionMatvecOperation::Single, info),
+            batch: sq_fp8_projection_dispatch(SqFp8ProjectionMatvecOperation::Batch, info),
+            pair: sq_fp8_projection_dispatch(SqFp8ProjectionMatvecOperation::Pair, info),
+            triple: sq_fp8_projection_dispatch(SqFp8ProjectionMatvecOperation::Triple, info),
+        }
+    }
+
+    fn for_operation(&self, operation: SqFp8ProjectionMatvecOperation) -> SqFp8ProjectionDispatch {
+        match operation {
+            SqFp8ProjectionMatvecOperation::Single => self.single,
+            SqFp8ProjectionMatvecOperation::Batch => self.batch,
+            SqFp8ProjectionMatvecOperation::Pair => self.pair,
+            SqFp8ProjectionMatvecOperation::Triple => self.triple,
+        }
+    }
+}
+
 fn reset_sq_fp8_projection_telemetry() {
     SQ_FP8_SINGLE_MATVEC_COUNT.store(0, Ordering::Relaxed);
     SQ_FP8_BATCH_MATVEC_COUNT.store(0, Ordering::Relaxed);
@@ -171,6 +239,23 @@ fn snapshot_sq_fp8_projection_telemetry() -> SqFp8ProjectionTelemetry {
         batch_matvec_count: SQ_FP8_BATCH_MATVEC_COUNT.load(Ordering::Relaxed),
         pair_matvec_count: SQ_FP8_PAIR_MATVEC_COUNT.load(Ordering::Relaxed),
         triple_matvec_count: SQ_FP8_TRIPLE_MATVEC_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+fn record_sq_fp8_projection_dispatch(dispatch: SqFp8ProjectionDispatch) {
+    match dispatch.operation {
+        SqFp8ProjectionMatvecOperation::Single => {
+            SQ_FP8_SINGLE_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        SqFp8ProjectionMatvecOperation::Batch => {
+            SQ_FP8_BATCH_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        SqFp8ProjectionMatvecOperation::Pair => {
+            SQ_FP8_PAIR_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        SqFp8ProjectionMatvecOperation::Triple => {
+            SQ_FP8_TRIPLE_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -212,33 +297,47 @@ fn select_sq_fp8_projection_implementation_id(
         .unwrap_or("sq8_0_projection_unresolved")
 }
 
+fn sq_fp8_projection_dispatch(
+    operation: SqFp8ProjectionMatvecOperation,
+    info: &ullm_runtime_sys::DeviceInfo,
+) -> SqFp8ProjectionDispatch {
+    SqFp8ProjectionDispatch {
+        operation,
+        implementation_id: select_sq_fp8_projection_implementation_id(operation.operation(), info),
+    }
+}
+
 fn sq_fp8_projection_implementation_ids(
     telemetry: SqFp8ProjectionTelemetry,
-    info: &ullm_runtime_sys::DeviceInfo,
+    dispatches: SqFp8ProjectionDispatches,
 ) -> String {
     let mut selected = Vec::new();
     if telemetry.single_matvec_count > 0 {
         selected.push(format!(
-            "single={}",
-            select_sq_fp8_projection_implementation_id(SQ_FP8_PROJECTION_MATVEC_OP, info)
+            "{}={}",
+            dispatches.single.label(),
+            dispatches.single.implementation_id
         ));
     }
     if telemetry.batch_matvec_count > 0 {
         selected.push(format!(
-            "batch={}",
-            select_sq_fp8_projection_implementation_id(SQ_FP8_PROJECTION_MATVEC_BATCH_OP, info)
+            "{}={}",
+            dispatches.batch.label(),
+            dispatches.batch.implementation_id
         ));
     }
     if telemetry.pair_matvec_count > 0 {
         selected.push(format!(
-            "pair={}",
-            select_sq_fp8_projection_implementation_id(SQ_FP8_PROJECTION_MATVEC_PAIR_OP, info)
+            "{}={}",
+            dispatches.pair.label(),
+            dispatches.pair.implementation_id
         ));
     }
     if telemetry.triple_matvec_count > 0 {
         selected.push(format!(
-            "triple={}",
-            select_sq_fp8_projection_implementation_id(SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP, info)
+            "{}={}",
+            dispatches.triple.label(),
+            dispatches.triple.implementation_id
         ));
     }
     if selected.is_empty() {
@@ -2725,9 +2824,9 @@ struct RuntimeCachedPrefixDispatchSelection {
 fn runtime_device_gpu_arch(info: &ullm_runtime_sys::DeviceInfo) -> Option<&'static str> {
     let gcn_arch = info.gcn_arch_name.to_ascii_lowercase();
     let name = info.name.to_ascii_lowercase();
-    if gcn_arch.starts_with("gfx12") || name.contains("r9700") {
+    if info.compute_major == 12 || gcn_arch.starts_with("gfx12") || name.contains("r9700") {
         Some("RDNA4")
-    } else if gcn_arch.starts_with("gfx10") || name.contains("v620") {
+    } else if info.compute_major == 10 || gcn_arch.starts_with("gfx10") || name.contains("v620") {
         Some("RDNA2")
     } else {
         None

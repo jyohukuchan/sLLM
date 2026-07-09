@@ -299,10 +299,12 @@ Done:
 - single, batch, pair, and triple SQ FP8 matvec APIs exist.
 - mixed request-state rows report the projection boundary counters and the selected SQ8_0 projection
   implementation IDs resolved through `backend_dispatch`.
+- full mixed request-state smoke can run supported SQ8_0 tensors through the direct resident
+  dequant matvec path without whole-tensor F32 materialization.
 
 Remaining:
 
-- make full model-loop path use direct SQ8_0 projection kernels when tensors are resident SQ8_0;
+- extend any remaining package/model-loop rows that still miss direct SQ8_0 projection telemetry;
 - store `sq_fp8_single_matvec_count`, `sq_fp8_batch_matvec_count`, `sq_fp8_pair_matvec_count`, and `sq_fp8_triple_matvec_count` in any remaining throughput rows that do not yet expose them;
 - ensure performance summaries reject accidental `materialized_f32_fallback` rows unless explicitly marked as fallback.
 
@@ -357,11 +359,15 @@ Done:
   overridden.
 - SQ8_0 projection execution records operation-level implementation IDs for single, batch, pair, and
   triple matvec boundaries.
+- `PackageAq4ResidentMatvec` now carries SQ8_0 projection dispatch decisions to the single, batch,
+  pair, and triple matvec execution boundaries before calling the existing runtime kernels.
+- runtime GPU-architecture detection maps `compute_major == 12` to `RDNA4`, so R9700 dispatch rows
+  resolve to `sq8_0_matvec_*_rdna4_direct` instead of generic direct IDs.
 
 Remaining:
 
-- use dispatch-selected SQ8_0 projection implementations for kernel selection semantics, not only
-  reporting;
+- use dispatch-selected SQ8_0 projection implementations to select between multiple C++ kernel
+  families once multiple implementations exist;
 - add registry entries for higher-level SQ8_0 fused projection kernels;
 - keep selected implementation IDs in all result rows that represent dispatch-selected execution.
 
@@ -497,8 +503,10 @@ Expected outputs:
 3. Wire `backend_dispatch` into cached-prefix executor resolution. Done.
    - This is the smallest real dispatch connection and exercises GPU arch/name selection.
 4. Wire `backend_dispatch` into SQ8_0 projection execution. Partial.
-   - Start with operation-level reporting before changing kernel selection semantics.
-5. Generate one fresh SQ8_0 artifact from policy JSON and run:
+   - Operation-level reporting is done.
+   - Dispatch decisions now reach the direct matvec execution boundary.
+   - C++ kernel-family switching remains a follow-up.
+5. Generate one fresh SQ8_0 artifact from policy JSON and run. Done.
    - materialize smoke;
    - selected-layer model-loop smoke;
    - mixed request-state throughput row.

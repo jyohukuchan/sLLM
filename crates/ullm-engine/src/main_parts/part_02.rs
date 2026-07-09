@@ -3247,8 +3247,12 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     let final_logits_wall_ms = final_logits_started.elapsed().as_secs_f64() * 1000.0;
     let sq_fp8_projection_telemetry = snapshot_sq_fp8_projection_telemetry();
     let sq_projection_boundary = sq_fp8_projection_boundary(sq_fp8_projection_telemetry);
+    let sq_fp8_projection_dispatches = SqFp8ProjectionDispatches::from_info(&info);
     let sq_projection_implementation_ids =
-        sq_fp8_projection_implementation_ids(sq_fp8_projection_telemetry, &info);
+        sq_fp8_projection_implementation_ids(
+            sq_fp8_projection_telemetry,
+            sq_fp8_projection_dispatches,
+        );
     let total_wall_ms = prefill_wall_ms + decode_wall_ms + final_logits_wall_ms;
     let outer_wall_ms = run_started.elapsed().as_secs_f64() * 1000.0;
     let prefill_total_input_tokens = request_plan.prompt_tokens.iter().sum::<usize>();
