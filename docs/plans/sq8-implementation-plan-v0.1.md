@@ -369,11 +369,13 @@ Done:
   pair, and triple matvec execution boundaries before calling the existing runtime kernels.
 - runtime GPU-architecture detection maps `compute_major == 12` to `RDNA4`, so R9700 dispatch rows
   resolve to `sq8_0_matvec_*_rdna4_direct` instead of generic direct IDs.
+- SQ8_0 projection matvec registry (`operation`, `phase`, and descriptor IDs) is now defined in
+  `backend_dispatch.rs`, and `part_00.rs` consumes it through public APIs.
 
 Remaining:
 
-- use dispatch-selected SQ8_0 projection implementations to select between multiple C++ kernel
-  families once multiple implementations exist;
+- use dispatch-selected SQ8_0 projection descriptors to select between multiple C++ kernel
+  families once non-direct implementations exist;
 - add registry entries for higher-level SQ8_0 fused projection kernels;
 - keep selected implementation IDs in all result rows that represent dispatch-selected execution.
 
@@ -404,7 +406,10 @@ Now:
 - Done: `sq_fp8_matvec_kernel_source()` is fully moved to
   `runtime/src/kernels/sq8_0/sq8_0_matvec_hiprtc.inc` and still consumed by the same
   compile entry points.
-- Remaining: descriptor naming registry and any additional SQ8_0 kernel source split is still pending.
+- Done: descriptor naming template and descriptor IDs are now centralized as a registry API in
+  `backend_dispatch.rs` (`sq8_0_<operation>_<target>_<family>`), including single/batch/pair/triple
+  matvec entries and RDNA4/generic targets.
+- Remaining: additional SQ8_0 kernel source split and fused kernel families are still pending.
 
 ### M8: Regression Suite
 

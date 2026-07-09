@@ -4,7 +4,11 @@ use std::io::{Read, Write};
 use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
-use ullm_engine::backend_dispatch::{BackendImplementation, BackendRequest, select_backend};
+use ullm_engine::backend_dispatch::{
+    BackendImplementation, BackendRequest, select_sq8_projection_implementation_id, select_backend,
+    Sq8ProjectionMatvecOperation as SqFp8ProjectionMatvecOperation,
+    SQ8_0_PROJECTION_DISPATCH_PHASE,
+};
 use ullm_engine::decode_runner::{
     Qwen3DecoderLayerDecodeBatchInput, Qwen3DecoderLayerDecodeInputLayout,
     Qwen3DecoderLayerDecodeSequenceView, Qwen3DecoderLayerRequestDecodeRunner,
@@ -69,122 +73,6 @@ static SQ_FP8_SINGLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_BATCH_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_PAIR_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_TRIPLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
-
-const SQ_FP8_PROJECTION_DISPATCH_PHASE: &str = "component";
-const SQ_FP8_PROJECTION_MATVEC_OP: &str = "sq8_0_matvec";
-const SQ_FP8_PROJECTION_MATVEC_BATCH_OP: &str = "sq8_0_matvec_batch";
-const SQ_FP8_PROJECTION_MATVEC_PAIR_OP: &str = "sq8_0_matvec_pair";
-const SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP: &str = "sq8_0_matvec_triple";
-const SQ_FP8_PROJECTION_DISPATCH_IMPLEMENTATIONS: &[BackendImplementation<'static>] = &[
-    BackendImplementation {
-        id: "sq8_0_matvec_generic_direct",
-        operation: SQ_FP8_PROJECTION_MATVEC_OP,
-        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
-        format_id: Some(FORMAT_SQ8_0),
-        model_arch: None,
-        gpu_arch: None,
-        gpu_name: None,
-        priority: 0,
-    },
-    BackendImplementation {
-        id: "sq8_0_matvec_rdna4_direct",
-        operation: SQ_FP8_PROJECTION_MATVEC_OP,
-        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
-        format_id: Some(FORMAT_SQ8_0),
-        model_arch: None,
-        gpu_arch: Some("RDNA4"),
-        gpu_name: None,
-        priority: 10,
-    },
-    BackendImplementation {
-        id: "sq8_0_matvec_batch_generic_direct",
-        operation: SQ_FP8_PROJECTION_MATVEC_BATCH_OP,
-        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
-        format_id: Some(FORMAT_SQ8_0),
-        model_arch: None,
-        gpu_arch: None,
-        gpu_name: None,
-        priority: 0,
-    },
-    BackendImplementation {
-        id: "sq8_0_matvec_batch_rdna4_direct",
-        operation: SQ_FP8_PROJECTION_MATVEC_BATCH_OP,
-        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
-        format_id: Some(FORMAT_SQ8_0),
-        model_arch: None,
-        gpu_arch: Some("RDNA4"),
-        gpu_name: None,
-        priority: 10,
-    },
-    BackendImplementation {
-        id: "sq8_0_matvec_pair_generic_direct",
-        operation: SQ_FP8_PROJECTION_MATVEC_PAIR_OP,
-        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
-        format_id: Some(FORMAT_SQ8_0),
-        model_arch: None,
-        gpu_arch: None,
-        gpu_name: None,
-        priority: 0,
-    },
-    BackendImplementation {
-        id: "sq8_0_matvec_pair_rdna4_direct",
-        operation: SQ_FP8_PROJECTION_MATVEC_PAIR_OP,
-        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
-        format_id: Some(FORMAT_SQ8_0),
-        model_arch: None,
-        gpu_arch: Some("RDNA4"),
-        gpu_name: None,
-        priority: 10,
-    },
-    BackendImplementation {
-        id: "sq8_0_matvec_triple_generic_direct",
-        operation: SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP,
-        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
-        format_id: Some(FORMAT_SQ8_0),
-        model_arch: None,
-        gpu_arch: None,
-        gpu_name: None,
-        priority: 0,
-    },
-    BackendImplementation {
-        id: "sq8_0_matvec_triple_rdna4_direct",
-        operation: SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP,
-        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
-        format_id: Some(FORMAT_SQ8_0),
-        model_arch: None,
-        gpu_arch: Some("RDNA4"),
-        gpu_name: None,
-        priority: 10,
-    },
-];
-
-#[derive(Clone, Copy, Debug)]
-enum SqFp8ProjectionMatvecOperation {
-    Single,
-    Batch,
-    Pair,
-    Triple,
-}
-
-impl SqFp8ProjectionMatvecOperation {
-    const fn operation(&self) -> &'static str {
-        match self {
-            Self::Single => SQ_FP8_PROJECTION_MATVEC_OP,
-            Self::Batch => SQ_FP8_PROJECTION_MATVEC_BATCH_OP,
-            Self::Pair => SQ_FP8_PROJECTION_MATVEC_PAIR_OP,
-            Self::Triple => SQ_FP8_PROJECTION_MATVEC_TRIPLE_OP,
-        }
-    }
-
-    const fn label(&self) -> &'static str {
-        match self {
-            Self::Single => "single",
-            Self::Batch => "batch",
-            Self::Pair => "pair",
-            Self::Triple => "triple",
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 struct SqFp8ProjectionDispatch {
@@ -281,20 +169,18 @@ fn sq_fp8_projection_boundary(telemetry: SqFp8ProjectionTelemetry) -> String {
 }
 
 fn select_sq_fp8_projection_implementation_id(
-    operation: &'static str,
+    operation: SqFp8ProjectionMatvecOperation,
     info: &ullm_runtime_sys::DeviceInfo,
 ) -> &'static str {
     let request = BackendRequest {
-        operation,
-        phase: SQ_FP8_PROJECTION_DISPATCH_PHASE,
+        operation: operation.operation_id(),
+        phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
         format_id: Some(FORMAT_SQ8_0),
         model_arch: None,
         gpu_arch: runtime_device_gpu_arch(info),
         gpu_name: Some(info.name.as_str()),
     };
-    select_backend(&request, SQ_FP8_PROJECTION_DISPATCH_IMPLEMENTATIONS)
-        .map(|implementation| implementation.id)
-        .unwrap_or("sq8_0_projection_unresolved")
+    select_sq8_projection_implementation_id(&request)
 }
 
 fn sq_fp8_projection_dispatch(
@@ -303,7 +189,7 @@ fn sq_fp8_projection_dispatch(
 ) -> SqFp8ProjectionDispatch {
     SqFp8ProjectionDispatch {
         operation,
-        implementation_id: select_sq_fp8_projection_implementation_id(operation.operation(), info),
+        implementation_id: select_sq_fp8_projection_implementation_id(operation, info),
     }
 }
 
