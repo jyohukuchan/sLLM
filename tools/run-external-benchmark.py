@@ -1294,6 +1294,40 @@ def default_metrics(memory: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def classify_benchmark_harness(parse_name: str) -> dict[str, Any]:
+    if parse_name == "vllm-throughput":
+        return {
+            "class": "serving_throughput_benchmark",
+            "serving_parity_candidate": True,
+            "includes_http_server": False,
+            "notes": ["source=vllm_cli_offline_throughput"],
+            "harness_type": "vllm_bench_throughput_cli",
+        }
+    if parse_name == "ullm-model-loop-throughput":
+        return {
+            "class": "cli_model_loop_diagnostic",
+            "serving_parity_candidate": False,
+            "includes_http_server": False,
+            "notes": ["source=ullm_cli_model_loop"],
+            "harness_type": "ullm_cli_model_loop",
+        }
+    if parse_name == "ullm-package-batch-throughput":
+        return {
+            "class": "cli_logical_batch_diagnostic",
+            "serving_parity_candidate": False,
+            "includes_http_server": False,
+            "notes": ["source=ullm_package_batch_cli"],
+            "harness_type": "ullm_cli_logical_batch",
+        }
+    return {
+        "class": "unknown_or_unclassified",
+        "serving_parity_candidate": False,
+        "includes_http_server": False,
+        "notes": ["source=unclassified_or_missing_parse"],
+        "harness_type": "unknown",
+    }
+
+
 def classify_failure(returncode: int, timed_out: bool, text: str) -> tuple[str, dict[str, str]]:
     lowered = text.lower()
     if timed_out:
@@ -1573,6 +1607,7 @@ def main() -> int:
         },
         "error": error,
         "notes": args.note,
+        "harness": classify_benchmark_harness(args.parse),
     }
     if args.sq_candidate or args.candidate_artifact:
         candidate_id = canonical_or_original(args.sq_candidate) if args.sq_candidate else None

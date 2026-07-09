@@ -610,6 +610,20 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(status, "ok")
         self.assertIsNone(error)
 
+    def test_classifies_benchmark_harness_for_vllm_and_ullm_model_loop(self) -> None:
+        vllm = TOOL.classify_benchmark_harness("vllm-throughput")
+        model_loop = TOOL.classify_benchmark_harness("ullm-model-loop-throughput")
+
+        self.assertNotEqual(vllm["class"], model_loop["class"])
+        self.assertEqual(vllm["class"], "serving_throughput_benchmark")
+        self.assertTrue(vllm["serving_parity_candidate"])
+        self.assertFalse(vllm["includes_http_server"])
+        self.assertEqual(vllm["harness_type"], "vllm_bench_throughput_cli")
+        self.assertEqual(model_loop["class"], "cli_model_loop_diagnostic")
+        self.assertFalse(model_loop["serving_parity_candidate"])
+        self.assertFalse(model_loop["includes_http_server"])
+        self.assertEqual(model_loop["harness_type"], "ullm_cli_model_loop")
+
     def test_prompt_guard_bundle_fields_attached_when_token_logits_check_passed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             bundle_path = Path(tmpdir) / "prompt_guard_bundle.json"

@@ -60,6 +60,20 @@ def workload_prefix(workload: dict[str, Any]) -> str:
     return f"pp{prompt}-tg{generated}"
 
 
+def harness_class(row: dict[str, Any]) -> str:
+    harness = as_dict(row.get("harness"))
+    explicit = harness.get("class")
+    if explicit:
+        return str(explicit)
+    engine = as_dict(row.get("engine")).get("name")
+    case_id = as_str(row.get("case_id"))
+    if engine == "vLLM":
+        return "serving_throughput_benchmark"
+    if "mixed-real-batch-no-final" in case_id:
+        return "cli_model_loop_diagnostic"
+    return "-"
+
+
 def should_keep(
     row: dict[str, Any],
     workload_prefix_filter: str,
@@ -144,6 +158,7 @@ def iter_markdown_rows(
         yield [
             as_str(engine.get("name")),
             as_str(row.get("case_id")),
+            harness_class(row),
             f"{requested}",
             format_float(workload.get("prompt_tokens"), digits=0),
             format_float(workload.get("generated_tokens"), digits=0),
@@ -166,6 +181,7 @@ def markdown_lines(
     header = [
         "Engine",
         "Case",
+        "Harness",
         "Requests",
         "Prompt tokens",
         "Generated tokens",
@@ -176,7 +192,7 @@ def markdown_lines(
         "Decode x GiB",
     ]
     yield "| " + " | ".join(header) + " |"
-    yield "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    yield "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     for row in iter_markdown_rows(
         paths, workload_prefix_filter, case_substring, requests_filter
     ):
@@ -194,6 +210,7 @@ def markdown_lines(
                     as_str(row[7]),
                     as_str(row[8]),
                     as_str(row[9]),
+                    as_str(row[10]),
                 ]
             )
             + " |"
@@ -209,7 +226,6 @@ def markdown_table(
     return "\n".join(
         markdown_lines(paths, workload_prefix_filter, case_substring, requests_filter or set())
     )
-    return "\n".join(lines)
 
 
 def parse_args() -> argparse.Namespace:

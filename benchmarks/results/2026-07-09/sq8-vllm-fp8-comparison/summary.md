@@ -35,14 +35,14 @@ python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8
 
 Compact batch-grid output:
 
-| Engine | Case | Requests | Prompt tokens | Generated tokens | Prefill tok/s | Decode tok/s | Total tok/s | Consumed GiB | Decode x GiB |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| uLLM | qwen3-14b-fp8-sq8-full-mixed-real-batch-no-final-pp16-tg8-b2 | 2 | 32 | 16 | 15.42 | 15.71 | 15.51 | 12.49 | 196.19 |
-| uLLM | qwen3-14b-fp8-sq8-full-mixed-real-batch-no-final-pp16-tg8-b4 | 4 | 64 | 32 | 16.22 | 16.77 | 16.40 | 13.06 | 218.99 |
-| uLLM | qwen3-14b-fp8-sq8-full-mixed-real-batch-no-final-pp16-tg8-b8 | 8 | 128 | 64 | 16.48 | 16.75 | 16.57 | 13.57 | 227.32 |
-| vLLM | vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr | 2 | 32 | 16 | 34.41 | 17.21 | 51.62 | 19.57 | 336.72 |
-| vLLM | vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b4-tp1-rocr | 4 | 64 | 32 | 135.04 | 67.52 | 202.56 | 28.05 | 1894.13 |
-| vLLM | vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b8-tp1-rocr | 8 | 128 | 64 | 236.01 | 118.01 | 354.02 | 28.05 | 3310.52 |
+| Engine | Case | Harness | Requests | Prompt tokens | Generated tokens | Prefill tok/s | Decode tok/s | Total tok/s | Consumed GiB | Decode x GiB |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| uLLM | qwen3-14b-fp8-sq8-full-mixed-real-batch-no-final-pp16-tg8-b2 | cli_model_loop_diagnostic | 2 | 32 | 16 | 15.42 | 15.71 | 15.51 | 12.49 | 196.19 |
+| uLLM | qwen3-14b-fp8-sq8-full-mixed-real-batch-no-final-pp16-tg8-b4 | cli_model_loop_diagnostic | 4 | 64 | 32 | 16.22 | 16.77 | 16.40 | 13.06 | 218.99 |
+| uLLM | qwen3-14b-fp8-sq8-full-mixed-real-batch-no-final-pp16-tg8-b8 | cli_model_loop_diagnostic | 8 | 128 | 64 | 16.48 | 16.75 | 16.57 | 13.57 | 227.32 |
+| vLLM | vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b2-tp1-rocr | serving_throughput_benchmark | 2 | 32 | 16 | 34.41 | 17.21 | 51.62 | 19.57 | 336.72 |
+| vLLM | vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b4-tp1-rocr | serving_throughput_benchmark | 4 | 64 | 32 | 135.04 | 67.52 | 202.56 | 28.05 | 1894.13 |
+| vLLM | vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-b8-tp1-rocr | serving_throughput_benchmark | 8 | 128 | 64 | 236.01 | 118.01 | 354.02 | 28.05 | 3310.52 |
 
 Raw harness-separated vLLM/uLLM ratios for this compact table are decode `1.10x` / total `3.33x`
 at b2, decode `4.03x` / total `12.35x` at b4, and decode `7.05x` / total `21.37x` at b8. These

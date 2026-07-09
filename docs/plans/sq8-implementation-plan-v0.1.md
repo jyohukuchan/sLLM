@@ -866,6 +866,9 @@ Expected outputs:
   failed rows.
 - Compact SQ8_0/vLLM batch-grid tables can be regenerated from JSONL with
   `tools/summarize-sq8-vllm-batch-grid.py`, for example with `--workload-prefix pp16-tg8 --requests 2,4,8`.
+- New external benchmark rows carry a machine-readable `harness` object. This distinguishes
+  `cli_model_loop_diagnostic` uLLM rows from `serving_throughput_benchmark` vLLM rows and records
+  whether the row is a serving-parity candidate without relying only on prose caveats.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
 - The vLLM row should be produced through the derived command template in

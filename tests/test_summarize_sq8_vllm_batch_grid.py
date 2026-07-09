@@ -36,8 +36,9 @@ def make_row(
     total_tps: float = 35.7,
     consumed_bytes: int = 10 * 1024**3,
     decode_x_gib: float = 100.0,
+    harness: dict | None = None,
 ) -> dict:
-    return {
+    row = {
         "case_id": case_id,
         "status": "ok",
         "engine": {"name": engine_name},
@@ -54,6 +55,9 @@ def make_row(
         },
         "memory": {"vram_consumed_bytes": consumed_bytes},
     }
+    if harness is not None:
+        row["harness"] = harness
+    return row
 
 
 class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
@@ -63,8 +67,25 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
             path.write_text(
                 "\n".join(
                     [
-                        json.dumps(make_row(case_id="sq8-pp16-tg8-b2", engine_name="uLLM", prompt_tokens=16, generated_tokens=8, batch_size=2)),
-                        json.dumps(make_row(case_id="vllm-pp16-tg8-b2", engine_name="vLLM", prompt_tokens=16, generated_tokens=8, batch_size=2)),
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-pp16-tg8-b2",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
                         json.dumps(make_row(case_id="vllm-pp16-tg8-b1", engine_name="vLLM", prompt_tokens=16, generated_tokens=8, batch_size=1)),
                         json.dumps(make_row(case_id="sq8-pp16-tg16-b2", engine_name="uLLM", prompt_tokens=16, generated_tokens=16, batch_size=2)),
                     ]
@@ -76,8 +97,12 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
             table = TOOL.markdown_table([path], "pp16-tg8", "", {2})
             lines = table.splitlines()
 
-            self.assertTrue(lines[0].startswith("| Engine | Case | Requests |"))
-            self.assertIn("uLLM | sq8-pp16-tg8-b2", table)
+            self.assertTrue(lines[0].startswith("| Engine | Case | Harness | Requests |"))
+            self.assertIn(
+                "uLLM | sq8-mixed-real-batch-no-final-pp16-tg8-b2 | cli_model_loop_diagnostic",
+                table,
+            )
+            self.assertIn("vLLM | vllm-pp16-tg8-b2 | serving_throughput_benchmark", table)
             self.assertIn("vLLM | vllm-pp16-tg8-b2", table)
             self.assertNotIn("vllm-pp16-tg8-b1", table)
             self.assertNotIn("sq8-pp16-tg16-b2", table)
