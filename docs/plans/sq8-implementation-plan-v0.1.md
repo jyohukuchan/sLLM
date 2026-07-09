@@ -383,7 +383,7 @@ gpu_arch == RDNA4 && gpu_name == Radeon_AI_PRO_R9700 && operation == cached_pref
 
 ### M7: C++ Kernel Descriptor Split
 
-Status: planned.
+Status: partial.
 
 Deliverables:
 
@@ -392,6 +392,13 @@ Deliverables:
 - make build.rs track new include files;
 - keep one translation unit until helper ownership is clear;
 - later split `.cpp` files only after compile/link behavior is stable.
+
+Now:
+
+- Done: `sq_fp8_matvec_kernel_source()` is fully moved to
+  `runtime/src/kernels/sq8_0/sq8_0_matvec_hiprtc.inc` and still consumed by the same
+  compile entry points.
+- Remaining: descriptor naming registry and any additional SQ8_0 kernel source split is still pending.
 
 ### M8: Regression Suite
 
