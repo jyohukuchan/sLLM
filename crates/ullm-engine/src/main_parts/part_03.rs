@@ -6582,9 +6582,24 @@ fn package_token_ids_generate_incremental_smoke_impl(
         row_chunk: 256,
     });
     let sq_overlay_json = sq_artifact.map(|artifact| {
+        let candidate_legacy = if artifact.manifest.candidate.id == FORMAT_SQ8_0 {
+            None
+        } else {
+            Some(artifact.manifest.candidate.id.as_str())
+        };
+        let implementation_id = artifact
+            .manifest
+            .candidate
+            .implementation_id
+            .as_deref()
+            .or(candidate_legacy)
+            .unwrap_or("none");
         serde_json::json!({
             "artifact": artifact.artifact_dir,
-            "candidate": artifact.manifest.candidate.id,
+            "candidate": FORMAT_SQ8_0,
+            "candidate_legacy": candidate_legacy,
+            "format_id": FORMAT_SQ8_0,
+            "implementation_id": implementation_id,
             "schema_version": artifact.manifest.schema_version,
             "fp8_tensor_count": artifact.manifest.storage.fp8_tensor_count,
             "passthrough_tensor_count": artifact.manifest.storage.passthrough_tensor_count,
@@ -7458,9 +7473,24 @@ fn package_token_ids_logits_smoke_impl_with_sq_overlay(
         row_chunk: 256,
     });
     let sq_overlay_json = sq_artifact.map(|artifact| {
+        let candidate_legacy = if artifact.manifest.candidate.id == FORMAT_SQ8_0 {
+            None
+        } else {
+            Some(artifact.manifest.candidate.id.as_str())
+        };
+        let implementation_id = artifact
+            .manifest
+            .candidate
+            .implementation_id
+            .as_deref()
+            .or(candidate_legacy)
+            .unwrap_or("none");
         serde_json::json!({
             "artifact": artifact.artifact_dir,
-            "candidate": artifact.manifest.candidate.id,
+            "candidate": FORMAT_SQ8_0,
+            "candidate_legacy": candidate_legacy,
+            "format_id": FORMAT_SQ8_0,
+            "implementation_id": implementation_id,
             "schema_version": artifact.manifest.schema_version,
             "fp8_tensor_count": artifact.manifest.storage.fp8_tensor_count,
             "passthrough_tensor_count": artifact.manifest.storage.passthrough_tensor_count,

@@ -296,7 +296,9 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "package-self-attn-mlp-block-model-loop-smoke "
             "package=/tmp/model.ullm.d layers=[3, 7] layers_csv=3,7 "
             "input_source=embedding_token_ids prefill_mode=token_id_layer_stack "
-            "sq_overlay=true sq_candidate=sq-fp8-w8a16-r9700-v0 "
+            "format_id=SQ8_0 sq_overlay=true sq_candidate=SQ8_0 "
+            "sq_candidate_legacy=sq-fp8-w8a16-r9700-v0 "
+            "sq_format_id=SQ8_0 sq_implementation_id=sq-fp8-w8a16-r9700-v0 "
             "sq_artifact=/tmp/sq-artifact sq_schema_version=sq-fp8-artifact-v0.1 "
             "sq_fp8_tensor_count=22 sq_passthrough_tensor_count=753 sq_row_chunk=256 "
             "sq_execution_mode=materialized_f32_fallback "
@@ -371,9 +373,15 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         )
         self.assertEqual(row["workload"]["prefill_mode"], "token_id_layer_stack")
         self.assertEqual(row["workload"]["input_source"], "embedding_token_ids")
+        self.assertEqual(row["workload"]["format_id"], "SQ8_0")
         self.assertTrue(row["workload"]["sq_overlay"])
         self.assertEqual(row["workload"]["sq_candidate"], "SQ8_0")
         self.assertEqual(row["workload"]["sq_candidate_legacy"], "sq-fp8-w8a16-r9700-v0")
+        self.assertEqual(row["workload"]["sq_format_id"], "SQ8_0")
+        self.assertEqual(
+            row["workload"]["sq_implementation_id"],
+            "sq-fp8-w8a16-r9700-v0",
+        )
         self.assertEqual(row["workload"]["sq_artifact"], "/tmp/sq-artifact")
         self.assertEqual(row["workload"]["sq_schema_version"], "sq-fp8-artifact-v0.1")
         self.assertEqual(row["workload"]["sq_fp8_tensor_count"], 22)

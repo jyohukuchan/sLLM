@@ -939,7 +939,11 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
     if report.get("sq_overlay") is True:
         row_workload["sq_overlay"] = True
     for key in (
+        "format_id",
         "sq_candidate",
+        "sq_candidate_legacy",
+        "sq_format_id",
+        "sq_implementation_id",
         "sq_artifact",
         "sq_schema_version",
         "sq_execution_mode",
@@ -952,6 +956,8 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
                 row_workload[key] = canonical
                 if legacy is not None:
                     row_workload["sq_candidate_legacy"] = legacy
+            elif key in {"format_id", "sq_format_id"}:
+                row_workload[key] = canonical_or_original(value)
             else:
                 row_workload[key] = value
     for key in (

@@ -3282,6 +3282,22 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         .as_ref()
         .map(|info| info.candidate.as_str())
         .unwrap_or("none");
+    let format_id = sq_overlay_info
+        .as_ref()
+        .map(|info| info.format_id.as_str())
+        .unwrap_or(FORMAT_AQ4_0);
+    let sq_format_id = sq_overlay_info
+        .as_ref()
+        .map(|info| info.format_id.as_str())
+        .unwrap_or("none");
+    let sq_implementation_id = sq_overlay_info
+        .as_ref()
+        .map(|info| info.implementation_id.as_str())
+        .unwrap_or("none");
+    let sq_candidate_legacy = sq_overlay_info
+        .as_ref()
+        .and_then(|info| info.candidate_legacy.as_deref())
+        .unwrap_or("none");
     let sq_artifact_path = sq_overlay_info
         .as_ref()
         .map(|info| info.artifact.as_str())
@@ -3309,15 +3325,19 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     };
 
     Ok(format!(
-        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true sq_overlay={} sq_candidate={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state format_id={} full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true sq_overlay={} sq_candidate={} sq_candidate_legacy={} sq_format_id={} sq_implementation_id={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
         command_name,
         path,
         layer_indices,
         usize_csv(&layer_indices),
         layer_kinds,
         request_plan.input_source,
+        format_id,
         sq_overlay_enabled,
         sq_candidate,
+        sq_candidate_legacy,
+        sq_format_id,
+        sq_implementation_id,
         sq_artifact_path,
         sq_schema_version,
         sq_fp8_tensor_count,

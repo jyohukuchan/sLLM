@@ -31,6 +31,7 @@ pub struct SqFp8ArtifactManifest {
 pub struct SqFp8Candidate {
     pub id: String,
     pub format_id: Option<String>,
+    pub implementation_id: Option<String>,
     pub weight_payload_dtype: String,
     pub activation_dtype: String,
     pub scale_granularity: String,
@@ -953,6 +954,7 @@ mod tests {
             candidate: SqFp8Candidate {
                 id: id.to_string(),
                 format_id: format_id.map(str::to_string),
+                implementation_id: None,
                 weight_payload_dtype: SQ_FP8_E4M3_DTYPE.to_string(),
                 activation_dtype: "bf16_or_f32".to_string(),
                 scale_granularity: "row".to_string(),
@@ -1137,6 +1139,7 @@ mod tests {
             candidate: SqFp8Candidate {
                 id: FORMAT_SQ8_0.to_string(),
                 format_id: Some(FORMAT_SQ8_0.to_string()),
+                implementation_id: None,
                 weight_payload_dtype: SQ_FP8_E4M3_DTYPE.to_string(),
                 activation_dtype: "bf16_or_f32".to_string(),
                 scale_granularity: "row".to_string(),

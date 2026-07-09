@@ -22,6 +22,7 @@ use ullm_engine::decoder::{
     qwen3_self_attn_prepare_sequence_for_paged_decode_f32, qwen3_self_attn_runtime_shape,
     split_qwen3_self_attn_q_projection,
 };
+use ullm_engine::format_id::{FORMAT_AQ4_0, FORMAT_SQ8_0};
 use ullm_engine::golden::{GoldenTensorFixture, compare_f32_slices};
 use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes, encode_u32_to_bytes};
 use ullm_engine::loader::{
@@ -8024,12 +8025,29 @@ fn sq_fp8_materialize_smoke(
         eprintln!("SQ FP8 runtime roundtrip mismatch: max_abs_diff={roundtrip_max_abs_diff:.9}");
         return ExitCode::from(1);
     }
+    let sq_candidate_legacy = if artifact.manifest.candidate.id == FORMAT_SQ8_0 {
+        None
+    } else {
+        Some(artifact.manifest.candidate.id.as_str())
+    };
+    let sq_implementation_id = artifact
+        .manifest
+        .candidate
+        .implementation_id
+        .as_deref()
+        .or(sq_candidate_legacy)
+        .unwrap_or("none");
+    let sq_candidate_legacy = sq_candidate_legacy.unwrap_or("none");
     let preview_count = roundtrip.len().min(8);
     println!(
-        "sq-fp8-materialize-smoke artifact={} schema={} candidate={} tensor_index={} tensor=\"{}\" family={} source_dtype={} shape=[{},{}] rows={} cols={} start_row={} row_count={} materialized_elements={} output_bytes={} payload_dtype={} scale_granularity={} scale_dtype={} backend={} device_index={} name=\"{}\" preview={} roundtrip_max_abs_diff={roundtrip_max_abs_diff:.9} verified=true",
+        "sq-fp8-materialize-smoke artifact={} schema={} format_id={} candidate={} candidate_legacy={} sq_format_id={} sq_implementation_id={} tensor_index={} tensor=\"{}\" family={} source_dtype={} shape=[{},{}] rows={} cols={} start_row={} row_count={} materialized_elements={} output_bytes={} payload_dtype={} scale_granularity={} scale_dtype={} backend={} device_index={} name=\"{}\" preview={} roundtrip_max_abs_diff={roundtrip_max_abs_diff:.9} verified=true",
         path,
         artifact.manifest.schema_version,
-        artifact.manifest.candidate.id,
+        FORMAT_SQ8_0,
+        FORMAT_SQ8_0,
+        sq_candidate_legacy,
+        FORMAT_SQ8_0,
+        sq_implementation_id,
         materialized.tensor_index,
         materialized.tensor_name,
         tensor.family,

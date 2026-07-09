@@ -5845,6 +5845,9 @@ struct PackageModelLoopExecutionSummary {
 struct PackageModelLoopSqOverlayInfo {
     artifact: String,
     candidate: String,
+    candidate_legacy: Option<String>,
+    format_id: String,
+    implementation_id: String,
     schema_version: String,
     fp8_tensor_count: u64,
     passthrough_tensor_count: u64,
@@ -5891,9 +5894,24 @@ fn package_model_loop_sq_overlay_info(
     artifact: &ullm_engine::sq::SqFp8Artifact,
     row_chunk: usize,
 ) -> PackageModelLoopSqOverlayInfo {
+    let candidate_legacy = if artifact.manifest.candidate.id == FORMAT_SQ8_0 {
+        None
+    } else {
+        Some(artifact.manifest.candidate.id.clone())
+    };
+    let implementation_id = artifact
+        .manifest
+        .candidate
+        .implementation_id
+        .clone()
+        .or_else(|| candidate_legacy.clone())
+        .unwrap_or_else(|| "none".to_string());
     PackageModelLoopSqOverlayInfo {
         artifact: artifact.artifact_dir.display().to_string(),
-        candidate: artifact.manifest.candidate.id.clone(),
+        candidate: FORMAT_SQ8_0.to_string(),
+        candidate_legacy,
+        format_id: FORMAT_SQ8_0.to_string(),
+        implementation_id,
         schema_version: artifact.manifest.schema_version.clone(),
         fp8_tensor_count: artifact.manifest.storage.fp8_tensor_count,
         passthrough_tensor_count: artifact.manifest.storage.passthrough_tensor_count,
@@ -7006,6 +7024,26 @@ impl PackageModelLoopSmokeRun {
             .as_ref()
             .map(|info| info.candidate.as_str())
             .unwrap_or("none");
+        let format_id = self
+            .sq_overlay_info
+            .as_ref()
+            .map(|info| info.format_id.as_str())
+            .unwrap_or(FORMAT_AQ4_0);
+        let sq_format_id = self
+            .sq_overlay_info
+            .as_ref()
+            .map(|info| info.format_id.as_str())
+            .unwrap_or("none");
+        let sq_implementation_id = self
+            .sq_overlay_info
+            .as_ref()
+            .map(|info| info.implementation_id.as_str())
+            .unwrap_or("none");
+        let sq_candidate_legacy = self
+            .sq_overlay_info
+            .as_ref()
+            .and_then(|info| info.candidate_legacy.as_deref())
+            .unwrap_or("none");
         let sq_artifact = self
             .sq_overlay_info
             .as_ref()
@@ -7047,15 +7085,19 @@ impl PackageModelLoopSmokeRun {
         let v_cache_max_abs_diff = runtime_diffs.v_cache_max_abs_diff;
 
         Ok(format!(
-            "{} package={} layers={:?} layers_csv={} input_source={} prefill_mode={} sq_overlay={} sq_candidate={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} batching_mode={} prefill_executor={} decode_executor=stack_ready_batch prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard={} lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} final_top_logits_source=verified_expected_layer_output input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_ready_counts={:?} decode_batch_ready_counts_csv={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} generated_tokens_csv={} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
+            "{} package={} layers={:?} layers_csv={} input_source={} prefill_mode={} format_id={} sq_overlay={} sq_candidate={} sq_candidate_legacy={} sq_format_id={} sq_implementation_id={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} batching_mode={} prefill_executor={} decode_executor=stack_ready_batch prefill_real_batch={} decode_real_batch={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard={} lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} final_top_logits_source=verified_expected_layer_output input_norm_tensors={:?} q_tensors={:?} k_tensors={:?} v_tensors={:?} o_tensors={:?} q_norm_tensors={:?} k_norm_tensors={:?} post_norm_tensors={:?} gate_tensors={:?} up_tensors={:?} down_tensors={:?} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} total_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} block_tables={:?} first_batch_ready={} second_batch_ready={} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_ready_counts={:?} decode_batch_ready_counts_csv={} final_ready={} decode_steps_by_layer={:?} cached_tokens={:?} generated_tokens={:?} generated_tokens_csv={} active_len={} free_blocks={} allocated_block_count={} free_runs={} largest_free_run={} hidden={} intermediate_by_layer={:?} q_projection_layouts={:?} q_gate_elements_by_layer={:?} output_gate_layouts={:?} q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={:.9} mlp_epsilon={:.9} input_norm_dtypes={:?} q_norm_dtypes={:?} k_norm_dtypes={:?} post_norm_dtypes={:?} backend={} device_index={} name=\"{}\" q_norm_max_abs_diff={q_norm_max_abs_diff:.9} k_norm_max_abs_diff={k_norm_max_abs_diff:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} causal_attention_max_abs_diff={causal_attention_max_abs_diff:.9} attention_max_abs_diff={attention_max_abs_diff:.9} projection_input_max_abs_diff={projection_input_max_abs_diff:.9} projected_max_abs_diff={projected_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} post_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_max_abs_diff={mlp_max_abs_diff:.9} layer_max_abs_diff={layer_max_abs_diff:.9} k_cache_max_abs_diff={k_cache_max_abs_diff:.9} v_cache_max_abs_diff={v_cache_max_abs_diff:.9} verified=true",
             self.command_name,
             path,
             layer_indices,
             layer_indices_csv,
             self.request_plan.input_source,
             prefill_mode,
+            format_id,
             sq_overlay,
             sq_candidate,
+            sq_candidate_legacy,
+            sq_format_id,
+            sq_implementation_id,
             sq_artifact,
             sq_schema_version,
             sq_fp8_tensor_count,
