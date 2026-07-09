@@ -1,0 +1,46 @@
+{
+  "schema_version": "ullm.sq8.layer_environment.v1",
+  "git": {
+    "commit": "a8446d903f6277025ff0a427cd59ae37b4503181",
+    "tracked_dirty": false
+  },
+  "source": {
+    "model": "Qwen3-14B-FP8",
+    "canonical_artifact": "/tmp/ullm-qwen3-14b-fp8-sq8-canonical-full-v0.2",
+    "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "thin_package": "/tmp/ullm-qwen3-14b-fp8-bf16-thin.ullm.d",
+    "thin_package_manifest_sha256": "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+    "input": "/tmp/ullm-sq8-p4-fixture-m8-v0.2/activation.f32le",
+    "input_f32_le_sha256": "c89eb4abd50f6d5fe41fb700a5a0f90508c343cca8a1988b9271761eed98bf4d"
+  },
+  "runtime": {
+    "rocm_version": "7.2.53211-e1a6bc5663",
+    "feature": "rocm-ck-gfx1201",
+    "hip_visible_devices": "1",
+    "runtime_device_index": 1,
+    "hip_device_index": 0,
+    "name": "AMD Radeon Graphics",
+    "compute": "12.0",
+    "arch": "gfx1201",
+    "required_hip_kernel_env": [
+      "ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1",
+      "ULLM_REQUIRE_HIP_ROPE_KERNEL=1",
+      "ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1",
+      "ULLM_REQUIRE_HIP_ADD_KERNEL=1",
+      "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1"
+    ]
+  },
+  "workload": {
+    "layer": 0,
+    "m": 8,
+    "position_offset": 0,
+    "warmups": 3,
+    "repeats": 10,
+    "upload_chunk_bytes": 16777216
+  },
+  "result": {
+    "file": "layer0-m8.json",
+    "sha256": "c7916231041dcad639d7d3a95577b2039eb4a00dab1cbd83801b63ee16e1c2ed"
+  },
+  "command": "HIP_VISIBLE_DEVICES=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 cargo run --release -p ullm-engine --features rocm-ck-gfx1201 --example sq8_ck_layer -- /tmp/ullm-qwen3-14b-fp8-sq8-canonical-full-v0.2 /tmp/ullm-qwen3-14b-fp8-bf16-thin.ullm.d /tmp/ullm-sq8-p4-fixture-m8-v0.2/activation.f32le benchmarks/results/2026-07-10/sq8-layer-v0.1/layer0-m8.json 0 8 3 10"
+}

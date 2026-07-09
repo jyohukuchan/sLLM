@@ -1,0 +1,70 @@
+{
+  "schema_version": "ullm.sq8.ck_runtime_dispatch.v1",
+  "device_arch": "gfx1201",
+  "profile": "rdna4_w8a8_block_ck",
+  "fallback_used": false,
+  "numerical_gate": {
+    "max_relative_l2": 0.005,
+    "min_cosine": 0.9999,
+    "nonfinite": 0
+  },
+  "cases": [
+    {
+      "label": "q_m8",
+      "m": 8,
+      "n": 5120,
+      "k": 5120,
+      "implementation": "MemV1DefaultTile16x128x128",
+      "quantized_byte_exact": true,
+      "scale_bit_exact": true,
+      "nonfinite": 0,
+      "max_abs": 0.007267475,
+      "relative_l2": 0.001658314,
+      "cosine": 0.999998625567,
+      "passed": true
+    },
+    {
+      "label": "gate_m8",
+      "m": 8,
+      "n": 17408,
+      "k": 5120,
+      "implementation": "MemV1KPaddingTile16x128x256",
+      "quantized_byte_exact": true,
+      "scale_bit_exact": true,
+      "nonfinite": 0,
+      "max_abs": 0.007318735,
+      "relative_l2": 0.001648310,
+      "cosine": 0.999998641540,
+      "passed": true
+    },
+    {
+      "label": "gate_m128",
+      "m": 128,
+      "n": 17408,
+      "k": 5120,
+      "implementation": "MemV1DefaultTile16x256x128",
+      "quantized_byte_exact": true,
+      "scale_bit_exact": true,
+      "nonfinite": 0,
+      "max_abs": 0.007777214,
+      "relative_l2": 0.001658324,
+      "cosine": 0.999998624980,
+      "passed": true
+    },
+    {
+      "label": "down_m8",
+      "m": 8,
+      "n": 5120,
+      "k": 17408,
+      "implementation": "MemV1DefaultTile16x128x256",
+      "quantized_byte_exact": true,
+      "scale_bit_exact": true,
+      "nonfinite": 0,
+      "max_abs": 0.007810593,
+      "relative_l2": 0.001649676,
+      "cosine": 0.999998639283,
+      "passed": true
+    }
+  ],
+  "passed": true
+}

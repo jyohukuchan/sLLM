@@ -1,0 +1,676 @@
+{
+  "schema_version": "ullm.sq8.layer.v1",
+  "passed": true,
+  "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+  "layer_index": 0,
+  "sequence_len": 8,
+  "position_offset": 0,
+  "input_f32_le_sha256": "c89eb4abd50f6d5fe41fb700a5a0f90508c343cca8a1988b9271761eed98bf4d",
+  "device": {
+    "runtime_index": 1,
+    "backend_device_id": 0,
+    "backend": "hip",
+    "name": "AMD Radeon Graphics",
+    "compute_major": 12,
+    "compute_minor": 0
+  },
+  "contracts": {
+    "optimized_profile": "rdna4_w8a8_block_ck",
+    "reference_profile": "reference_w8a16_block2d",
+    "projection_output": "bf16_rne_then_f32",
+    "activation_quantizations": 4,
+    "projection_calls": 7,
+    "fallback_used": false,
+    "timed_path_host_staging": false,
+    "required_hip_kernel_env": [
+      "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+      "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+      "ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL",
+      "ULLM_REQUIRE_HIP_ADD_KERNEL",
+      "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL"
+    ],
+    "warmups": 3,
+    "repeats": 10
+  },
+  "optimized_executions": {
+    "q": "Ck(MemV1DefaultTile16x128x128)",
+    "k": "Ck(MemV1DefaultTile16x128x128)",
+    "v": "Ck(MemV1DefaultTile16x128x128)",
+    "o": "Ck(MemV1DefaultTile16x128x128)",
+    "gate": "Ck(MemV1KPaddingTile16x128x256)",
+    "up": "Ck(MemV1KPaddingTile16x128x256)",
+    "down": "Ck(MemV1DefaultTile16x128x256)"
+  },
+  "reference_executions": {
+    "q": "Reference(HipKernel)",
+    "k": "Reference(HipKernel)",
+    "v": "Reference(HipKernel)",
+    "o": "Reference(HipKernel)",
+    "gate": "Reference(HipKernel)",
+    "up": "Reference(HipKernel)",
+    "down": "Reference(HipKernel)"
+  },
+  "activation_checks": {
+    "attention_o": {
+      "m": 8,
+      "k": 5120,
+      "encoded_byte_exact": true,
+      "scale_bit_exact": true,
+      "passed": true
+    },
+    "input_norm_qkv": {
+      "m": 8,
+      "k": 5120,
+      "encoded_byte_exact": true,
+      "scale_bit_exact": true,
+      "passed": true
+    },
+    "mlp_down": {
+      "m": 8,
+      "k": 17408,
+      "encoded_byte_exact": true,
+      "scale_bit_exact": true,
+      "passed": true
+    },
+    "post_norm_gate_up": {
+      "m": 8,
+      "k": 5120,
+      "encoded_byte_exact": true,
+      "scale_bit_exact": true,
+      "passed": true
+    }
+  },
+  "tensor_checks": {
+    "attention": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 1.9330085243570078e-9,
+        "max_abs": 0.0005339663475751877,
+        "relative_l2": 0.002308471702644763,
+        "cosine_similarity": 0.9999973387676845
+      },
+      "max_relative_l2": 0.01,
+      "min_cosine": 0.9995,
+      "passed": true
+    },
+    "attention_residual": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 6.569210476685015e-8,
+        "max_abs": 0.001953125,
+        "relative_l2": 0.0008662621411019503,
+        "cosine_similarity": 0.9999996248244164
+      },
+      "max_relative_l2": 0.02,
+      "min_cosine": 0.999,
+      "passed": true
+    },
+    "down_projected": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 1.539289147666509e-6,
+        "max_abs": 0.03125,
+        "relative_l2": 0.011561786232548653,
+        "cosine_similarity": 0.9999333865182116
+      },
+      "max_relative_l2": 0.02,
+      "min_cosine": 0.999,
+      "passed": true
+    },
+    "gate_projected": {
+      "metrics": {
+        "element_count": 139264,
+        "nonfinite_count": 0,
+        "mse": 1.8454531035158695e-6,
+        "max_abs": 0.0078125,
+        "relative_l2": 0.007044604022582243,
+        "cosine_similarity": 0.9999751910518874
+      },
+      "max_relative_l2": 0.02,
+      "min_cosine": 0.999,
+      "passed": true
+    },
+    "input_norm": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 3.776814215464435e-19,
+        "max_abs": 1.862645149230957e-9,
+        "relative_l2": 4.955713365109336e-8,
+        "cosine_similarity": 0.9999999999999859
+      },
+      "max_relative_l2": 0.0001,
+      "min_cosine": 0.999999,
+      "passed": true
+    },
+    "k_norm": {
+      "metrics": {
+        "element_count": 8192,
+        "nonfinite_count": 0,
+        "mse": 0.000012465273599788011,
+        "max_abs": 0.19647216796875,
+        "relative_l2": 0.0015519715954241762,
+        "cosine_similarity": 0.9999988108361789
+      },
+      "max_relative_l2": 0.0075,
+      "min_cosine": 0.9998,
+      "passed": true
+    },
+    "k_projected": {
+      "metrics": {
+        "element_count": 8192,
+        "nonfinite_count": 0,
+        "mse": 7.387275636058034e-10,
+        "max_abs": 0.000244140625,
+        "relative_l2": 0.0011856806048067855,
+        "cosine_similarity": 0.999999298127105
+      },
+      "max_relative_l2": 0.005,
+      "min_cosine": 0.9999,
+      "passed": true
+    },
+    "k_rope": {
+      "metrics": {
+        "element_count": 8192,
+        "nonfinite_count": 0,
+        "mse": 0.00001246527537366121,
+        "max_abs": 0.19647216796875,
+        "relative_l2": 0.001551971706002444,
+        "cosine_similarity": 0.9999988108361954
+      },
+      "max_relative_l2": 0.0075,
+      "min_cosine": 0.9998,
+      "passed": true
+    },
+    "o_projected": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 6.569210426045049e-8,
+        "max_abs": 0.001953125,
+        "relative_l2": 0.006755952136261767,
+        "cosine_similarity": 0.9999771791103903
+      },
+      "max_relative_l2": 0.02,
+      "min_cosine": 0.999,
+      "passed": true
+    },
+    "output": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 1.6112202133110052e-6,
+        "max_abs": 0.03076171875,
+        "relative_l2": 0.0039961484140139435,
+        "cosine_similarity": 0.9999920193009403
+      },
+      "max_relative_l2": 0.02,
+      "min_cosine": 0.999,
+      "passed": true
+    },
+    "post_attention_norm": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 7.856606968291033e-9,
+        "max_abs": 0.0008237957954406738,
+        "relative_l2": 0.000871482184436453,
+        "cosine_similarity": 0.9999996202595379
+      },
+      "max_relative_l2": 0.02,
+      "min_cosine": 0.999,
+      "passed": true
+    },
+    "q_norm": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 4.425654208064943e-6,
+        "max_abs": 0.03951597213745117,
+        "relative_l2": 0.001183507680877452,
+        "cosine_similarity": 0.9999992996662808
+      },
+      "max_relative_l2": 0.0075,
+      "min_cosine": 0.9998,
+      "passed": true
+    },
+    "q_projected": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 5.375654945324526e-10,
+        "max_abs": 0.00048828125,
+        "relative_l2": 0.0011867621970129058,
+        "cosine_similarity": 0.9999992959086422
+      },
+      "max_relative_l2": 0.005,
+      "min_cosine": 0.9999,
+      "passed": true
+    },
+    "q_rope": {
+      "metrics": {
+        "element_count": 40960,
+        "nonfinite_count": 0,
+        "mse": 4.425654093285188e-6,
+        "max_abs": 0.03951597213745117,
+        "relative_l2": 0.001183507665594061,
+        "cosine_similarity": 0.9999992996662789
+      },
+      "max_relative_l2": 0.0075,
+      "min_cosine": 0.9998,
+      "passed": true
+    },
+    "silu_gate_mul_up": {
+      "metrics": {
+        "element_count": 139264,
+        "nonfinite_count": 0,
+        "mse": 2.729758908903465e-8,
+        "max_abs": 0.003485962748527527,
+        "relative_l2": 0.011004082254432045,
+        "cosine_similarity": 0.9999394537970766
+      },
+      "max_relative_l2": 0.02,
+      "min_cosine": 0.999,
+      "passed": true
+    },
+    "up_projected": {
+      "metrics": {
+        "element_count": 139264,
+        "nonfinite_count": 0,
+        "mse": 1.6273193267845104e-6,
+        "max_abs": 0.007080078125,
+        "relative_l2": 0.008190151775739209,
+        "cosine_similarity": 0.9999664618855814
+      },
+      "max_relative_l2": 0.02,
+      "min_cosine": 0.999,
+      "passed": true
+    },
+    "v_projected": {
+      "metrics": {
+        "element_count": 8192,
+        "nonfinite_count": 0,
+        "mse": 6.624558748780096e-10,
+        "max_abs": 0.000244140625,
+        "relative_l2": 0.0012331539598140083,
+        "cosine_similarity": 0.999999240339155
+      },
+      "max_relative_l2": 0.005,
+      "min_cosine": 0.9999,
+      "passed": true
+    }
+  },
+  "reference_vs_optimized_oracle_final_check": {
+    "metrics": {
+      "element_count": 40960,
+      "nonfinite_count": 0,
+      "mse": 7.433344163363111e-6,
+      "max_abs": 0.03316545486450195,
+      "relative_l2": 0.008583339268476282,
+      "cosine_similarity": 0.9999631763866916
+    },
+    "max_relative_l2": 0.02,
+    "min_cosine": 0.999,
+    "passed": true
+  },
+  "optimized_output_health": {
+    "elements": 40960,
+    "nonfinite": 0,
+    "minimum": -2.2922363,
+    "maximum": 5.060791,
+    "max_abs": 5.060791,
+    "f32_le_sha256": "c80dfbcd6961fef4012e45904a72d9229ef25f7ef57e0cb69053522441e150a6"
+  },
+  "oracle_elapsed_ms": 4113.013000999999,
+  "optimized_timing": {
+    "samples_ms": [
+      0.776478,
+      0.778299,
+      0.799279,
+      0.776409,
+      0.7770589999999999,
+      0.777578,
+      0.7756689999999999,
+      0.779619,
+      0.7743789999999999,
+      0.7866890000000001
+    ],
+    "p50_ms": 0.7773185,
+    "p95_ms": 0.7936135
+  },
+  "reference_timing": {
+    "samples_ms": [
+      16.511147,
+      16.565027,
+      16.521777,
+      16.462946,
+      16.503266999999997,
+      16.571038,
+      16.463096,
+      16.568137,
+      16.544557,
+      16.540147
+    ],
+    "p50_ms": 16.530962000000002,
+    "p95_ms": 16.56973255
+  },
+  "optimized_speedup": 21.26665195798119,
+  "oracle_trace": {
+    "schema_version": "ullm.sq8.layer_oracle.v1",
+    "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "sequence_len": 8,
+    "options": {
+      "position_offset": 0,
+      "projection_output_contract": "bf16_rne_then_f32"
+    },
+    "projection_tensors": {
+      "q_proj": "model.layers.0.self_attn.q_proj.weight",
+      "k_proj": "model.layers.0.self_attn.k_proj.weight",
+      "v_proj": "model.layers.0.self_attn.v_proj.weight",
+      "o_proj": "model.layers.0.self_attn.o_proj.weight",
+      "gate_proj": "model.layers.0.mlp.gate_proj.weight",
+      "up_proj": "model.layers.0.mlp.up_proj.weight",
+      "down_proj": "model.layers.0.mlp.down_proj.weight"
+    },
+    "norm_weights": {
+      "input": {
+        "shape": [
+          1,
+          5120
+        ],
+        "f32_le_sha256": "c11e1d010f87d6735d0b981e0a7c36a3b7e92c1cc228f4e91a11b0913495aca0"
+      },
+      "post_attention": {
+        "shape": [
+          1,
+          5120
+        ],
+        "f32_le_sha256": "121238828641cceca82d2436211587f74cb7d552953034581931836d6ee715f4"
+      },
+      "q": {
+        "shape": [
+          1,
+          128
+        ],
+        "f32_le_sha256": "fbf86961e2692f5224a2defbc6c9e010b414668ef33d5ecfc4ba3cb4b0a3da3b"
+      },
+      "k": {
+        "shape": [
+          1,
+          128
+        ],
+        "f32_le_sha256": "7368227fd4e724b92de53a05c6d1c77dad0ff33ad1537d219ce1ca1e65ff51bd"
+      }
+    },
+    "activations": {
+      "input_norm_qkv": {
+        "shape": [
+          8,
+          5120
+        ],
+        "block_cols": 128,
+        "scale_shape": [
+          8,
+          40
+        ],
+        "hashes": {
+          "input_f32_le_sha256": "00539dbe98a99c935d65df197103f2ad8ed5d3b2ead5b5c59e526f0fe57f86c8",
+          "encoded_bytes_sha256": "db69341e33dc73ab7c0e551ae064000a7ecc7c09f1b6cd3bc7e71a74d6b98cea",
+          "scales_f32_le_sha256": "a0ee29b38c8a358e1b2c09bfe4fbef68301e1d6cb91f7ec2aef78b93a6a75a3d"
+        }
+      },
+      "attention_o": {
+        "shape": [
+          8,
+          5120
+        ],
+        "block_cols": 128,
+        "scale_shape": [
+          8,
+          40
+        ],
+        "hashes": {
+          "input_f32_le_sha256": "4f128b7c7a0caa8c42a658eaaf34bac2a48d9bf4dec9350ed4f2e60a4607a3cc",
+          "encoded_bytes_sha256": "a066dfebef80f590fc68fce303eac357bda786b79495b1c7122b9cfc3266631b",
+          "scales_f32_le_sha256": "c0a61f6f839b4d36fc08d4813a3e99ce34b14d1121dbb9b847ce8d0c564d4171"
+        }
+      },
+      "post_norm_gate_up": {
+        "shape": [
+          8,
+          5120
+        ],
+        "block_cols": 128,
+        "scale_shape": [
+          8,
+          40
+        ],
+        "hashes": {
+          "input_f32_le_sha256": "9b012fff48f1d1a7d2ca6fce09534d4fea9a85d46f80c184e533d25923cbd3e3",
+          "encoded_bytes_sha256": "40e6d704823af1a79aa1af8fdcb40e68ea90c223c887d4cfe9dd8c823a3e5c8c",
+          "scales_f32_le_sha256": "f65e26e5d212b9ec1fda5df0b4219666c660653e98cf761098fbc1305eb40fd3"
+        }
+      },
+      "mlp_down": {
+        "shape": [
+          8,
+          17408
+        ],
+        "block_cols": 128,
+        "scale_shape": [
+          8,
+          136
+        ],
+        "hashes": {
+          "input_f32_le_sha256": "b22dc91025f2cfa0e5c6b4a6f911352a7d8206dd5c0eb6c2a110921bcd36f84c",
+          "encoded_bytes_sha256": "acae6042528b766a2e23524fcd9ef9442d2db832e64eb0dc9f50808caa8e5319",
+          "scales_f32_le_sha256": "8c12fae41a0b18673416721c7844eb8edd860f15501d7604ed946237d91dae0d"
+        }
+      }
+    },
+    "projections": {
+      "q_proj": {
+        "tensor": "model.layers.0.self_attn.q_proj.weight",
+        "output_shape": [
+          8,
+          5120
+        ],
+        "cpu_worker_threads": 8,
+        "raw_output_f32_le_sha256": "8aa60efe9e679a17fb95c470c0b5c722f43db23aa05710cef558f2439acf86ab",
+        "contracted_output_f32_le_sha256": "f1fa28428793ba2017918e067ba674438769204c8e647eb19b74ae6881264363"
+      },
+      "k_proj": {
+        "tensor": "model.layers.0.self_attn.k_proj.weight",
+        "output_shape": [
+          8,
+          1024
+        ],
+        "cpu_worker_threads": 8,
+        "raw_output_f32_le_sha256": "10f7257b583efee133c25326983a86a1555254e8b69f1f52c9c338833ce98c47",
+        "contracted_output_f32_le_sha256": "478547192601f17f45bb021099a8026b7c085c9fae88ad2c5ba99a0888da9c78"
+      },
+      "v_proj": {
+        "tensor": "model.layers.0.self_attn.v_proj.weight",
+        "output_shape": [
+          8,
+          1024
+        ],
+        "cpu_worker_threads": 8,
+        "raw_output_f32_le_sha256": "9d012ff6d1c1053d73195a6ba433331ce4096c34f38732430fbf7dfd948efd80",
+        "contracted_output_f32_le_sha256": "ce024e88da712b9058c1daf083b3d18ec4225dde8331561d02d2fb852776bb30"
+      },
+      "o_proj": {
+        "tensor": "model.layers.0.self_attn.o_proj.weight",
+        "output_shape": [
+          8,
+          5120
+        ],
+        "cpu_worker_threads": 8,
+        "raw_output_f32_le_sha256": "0bdbb9f61a4dd9ed6d967a241febc08b9c87e6aea8c5277c2cc1da263c01fdc8",
+        "contracted_output_f32_le_sha256": "644f663802c23c9ff664df9634a75075ea57cfdddc197e6399957fd845b7ffd9"
+      },
+      "gate_proj": {
+        "tensor": "model.layers.0.mlp.gate_proj.weight",
+        "output_shape": [
+          8,
+          17408
+        ],
+        "cpu_worker_threads": 8,
+        "raw_output_f32_le_sha256": "ec95a82077a409358fbf29c9da77c40258a33236ae987c1247bf90e9078d8dff",
+        "contracted_output_f32_le_sha256": "00ee90f97f51129112d9a5405580d9094a7775a0332a2689ed3469a92475a377"
+      },
+      "up_proj": {
+        "tensor": "model.layers.0.mlp.up_proj.weight",
+        "output_shape": [
+          8,
+          17408
+        ],
+        "cpu_worker_threads": 8,
+        "raw_output_f32_le_sha256": "9de7a69dd39bcfe767e8466011e6f85490f08af56a8c16718e9dd88f1760e5ce",
+        "contracted_output_f32_le_sha256": "f0257dc76022aef259f0c9621c918c511ca9511613113823b4cb6186dc20e909"
+      },
+      "down_proj": {
+        "tensor": "model.layers.0.mlp.down_proj.weight",
+        "output_shape": [
+          8,
+          5120
+        ],
+        "cpu_worker_threads": 8,
+        "raw_output_f32_le_sha256": "ef835568459166afb87997c8d020fef51bebc5474476fe6bfd8b62a067daaa01",
+        "contracted_output_f32_le_sha256": "15035349b4cde99c1df169de8e4fa00ef5416e4989dc0a7bc168c38ab3cdf075"
+      }
+    },
+    "tensors": {
+      "input_hidden": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "c89eb4abd50f6d5fe41fb700a5a0f90508c343cca8a1988b9271761eed98bf4d"
+      },
+      "input_norm": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "00539dbe98a99c935d65df197103f2ad8ed5d3b2ead5b5c59e526f0fe57f86c8"
+      },
+      "q_projected": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "f1fa28428793ba2017918e067ba674438769204c8e647eb19b74ae6881264363"
+      },
+      "k_projected": {
+        "shape": [
+          8,
+          1024
+        ],
+        "f32_le_sha256": "478547192601f17f45bb021099a8026b7c085c9fae88ad2c5ba99a0888da9c78"
+      },
+      "v_projected": {
+        "shape": [
+          8,
+          1024
+        ],
+        "f32_le_sha256": "ce024e88da712b9058c1daf083b3d18ec4225dde8331561d02d2fb852776bb30"
+      },
+      "q_norm": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "fa7c12c69e163210854101e36ff645b8f4f0907cf55ae6cebc34a21f5135398f"
+      },
+      "k_norm": {
+        "shape": [
+          8,
+          1024
+        ],
+        "f32_le_sha256": "83114c5b89d80583a90581b58eb5431523bbb450f01477c95ed8c05663b0e01f"
+      },
+      "q_rope": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "e8eacb16f35b13b1fabdc034b57908cec35c3b146d60bbb09c334a475e3ff0e9"
+      },
+      "k_rope": {
+        "shape": [
+          8,
+          1024
+        ],
+        "f32_le_sha256": "14eb766587037d3aca4bd29a6e45a823ffc14f4df0d6fa0d9c7c5017c5e7122a"
+      },
+      "attention": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "4f128b7c7a0caa8c42a658eaaf34bac2a48d9bf4dec9350ed4f2e60a4607a3cc"
+      },
+      "o_projected": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "644f663802c23c9ff664df9634a75075ea57cfdddc197e6399957fd845b7ffd9"
+      },
+      "attention_residual": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "52be710b49b76f8d1a32cb7e55d23ff006151e2c8794f81baaa7ea497689dedc"
+      },
+      "post_attention_norm": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "9b012fff48f1d1a7d2ca6fce09534d4fea9a85d46f80c184e533d25923cbd3e3"
+      },
+      "gate_projected": {
+        "shape": [
+          8,
+          17408
+        ],
+        "f32_le_sha256": "00ee90f97f51129112d9a5405580d9094a7775a0332a2689ed3469a92475a377"
+      },
+      "up_projected": {
+        "shape": [
+          8,
+          17408
+        ],
+        "f32_le_sha256": "f0257dc76022aef259f0c9621c918c511ca9511613113823b4cb6186dc20e909"
+      },
+      "silu_gate_mul_up": {
+        "shape": [
+          8,
+          17408
+        ],
+        "f32_le_sha256": "b22dc91025f2cfa0e5c6b4a6f911352a7d8206dd5c0eb6c2a110921bcd36f84c"
+      },
+      "down_projected": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "15035349b4cde99c1df169de8e4fa00ef5416e4989dc0a7bc168c38ab3cdf075"
+      },
+      "output_hidden": {
+        "shape": [
+          8,
+          5120
+        ],
+        "f32_le_sha256": "50ae45383f53cefd59f6d9de970e04b87e8070d1423f78fd181ba90052bc7eb5"
+      }
+    },
+    "output_f32_le_sha256": "50ae45383f53cefd59f6d9de970e04b87e8070d1423f78fd181ba90052bc7eb5"
+  }
+}
