@@ -21,6 +21,7 @@ fn main() {
         root.join("runtime/src/ullm_runtime_api_aq4.inc"),
         root.join("runtime/src/ullm_runtime_api_linear_attn_prepare.inc"),
         root.join("runtime/src/ullm_runtime_api_primitives.inc"),
+        root.join("runtime/src/ullm_runtime_api_sq8_0.inc"),
         root.join("runtime/src/ullm_runtime_api_attention.inc"),
         root.join("runtime/src/ullm_runtime_api_linear_attn.inc"),
         root.join("runtime/src/ullm_runtime_api_smoke.inc"),

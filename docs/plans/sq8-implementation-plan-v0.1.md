@@ -403,8 +403,10 @@ Status: partial.
 Deliverables:
 
 - define implementation descriptor naming convention;
-- move SQ8_0 kernel source snippets into SQ8_0-specific `.inc` files;
-- make build.rs track new include files;
+- done: split SQ8_0 API wrapper group (`ullm_runtime_sq_fp8_matvec_f32`, `*_batch_*`, `*_pair_*`,
+  `*_triple_*`) into `runtime/src/ullm_runtime_api_sq8_0.inc`;
+- done: keep single C++ translation unit while kernel boundaries are represented in `.inc` includes;
+- done: make build.rs track new include files;
 - keep one translation unit until helper ownership is clear;
 - later split `.cpp` files only after compile/link behavior is stable.
 
@@ -420,7 +422,7 @@ Now:
   `backend_dispatch.rs`, and descriptor naming coverage tests now include fused entries.
 - Done: `backend_dispatch` now exposes `sq8_0_projection_descriptor_family()` and the Rust matvec
   execution path now carries the selected family metadata.
-- Remaining: additional SQ8_0 kernel source split and fused kernel families are still pending.
+- Remaining: runtime implementation helpers and fused kernel family implementations are still pending.
 
 ### M8: Regression Suite
 
