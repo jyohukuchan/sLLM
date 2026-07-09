@@ -419,6 +419,9 @@ Done:
 - `tools/run-external-benchmark.py` now records SQ8_0 direct-kernel requirement environment
   variables (`ULLM_REQUIRE_HIP_SQ_FP8_MATVEC*`) in `artifacts.command`, matching the existing AQ4
   require-flag provenance.
+- `tools/run-package-token-prompt-bench.py --require-hip-kernels` now also sets the SQ8_0 batch
+  matvec requirement flag, so prompt-suite and future real-batch SQ8_0 runs fail closed if that
+  kernel boundary is unavailable.
 - `tools/summarize-benchmark-results.py` now exposes a compact `Impl` column from
   `sq_projection_implementation_ids`, `dispatch_selected_implementation_id`, or
   `selected_implementation_id`, and classifies `SQ8_0` rows as FP8 family rows.

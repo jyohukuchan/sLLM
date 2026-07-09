@@ -34,6 +34,7 @@ REQUIRED_HIP_KERNEL_ENVS = {
     "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL": "1",
     "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL": "1",
     "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_BATCH_KERNEL": "1",
     "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_PAIR_KERNEL": "1",
     "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL": "1",
     "ULLM_REQUIRE_HIP_TOP1_KERNEL": "1",
@@ -109,7 +110,7 @@ def parse_args() -> argparse.Namespace:
         "--require-hip-kernels",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Require the optimized HIP kernels used by the current AQ4 path",
+        help="Require the optimized HIP kernels used by the current AQ4/SQ8_0 paths",
     )
     parser.add_argument(
         "--apply-chat-template",
