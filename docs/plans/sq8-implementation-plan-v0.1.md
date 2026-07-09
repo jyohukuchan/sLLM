@@ -301,11 +301,13 @@ Done:
   implementation IDs resolved through `backend_dispatch`.
 - full mixed request-state smoke can run supported SQ8_0 tensors through the direct resident
   dequant matvec path without whole-tensor F32 materialization.
+- selected-layer `sq-fp8-token-ids-model-loop-smoke` rows now report SQ8_0 projection telemetry
+  (execution mode, boundary, implementation IDs, and per-kernel counters), including the
+  fallback case where projection is materialized to F32.
 
 Remaining:
 
-- extend any remaining package/model-loop rows that still miss direct SQ8_0 projection telemetry;
-- store `sq_fp8_single_matvec_count`, `sq_fp8_batch_matvec_count`, `sq_fp8_pair_matvec_count`, and `sq_fp8_triple_matvec_count` in any remaining throughput rows that do not yet expose them;
+- keep coverage for remaining throughput rows where projection telemetry is still pending;
 - ensure performance summaries reject accidental `materialized_f32_fallback` rows unless explicitly marked as fallback.
 
 Verification:
@@ -512,7 +514,11 @@ Expected outputs:
 4. Wire `backend_dispatch` into SQ8_0 projection execution. Partial.
    - Operation-level reporting is done.
    - Dispatch decisions now reach the direct matvec execution boundary.
+   - Selected-layer model-loop rows now distinguish direct-path runs from
+     `materialized_f32_fallback`.
    - C++ kernel-family switching remains a follow-up.
+   - Selected-layer model-loop rows now carry projection boundary and counter telemetry for
+     `sq-fp8-token-ids-model-loop-smoke`.
 5. Generate one fresh SQ8_0 artifact from policy JSON and run. Done.
    - materialize smoke;
    - selected-layer model-loop smoke;

@@ -2602,6 +2602,7 @@ fn package_token_ids_model_loop_smoke_impl_with_sq_overlay(
     let mut stream = context
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    reset_sq_fp8_projection_telemetry();
 
     let mut smoke_run = PackageModelLoopSmokeRun::new_from_token_ids(
         &mut context,

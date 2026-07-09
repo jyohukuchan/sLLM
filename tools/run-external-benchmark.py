@@ -936,7 +936,8 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         row_workload["layers_csv"] = layers_csv
     if isinstance(report.get("input_source"), str):
         row_workload["input_source"] = report.get("input_source")
-    if report.get("sq_overlay") is True:
+    sq_overlay = report.get("sq_overlay") is True
+    if sq_overlay:
         row_workload["sq_overlay"] = True
     for key in (
         "format_id",
@@ -961,6 +962,11 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
                 row_workload[key] = canonical_or_original(value)
             else:
                 row_workload[key] = value
+        elif isinstance(value, str) and sq_overlay and key in {
+            "sq_projection_boundary",
+            "sq_projection_implementation_ids",
+        }:
+            row_workload[key] = value
     for key in (
         "sq_fp8_tensor_count",
         "sq_passthrough_tensor_count",
