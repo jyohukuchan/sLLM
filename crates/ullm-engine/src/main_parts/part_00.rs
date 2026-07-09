@@ -1,4 +1,5 @@
 use std::env;
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::process::{Command, ExitCode};
@@ -204,13 +205,14 @@ fn select_sq_fp8_projection_implementation_id(
     info: &ullm_runtime_sys::DeviceInfo,
     model_arch: Option<&str>,
 ) -> &'static str {
+    let gpu_name = dispatchable_sq8_projection_gpu_name(info);
     let request = BackendRequest {
         operation: operation.operation_id(),
         phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
         format_id: Some(FORMAT_SQ8_0),
         model_arch,
         gpu_arch: runtime_device_gpu_arch(info),
-        gpu_name: Some(info.name.as_str()),
+        gpu_name: Some(gpu_name.as_ref()),
     };
     select_sq8_projection_implementation_id(&request)
 }
@@ -265,6 +267,27 @@ fn sq_fp8_projection_implementation_ids(
         "none".to_string()
     } else {
         selected.join(",")
+    }
+}
+
+const RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
+const RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
+const RDNA4_GFX1201_R9700_NAME: &str = "AMD Radeon Graphics";
+const RDNA4_GFX1201_R9700_CANONICAL_NAME: &str = "Radeon_AI_PRO_R9700";
+
+fn dispatchable_sq8_projection_gpu_name(
+    info: &ullm_runtime_sys::DeviceInfo,
+) -> Cow<'_, str> {
+    if info.name == RDNA4_GFX1201_R9700_NAME
+        && info.compute_major == 12
+        && (info.gcn_arch_name.is_empty() || info.gcn_arch_name.eq_ignore_ascii_case("gfx1201"))
+        && (RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MIN
+            ..=RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MAX)
+            .contains(&info.total_global_mem)
+    {
+        Cow::Borrowed(RDNA4_GFX1201_R9700_CANONICAL_NAME)
+    } else {
+        Cow::Borrowed(info.name.as_str())
     }
 }
 
@@ -8760,6 +8783,9 @@ fn package_materialize_matvec_smoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ullm_engine::backend_dispatch::{
+        SQ8_0_MATVEC_BATCH_RDNA4_DIRECT_ID, SQ8_0_MATVEC_R9700_DIRECT_ID,
+    };
     use ullm_runtime_sys::DeviceInfo;
 
     #[test]
@@ -8789,5 +8815,57 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn dispatchable_sq8_projection_gpu_name_normalizes_amd_radeon_graphics_rdna4_r9700() {
+        let info = DeviceInfo {
+            device_id: 0,
+            backend: "hip".to_string(),
+            name: RDNA4_GFX1201_R9700_NAME.to_string(),
+            total_global_mem: 32 * 1024 * 1024 * 1024,
+            compute_major: 12,
+            compute_minor: 0,
+            gcn_arch_name: "".to_string(),
+            flags: 0,
+        };
+        assert_eq!(
+            dispatchable_sq8_projection_gpu_name(&info).as_ref(),
+            RDNA4_GFX1201_R9700_CANONICAL_NAME
+        );
+        assert_eq!(
+            select_sq_fp8_projection_implementation_id(
+                SqFp8ProjectionMatvecOperation::Single,
+                &info,
+                Some(SQ8_0_MODEL_ARCH_QWEN_FAMILY),
+            ),
+            SQ8_0_MATVEC_R9700_DIRECT_ID
+        );
+    }
+
+    #[test]
+    fn dispatchable_sq8_projection_gpu_name_leaves_non_matching_rocm_amd_graphics_name() {
+        let info = DeviceInfo {
+            device_id: 0,
+            backend: "hip".to_string(),
+            name: RDNA4_GFX1201_R9700_NAME.to_string(),
+            total_global_mem: 16 * 1024 * 1024 * 1024,
+            compute_major: 12,
+            compute_minor: 0,
+            gcn_arch_name: "gfx1201".to_string(),
+            flags: 0,
+        };
+        assert_eq!(
+            dispatchable_sq8_projection_gpu_name(&info).as_ref(),
+            RDNA4_GFX1201_R9700_NAME
+        );
+        assert_eq!(
+            select_sq_fp8_projection_implementation_id(
+                SqFp8ProjectionMatvecOperation::Batch,
+                &info,
+                Some(SQ8_0_MODEL_ARCH_QWEN_FAMILY),
+            ),
+            SQ8_0_MATVEC_BATCH_RDNA4_DIRECT_ID
+        );
     }
 }

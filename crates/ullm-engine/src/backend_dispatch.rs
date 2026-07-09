@@ -144,6 +144,7 @@ impl Sq8ProjectionFusedOperation {
 pub enum Sq8ProjectionTarget {
     Generic,
     Rdna4,
+    R9700,
 }
 
 impl Sq8ProjectionTarget {
@@ -151,6 +152,7 @@ impl Sq8ProjectionTarget {
         match self {
             Self::Generic => "generic",
             Self::Rdna4 => "rdna4",
+            Self::R9700 => "r9700",
         }
     }
 
@@ -158,10 +160,19 @@ impl Sq8ProjectionTarget {
         match self {
             Self::Generic => None,
             Self::Rdna4 => Some("RDNA4"),
+            Self::R9700 => Some("RDNA4"),
         }
     }
 
-    pub const fn all() -> &'static [Self; 2] {
+    pub const fn all() -> &'static [Self; 3] {
+        &[Self::Generic, Self::Rdna4, Self::R9700]
+    }
+
+    pub const fn matvec_targets() -> &'static [Self; 3] {
+        Self::all()
+    }
+
+    pub const fn fused_catalog_targets() -> &'static [Self; 2] {
         &[Self::Generic, Self::Rdna4]
     }
 }
@@ -236,6 +247,11 @@ pub const fn sq8_0_projection_descriptor_id(
             Sq8ProjectionFamily::Direct,
         ) => "sq8_0_matvec_rdna4_direct",
         (
+            Sq8ProjectionMatvecOperation::Single,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFamily::Direct,
+        ) => "sq8_0_matvec_r9700_direct",
+        (
             Sq8ProjectionMatvecOperation::Batch,
             Sq8ProjectionTarget::Generic,
             Sq8ProjectionFamily::Direct,
@@ -245,6 +261,11 @@ pub const fn sq8_0_projection_descriptor_id(
             Sq8ProjectionTarget::Rdna4,
             Sq8ProjectionFamily::Direct,
         ) => "sq8_0_matvec_batch_rdna4_direct",
+        (
+            Sq8ProjectionMatvecOperation::Batch,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFamily::Direct,
+        ) => "sq8_0_matvec_batch_r9700_direct",
         (
             Sq8ProjectionMatvecOperation::Pair,
             Sq8ProjectionTarget::Generic,
@@ -256,6 +277,11 @@ pub const fn sq8_0_projection_descriptor_id(
             Sq8ProjectionFamily::Direct,
         ) => "sq8_0_matvec_pair_rdna4_direct",
         (
+            Sq8ProjectionMatvecOperation::Pair,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFamily::Direct,
+        ) => "sq8_0_matvec_pair_r9700_direct",
+        (
             Sq8ProjectionMatvecOperation::Triple,
             Sq8ProjectionTarget::Generic,
             Sq8ProjectionFamily::Direct,
@@ -265,6 +291,11 @@ pub const fn sq8_0_projection_descriptor_id(
             Sq8ProjectionTarget::Rdna4,
             Sq8ProjectionFamily::Direct,
         ) => "sq8_0_matvec_triple_rdna4_direct",
+        (
+            Sq8ProjectionMatvecOperation::Triple,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFamily::Direct,
+        ) => "sq8_0_matvec_triple_r9700_direct",
     }
 }
 
@@ -285,6 +316,11 @@ pub const fn sq8_0_fused_projection_descriptor_id(
             Sq8ProjectionFusedFamily::V0,
         ) => "sq8_0_self_attn_qkv_rdna4_v0",
         (
+            Sq8ProjectionFusedOperation::SelfAttnQkv,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFusedFamily::V0,
+        ) => "sq8_0_self_attn_qkv_r9700_v0",
+        (
             Sq8ProjectionFusedOperation::SelfAttnO,
             Sq8ProjectionTarget::Generic,
             Sq8ProjectionFusedFamily::V0,
@@ -294,6 +330,11 @@ pub const fn sq8_0_fused_projection_descriptor_id(
             Sq8ProjectionTarget::Rdna4,
             Sq8ProjectionFusedFamily::V0,
         ) => "sq8_0_self_attn_o_rdna4_v0",
+        (
+            Sq8ProjectionFusedOperation::SelfAttnO,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFusedFamily::V0,
+        ) => "sq8_0_self_attn_o_r9700_v0",
         (
             Sq8ProjectionFusedOperation::MlpGateUp,
             Sq8ProjectionTarget::Generic,
@@ -305,6 +346,11 @@ pub const fn sq8_0_fused_projection_descriptor_id(
             Sq8ProjectionFusedFamily::V0,
         ) => "sq8_0_mlp_gate_up_rdna4_v0",
         (
+            Sq8ProjectionFusedOperation::MlpGateUp,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFusedFamily::V0,
+        ) => "sq8_0_mlp_gate_up_r9700_v0",
+        (
             Sq8ProjectionFusedOperation::MlpDown,
             Sq8ProjectionTarget::Generic,
             Sq8ProjectionFusedFamily::V0,
@@ -314,6 +360,11 @@ pub const fn sq8_0_fused_projection_descriptor_id(
             Sq8ProjectionTarget::Rdna4,
             Sq8ProjectionFusedFamily::V0,
         ) => "sq8_0_mlp_down_rdna4_v0",
+        (
+            Sq8ProjectionFusedOperation::MlpDown,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFusedFamily::V0,
+        ) => "sq8_0_mlp_down_r9700_v0",
         (
             Sq8ProjectionFusedOperation::LinearAttnQkv,
             Sq8ProjectionTarget::Generic,
@@ -325,6 +376,11 @@ pub const fn sq8_0_fused_projection_descriptor_id(
             Sq8ProjectionFusedFamily::V0,
         ) => "sq8_0_linear_attn_qkv_rdna4_v0",
         (
+            Sq8ProjectionFusedOperation::LinearAttnQkv,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFusedFamily::V0,
+        ) => "sq8_0_linear_attn_qkv_r9700_v0",
+        (
             Sq8ProjectionFusedOperation::LinearAttnOut,
             Sq8ProjectionTarget::Generic,
             Sq8ProjectionFusedFamily::V0,
@@ -334,6 +390,11 @@ pub const fn sq8_0_fused_projection_descriptor_id(
             Sq8ProjectionTarget::Rdna4,
             Sq8ProjectionFusedFamily::V0,
         ) => "sq8_0_linear_attn_out_rdna4_v0",
+        (
+            Sq8ProjectionFusedOperation::LinearAttnOut,
+            Sq8ProjectionTarget::R9700,
+            Sq8ProjectionFusedFamily::V0,
+        ) => "sq8_0_linear_attn_out_r9700_v0",
     }
 }
 
@@ -347,6 +408,11 @@ pub const SQ8_0_MATVEC_RDNA4_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
     Sq8ProjectionTarget::Rdna4,
     Sq8ProjectionFamily::Direct,
 );
+pub const SQ8_0_MATVEC_R9700_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
+    Sq8ProjectionMatvecOperation::Single,
+    Sq8ProjectionTarget::R9700,
+    Sq8ProjectionFamily::Direct,
+);
 pub const SQ8_0_MATVEC_BATCH_GENERIC_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
     Sq8ProjectionMatvecOperation::Batch,
     Sq8ProjectionTarget::Generic,
@@ -355,6 +421,11 @@ pub const SQ8_0_MATVEC_BATCH_GENERIC_DIRECT_ID: &str = sq8_0_projection_descript
 pub const SQ8_0_MATVEC_BATCH_RDNA4_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
     Sq8ProjectionMatvecOperation::Batch,
     Sq8ProjectionTarget::Rdna4,
+    Sq8ProjectionFamily::Direct,
+);
+pub const SQ8_0_MATVEC_BATCH_R9700_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
+    Sq8ProjectionMatvecOperation::Batch,
+    Sq8ProjectionTarget::R9700,
     Sq8ProjectionFamily::Direct,
 );
 pub const SQ8_0_MATVEC_PAIR_GENERIC_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
@@ -367,6 +438,11 @@ pub const SQ8_0_MATVEC_PAIR_RDNA4_DIRECT_ID: &str = sq8_0_projection_descriptor_
     Sq8ProjectionTarget::Rdna4,
     Sq8ProjectionFamily::Direct,
 );
+pub const SQ8_0_MATVEC_PAIR_R9700_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
+    Sq8ProjectionMatvecOperation::Pair,
+    Sq8ProjectionTarget::R9700,
+    Sq8ProjectionFamily::Direct,
+);
 pub const SQ8_0_MATVEC_TRIPLE_GENERIC_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
     Sq8ProjectionMatvecOperation::Triple,
     Sq8ProjectionTarget::Generic,
@@ -375,6 +451,11 @@ pub const SQ8_0_MATVEC_TRIPLE_GENERIC_DIRECT_ID: &str = sq8_0_projection_descrip
 pub const SQ8_0_MATVEC_TRIPLE_RDNA4_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
     Sq8ProjectionMatvecOperation::Triple,
     Sq8ProjectionTarget::Rdna4,
+    Sq8ProjectionFamily::Direct,
+);
+pub const SQ8_0_MATVEC_TRIPLE_R9700_DIRECT_ID: &str = sq8_0_projection_descriptor_id(
+    Sq8ProjectionMatvecOperation::Triple,
+    Sq8ProjectionTarget::R9700,
     Sq8ProjectionFamily::Direct,
 );
 
@@ -461,6 +542,16 @@ pub const SQ8_0_PROJECTION_DISPATCH_IMPLEMENTATIONS: &[BackendImplementation<'st
         priority: 10,
     },
     BackendImplementation {
+        id: SQ8_0_MATVEC_R9700_DIRECT_ID,
+        operation: SQ8_0_MATVEC_OPERATION,
+        phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: Sq8ProjectionTarget::R9700.gpu_arch(),
+        gpu_name: Some("Radeon_AI_PRO_R9700"),
+        priority: 20,
+    },
+    BackendImplementation {
         id: SQ8_0_MATVEC_BATCH_GENERIC_DIRECT_ID,
         operation: SQ8_0_MATVEC_BATCH_OPERATION,
         phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
@@ -479,6 +570,16 @@ pub const SQ8_0_PROJECTION_DISPATCH_IMPLEMENTATIONS: &[BackendImplementation<'st
         gpu_arch: Sq8ProjectionTarget::Rdna4.gpu_arch(),
         gpu_name: None,
         priority: 10,
+    },
+    BackendImplementation {
+        id: SQ8_0_MATVEC_BATCH_R9700_DIRECT_ID,
+        operation: SQ8_0_MATVEC_BATCH_OPERATION,
+        phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: Sq8ProjectionTarget::R9700.gpu_arch(),
+        gpu_name: Some("Radeon_AI_PRO_R9700"),
+        priority: 20,
     },
     BackendImplementation {
         id: SQ8_0_MATVEC_PAIR_GENERIC_DIRECT_ID,
@@ -501,6 +602,16 @@ pub const SQ8_0_PROJECTION_DISPATCH_IMPLEMENTATIONS: &[BackendImplementation<'st
         priority: 10,
     },
     BackendImplementation {
+        id: SQ8_0_MATVEC_PAIR_R9700_DIRECT_ID,
+        operation: SQ8_0_MATVEC_PAIR_OPERATION,
+        phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: Sq8ProjectionTarget::R9700.gpu_arch(),
+        gpu_name: Some("Radeon_AI_PRO_R9700"),
+        priority: 20,
+    },
+    BackendImplementation {
         id: SQ8_0_MATVEC_TRIPLE_GENERIC_DIRECT_ID,
         operation: SQ8_0_MATVEC_TRIPLE_OPERATION,
         phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
@@ -519,6 +630,16 @@ pub const SQ8_0_PROJECTION_DISPATCH_IMPLEMENTATIONS: &[BackendImplementation<'st
         gpu_arch: Sq8ProjectionTarget::Rdna4.gpu_arch(),
         gpu_name: None,
         priority: 10,
+    },
+    BackendImplementation {
+        id: SQ8_0_MATVEC_TRIPLE_R9700_DIRECT_ID,
+        operation: SQ8_0_MATVEC_TRIPLE_OPERATION,
+        phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+        format_id: Some(FORMAT_SQ8_0),
+        model_arch: None,
+        gpu_arch: Sq8ProjectionTarget::R9700.gpu_arch(),
+        gpu_name: Some("Radeon_AI_PRO_R9700"),
+        priority: 20,
     },
 ];
 
@@ -663,12 +784,16 @@ pub fn sq8_0_projection_descriptor_family(id: &str) -> Option<Sq8ProjectionFamil
     match id {
         SQ8_0_MATVEC_GENERIC_DIRECT_ID
         | SQ8_0_MATVEC_RDNA4_DIRECT_ID
+        | SQ8_0_MATVEC_R9700_DIRECT_ID
         | SQ8_0_MATVEC_BATCH_GENERIC_DIRECT_ID
         | SQ8_0_MATVEC_BATCH_RDNA4_DIRECT_ID
+        | SQ8_0_MATVEC_BATCH_R9700_DIRECT_ID
         | SQ8_0_MATVEC_PAIR_GENERIC_DIRECT_ID
         | SQ8_0_MATVEC_PAIR_RDNA4_DIRECT_ID
+        | SQ8_0_MATVEC_PAIR_R9700_DIRECT_ID
         | SQ8_0_MATVEC_TRIPLE_GENERIC_DIRECT_ID
-        | SQ8_0_MATVEC_TRIPLE_RDNA4_DIRECT_ID => Some(Sq8ProjectionFamily::Direct),
+        | SQ8_0_MATVEC_TRIPLE_RDNA4_DIRECT_ID
+        | SQ8_0_MATVEC_TRIPLE_R9700_DIRECT_ID => Some(Sq8ProjectionFamily::Direct),
         _ => None,
     }
 }
@@ -941,14 +1066,42 @@ mod tests {
     }
 
     #[test]
-    fn sq8_projection_rdna4_request_selects_rdna4_direct() {
+    fn sq8_projection_r9700_request_selects_r9700_direct() {
         let request = BackendRequest {
             operation: SQ8_0_MATVEC_OPERATION,
             phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
             format_id: Some(FORMAT_SQ8_0),
             model_arch: Some("Qwen3"),
             gpu_arch: Some("RDNA4"),
-            gpu_name: Some("R9700"),
+            gpu_name: Some("Radeon_AI_PRO_R9700"),
+        };
+        let selected = select_sq8_projection_implementation(&request).unwrap();
+        assert_eq!(selected.id, SQ8_0_MATVEC_R9700_DIRECT_ID);
+    }
+
+    #[test]
+    fn sq8_projection_r9700_target_outperforms_rdna4_direct_with_name_match() {
+        let request = BackendRequest {
+            operation: SQ8_0_MATVEC_BATCH_OPERATION,
+            phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+            format_id: Some(FORMAT_SQ8_0),
+            model_arch: Some("Qwen3"),
+            gpu_arch: Some("RDNA4"),
+            gpu_name: Some("Radeon_AI_PRO_R9700"),
+        };
+        let selected = select_sq8_projection_implementation(&request).unwrap();
+        assert_eq!(selected.id, SQ8_0_MATVEC_BATCH_R9700_DIRECT_ID);
+    }
+
+    #[test]
+    fn sq8_projection_rdna4_request_selects_rdna4_direct_when_name_unmatched() {
+        let request = BackendRequest {
+            operation: SQ8_0_MATVEC_OPERATION,
+            phase: SQ8_0_PROJECTION_DISPATCH_PHASE,
+            format_id: Some(FORMAT_SQ8_0),
+            model_arch: Some("Qwen3"),
+            gpu_arch: Some("RDNA4"),
+            gpu_name: Some("RX_7700"),
         };
         let selected = select_sq8_projection_implementation(&request).unwrap();
         assert_eq!(selected.id, SQ8_0_MATVEC_RDNA4_DIRECT_ID);
@@ -973,7 +1126,7 @@ mod tests {
         assert_eq!(
             SQ8_0_PROJECTION_DISPATCH_IMPLEMENTATIONS.len(),
             Sq8ProjectionMatvecOperation::all().len()
-                * Sq8ProjectionTarget::all().len()
+                * Sq8ProjectionTarget::matvec_targets().len()
                 * Sq8ProjectionFamily::all().len()
         );
 
@@ -982,9 +1135,9 @@ mod tests {
                 .iter()
                 .filter(|implementation| implementation.operation == operation.operation_id())
                 .collect();
-            assert_eq!(variants.len(), 2);
+            assert_eq!(variants.len(), 3);
 
-            for target in Sq8ProjectionTarget::all().iter() {
+            for target in Sq8ProjectionTarget::matvec_targets().iter() {
                 let expected = sq8_0_projection_descriptor_id(
                     *operation,
                     *target,
@@ -1004,7 +1157,7 @@ mod tests {
     #[test]
     fn sq8_projection_descriptor_ids_follow_naming_convention() {
         for operation in Sq8ProjectionMatvecOperation::all().iter() {
-            for target in Sq8ProjectionTarget::all().iter() {
+            for target in Sq8ProjectionTarget::matvec_targets().iter() {
                 let expected = sq8_0_projection_descriptor_id(
                     *operation,
                     *target,
@@ -1050,7 +1203,7 @@ mod tests {
         assert_eq!(
             SQ8_0_FUSED_PROJECTION_DESCRIPTOR_CATALOG.len(),
             Sq8ProjectionFusedOperation::all().len()
-                * Sq8ProjectionTarget::all().len()
+                * Sq8ProjectionTarget::fused_catalog_targets().len()
                 * Sq8ProjectionFusedFamily::all().len()
         );
 
@@ -1061,7 +1214,7 @@ mod tests {
                 .collect();
             assert_eq!(variants.len(), 2);
 
-            for target in Sq8ProjectionTarget::all().iter() {
+            for target in Sq8ProjectionTarget::fused_catalog_targets().iter() {
                 for family in Sq8ProjectionFusedFamily::all().iter() {
                     let expected =
                         sq8_0_fused_projection_descriptor_id(*operation, *target, *family);
@@ -1076,7 +1229,7 @@ mod tests {
                         implementation.priority,
                         match target {
                             Sq8ProjectionTarget::Generic => 0,
-                            Sq8ProjectionTarget::Rdna4 => 10,
+                            Sq8ProjectionTarget::Rdna4 | Sq8ProjectionTarget::R9700 => 10,
                         }
                     );
                     let _ = family;

@@ -398,8 +398,12 @@ Done:
 - SQ8_0 single/batch/pair/triple direct-matvec entry points now validate that the selected descriptor
   family is `Direct` before calling the kernel; unresolved/non-direct selections return an explicit
   error instead of entering the runtime kernel path.
-- runtime GPU-architecture detection maps `compute_major == 12` to `RDNA4`, so R9700 dispatch rows
-  resolve to `sq8_0_matvec_*_rdna4_direct` instead of generic direct IDs.
+- runtime GPU-architecture detection maps `compute_major == 12` to `RDNA4`.
+- SQ8_0 matvec projection dispatch now has active R9700-specific direct descriptor IDs
+  (`sq8_0_matvec*_r9700_direct`). Dispatch-only GPU-name canonicalization maps ROCm's generic
+  `AMD Radeon Graphics` report to `Radeon_AI_PRO_R9700` when the device is `gfx1201`,
+  `compute_major == 12`, and the observed memory size matches the local R9700 range. Non-matching
+  RDNA4 devices still resolve to `sq8_0_matvec*_rdna4_direct`.
 - SQ8_0 projection matvec registry (`operation`, `phase`, and descriptor IDs) is now defined in
   `backend_dispatch.rs`, and `part_00.rs` consumes it through public APIs.
 - higher-level SQ8_0 fused projection descriptor catalog entries (`self_attn_qkv`, `self_attn_o`,
@@ -419,6 +423,12 @@ Done:
 - Qwen3/Qwen3.5 SQ8_0 model-loop projection telemetry now passes `model_arch=Qwen3` into the
   projection dispatch request. Unknown or non-model-loop SQ projection paths still pass `None`, so
   existing default selection behavior is preserved.
+- Active SQ8_0 matvec dispatch now distinguishes Generic, RDNA4, and R9700 direct descriptors while
+  preserving the same current direct kernel family. Higher-level fused descriptors have R9700 naming
+  support, but the active fused catalog remains Generic/RDNA4 until fused kernels are ready.
+- A layer0 Qwen3-14B-FP8 SQ8_0 mixed-request-state smoke on device index `2` now reports
+  `sq_projection_implementation_ids=single=sq8_0_matvec_r9700_direct,triple=sq8_0_matvec_triple_r9700_direct`
+  while preserving the human-facing runtime device name `AMD Radeon Graphics`.
 
 Remaining:
 
@@ -699,6 +709,10 @@ Expected outputs:
      implementation-side prefix selectors for future model-family entries.
    - Qwen3/Qwen3.5 model-loop SQ8_0 rows now feed `model_arch=Qwen3` into projection dispatch
      selection without changing stdout/JSON schema.
+   - SQ8_0 matvec projection dispatch now has active R9700-specific direct descriptor IDs and a
+     conservative dispatch-only canonical name for the local `gfx1201` R9700 device.
+   - A short layer0 SQ8_0 mixed-request-state smoke confirms the local R9700 path selects
+     `*_r9700_direct` descriptor IDs.
    - C++ kernel-family switching remains a follow-up.
    - Selected-layer model-loop rows now carry projection boundary and counter telemetry for
      `sq-fp8-token-ids-model-loop-smoke`.
