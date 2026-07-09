@@ -1,5 +1,10 @@
 # SQ8_0 Implementation Plan v0.1
 
+> Status as of 2026-07-10: superseded for execution by
+> [`sq8-recovery-plan-v0.2.md`](sq8-recovery-plan-v0.2.md). This document remains as implementation
+> history. Its Qwen3-14B-FP8 same-model assumptions and Immediate Work Queue predate the discovery
+> that the sidecar builder ignored source `weight_scale_inv`; do not use them to choose new work.
+
 ## 前回の要点
 
 - `FQ8_0` は会話上のtypoであり、正式なpublic format IDは `SQ8_0` とする。
