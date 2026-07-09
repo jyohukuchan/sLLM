@@ -899,7 +899,7 @@ Expected outputs:
   The gate requires `--require-normalized-throughput-comparison` so `uLLM` (`cli_model_loop_diagnostic`)
   and `vLLM` (`serving_throughput_benchmark`) rows are validated with explicit shape-homogenizing checks.
 - The post-host-pack 2026-07-10 uLLM rows plus the existing 2026-07-09 vLLM b2/b4/b8 rows now pass
-  `--require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families`.
+  `--require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families --max-ullm-sq-host-staging-write-count 24`.
   The same summary helper can add `--show-sq-details` to display `SQ boundary`, `SQ family`,
   `SQ batch`, `SQ staging ops`, and `SQ staging MiB` in the comparison table.
 - `--require-ullm-sq-no-host-staging` is available as an optional stricter gate for final
@@ -992,7 +992,8 @@ Expected outputs:
      `--require-ullm-sq-batch-coverage` so SQ8_0 rows with non-batch projection boundaries or
      incomplete batch matvec counters are blocked before mixing against serving rows.
    - The 2026-07-10 post-host-pack b2/b4/b8 refresh now satisfies the normalized comparison gate together with
-     `--require-ullm-sq-batch-coverage` and `--require-ullm-sq-kernel-families`.
+     `--require-ullm-sq-batch-coverage`, `--require-ullm-sq-kernel-families`, and
+     `--max-ullm-sq-host-staging-write-count 24`.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device

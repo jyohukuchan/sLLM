@@ -31,6 +31,7 @@ python3 tools/summarize-sq8-vllm-batch-grid.py \
   --require-normalized-throughput-comparison \
   --require-ullm-sq-batch-coverage \
   --require-ullm-sq-kernel-families \
+  --max-ullm-sq-host-staging-write-count 24 \
   --show-sq-details
 ```
 

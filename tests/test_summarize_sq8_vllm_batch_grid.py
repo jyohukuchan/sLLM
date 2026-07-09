@@ -1879,6 +1879,87 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
             self.assertEqual(status, 2)
             self.assertIn("sq_diagnostic_host_staging_read_count", stderr.getvalue())
 
+    def test_require_ullm_sq_host_staging_write_count_passes_within_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "write_count_within_limit.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                        sq_diagnostic_host_staging_write_count=24,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--max-ullm-sq-host-staging-write-count",
+                    "24",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_require_ullm_sq_host_staging_write_count_fails_when_over_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "write_count_over_limit.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                        sq_diagnostic_host_staging_write_count=25,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--max-ullm-sq-host-staging-write-count",
+                    "24",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("sq_diagnostic_host_staging_write_count=25", stderr.getvalue())
+            self.assertIn("max=24", stderr.getvalue())
+
     def test_require_ullm_sq_no_host_staging_passes_when_all_zero(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:
             path = Path(workdir) / "zero_host_staging.jsonl"

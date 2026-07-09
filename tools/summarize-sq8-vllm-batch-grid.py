@@ -730,6 +730,37 @@ def ullm_sq_no_host_staging_gate_failures(
     return failures
 
 
+def ullm_sq_host_staging_write_count_gate_failures(
+    rows: list[dict[str, Any]],
+    max_write_count: int,
+) -> list[str]:
+    failures: list[str] = []
+    for row in rows:
+        engine_name = as_str(as_dict(row.get("engine")).get("name"))
+        workload = as_dict(row.get("workload"))
+        if engine_name != "uLLM":
+            continue
+        if as_str(workload.get("format_id")) != "SQ8_0":
+            continue
+        raw_value = workload.get("sq_diagnostic_host_staging_write_count")
+        if raw_value is None:
+            continue
+        write_count = as_int(raw_value)
+        if write_count is None:
+            failures.append(
+                f"selected uLLM SQ8_0 row has malformed host staging write count: "
+                f"{harness_summary(row)} sq_diagnostic_host_staging_write_count={as_str(raw_value)}"
+            )
+            continue
+        if write_count > max_write_count:
+            failures.append(
+                "selected uLLM SQ8_0 row exceeds max sq_diagnostic_host_staging_write_count: "
+                f"{harness_summary(row)} sq_diagnostic_host_staging_write_count={write_count} "
+                f"max={max_write_count}"
+            )
+    return failures
+
+
 def required_engines_grid_gate_failures(
     rows: list[dict[str, Any]],
     required_engines: set[str],
@@ -824,6 +855,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max-ullm-sq-host-staging-write-count",
+        type=int,
+        default=None,
+        help=(
+            "fail when selected uLLM SQ8_0 rows have workload.sq_diagnostic_host_staging_write_count "
+            "greater than this limit"
+        ),
+    )
+    parser.add_argument(
         "--require-normalized-throughput-comparison",
         action="store_true",
         help=(
@@ -851,6 +891,13 @@ def main() -> int:
     try:
         requests_filter = parse_requests_filter(args.requests)
         required_engines = parse_required_engines_filter(args.require_engines)
+        if (
+            args.max_ullm_sq_host_staging_write_count is not None
+            and args.max_ullm_sq_host_staging_write_count < 0
+        ):
+            raise ValueError(
+                "--max-ullm-sq-host-staging-write-count must be a non-negative integer"
+            )
         if args.require_engine_grid and not required_engines:
             raise ValueError(
                 "--require-engine-grid requires --require-engines to be specified"
@@ -864,6 +911,7 @@ def main() -> int:
             or args.require_ullm_sq_batch_coverage
             or args.require_normalized_throughput_comparison
             or args.require_ullm_sq_no_host_staging
+            or args.max_ullm_sq_host_staging_write_count is not None
         )
         if requires_gate:
             rows = selected_rows(
@@ -904,6 +952,17 @@ def main() -> int:
                 )
             else:
                 ullm_sq_no_host_staging_failures = []
+            if args.max_ullm_sq_host_staging_write_count is not None:
+                max_ullm_sq_host_staging_write_count = (
+                    args.max_ullm_sq_host_staging_write_count
+                )
+                ullm_sq_host_staging_write_count_failures = (
+                    ullm_sq_host_staging_write_count_gate_failures(
+                        rows, max_ullm_sq_host_staging_write_count
+                    )
+                )
+            else:
+                ullm_sq_host_staging_write_count_failures = []
             if args.require_normalized_throughput_comparison:
                 normalized_throughput_comparison_failures = (
                     normalized_throughput_comparison_gate_failures(
@@ -926,6 +985,7 @@ def main() -> int:
             ullm_sq_kernel_families_failures = []
             ullm_sq_batch_coverage_failures = []
             ullm_sq_no_host_staging_failures = []
+            ullm_sq_host_staging_write_count_failures = []
             normalized_throughput_comparison_failures = []
         for line in markdown_lines(rows, show_sq_details=args.show_sq_details):
             print(line)
@@ -935,6 +995,7 @@ def main() -> int:
             or ullm_sq_kernel_families_failures
             or ullm_sq_batch_coverage_failures
             or ullm_sq_no_host_staging_failures
+            or ullm_sq_host_staging_write_count_failures
             or normalized_throughput_comparison_failures
         ):
             print(
@@ -947,6 +1008,7 @@ def main() -> int:
                 + ullm_sq_kernel_families_failures
                 + ullm_sq_batch_coverage_failures
                 + ullm_sq_no_host_staging_failures
+                + ullm_sq_host_staging_write_count_failures
                 + normalized_throughput_comparison_failures
             ):
                 print(line, file=sys.stderr)
