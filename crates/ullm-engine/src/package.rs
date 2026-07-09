@@ -5,7 +5,7 @@ use crate::qwen3_names::qwen3_tensor_name_alias;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageSummary {
@@ -761,7 +761,22 @@ fn referenced_file_candidate(
     if relative.is_empty() {
         return None;
     }
-    let absolute = package_dir.join(relative);
+    let relative_path = Path::new(relative);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    let package_root = fs::canonicalize(package_dir).ok()?;
+    let absolute = fs::canonicalize(package_dir.join(relative_path)).ok()?;
+    if !absolute.starts_with(&package_root) {
+        return None;
+    }
     let Ok(metadata) = fs::metadata(&absolute) else {
         return None;
     };
@@ -1352,6 +1367,61 @@ mod tests {
         assert!(duplicate.contains("duplicated 2 times"));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exact_passthrough_rejects_package_escape() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-engine-passthrough-escape-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let outside = root.with_extension("outside.raw");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&outside, [0_u8, 1]).unwrap();
+        let outside_name = outside.file_name().unwrap().to_str().unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            format!(
+                r#"{{
+                  "passthrough_tensors": [{{
+                    "name": "lm_head.weight",
+                    "dtype": "BF16",
+                    "shape": [1, 1],
+                    "elements": 1,
+                    "payload_bytes": 2,
+                    "payload_file": "../{outside_name}"
+                  }}]
+                }}"#
+            ),
+        )
+        .unwrap();
+        assert!(select_exact_passthrough_payload_bundle(&root, "lm_head.weight").is_err());
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, root.join("escaped.raw")).unwrap();
+            fs::write(
+                root.join("manifest.json"),
+                r#"{
+                  "passthrough_tensors": [{
+                    "name": "lm_head.weight",
+                    "dtype": "BF16",
+                    "shape": [1, 1],
+                    "elements": 1,
+                    "payload_bytes": 2,
+                    "payload_file": "escaped.raw"
+                  }]
+                }"#,
+            )
+            .unwrap();
+            assert!(select_exact_passthrough_payload_bundle(&root, "lm_head.weight").is_err());
+        }
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_file(outside).unwrap();
     }
 
     #[test]
