@@ -661,6 +661,8 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
                     "mode": "real",
                     "prefill_executor": "cached_prefix_rdna4_fp8_auto",
                     "resolved_prefill_executor": "cached_prefix_flash2_fp8q",
+                    "prefill_real_batch": True,
+                    "decode_real_batch": True,
                 },
                 "metrics": {
                     "prefill_total_input_tps": 100.0,
@@ -680,6 +682,19 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
                     "time_per_output_token_ms_p50": 10.0,
                     "time_per_output_token_ms_p95": 12.0,
                     "per_request_decode_tps_mean": 90.0,
+                },
+                "serving": {
+                    "candidate_contract_version": "v2026-1",
+                    "serving_loop_kind": "offline_token_batching",
+                    "scheduler_policy": "real_request_batch",
+                    "request_source": "synthetic_workload",
+                    "request_arrival_pattern": "steady",
+                    "tokenizer_included": True,
+                    "http_server_included": False,
+                    "runtime_reused_across_requests": True,
+                    "weights_reloaded_per_request": False,
+                    "load_excluded_from_total": True,
+                    "final_logits_in_total": False,
                 },
                 "correctness": {"verified_all": True},
                 "verified": True,
@@ -757,6 +772,146 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
                 row["metrics"]["decode_total_generated_tokens_per_second"], 200.0
             )
             self.assertEqual(row["memory"]["kv_cache_bytes_total"], 98304)
+            candidate = row["harness"]["ullm_serving_candidate"]
+            self.assertEqual(candidate["candidate_contract_version"], "v2026-1")
+            self.assertEqual(candidate["serving_loop_kind"], "offline_token_batching")
+            self.assertEqual(candidate["scheduler_policy"], "real_request_batch")
+            self.assertEqual(candidate["request_source"], "synthetic_workload")
+            self.assertEqual(candidate["request_arrival_pattern"], "steady")
+            self.assertEqual(candidate["tokenizer_included"], True)
+            self.assertEqual(candidate["http_server_included"], False)
+            self.assertEqual(candidate["runtime_reused_across_requests"], True)
+            self.assertEqual(candidate["weights_reloaded_per_request"], False)
+            self.assertEqual(candidate["load_excluded_from_total"], True)
+            self.assertEqual(candidate["final_logits_in_total"], False)
+            self.assertEqual(candidate["parity_blockers"], [])
+
+    def test_runs_main_with_ullm_serving_throughput_detects_contract_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_jsonl = root / "results.jsonl"
+            stdout_log = root / "stdout.log"
+            stderr_log = root / "stderr.log"
+            memory_log = root / "memory.jsonl"
+            result_json = root / "raw.json"
+            report = {
+                "workload": {
+                    "batch_size": 4,
+                    "concurrent_requests": 2,
+                },
+                "batching": {
+                    "mode": "logical",
+                    "prefill_executor": "cached_prefix_rdna4_fp8_auto",
+                    "resolved_prefill_executor": "cached_prefix_flash2_fp8q",
+                    "prefill_real_batch": False,
+                    "decode_real_batch": False,
+                },
+                "serving": {
+                    "candidate_contract_version": "v2026-2",
+                    "serving_loop_kind": "offline_token_batching",
+                    "scheduler_policy": "request_batch",
+                    "request_source": "synthetic_workload",
+                    "request_arrival_pattern": "constant",
+                    "tokenizer_included": True,
+                    "http_server_included": False,
+                    "runtime_reused_across_requests": False,
+                    "weights_reloaded_per_request": True,
+                    "load_excluded_from_total": False,
+                    "final_logits_in_total": True,
+                    "parity_blockers": [
+                        "runner_known_gap",
+                        "batching_mode_not_real",
+                    ],
+                },
+                "metrics": {
+                    "prefill_total_input_tps": 90.0,
+                    "decode_total_generated_tps": 180.0,
+                    "end_to_end_total_tps": 70.0,
+                    "prefill_total_input_tokens": 200,
+                    "decode_total_generated_tokens": 160,
+                    "generated_tokens_total": 160,
+                    "end_to_end_total_tokens": 360,
+                    "prefill_wall_ms_sum": 80.0,
+                    "decode_wall_ms_sum": 20.0,
+                    "batch_wall_ms": 150.0,
+                },
+                "correctness": {"verified_all": True},
+                "verified": True,
+            }
+            report_path = root / "report.json"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            command = [
+                sys.executable,
+                str(REPO_ROOT / "tools" / "run-external-benchmark.py"),
+                "--run-id",
+                "serving-throughput-blockers",
+                "--case-id",
+                "serving-throughput-blockers-case",
+                "--output-jsonl",
+                str(output_jsonl),
+                "--stdout-log",
+                str(stdout_log),
+                "--stderr-log",
+                str(stderr_log),
+                "--memory-log",
+                str(memory_log),
+                "--engine-name",
+                "uLLM",
+                "--model-name",
+                "Qwen3",
+                "--model-format",
+                "ullm-package",
+                "--model-quantization",
+                "AQ4",
+                "--context-length",
+                "128",
+                "--prompt-tokens",
+                "16",
+                "--generated-tokens",
+                "4",
+                "--batch-size",
+                "1",
+                "--concurrent-requests",
+                "1",
+                "--kv-cache-dtype",
+                "f32",
+                "--parse",
+                "ullm-serving-throughput",
+                "--result-json",
+                str(result_json),
+                "--",
+                sys.executable,
+                "-c",
+                "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))",
+                str(report_path),
+            ]
+            process = subprocess.run(
+                command,
+                check=False,
+                text=True,
+                capture_output=True,
+                cwd=REPO_ROOT,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            row = json.loads(
+                output_jsonl.read_text(encoding="utf-8").strip().splitlines()[-1]
+            )
+
+            blockers = row["harness"]["ullm_serving_candidate"]["parity_blockers"]
+            self.assertEqual(
+                blockers,
+                [
+                    "runner_known_gap",
+                    "batching_mode_not_real",
+                    "prefill_real_batch_not_true",
+                    "decode_real_batch_not_true",
+                    "runtime_reused_across_requests_not_true",
+                    "weights_reloaded_per_request_not_false",
+                    "load_excluded_from_total_not_true",
+                    "final_logits_in_total_not_false",
+                ],
+            )
 
     def test_prompt_guard_bundle_fields_attached_when_token_logits_check_passed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -897,6 +897,13 @@ Expected outputs:
   `harness.class=ullm_serving_throughput_candidate` and `serving_parity_candidate=false`, so these
   rows cannot satisfy the final serving-parity gate until the harness semantics are explicitly
   promoted.
+- `ullm-serving-throughput` rows now preserve a machine-readable serving candidate contract under
+  `harness.ullm_serving_candidate` before any promotion is considered. The preserved fields include
+  the serving loop kind, scheduler policy, request source/arrival pattern, tokenizer and HTTP-server
+  inclusion flags, runtime/weight reuse flags, load-excluded timing semantics, and whether
+  diagnostic final logits are included in total latency. Runner-provided blockers and parser-derived
+  non-serving-like semantics are preserved as explicit candidate blockers instead of being inferred
+  from prose.
 - `tools/summarize-sq8-vllm-batch-grid.py --require-serving-parity` is the machine gate for final
   serving-comparison tables. It currently fails the b2/b4/b8 compact table by design because the
   selected uLLM rows are CLI model-loop diagnostics and the selected vLLM rows are serving
@@ -1028,6 +1035,9 @@ Expected outputs:
      serving-style/offline-serving rows under a non-parity candidate harness class. The remaining
      implementation work is to build the actual runner semantics and then decide when that class can
      be promoted into the final serving gate.
+   - `ullm-serving-throughput` rows now preserve a candidate contract and conservative blocker list,
+     so future offline-serving rows can show exactly why they are still outside final parity or what
+     must be reviewed before promotion.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device

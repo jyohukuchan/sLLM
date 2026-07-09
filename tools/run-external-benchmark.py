@@ -958,6 +958,83 @@ def enrich_ullm_batch_memory(row: dict[str, Any], report: dict[str, Any]) -> Non
     )
 
 
+def enrich_ullm_serving_candidate_harness(
+    row: dict[str, Any], report: dict[str, Any]
+) -> None:
+    harness = row.get("harness")
+    if not isinstance(harness, dict):
+        return
+
+    serving = report.get("serving")
+    serving_report = serving if isinstance(serving, dict) else {}
+
+    candidate: dict[str, Any] = {}
+    for key in (
+        "candidate_contract_version",
+        "serving_loop_kind",
+        "scheduler_policy",
+        "request_source",
+        "request_arrival_pattern",
+        "tokenizer_included",
+        "http_server_included",
+        "runtime_reused_across_requests",
+        "weights_reloaded_per_request",
+        "load_excluded_from_total",
+        "final_logits_in_total",
+    ):
+        if key in serving_report:
+            value = serving_report[key]
+            if key in {
+                "tokenizer_included",
+                "http_server_included",
+                "runtime_reused_across_requests",
+                "weights_reloaded_per_request",
+                "load_excluded_from_total",
+                "final_logits_in_total",
+            }:
+                value = parse_bool(value)
+            candidate[key] = value
+
+    report_blockers = serving_report.get("parity_blockers")
+    if isinstance(report_blockers, list):
+        blockers = [
+            blocker for blocker in report_blockers if isinstance(blocker, str) and blocker
+        ]
+    elif isinstance(report_blockers, str) and report_blockers:
+        blockers = [report_blockers]
+    else:
+        blockers = []
+
+    batching = row.get("batching") if isinstance(row.get("batching"), dict) else {}
+
+    if not serving_report:
+        blockers.append("missing_serving_contract")
+
+    if batching.get("mode") != "real":
+        blockers.append("batching_mode_not_real")
+
+    if parse_bool(batching.get("prefill_real_batch")) is not True:
+        blockers.append("prefill_real_batch_not_true")
+
+    if parse_bool(batching.get("decode_real_batch")) is not True:
+        blockers.append("decode_real_batch_not_true")
+
+    if parse_bool(serving_report.get("runtime_reused_across_requests")) is not True:
+        blockers.append("runtime_reused_across_requests_not_true")
+
+    if parse_bool(serving_report.get("weights_reloaded_per_request")) is not False:
+        blockers.append("weights_reloaded_per_request_not_false")
+
+    if parse_bool(serving_report.get("load_excluded_from_total")) is not True:
+        blockers.append("load_excluded_from_total_not_true")
+
+    if parse_bool(serving_report.get("final_logits_in_total")) is not False:
+        blockers.append("final_logits_in_total_not_false")
+
+    candidate["parity_blockers"] = list(dict.fromkeys(blockers))
+    harness["ullm_serving_candidate"] = candidate
+
+
 def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any]) -> None:
     row_workload = row.get("workload")
     if not isinstance(row_workload, dict):
@@ -1640,6 +1717,8 @@ def main() -> int:
         if isinstance(batching, dict):
             row["batching"] = batching
         ullm_correctness = parse_ullm_batch_throughput_correctness(ullm_report)
+        if args.parse == "ullm-serving-throughput":
+            enrich_ullm_serving_candidate_harness(row, ullm_report)
     elif args.parse == "ullm-component-prefill":
         enrich_ullm_component_prefill_row(row, ullm_report)
         verified = ullm_report.get("verified")
