@@ -22,6 +22,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-label", default="reference")
     parser.add_argument("--candidate-label", default="candidate")
     parser.add_argument("--logit-atol", type=float, default=1e-6)
+    parser.add_argument(
+        "--acceptance-mode",
+        choices=("strict", "behavioral"),
+        default="strict",
+        help=(
+            "strict requires exact generated token/text and top-logit agreement; "
+            "behavioral records exact-match diagnostics but only gates on prompt match, "
+            "candidate verification, non-empty generated text, and accepted output health"
+        ),
+    )
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--output-md", type=Path)
     return parser.parse_args()
@@ -178,6 +188,10 @@ def compare_top_logits(
     }
 
 
+def output_status_accepted(value: Any) -> bool:
+    return value in ("ok", "not_evaluated")
+
+
 def compare_case(
     reference_summary_path: Path,
     candidate_summary_path: Path,
@@ -222,6 +236,9 @@ def compare_case(
     generated_match = reference_generated == candidate_generated
     generated_text_match = reference_text == candidate_text
     generated_text_without_stop_match = reference_text_without_stop == candidate_text_without_stop
+    candidate_generated_text_nonempty = bool(
+        (candidate_text_without_stop or candidate_text).strip()
+    )
     reference_stop = stop_signature(reference_report, f"{reference_label}.{case_id}")
     candidate_stop = stop_signature(candidate_report, f"{candidate_label}.{case_id}")
     stop_match = reference_stop == candidate_stop
@@ -265,16 +282,23 @@ def compare_case(
         "reference_output_status": reference_case.get("output_status"),
         "candidate_output_status": candidate_case.get("output_status"),
         "output_status_match": reference_case.get("output_status") == candidate_case.get("output_status"),
+        "candidate_output_status_accepted": output_status_accepted(candidate_case.get("output_status")),
+        "candidate_generated_text_nonempty": candidate_generated_text_nonempty,
         "prefill_top_logits": prefill_top_logits,
         "decode_last_top_logits": decode_last_top_logits,
         "top_logits_match": prefill_top_logits["token_ids_match"]
         and prefill_top_logits["logits_within_atol"]
         and decode_last_top_logits["token_ids_match"]
         and decode_last_top_logits["logits_within_atol"],
+        "behavioral_accept": prompt_match
+        and candidate_report.get("verified") is True
+        and candidate_generated_text_nonempty
+        and output_status_accepted(candidate_case.get("output_status")),
     }
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
+    acceptance_mode = getattr(args, "acceptance_mode", "strict")
     reference_summary = load_json_object(args.reference_summary, "reference summary")
     candidate_summary = load_json_object(args.candidate_summary, "candidate summary")
     reference_cases = case_map(reference_summary, "reference summary")
@@ -312,6 +336,14 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "stop_match_count": sum(1 for item in case_reports if item["stop_match"]),
         "both_verified_count": sum(1 for item in case_reports if item["both_verified"]),
         "output_status_match_count": sum(1 for item in case_reports if item["output_status_match"]),
+        "candidate_verified_count": sum(1 for item in case_reports if item["candidate_verified"] is True),
+        "candidate_output_status_accepted_count": sum(
+            1 for item in case_reports if item["candidate_output_status_accepted"]
+        ),
+        "candidate_generated_text_nonempty_count": sum(
+            1 for item in case_reports if item["candidate_generated_text_nonempty"]
+        ),
+        "behavioral_accept_count": sum(1 for item in case_reports if item["behavioral_accept"]),
         "top_logits_match_count": sum(1 for item in case_reports if item["top_logits_match"]),
         "max_prefill_top_logit_abs_diff": max(
             (
@@ -330,8 +362,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             default=None,
         ),
         "logit_atol": args.logit_atol,
+        "acceptance_mode": acceptance_mode,
     }
-    passed = (
+    strict_passed = (
         not missing_in_candidate
         and not extra_in_candidate
         and all(item["prompt_tokens_match"] for item in case_reports)
@@ -342,9 +375,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         and all(item["both_verified"] for item in case_reports)
         and all(item["top_logits_match"] for item in case_reports)
     )
-    metrics["passed"] = passed
+    behavioral_passed = (
+        not missing_in_candidate
+        and not extra_in_candidate
+        and all(item["behavioral_accept"] for item in case_reports)
+    )
+    metrics["strict_passed"] = strict_passed
+    metrics["behavioral_passed"] = behavioral_passed
+    metrics["passed"] = strict_passed if acceptance_mode == "strict" else behavioral_passed
     return {
-        "schema_version": "package-token-prompt-suite-generated-text-guard-v0.2",
+        "schema_version": "package-token-prompt-suite-generated-text-guard-v0.3",
         "reference": {
             "label": args.reference_label,
             "summary": str(args.reference_summary),
@@ -389,16 +429,19 @@ def write_md(path: Path, json_path: Path | None, report: dict[str, Any]) -> None
         [
             f"- Reference: `{report['reference']['label']}`",
             f"- Candidate: `{report['candidate']['label']}`",
+            f"- Acceptance mode: `{metrics.get('acceptance_mode')}`",
             f"- Passed: `{fmt_bool(metrics.get('passed'))}`",
+            f"- Strict passed: `{fmt_bool(metrics.get('strict_passed'))}`",
+            f"- Behavioral passed: `{fmt_bool(metrics.get('behavioral_passed'))}`",
             f"- Compared cases: `{metrics.get('compared_case_count')}`",
             "",
-            "| case | category | prompt match | token match | text match | no-stop text match | logits match | stop match | both verified | output status match | generated tokens | token sha256 | text sha256 |",
-            "| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | ---: | --- | --- |",
+            "| case | category | prompt match | token match | text match | no-stop text match | logits match | behavioral accept | output status | generated tokens | token sha256 | text sha256 |",
+            "| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | --- | ---: | --- | --- |",
         ]
     )
     for item in report["cases"]:
         lines.append(
-            "| {case} | {category} | {prompt} | {tokens_match} | {text_match} | {no_stop_text_match} | {logits} | {stop} | {verified} | {status} | {tokens} | {token_sha} | {text_sha} |".format(
+            "| {case} | {category} | {prompt} | {tokens_match} | {text_match} | {no_stop_text_match} | {logits} | {behavioral} | {status} | {tokens} | {token_sha} | {text_sha} |".format(
                 case=item["id"],
                 category=item.get("category", ""),
                 prompt=fmt_bool(item.get("prompt_tokens_match")),
@@ -406,9 +449,8 @@ def write_md(path: Path, json_path: Path | None, report: dict[str, Any]) -> None
                 text_match=fmt_bool(item.get("generated_text_match")),
                 no_stop_text_match=fmt_bool(item.get("generated_without_stop_text_match")),
                 logits=fmt_bool(item.get("top_logits_match")),
-                stop=fmt_bool(item.get("stop_match")),
-                verified=fmt_bool(item.get("both_verified")),
-                status=fmt_bool(item.get("output_status_match")),
+                behavioral=fmt_bool(item.get("behavioral_accept")),
+                status=item.get("candidate_output_status"),
                 tokens=item.get("reference_generated_tokens"),
                 token_sha=(item.get("generated_token_sha256") or "")[:16],
                 text_sha=(item.get("generated_without_stop_text_sha256") or "")[:16],

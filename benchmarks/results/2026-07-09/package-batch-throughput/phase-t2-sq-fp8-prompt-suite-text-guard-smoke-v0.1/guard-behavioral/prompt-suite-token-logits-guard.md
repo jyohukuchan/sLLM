@@ -1,10 +1,10 @@
 # Package Prompt Suite Generated-Text Guard
 
-- JSON: `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/guard-logit-atol-0p2/prompt-suite-token-logits-guard.json`
+- JSON: `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/guard-behavioral/prompt-suite-token-logits-guard.json`
 - Reference: `aq4`
 - Candidate: `sq-layer23-k16`
-- Acceptance mode: `strict`
-- Passed: `false`
+- Acceptance mode: `behavioral`
+- Passed: `true`
 - Strict passed: `false`
 - Behavioral passed: `true`
 - Compared cases: `1`

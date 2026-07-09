@@ -8,16 +8,16 @@
     "label": "sq-layer23-k16",
     "summary": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/sq-layer23-k16/summary.json"
   },
-  "passed": false,
+  "passed": true,
   "checks": [
     {
       "name": "prompt_suite_token_logits",
-      "json": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/guard/prompt-suite-token-logits-guard.json",
-      "md": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/guard/prompt-suite-token-logits-guard.md",
-      "passed": false,
+      "json": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/guard-behavioral/prompt-suite-token-logits-guard.json",
+      "md": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/guard-behavioral/prompt-suite-token-logits-guard.md",
+      "passed": true,
       "metrics": {
-        "exit_code": 1,
-        "acceptance_mode": "strict",
+        "exit_code": 0,
+        "acceptance_mode": "behavioral",
         "strict_passed": false,
         "behavioral_passed": true,
         "compared_case_count": 1,

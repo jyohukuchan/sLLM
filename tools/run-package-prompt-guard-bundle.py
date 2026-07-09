@@ -30,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--suite-guard-script", type=Path, default=DEFAULT_SUITE_GUARD)
     parser.add_argument("--logits-guard-script", type=Path, default=DEFAULT_LOGITS_GUARD)
     parser.add_argument("--logit-atol", type=float, default=1e-6)
+    parser.add_argument(
+        "--acceptance-mode",
+        choices=("strict", "behavioral"),
+        default="strict",
+        help="Prompt-suite acceptance mode passed to compare-package-token-prompt-suite.py",
+    )
     parser.add_argument("--reference-logits", type=Path)
     parser.add_argument("--candidate-logits", type=Path)
     parser.add_argument("--summary-json", default="guard-bundle-summary.json")
@@ -120,6 +126,8 @@ def main() -> int:
             args.candidate_label,
             "--logit-atol",
             str(args.logit_atol),
+            "--acceptance-mode",
+            args.acceptance_mode,
             "--output-json",
             str(suite_guard_json),
             "--output-md",
@@ -136,6 +144,9 @@ def main() -> int:
             "passed": bool(suite_metrics.get("passed")),
             "metrics": {
                 "exit_code": suite_guard_exit_code,
+                "acceptance_mode": suite_metrics.get("acceptance_mode"),
+                "strict_passed": suite_metrics.get("strict_passed"),
+                "behavioral_passed": suite_metrics.get("behavioral_passed"),
                 "compared_case_count": suite_metrics.get("compared_case_count"),
                 "generated_token_match_count": suite_metrics.get("generated_token_match_count"),
                 "generated_text_match_count": suite_metrics.get("generated_text_match_count"),

@@ -179,6 +179,44 @@ class PromptSuiteGuardTests(unittest.TestCase):
         self.assertEqual(report["metrics"]["generated_without_stop_text_match_count"], 0)
         self.assertIsNone(report["cases"][0]["generated_without_stop_text_sha256"])
 
+    def test_prompt_suite_behavioral_accepts_healthy_text_drift(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reference_report = root / "reference" / "case_a.json"
+            candidate_report = root / "candidate" / "case_a.json"
+            write_json(reference_report, prompt_report(generated_text=" concise reference answer"))
+            write_json(
+                candidate_report,
+                prompt_report(
+                    generated_token_ids=[30, 41],
+                    generated_text=" concise candidate answer",
+                    decode_logit=4.01,
+                ),
+            )
+            reference_summary = root / "reference" / "summary.json"
+            candidate_summary = root / "candidate" / "summary.json"
+            write_json(reference_summary, prompt_summary(reference_report))
+            write_json(candidate_summary, prompt_summary(candidate_report))
+
+            report = PROMPT_SUITE_TOOL.build_report(
+                types.SimpleNamespace(
+                    reference_summary=reference_summary,
+                    candidate_summary=candidate_summary,
+                    reference_label="ref",
+                    candidate_label="cand",
+                    logit_atol=1e-6,
+                    acceptance_mode="behavioral",
+                )
+            )
+
+        self.assertTrue(report["metrics"]["passed"])
+        self.assertFalse(report["metrics"]["strict_passed"])
+        self.assertTrue(report["metrics"]["behavioral_passed"])
+        self.assertEqual(report["metrics"]["generated_token_match_count"], 0)
+        self.assertEqual(report["metrics"]["generated_text_match_count"], 0)
+        self.assertEqual(report["metrics"]["top_logits_match_count"], 0)
+        self.assertEqual(report["metrics"]["behavioral_accept_count"], 1)
+
 
 def logits_report(*, token_id: int = 30, logit: float = 3.0, verified: bool = True) -> dict:
     return {

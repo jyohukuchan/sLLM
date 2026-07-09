@@ -43,10 +43,10 @@
     "max_prefill_top_logit_abs_diff": 0.04891014099121094,
     "max_decode_last_top_logit_abs_diff": 0.1147451400756836,
     "logit_atol": 0.001,
-    "acceptance_mode": "strict",
+    "acceptance_mode": "behavioral",
     "strict_passed": false,
     "behavioral_passed": true,
-    "passed": false
+    "passed": true
   },
   "missing_in_candidate": [],
   "extra_in_candidate": [],

@@ -1,5 +1,5 @@
 {
-  "schema_version": "package-token-prompt-suite-generated-text-guard-v0.2",
+  "schema_version": "package-token-prompt-suite-generated-text-guard-v0.3",
   "reference": {
     "label": "aq4",
     "summary": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/aq4/summary.json",
@@ -35,10 +35,17 @@
     "stop_match_count": 1,
     "both_verified_count": 1,
     "output_status_match_count": 1,
+    "candidate_verified_count": 1,
+    "candidate_output_status_accepted_count": 1,
+    "candidate_generated_text_nonempty_count": 1,
+    "behavioral_accept_count": 1,
     "top_logits_match_count": 0,
     "max_prefill_top_logit_abs_diff": 0.04891014099121094,
     "max_decode_last_top_logit_abs_diff": 0.1147451400756836,
     "logit_atol": 0.2,
+    "acceptance_mode": "strict",
+    "strict_passed": false,
+    "behavioral_passed": true,
     "passed": false
   },
   "missing_in_candidate": [],
@@ -81,6 +88,8 @@
       "reference_output_status": "not_evaluated",
       "candidate_output_status": "not_evaluated",
       "output_status_match": true,
+      "candidate_output_status_accepted": true,
+      "candidate_generated_text_nonempty": true,
       "prefill_top_logits": {
         "count": 8,
         "count_match": true,
@@ -261,7 +270,8 @@
           }
         ]
       },
-      "top_logits_match": false
+      "top_logits_match": false,
+      "behavioral_accept": true
     }
   ]
 }

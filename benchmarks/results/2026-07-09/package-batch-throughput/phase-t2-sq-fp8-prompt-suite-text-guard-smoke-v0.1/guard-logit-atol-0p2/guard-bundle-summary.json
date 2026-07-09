@@ -17,6 +17,9 @@
       "passed": false,
       "metrics": {
         "exit_code": 1,
+        "acceptance_mode": "strict",
+        "strict_passed": false,
+        "behavioral_passed": true,
         "compared_case_count": 1,
         "generated_token_match_count": 1,
         "generated_text_match_count": 1,
