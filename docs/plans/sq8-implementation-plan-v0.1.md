@@ -537,6 +537,9 @@ Current local baseline state:
   `prompt_tokens=16`, `generated_tokens=8`, and `concurrent_requests=1`. This row uses
   Qwen3.5-9B, so it fixes the uLLM SQ8_0 measurement path but is not yet a same-model comparison
   against `Qwen3-14B-FP8`.
+- The same JSONL now also contains a successful `vLLM + Qwen3-14B-FP8` R9700 smoke row for the
+  same `prompt_tokens=16`, `generated_tokens=8`, `concurrent_requests=1` shape. This proves the
+  local vLLM FP8 smoke baseline can run, while preserving the model mismatch limitation.
 
 Workload grid:
 

@@ -149,6 +149,20 @@ and records direct SQ8_0 `single+triple` projection execution plus the attached 
 prompt-suite guard bundle. This is a measurement-path row for Qwen3.5-9B, not a same-model row for
 the Qwen3-14B-FP8 vLLM target.
 
+A matching-shape vLLM row has also been recorded in the same JSONL:
+
+```text
+case_id: vllm-r9700-qwen3-14b-fp8-smoke-pp16-tg8-tp1-rocr
+status: ok
+prefill tok/s: 31.185949962897716
+decode tok/s: 15.59
+total tok/s: 46.78
+consumed VRAM: 30830026752 bytes
+```
+
+This confirms local vLLM FP8 smoke execution on R9700. It still should not be interpreted as a
+same-model uLLM-vs-vLLM performance conclusion.
+
 ## Notes
 
 - This is not a replacement for MI300X TP/PP testing. It is a local feasibility and baseline pass.
