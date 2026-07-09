@@ -388,6 +388,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_execution_mode=direct_fp8_dequant_matvec "
             "sq_projection_boundary=pair "
             "sq_projection_implementation_ids=pair=sq8_0_matvec_pair_rdna4_direct "
+            "sq_projection_kernel_families=pair=direct "
             "sq_fp8_single_matvec_count=0 "
             "sq_fp8_batch_matvec_count=0 sq_fp8_expected_all_batch_matvec_count=14 "
             "sq_fp8_pair_matvec_count=8 "
@@ -487,6 +488,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(
             row["workload"]["sq_projection_implementation_ids"],
             "pair=sq8_0_matvec_pair_rdna4_direct",
+        )
+        self.assertEqual(
+            row["workload"]["sq_projection_kernel_families"],
+            "pair=direct",
         )
         self.assertEqual(row["workload"]["sq_fp8_single_matvec_count"], 0)
         self.assertEqual(row["workload"]["sq_fp8_batch_matvec_count"], 0)
@@ -717,6 +722,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_execution_mode=materialized_f32_fallback "
             "sq_projection_boundary=none "
             "sq_projection_implementation_ids=none "
+            "sq_projection_kernel_families=none "
             "sq_fp8_single_matvec_count=0 "
             "sq_fp8_batch_matvec_count=0 sq_fp8_pair_matvec_count=0 "
             "sq_fp8_triple_matvec_count=0 "
@@ -778,11 +784,86 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["sq_fp8_pair_matvec_count"], 0)
         self.assertEqual(row["workload"]["sq_fp8_triple_matvec_count"], 0)
         self.assertEqual(row["workload"]["sq_projection_implementation_ids"], "none")
+        self.assertEqual(row["workload"]["sq_projection_kernel_families"], "none")
         self.assertEqual(row["workload"]["batch_size"], 2)
         self.assertEqual(row["workload"]["concurrent_requests"], 2)
         self.assertEqual(row["workload"]["prefill_mode"], "token_id_layer_stack")
         self.assertEqual(row["workload"]["format_id"], "SQ8_0")
         self.assertTrue(row["workload"]["sq_overlay"])
+
+    def test_parses_sq_fp8_projection_rows_without_kernel_families(self) -> None:
+        stdout = (
+            "sq-fp8-token-ids-model-loop-smoke "
+            "package=/tmp/model.ullm.d layers=[0, 1] layers_csv=0,1 "
+            "input_source=embedding_token_ids prefill_mode=token_id_layer_stack "
+            "format_id=SQ8_0 sq_overlay=true sq_candidate=SQ8_0 "
+            "sq_candidate_legacy=sq-fp8-w8a16-r9700-v0 "
+            "sq_format_id=SQ8_0 sq_implementation_id=sq-fp8-w8a16-r9700-v0 "
+            "sq_artifact=/tmp/sq-artifact sq_schema_version=sq-fp8-artifact-v0.1 "
+            "sq_fp8_tensor_count=22 sq_passthrough_tensor_count=753 sq_row_chunk=256 "
+            "sq_execution_mode=direct_fp8_dequant_matvec "
+            "sq_projection_boundary=single "
+            "sq_projection_implementation_ids=single=sq8_0_matvec_r9700_direct "
+            "sq_fp8_single_matvec_count=24 sq_fp8_batch_matvec_count=0 "
+            "sq_fp8_pair_matvec_count=0 sq_fp8_triple_matvec_count=0 "
+            "request_batch_executor=true fused_request_batch=false throughput_row=true "
+            "load_excluded_from_total=true final_logits_in_total=true "
+            "batching_mode=real "
+            "prefill_executor=stack_prefill_request_batch_step decode_executor=stack_ready_batch "
+            "prefill_real_batch=true decode_real_batch=true "
+            "prefill_executor_request_parallelism=3 decode_executor_request_parallelism=2 "
+            "prefill_batch_request_counts=[3, 1] decode_batch_ready_counts=[2, 1] "
+            "prefill_wall_ms=40.124272 decode_wall_ms=35.822329 final_logits_wall_ms=12.000000 "
+            "layer_load_ms=34.000000 total_wall_ms=94.946601 outer_wall_ms=128.946601 "
+            "prefill_total_input_tokens=4 decode_total_generated_tokens=3 "
+            "end_to_end_total_tokens=7 prefill_total_input_tps=84.881948 "
+            "decode_total_generated_tps=83.746649 "
+            "end_to_end_total_tps=73.725646 "
+            "generated_tokens_csv=2,1 "
+            "cached_tokens=[3, 3] "
+            "final_top1_tokens_csv=42,43 "
+            "final_topk_tokens_csv=42,7,5;43,8,6 "
+            "final_topk_logits_csv=3.250000,2.000000,1.500000;4.500000,4.000000,3.500000 "
+            "sequence_len=3 request_count=2 concurrent_requests=2 "
+            "prompt_tokens_csv=1,2 max_new_tokens_csv=2,1 total_tokens_csv=3,3 "
+            "layer_max_abs_diff=0.000000000 block_max_abs_diff=0.000000000 "
+            "prefill_batch_request_counts_csv=3,1 decode_batch_ready_counts_csv=2,1 "
+            "backend=hip device_index=2 name=\"AMD Radeon Graphics\" verified=true"
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_model_loop_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 1,
+                "concurrent_requests": 1,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "batching": {
+                "mode": "real",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+
+        TOOL.enrich_ullm_model_loop_row(row, report)
+
+        self.assertEqual(report["command"], "sq-fp8-token-ids-model-loop-smoke")
+        self.assertEqual(row["workload"]["sq_projection_boundary"], "single")
+        self.assertEqual(
+            row["workload"]["sq_projection_implementation_ids"],
+            "single=sq8_0_matvec_r9700_direct",
+        )
+        self.assertNotIn("sq_projection_kernel_families", row["workload"])
 
     def test_parses_sq_fp8_package_self_attn_layer_batch_smoke_key_value_output(self) -> None:
         stdout = (
@@ -796,6 +877,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_execution_mode=direct_fp8_dequant_matvec_batch "
             "sq_projection_boundary=batch "
             "sq_projection_implementation_ids=batch=sq8_0_matvec_batch_r9700_direct "
+            "sq_projection_kernel_families=batch=direct "
             "sq_fp8_single_matvec_count=0 sq_fp8_batch_matvec_count=14 "
             "sq_fp8_expected_all_batch_matvec_count=14 sq_fp8_pair_matvec_count=0 "
             "sq_fp8_triple_matvec_count=0 real_batch=true token_parallelism=32 "
@@ -838,6 +920,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertTrue(row["workload"]["sq_overlay"])
         self.assertEqual(row["workload"]["format_id"], "SQ8_0")
         self.assertEqual(row["workload"]["sq_projection_boundary"], "batch")
+        self.assertEqual(
+            row["workload"]["sq_projection_kernel_families"],
+            "batch=direct",
+        )
         self.assertEqual(
             row["workload"]["sq_projection_implementation_ids"],
             "batch=sq8_0_matvec_batch_r9700_direct",
@@ -1137,6 +1223,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_execution_mode=direct_fp8_dequant_matvec "
             "sq_projection_boundary=single+triple "
             "sq_projection_implementation_ids=single=sq8_0_matvec_r9700_direct,triple=sq8_0_matvec_triple_r9700_direct "
+            "sq_projection_kernel_families=single=direct,triple=direct "
             "sq_fp8_single_matvec_count=24 sq_fp8_batch_matvec_count=0 "
             "sq_fp8_expected_all_batch_matvec_count=21 sq_fp8_pair_matvec_count=0 "
             "sq_fp8_triple_matvec_count=6 prefill_sq_fp8_batch_matvec_count=0 "
@@ -1189,6 +1276,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "direct_fp8_dequant_matvec",
         )
         self.assertEqual(row["workload"]["sq_projection_boundary"], "single+triple")
+        self.assertEqual(
+            row["workload"]["sq_projection_kernel_families"],
+            "single=direct,triple=direct",
+        )
         self.assertEqual(row["workload"]["sq_fp8_batch_matvec_count"], 0)
         self.assertEqual(row["workload"]["sq_fp8_expected_all_batch_matvec_count"], 21)
         self.assertEqual(row["workload"]["sq_fp8_single_matvec_count"], 24)
@@ -1216,6 +1307,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_execution_mode=direct_fp8_dequant_matvec "
             "sq_projection_boundary=single+batch "
             "sq_projection_implementation_ids=single=sq8_0_matvec_r9700_direct,batch=sq8_0_matvec_batch_r9700_direct "
+            "sq_projection_kernel_families=single=direct,batch=direct "
             "sq_fp8_single_matvec_count=24 sq_fp8_batch_matvec_count=9 "
             "sq_fp8_expected_all_batch_matvec_count=21 sq_fp8_pair_matvec_count=0 "
             "sq_fp8_triple_matvec_count=0 prefill_sq_fp8_batch_matvec_count=6 "
@@ -1262,6 +1354,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         TOOL.enrich_ullm_model_loop_row(row, report)
 
         self.assertEqual(row["workload"]["sq_projection_boundary"], "single+batch")
+        self.assertEqual(
+            row["workload"]["sq_projection_kernel_families"],
+            "single=direct,batch=direct",
+        )
         self.assertEqual(row["workload"]["sq_fp8_batch_matvec_count"], 9)
         self.assertEqual(row["workload"]["sq_fp8_expected_all_batch_matvec_count"], 21)
         self.assertEqual(row["workload"]["sq_fp8_single_matvec_count"], 24)
@@ -1289,6 +1385,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_execution_mode=direct_fp8_dequant_matvec "
             "sq_projection_boundary=batch "
             "sq_projection_implementation_ids=batch=sq8_0_matvec_batch_r9700_direct "
+            "sq_projection_kernel_families=batch=direct "
             "sq_fp8_single_matvec_count=0 sq_fp8_batch_matvec_count=21 "
             "sq_fp8_expected_all_batch_matvec_count=21 sq_fp8_pair_matvec_count=0 "
             "sq_fp8_triple_matvec_count=0 prefill_sq_fp8_batch_matvec_count=14 "
@@ -1335,6 +1432,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         TOOL.enrich_ullm_model_loop_row(row, report)
 
         self.assertEqual(row["workload"]["sq_projection_boundary"], "batch")
+        self.assertEqual(
+            row["workload"]["sq_projection_kernel_families"],
+            "batch=direct",
+        )
         self.assertEqual(row["workload"]["sq_fp8_batch_matvec_count"], 21)
         self.assertEqual(row["workload"]["sq_fp8_expected_all_batch_matvec_count"], 21)
         self.assertEqual(row["workload"]["sq_fp8_single_matvec_count"], 0)
@@ -1364,6 +1465,7 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_execution_mode=direct_fp8_dequant_matvec "
             "sq_projection_boundary=batch "
             "sq_projection_implementation_ids=batch=sq8_0_matvec_batch_r9700_direct "
+            "sq_projection_kernel_families=batch=direct "
             "sq_fp8_single_matvec_count=0 sq_fp8_batch_matvec_count=560 "
             "sq_fp8_expected_all_batch_matvec_count=560 sq_fp8_pair_matvec_count=0 "
             "sq_fp8_triple_matvec_count=0 prefill_sq_fp8_batch_matvec_count=280 "
@@ -1416,6 +1518,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["layers_csv"], layers_csv)
         self.assertEqual(row["workload"]["sq_fp8_tensor_count"], 281)
         self.assertEqual(row["workload"]["sq_projection_boundary"], "batch")
+        self.assertEqual(
+            row["workload"]["sq_projection_kernel_families"],
+            "batch=direct",
+        )
         self.assertEqual(row["workload"]["sq_fp8_batch_matvec_count"], 560)
         self.assertEqual(row["workload"]["sq_fp8_expected_all_batch_matvec_count"], 560)
         self.assertEqual(row["workload"]["sq_fp8_single_matvec_count"], 0)

@@ -312,6 +312,58 @@ fn sq_fp8_projection_implementation_ids(
     }
 }
 
+fn sq_fp8_projection_kernel_families(
+    telemetry: SqFp8ProjectionTelemetry,
+    dispatches: SqFp8ProjectionDispatches,
+) -> String {
+    let mut selected = Vec::new();
+    if telemetry.single_matvec_count > 0 {
+        selected.push(format!(
+            "{}={}",
+            dispatches.single.label(),
+            dispatches
+                .single
+                .family
+                .map(Sq8ProjectionFamily::id)
+                .unwrap_or("none")
+        ));
+    }
+    if telemetry.batch_matvec_count > 0 {
+        selected.push(format!(
+            "{}={}",
+            dispatches.batch.label(),
+            dispatches
+                .batch
+                .family
+                .map(Sq8ProjectionFamily::id)
+                .unwrap_or("none")
+        ));
+    }
+    if telemetry.pair_matvec_count > 0 {
+        selected.push(format!(
+            "{}={}",
+            dispatches.pair.label(),
+            dispatches.pair.family.map(Sq8ProjectionFamily::id).unwrap_or("none")
+        ));
+    }
+    if telemetry.triple_matvec_count > 0 {
+        selected.push(format!(
+            "{}={}",
+            dispatches.triple.label(),
+            dispatches
+                .triple
+                .family
+                .map(Sq8ProjectionFamily::id)
+                .unwrap_or("none")
+        ));
+    }
+    if selected.is_empty() {
+        "none".to_string()
+    } else {
+        selected.join(",")
+    }
+}
+
 const RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
 const RDNA4_GFX1201_R9700_NAME_CANONICAL_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
 const RDNA4_GFX1201_R9700_NAME: &str = "AMD Radeon Graphics";
@@ -8857,7 +8909,9 @@ fn package_materialize_matvec_smoke(
 mod tests {
     use super::*;
     use ullm_engine::backend_dispatch::{
-        SQ8_0_MATVEC_BATCH_RDNA4_DIRECT_ID, SQ8_0_MATVEC_R9700_DIRECT_ID,
+        SQ8_0_MATVEC_BATCH_R9700_DIRECT_ID, SQ8_0_MATVEC_BATCH_RDNA4_DIRECT_ID,
+        SQ8_0_MATVEC_PAIR_GENERIC_DIRECT_ID, SQ8_0_MATVEC_R9700_DIRECT_ID,
+        SQ8_0_MATVEC_TRIPLE_R9700_DIRECT_ID, SQ8_0_MATVEC_TRIPLE_RDNA4_DIRECT_ID,
     };
     use ullm_runtime_sys::DeviceInfo;
 
@@ -8870,6 +8924,17 @@ mod tests {
             SqFp8ProjectionMatvecOperation::Pair => "sq8_0_matvec_pair_generic_legacy",
             SqFp8ProjectionMatvecOperation::Triple => "sq8_0_matvec_triple_generic_legacy",
         };
+        SqFp8ProjectionDispatch {
+            operation,
+            implementation_id,
+            family: sq8_0_projection_descriptor_family(implementation_id),
+        }
+    }
+
+    fn sq_fp8_projection_dispatch_fixture(
+        operation: SqFp8ProjectionMatvecOperation,
+        implementation_id: &'static str,
+    ) -> SqFp8ProjectionDispatch {
         SqFp8ProjectionDispatch {
             operation,
             implementation_id,
@@ -8923,6 +8988,65 @@ mod tests {
             assert!(err.contains(operation.label()));
             assert!(err.contains(dispatch.implementation_id));
         }
+    }
+
+    #[test]
+    fn sq_fp8_projection_kernel_families_returns_none_without_projection_boundary() {
+        let dispatches = SqFp8ProjectionDispatches {
+            single: sq_fp8_projection_dispatch_fixture(
+                SqFp8ProjectionMatvecOperation::Single,
+                SQ8_0_MATVEC_R9700_DIRECT_ID,
+            ),
+            batch: sq_fp8_projection_dispatch_fixture(
+                SqFp8ProjectionMatvecOperation::Batch,
+                SQ8_0_MATVEC_BATCH_R9700_DIRECT_ID,
+            ),
+            pair: sq_fp8_projection_dispatch_fixture(
+                SqFp8ProjectionMatvecOperation::Pair,
+                SQ8_0_MATVEC_PAIR_GENERIC_DIRECT_ID,
+            ),
+            triple: sq_fp8_projection_dispatch_fixture(
+                SqFp8ProjectionMatvecOperation::Triple,
+                SQ8_0_MATVEC_TRIPLE_R9700_DIRECT_ID,
+            ),
+        };
+        let telemetry = SqFp8ProjectionTelemetry::default();
+        assert_eq!(
+            sq_fp8_projection_kernel_families(telemetry, dispatches),
+            "none"
+        );
+    }
+
+    #[test]
+    fn sq_fp8_projection_kernel_families_tracks_direct_boundaries() {
+        let dispatches = SqFp8ProjectionDispatches {
+            single: sq_fp8_projection_dispatch_fixture(
+                SqFp8ProjectionMatvecOperation::Single,
+                SQ8_0_MATVEC_R9700_DIRECT_ID,
+            ),
+            batch: sq_fp8_projection_dispatch_fixture(
+                SqFp8ProjectionMatvecOperation::Batch,
+                SQ8_0_MATVEC_BATCH_R9700_DIRECT_ID,
+            ),
+            pair: sq_fp8_projection_dispatch_fixture(
+                SqFp8ProjectionMatvecOperation::Pair,
+                SQ8_0_MATVEC_PAIR_GENERIC_DIRECT_ID,
+            ),
+            triple: sq_fp8_projection_dispatch_fixture(
+                SqFp8ProjectionMatvecOperation::Triple,
+                SQ8_0_MATVEC_TRIPLE_RDNA4_DIRECT_ID,
+            ),
+        };
+        let telemetry = SqFp8ProjectionTelemetry {
+            single_matvec_count: 1,
+            batch_matvec_count: 2,
+            pair_matvec_count: 0,
+            triple_matvec_count: 3,
+        };
+        assert_eq!(
+            sq_fp8_projection_kernel_families(telemetry, dispatches),
+            "single=direct,batch=direct,triple=direct"
+        );
     }
 
     #[test]

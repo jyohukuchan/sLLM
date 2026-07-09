@@ -465,6 +465,9 @@ Done:
 - Active SQ8_0 matvec dispatch now distinguishes Generic, RDNA4, and R9700 direct descriptors while
   preserving the same current direct kernel family. Higher-level fused descriptors have R9700 naming
   support, but the active fused catalog remains Generic/RDNA4 until fused kernels are ready.
+- SQ8_0 projection result rows now report both `sq_projection_implementation_ids` and
+  `sq_projection_kernel_families`, so future non-direct/fused C++ kernel families can be separated
+  from the current `direct` family without parsing implementation IDs.
 - A layer0 Qwen3-14B-FP8 SQ8_0 mixed-request-state smoke on device index `2` now reports
   `sq_projection_implementation_ids=single=sq8_0_matvec_r9700_direct,triple=sq8_0_matvec_triple_r9700_direct`
   while preserving the human-facing runtime device name `AMD Radeon Graphics`.
@@ -540,6 +543,8 @@ Now:
   `backend_dispatch.rs`, and descriptor naming coverage tests now include fused entries.
 - Done: `backend_dispatch` now exposes `sq8_0_projection_descriptor_family()` and the Rust matvec
   execution path now carries the selected family metadata.
+- Done: SQ8_0 stdout rows and external benchmark rows now preserve
+  `sq_projection_kernel_families` next to `sq_projection_implementation_ids`.
 - Done: test-only non-direct SQ8_0 matvec descriptors exercise `family=None` selection and the
   Rust-side direct-family guard before any runtime C++ kernel is called.
 - Done: SQ8_0 matvec runtime helper group is moved to
@@ -908,6 +913,9 @@ Expected outputs:
      selection without changing stdout/JSON schema.
    - SQ8_0 matvec projection dispatch now has active R9700-specific direct descriptor IDs and a
      conservative dispatch-only canonical name for the local `gfx1201` R9700 device.
+   - SQ8_0 projection rows now preserve `sq_projection_kernel_families`, which is currently
+     `direct` for executed matvec boundaries and keeps future C++ kernel family switching
+     machine-readable.
    - A short layer0 SQ8_0 mixed-request-state smoke confirms the local R9700 path selects
      `*_r9700_direct` descriptor IDs.
    - Non-direct descriptor fixtures now prove the current execution boundary fails closed before

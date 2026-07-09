@@ -1111,6 +1111,7 @@ def enrich_ullm_sq_projection_workload(
         "sq_execution_mode",
         "sq_projection_boundary",
         "sq_projection_implementation_ids",
+        "sq_projection_kernel_families",
     ):
         value = report.get(key)
         if isinstance(value, str) and value != "none":
@@ -1126,6 +1127,7 @@ def enrich_ullm_sq_projection_workload(
         elif isinstance(value, str) and sq_overlay and key in {
             "sq_projection_boundary",
             "sq_projection_implementation_ids",
+            "sq_projection_kernel_families",
         }:
             row_workload[key] = value
     for key in (
