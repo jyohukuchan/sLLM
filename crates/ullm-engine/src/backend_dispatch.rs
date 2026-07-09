@@ -663,6 +663,20 @@ pub fn select_sq8_projection_implementation_id(request: &BackendRequest<'_>) -> 
         .unwrap_or(SQ8_0_PROJECTION_UNRESOLVED_ID)
 }
 
+pub fn sq8_0_projection_descriptor_family(id: &str) -> Option<Sq8ProjectionFamily> {
+    match id {
+        SQ8_0_MATVEC_GENERIC_DIRECT_ID
+        | SQ8_0_MATVEC_RDNA4_DIRECT_ID
+        | SQ8_0_MATVEC_BATCH_GENERIC_DIRECT_ID
+        | SQ8_0_MATVEC_BATCH_RDNA4_DIRECT_ID
+        | SQ8_0_MATVEC_PAIR_GENERIC_DIRECT_ID
+        | SQ8_0_MATVEC_PAIR_RDNA4_DIRECT_ID
+        | SQ8_0_MATVEC_TRIPLE_GENERIC_DIRECT_ID
+        | SQ8_0_MATVEC_TRIPLE_RDNA4_DIRECT_ID => Some(Sq8ProjectionFamily::Direct),
+        _ => None,
+    }
+}
+
 fn optional_match(expected: Option<&str>, actual: Option<&str>) -> bool {
     match expected {
         Some(expected) => actual == Some(expected),
@@ -969,6 +983,34 @@ mod tests {
         assert_eq!(
             select_sq8_projection_implementation_id(&request),
             SQ8_0_PROJECTION_UNRESOLVED_ID
+        );
+    }
+
+    #[test]
+    fn sq8_projection_descriptor_family_resolves_active_matvec_descriptors() {
+        for implementation in SQ8_0_PROJECTION_DISPATCH_IMPLEMENTATIONS {
+            assert_eq!(
+                sq8_0_projection_descriptor_family(implementation.id),
+                Some(Sq8ProjectionFamily::Direct),
+                "failed to resolve family for {}",
+                implementation.id
+            );
+        }
+    }
+
+    #[test]
+    fn sq8_projection_descriptor_family_is_none_for_unknown_and_fused_ids() {
+        assert_eq!(
+            sq8_0_projection_descriptor_family("sq8_0_projection_unresolved"),
+            None
+        );
+        assert_eq!(
+            sq8_0_projection_descriptor_family(SQ8_0_SELF_ATTN_QKV_GENERIC_V0_ID),
+            None
+        );
+        assert_eq!(
+            sq8_0_projection_descriptor_family("sq8_0_foo_bar_baz"),
+            None
         );
     }
 }

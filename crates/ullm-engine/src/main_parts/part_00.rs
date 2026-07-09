@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use ullm_engine::backend_dispatch::{
     BackendImplementation, BackendRequest, select_sq8_projection_implementation_id, select_backend,
+    sq8_0_projection_descriptor_family, Sq8ProjectionFamily,
     Sq8ProjectionMatvecOperation as SqFp8ProjectionMatvecOperation,
     SQ8_0_PROJECTION_DISPATCH_PHASE,
 };
@@ -78,11 +79,23 @@ static SQ_FP8_TRIPLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 struct SqFp8ProjectionDispatch {
     operation: SqFp8ProjectionMatvecOperation,
     implementation_id: &'static str,
+    family: Option<Sq8ProjectionFamily>,
 }
 
 impl SqFp8ProjectionDispatch {
     fn label(&self) -> &'static str {
         self.operation.label()
+    }
+
+    fn require_direct_family(&self, label: &str) -> Result<(), String> {
+        match self.family {
+            Some(Sq8ProjectionFamily::Direct) => Ok(()),
+            None => Err(format!(
+                "{label} SQ8_0 projection dispatch has no direct kernel family: operation={} implementation_id={}",
+                self.operation.label(),
+                self.implementation_id
+            )),
+        }
     }
 }
 
@@ -187,9 +200,11 @@ fn sq_fp8_projection_dispatch(
     operation: SqFp8ProjectionMatvecOperation,
     info: &ullm_runtime_sys::DeviceInfo,
 ) -> SqFp8ProjectionDispatch {
+    let implementation_id = select_sq_fp8_projection_implementation_id(operation, info);
     SqFp8ProjectionDispatch {
         operation,
-        implementation_id: select_sq_fp8_projection_implementation_id(operation, info),
+        implementation_id,
+        family: sq8_0_projection_descriptor_family(implementation_id),
     }
 }
 

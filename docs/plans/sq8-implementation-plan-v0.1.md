@@ -367,6 +367,9 @@ Done:
   triple matvec boundaries.
 - `PackageAq4ResidentMatvec` now carries SQ8_0 projection dispatch decisions to the single, batch,
   pair, and triple matvec execution boundaries before calling the existing runtime kernels.
+- SQ8_0 single/batch/pair/triple direct-matvec entry points now validate that the selected descriptor
+  family is `Direct` before calling the kernel; unresolved/non-direct selections return an explicit
+  error instead of entering the runtime kernel path.
 - runtime GPU-architecture detection maps `compute_major == 12` to `RDNA4`, so R9700 dispatch rows
   resolve to `sq8_0_matvec_*_rdna4_direct` instead of generic direct IDs.
 - SQ8_0 projection matvec registry (`operation`, `phase`, and descriptor IDs) is now defined in
@@ -378,8 +381,7 @@ Done:
 
 Remaining:
 
-- use dispatch-selected SQ8_0 projection descriptors to select between multiple C++ kernel
-  families once non-direct implementations exist;
+- add actual runtime C++ projection family switching once non-direct implementations exist;
 - keep runtime dispatch switched off for higher-level fused projection kernels; only the catalog is
   published in `backend_dispatch.rs`;
 - keep selected implementation IDs in all result rows that represent dispatch-selected execution.
@@ -416,6 +418,8 @@ Now:
   matvec entries and RDNA4/generic targets.
 - Done: higher-level SQ8_0 fused projection descriptor catalog entries were added in
   `backend_dispatch.rs`, and descriptor naming coverage tests now include fused entries.
+- Done: `backend_dispatch` now exposes `sq8_0_projection_descriptor_family()` and the Rust matvec
+  execution path now carries the selected family metadata.
 - Remaining: additional SQ8_0 kernel source split and fused kernel families are still pending.
 
 ### M8: Regression Suite

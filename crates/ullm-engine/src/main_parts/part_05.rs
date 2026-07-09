@@ -5146,6 +5146,7 @@ impl PackageAq4ResidentMatvec {
                 scale_block_cols,
             } => {
                 let dispatch = self.projection_dispatch(SqFp8ProjectionMatvecOperation::Single);
+                dispatch.require_direct_family(label)?;
                 ullm_runtime_sys::sq_fp8_matvec_f32(
                     payload_buffer.as_ref(),
                     scale_buffer.as_ref(),
@@ -5201,6 +5202,7 @@ impl PackageAq4ResidentMatvec {
                 scale_block_cols,
             } => {
                 let dispatch = self.projection_dispatch(SqFp8ProjectionMatvecOperation::Batch);
+                dispatch.require_direct_family(label)?;
                 ullm_runtime_sys::sq_fp8_matvec_batch_f32(
                     payload_buffer.as_ref(),
                     scale_buffer.as_ref(),
@@ -5315,6 +5317,7 @@ impl PackageAq4ResidentMatvec {
         }
         if let (Some(left_sq), Some(right_sq)) = (self.sq_fp8_storage(), right.sq_fp8_storage()) {
             let dispatch = self.projection_dispatch(SqFp8ProjectionMatvecOperation::Pair);
+            dispatch.require_direct_family(label)?;
             ullm_runtime_sys::sq_fp8_matvec_pair_f32(
                 left_sq.payload_buffer,
                 left_sq.scale_buffer,
@@ -5405,6 +5408,7 @@ impl PackageAq4ResidentMatvec {
             third.sq_fp8_storage(),
         ) {
             let dispatch = self.projection_dispatch(SqFp8ProjectionMatvecOperation::Triple);
+            dispatch.require_direct_family(label)?;
             ullm_runtime_sys::sq_fp8_matvec_triple_f32(
                 first_sq.payload_buffer,
                 first_sq.scale_buffer,
