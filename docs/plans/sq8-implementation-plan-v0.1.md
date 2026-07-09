@@ -685,6 +685,15 @@ Current local baseline state:
   `sq_diagnostic_host_staging_read_bytes=0`, and
   `sq_diagnostic_host_staging_write_bytes=196608` by using runtime buffer-to-buffer copies for
   batch packing and per-request unpacking.
+- A full 40-layer D2D-pack smoke row at
+  `benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-d2d-pack-smoke/results.jsonl`
+  keeps `sq_fp8_batch_matvec_count=560/560` for `Qwen3-14B-FP8` with real prefill/decode batching.
+  It records `sq_diagnostic_host_staging_read_count=156`,
+  `sq_diagnostic_host_staging_write_count=240`,
+  `sq_diagnostic_host_staging_read_bytes=3194880`, and
+  `sq_diagnostic_host_staging_write_bytes=6553600`. This shows the remaining full-stack staging is
+  dominated by layer-to-layer residual handoff through the host-driven wrapper, not by the
+  selected-layer batch pack/unpack boundary.
 - The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
   It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and
@@ -890,7 +899,11 @@ Expected outputs:
      SiLU-mul activation and MLP down residual add on batch device buffers. A third reduction moves
      the shape to `0/9` by adding runtime buffer-to-buffer copy and using it for batch pack/unpack
      boundaries. The remaining counted writes are host residual inputs in this smoke path; serving
-     parity still needs full-package/server-style rows rather than selected-layer diagnostics.
+     parity still needs full-package/server-style rows rather than selected-layer diagnostics. The
+     full 40-layer D2D-pack row keeps `560/560` direct batch projection coverage but still records
+     `156/240` host-staging read/write operations from layer-to-layer residual handoff, so the next
+     implementation step is a true device-to-device stack handoff instead of the current wrapper
+     that reads residuals back to host.
 
 ## Risks
 
