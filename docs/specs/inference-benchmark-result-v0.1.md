@@ -351,6 +351,10 @@ selected-layer diagnostics when they use `layers_csv` covering the full model. I
 they are implementation-valid full model-loop real-batch rows. They should still remain separate
 from serving rows when final logits are included in total latency or when host staging is part of the
 diagnostic resident path.
+Rows may expose that staging under `workload.sq_diagnostic_host_staging_read_count`,
+`workload.sq_diagnostic_host_staging_write_count`, `workload.sq_diagnostic_host_staging_read_bytes`,
+and `workload.sq_diagnostic_host_staging_write_bytes`. Nonzero values mean the row is still
+diagnostic for serving comparison even when all SQ8_0 projection boundaries are batched.
 
 SQ candidate rows may also carry a top-level `candidate` object:
 

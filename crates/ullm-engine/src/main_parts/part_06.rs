@@ -2935,6 +2935,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident residual: {err}")
                 })?;
+            record_sq_diagnostic_host_staging_f32_write(
+                item.residual.len(),
+                "self-attn resident residual staging",
+            )?;
             let mut step_ms = PackageSelfAttnComponentStepMs::default();
             layer.run_device_step_input(
                 stream,
@@ -2948,6 +2952,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 stream,
                 self.hidden,
                 &format!("{item_label} self-attn resident input normed"),
+            )?;
+            record_sq_diagnostic_host_staging_f32_read(
+                normed_values.len(),
+                "self-attn resident input normed staging",
             )?;
             let start = batch_index.checked_mul(self.hidden).ok_or_else(|| {
                 format!("{label} self-attn resident batch input normed offset overflows")
@@ -2971,6 +2979,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
             .map_err(|err| {
                 format!("failed to copy {label} self-attn resident batch input normed: {err}")
             })?;
+        record_sq_diagnostic_host_staging_f32_write(
+            input_normed_values.len(),
+            "self-attn resident batch input normed staging",
+        )?;
 
         let component_started = Instant::now();
         weights.q_matrix.matvec_batch(
@@ -3012,17 +3024,29 @@ impl PackageSelfAttnResidentStepBatchLayer {
             q_projected_elements,
             &format!("{label} self-attn resident batch q projected"),
         )?;
+        record_sq_diagnostic_host_staging_f32_read(
+            q_projected_values.len(),
+            "self-attn resident batch q projected staging",
+        )?;
         let k_projected_values = read_runtime_buffer_f32(
             &self.batch_k_projected_buffer,
             stream,
             k_projected_elements,
             &format!("{label} self-attn resident batch k projected"),
         )?;
+        record_sq_diagnostic_host_staging_f32_read(
+            k_projected_values.len(),
+            "self-attn resident batch k projected staging",
+        )?;
         let v_projected_values = read_runtime_buffer_f32(
             &self.batch_v_projected_buffer,
             stream,
             v_projected_elements,
             &format!("{label} self-attn resident batch v projected"),
+        )?;
+        record_sq_diagnostic_host_staging_f32_read(
+            v_projected_values.len(),
+            "self-attn resident batch v projected staging",
         )?;
 
         for (batch_index, item) in items.iter().enumerate() {
@@ -3062,6 +3086,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident q projected: {err}")
                 })?;
+            record_sq_diagnostic_host_staging_f32_write(
+                q_projected_rows,
+                "self-attn resident q projected staging",
+            )?;
             layer
                 .k_projected_buffer
                 .copy_from_host(
@@ -3072,6 +3100,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident k projected: {err}")
                 })?;
+            record_sq_diagnostic_host_staging_f32_write(
+                k_projected_rows,
+                "self-attn resident k projected staging",
+            )?;
             layer
                 .v_projected_buffer
                 .copy_from_host(
@@ -3082,6 +3114,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident v projected: {err}")
                 })?;
+            record_sq_diagnostic_host_staging_f32_write(
+                v_projected_rows,
+                "self-attn resident v projected staging",
+            )?;
             let projection_input_buffer = layer.run_device_step_after_qkv_projection_input(
                 stream,
                 rotary_dim,
@@ -3116,6 +3152,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                     )?
                 }
             };
+            record_sq_diagnostic_host_staging_f32_read(
+                projection_input_values.len(),
+                "self-attn resident attention projection input staging",
+            )?;
             attention_projection_input_values
                 [projection_input_start..projection_input_start + attention_elements]
                 .copy_from_slice(&projection_input_values);
@@ -3131,6 +3171,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 "failed to copy {label} self-attn resident batch attention projection input: {err}"
             )
         })?;
+        record_sq_diagnostic_host_staging_f32_write(
+            attention_projection_input_values.len(),
+            "self-attn resident batch attention projection input staging",
+        )?;
 
         let component_started = Instant::now();
         weights.o_matrix.matvec_batch(
@@ -3159,6 +3203,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
             stream,
             attention_block_output_elements,
             &format!("{label} self-attn resident batch o projection"),
+        )?;
+        record_sq_diagnostic_host_staging_f32_read(
+            attention_projection_output_values.len(),
+            "self-attn resident batch o projection staging",
         )?;
         for (attention_index, residual_value) in attention_projection_output_values
             .iter_mut()
@@ -3220,6 +3268,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident attention output: {err}")
                 })?;
+            record_sq_diagnostic_host_staging_f32_write(
+                hidden_elements,
+                "self-attn resident attention output staging",
+            )?;
 
             let component_started = Instant::now();
             ullm_runtime_sys::rmsnorm_f32(
@@ -3256,15 +3308,17 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .ok_or_else(|| {
                     format!("{label} self-attn resident batch post-normed end overflows")
                 })?;
-            post_normed_values[post_normed_start..post_normed_end]
-                .copy_from_slice(&read_runtime_buffer_f32(
-                    &layer.post_normed_buffer,
-                    stream,
-                    self.hidden,
-                    &format!(
-                        "{item_label} self-attn resident batch post normed"
-                    ),
-                )?);
+            let post_normed = read_runtime_buffer_f32(
+                &layer.post_normed_buffer,
+                stream,
+                self.hidden,
+                &format!("{item_label} self-attn resident batch post normed"),
+            )?;
+            record_sq_diagnostic_host_staging_f32_read(
+                post_normed.len(),
+                "self-attn resident post normed staging",
+            )?;
+            post_normed_values[post_normed_start..post_normed_end].copy_from_slice(&post_normed);
         }
         self.batch_post_normed_buffer.copy_from_host(
             0,
@@ -3274,6 +3328,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
         .map_err(|err| {
             format!("failed to copy {label} self-attn resident batch post normed: {err}")
         })?;
+        record_sq_diagnostic_host_staging_f32_write(
+            post_normed_values.len(),
+            "self-attn resident batch post normed staging",
+        )?;
 
         let component_started = Instant::now();
         weights.mlp_gate_matrix.matvec_batch(
@@ -3311,11 +3369,19 @@ impl PackageSelfAttnResidentStepBatchLayer {
             mlp_activation_elements,
             &format!("{label} self-attn resident batch MLP gate output"),
         )?;
+        record_sq_diagnostic_host_staging_f32_read(
+            mlp_gate_values.len(),
+            "self-attn resident batch MLP gate staging",
+        )?;
         let mlp_up_values = read_runtime_buffer_f32(
             &self.batch_mlp_activation_buffer,
             stream,
             mlp_activation_elements,
             &format!("{label} self-attn resident batch MLP up output"),
+        )?;
+        record_sq_diagnostic_host_staging_f32_read(
+            mlp_up_values.len(),
+            "self-attn resident batch MLP up staging",
         )?;
 
         for (gate_value, up_value) in mlp_gate_values.iter_mut().zip(mlp_up_values.iter()) {
@@ -3331,6 +3397,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
         .map_err(|err| {
             format!("failed to copy {label} self-attn resident batch MLP activation: {err}")
         })?;
+        record_sq_diagnostic_host_staging_f32_write(
+            mlp_gate_values.len(),
+            "self-attn resident batch MLP activation staging",
+        )?;
 
         let component_started = Instant::now();
         weights.mlp_down_matrix.matvec_batch(
@@ -3357,6 +3427,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
             stream,
             attention_block_output_elements,
             &format!("{label} self-attn resident batch MLP down output"),
+        )?;
+        record_sq_diagnostic_host_staging_f32_read(
+            mlp_down_output_values.len(),
+            "self-attn resident batch MLP down staging",
         )?;
         for (output_value, residual_value) in mlp_down_output_values
             .iter_mut()
@@ -3398,6 +3472,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident layer output: {err}")
                 })?;
+            record_sq_diagnostic_host_staging_f32_write(
+                hidden_elements,
+                "self-attn resident layer output staging",
+            )?;
             if sync_component_timing {
                 layer.last_component_step_ms = Some(component_step_ms[batch_index]);
             }
@@ -3446,6 +3524,10 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 stream,
                 self.hidden,
                 &format!("{item_label} self-attn resident residual"),
+            )?;
+            record_sq_diagnostic_host_staging_f32_read(
+                residual.len(),
+                "self-attn resident device residual staging",
             )?;
             host_batch_items.push(MixedRequestStateBatchStepItem {
                 request_id,

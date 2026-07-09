@@ -654,6 +654,13 @@ Current local baseline state:
   `generated_tokens=1x2`, `rotary_dim=128`, and `rope_base=1000000`. It records
   `batching_mode=real`, `prefill_real_batch=true`, `decode_real_batch=true`,
   `sq_projection_boundary=batch`, and `sq_fp8_batch_matvec_count=560/560`.
+- Diagnostic host-staging telemetry is now emitted for SQ8_0 mixed request-state rows and preserved
+  by the external benchmark parser. The short layer3 telemetry smoke at
+  `benchmarks/results/2026-07-09/sq8-host-staging-telemetry-smoke/results.jsonl` records
+  `sq_diagnostic_host_staging_read_count=39`,
+  `sq_diagnostic_host_staging_write_count=48`,
+  `sq_diagnostic_host_staging_read_bytes=1327104`, and
+  `sq_diagnostic_host_staging_write_bytes=1130496`.
 - The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
   It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and
@@ -760,6 +767,10 @@ Comparison rules:
   `decode_real_batch=true`, and `sq_fp8_batch_matvec_count=560/560`. Treat it as full model-loop
   real-batch evidence, but not final serving parity because final logits are included and the
   resident path still uses diagnostic host staging.
+- SQ8_0 mixed request-state rows may now report `sq_diagnostic_host_staging_*` counters. Nonzero
+  values make the host-staging caveat machine-readable and should keep the row outside final serving
+  parity comparisons until those copies are removed or the row is explicitly classified as
+  diagnostic.
 - AQ4-derived stack real-batch rows with SQ8_0 overlay are not comparable serving rows when they
   report `sq_execution_mode=materialized_f32_fallback`. They are scheduler-connectivity diagnostics
   until the stack/model-loop loader uses resident SQ8_0 matvec storage instead of materialized F32
@@ -848,6 +859,9 @@ Expected outputs:
      `batching_mode=real`, `sq_projection_boundary=batch`, and
      `sq_fp8_batch_matvec_count=560/560`. The remaining blocker for final vLLM serving comparison is
      reducing/annotating host staging and adding server-style or serving-equivalent rows.
+   - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
+     request-state rows. The next implementation step is still to reduce the counted copies rather
+     than treating the annotation itself as serving parity.
 
 ## Risks
 

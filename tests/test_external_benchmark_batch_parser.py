@@ -1297,6 +1297,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "sq_fp8_single_matvec_count=0 sq_fp8_batch_matvec_count=560 "
             "sq_fp8_expected_all_batch_matvec_count=560 sq_fp8_pair_matvec_count=0 "
             "sq_fp8_triple_matvec_count=0 prefill_sq_fp8_batch_matvec_count=280 "
+            "sq_diagnostic_host_staging_read_count=960 "
+            "sq_diagnostic_host_staging_write_count=880 "
+            "sq_diagnostic_host_staging_read_bytes=125829120 "
+            "sq_diagnostic_host_staging_write_bytes=104857600 "
             "decode_sq_fp8_batch_matvec_count=280 batching_mode=real "
             "prefill_executor=mixed_request_state_layer_batch_step "
             "decode_executor=mixed_request_state_layer_batch_step "
@@ -1345,6 +1349,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["sq_fp8_batch_matvec_count"], 560)
         self.assertEqual(row["workload"]["sq_fp8_expected_all_batch_matvec_count"], 560)
         self.assertEqual(row["workload"]["sq_fp8_single_matvec_count"], 0)
+        self.assertEqual(row["workload"]["sq_diagnostic_host_staging_read_count"], 960)
+        self.assertEqual(row["workload"]["sq_diagnostic_host_staging_write_count"], 880)
+        self.assertEqual(row["workload"]["sq_diagnostic_host_staging_read_bytes"], 125829120)
+        self.assertEqual(row["workload"]["sq_diagnostic_host_staging_write_bytes"], 104857600)
         self.assertEqual(row["batching"]["mode"], "real")
         self.assertTrue(row["batching"]["prefill_real_batch"])
         self.assertTrue(row["batching"]["decode_real_batch"])

@@ -1137,6 +1137,10 @@ def enrich_ullm_sq_projection_workload(
         "sq_fp8_expected_all_batch_matvec_count",
         "sq_fp8_pair_matvec_count",
         "sq_fp8_triple_matvec_count",
+        "sq_diagnostic_host_staging_read_count",
+        "sq_diagnostic_host_staging_write_count",
+        "sq_diagnostic_host_staging_read_bytes",
+        "sq_diagnostic_host_staging_write_bytes",
         "prefill_sq_fp8_batch_matvec_count",
         "decode_sq_fp8_batch_matvec_count",
     ):
@@ -1144,6 +1148,7 @@ def enrich_ullm_sq_projection_workload(
         if value is not None and (
             value > 0
             or key.startswith("sq_fp8_")
+            or key.startswith("sq_diagnostic_host_staging_")
             or key in {
                 "prefill_sq_fp8_batch_matvec_count",
                 "decode_sq_fp8_batch_matvec_count",

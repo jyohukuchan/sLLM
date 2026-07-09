@@ -72,10 +72,22 @@ struct SqFp8ProjectionTelemetry {
     triple_matvec_count: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SqDiagnosticHostStagingTelemetry {
+    read_count: u64,
+    write_count: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+}
+
 static SQ_FP8_SINGLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_BATCH_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_PAIR_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
 static SQ_FP8_TRIPLE_MATVEC_COUNT: AtomicU64 = AtomicU64::new(0);
+static SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT: AtomicU64 = AtomicU64::new(0);
+static SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES: AtomicU64 = AtomicU64::new(0);
+static SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
 struct SqFp8ProjectionDispatch {
@@ -154,12 +166,28 @@ fn reset_sq_fp8_projection_telemetry() {
     SQ_FP8_TRIPLE_MATVEC_COUNT.store(0, Ordering::Relaxed);
 }
 
+fn reset_sq_diagnostic_host_staging_telemetry() {
+    SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT.store(0, Ordering::Relaxed);
+    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.store(0, Ordering::Relaxed);
+    SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES.store(0, Ordering::Relaxed);
+    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.store(0, Ordering::Relaxed);
+}
+
 fn snapshot_sq_fp8_projection_telemetry() -> SqFp8ProjectionTelemetry {
     SqFp8ProjectionTelemetry {
         single_matvec_count: SQ_FP8_SINGLE_MATVEC_COUNT.load(Ordering::Relaxed),
         batch_matvec_count: SQ_FP8_BATCH_MATVEC_COUNT.load(Ordering::Relaxed),
         pair_matvec_count: SQ_FP8_PAIR_MATVEC_COUNT.load(Ordering::Relaxed),
         triple_matvec_count: SQ_FP8_TRIPLE_MATVEC_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+fn snapshot_sq_diagnostic_host_staging_telemetry() -> SqDiagnosticHostStagingTelemetry {
+    SqDiagnosticHostStagingTelemetry {
+        read_count: SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT.load(Ordering::Relaxed),
+        write_count: SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.load(Ordering::Relaxed),
+        read_bytes: SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES.load(Ordering::Relaxed),
+        write_bytes: SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.load(Ordering::Relaxed),
     }
 }
 
@@ -178,6 +206,32 @@ fn record_sq_fp8_projection_dispatch(dispatch: SqFp8ProjectionDispatch) {
             SQ_FP8_TRIPLE_MATVEC_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+fn record_sq_diagnostic_host_staging_read_bytes(bytes: usize) {
+    SQ_DIAGNOSTIC_HOST_STAGING_READ_COUNT.fetch_add(1, Ordering::Relaxed);
+    SQ_DIAGNOSTIC_HOST_STAGING_READ_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+fn record_sq_diagnostic_host_staging_write_bytes(bytes: usize) {
+    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
+    SQ_DIAGNOSTIC_HOST_STAGING_WRITE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+
+fn record_sq_diagnostic_host_staging_f32_read(
+    elements: usize,
+    label: &str,
+) -> Result<(), String> {
+    record_sq_diagnostic_host_staging_read_bytes(checked_f32_byte_len(elements, label)?);
+    Ok(())
+}
+
+fn record_sq_diagnostic_host_staging_f32_write(
+    elements: usize,
+    label: &str,
+) -> Result<(), String> {
+    record_sq_diagnostic_host_staging_write_bytes(checked_f32_byte_len(elements, label)?);
+    Ok(())
 }
 
 fn sq_fp8_projection_boundary(telemetry: SqFp8ProjectionTelemetry) -> String {
