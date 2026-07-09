@@ -2,6 +2,7 @@
 // This file is only a manifest for role-specific C ABI wrapper groups.
 
 #include "ullm_runtime_api_core.inc"
+#include "ullm_runtime_api_sq8_ck.inc"
 #include "ullm_runtime_api_aq4.inc"
 #include "ullm_runtime_api_linear_attn_prepare.inc"
 #include "ullm_runtime_api_primitives.inc"

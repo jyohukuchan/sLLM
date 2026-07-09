@@ -25,6 +25,14 @@ typedef enum ullm_sq_fp8_execution_path {
     ULLM_SQ_FP8_EXECUTION_PATH_HIP_KERNEL = 1,
 } ullm_sq_fp8_execution_path;
 
+typedef enum ullm_sq8_ck_implementation {
+    ULLM_SQ8_CK_IMPLEMENTATION_UNAVAILABLE = 0,
+    ULLM_SQ8_CK_MEM_V1_DEFAULT_TILE_16X128X128 = 1,
+    ULLM_SQ8_CK_MEM_V1_KPADDING_TILE_16X128X256 = 2,
+    ULLM_SQ8_CK_MEM_V1_DEFAULT_TILE_16X256X128 = 3,
+    ULLM_SQ8_CK_MEM_V1_DEFAULT_TILE_16X128X256 = 4,
+} ullm_sq8_ck_implementation;
+
 typedef struct ullm_device_info {
     int32_t device_id;
     char backend[16];
@@ -98,6 +106,38 @@ ullm_status ullm_runtime_stream_create(
 ullm_status ullm_runtime_stream_destroy(ullm_runtime_stream *stream);
 
 ullm_status ullm_runtime_stream_synchronize(ullm_runtime_stream *stream);
+
+/*
+ * Enqueues exact OCP E4M3 RNE row-by-K128 activation quantization from F32
+ * input[M,K] to byte output[M,K] and F32 scales[M,K/128]. The outputs may be
+ * reused by multiple projection calls on the same stream.
+ */
+ullm_status ullm_runtime_sq8_ck_quantize_activation_f32(
+    const ullm_runtime_buffer *input_buffer,
+    size_t m,
+    size_t k,
+    ullm_runtime_buffer *quantized_buffer,
+    ullm_runtime_buffer *scale_buffer,
+    ullm_runtime_stream *stream);
+
+/*
+ * Enqueues a measured gfx1201 CK ABScale projection from quantized A[M,K],
+ * F32 A scales[M,K/128], canonical FP8 weight[N,K], and F32 weight scales
+ * [N/128,K/128]. It then converts workspace_buffer[M,N] from BF16 into F32
+ * output_buffer[M,N] on the same stream.
+ */
+ullm_status ullm_runtime_sq8_ck_projection_f32(
+    const ullm_runtime_buffer *quantized_activation_buffer,
+    const ullm_runtime_buffer *activation_scale_buffer,
+    const ullm_runtime_buffer *weight_buffer,
+    const ullm_runtime_buffer *weight_scale_buffer,
+    size_t m,
+    size_t n,
+    size_t k,
+    ullm_runtime_buffer *workspace_buffer,
+    ullm_runtime_buffer *output_buffer,
+    ullm_runtime_stream *stream,
+    ullm_sq8_ck_implementation *implementation);
 
 ullm_status ullm_runtime_wmma_fp8_probe(
     ullm_runtime_buffer *output_buffer,

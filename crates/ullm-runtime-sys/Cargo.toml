@@ -5,5 +5,13 @@ edition = "2024"
 license = "Apache-2.0"
 links = "ullm_runtime"
 
+[features]
+default = []
+rocm-ck-gfx1201 = []
+
 [build-dependencies]
 cc = "1.2"
+
+[[example]]
+name = "sq8_ck_fixture"
+required-features = ["rocm-ck-gfx1201"]
