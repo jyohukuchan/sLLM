@@ -338,11 +338,11 @@ they must not be mixed with final `real` full-package throughput rows in SQ/vLLM
 
 SQ8_0 resident stack diagnostics, such as `sq-fp8-package-self-attn-stack-batch-smoke`, may also
 use the model-loop parser. These rows prove that the stack path can avoid F32 materialized SQ8_0
-weights and use resident direct projection boundaries. If they report `batching.mode="grouped"`,
-`prefill_real_batch=false`, `decode_real_batch=false`, or
-`sq_fp8_batch_matvec_count < sq_fp8_expected_all_batch_matvec_count`, they are not final real-batch
-serving rows. They should remain in a diagnostic comparison class even when `sq_execution_mode` is
-`direct_fp8_dequant_matvec`.
+weights and use resident direct projection boundaries. Rows with `batching.mode="real"`,
+`prefill_real_batch=true`, and `decode_real_batch=true` prove real-batch projection for the reported
+boundary. If `sq_fp8_batch_matvec_count < sq_fp8_expected_all_batch_matvec_count`, only part of the
+selected SQ8_0 projection set is batched, so the row remains a resident stack diagnostic rather than
+a final real-batch serving row.
 
 SQ candidate rows may also carry a top-level `candidate` object:
 

@@ -397,6 +397,13 @@ Done:
   It is still `batching_mode=grouped` with `prefill_real_batch=false`,
   `decode_real_batch=false`, and `sq_fp8_batch_matvec_count=0/21`, so it is a resident
   stack-connectivity diagnostic rather than the final full-package real-batch row.
+- The next resident stack diagnostic row is
+  `benchmarks/results/2026-07-09/sq8-stack-resident-qkv-batch/results.jsonl`. It reports
+  `batching_mode=real`, `prefill_real_batch=true`, `decode_real_batch=true`,
+  `sq_projection_boundary=single+batch`, and `sq_fp8_batch_matvec_count=9/21`. This proves q/k/v
+  projections use direct SQ8_0 batch matvec in both prefill and decode. The remaining o/gate/up/down
+  projections still use direct single boundaries, so it is still a selected-layer resident
+  diagnostic rather than the final all-projection/full-serving row.
 
 ### M6: Dispatch Integration
 
@@ -813,9 +820,10 @@ Expected outputs:
      as `PackageAq4ResidentMatvec` or a new resident stack-batch layer that can call
      `matvec_batch` for q/k/v/o/gate/up/down.
    - The new `sq-fp8-package-self-attn-stack-batch-smoke` closes the materialized-F32 side of this
-     blocker for a stack-shaped diagnostic by using the resident mixed request-state path. It does
-     not close the real-batch side yet: the current row is grouped and uses direct `single+triple`
-     projection boundaries, with no SQ8_0 batch matvec calls.
+     blocker for a stack-shaped diagnostic by using the resident mixed request-state path. The
+     latest row now closes the q/k/v real-batch side as well with `batching_mode=real` and
+     `sq_fp8_batch_matvec_count=9/21`. The remaining blocker is batching the o/gate/up/down
+     projection boundaries and moving from selected-layer diagnostics to full-package/server rows.
    - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
      final vLLM serving comparison still needs real-batch or server-style uLLM rows.
 
