@@ -1,0 +1,175 @@
+{
+  "aq4_baseline_case_id": "aq4-qkv-layers3-7-11-baseline-reused",
+  "candidate": {
+    "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-q16-k16-v16-policy-v0.1-artifact",
+    "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-q16-k16-v16"
+  },
+  "finding": "Layer3+7+11 QKV q16/k16/v16 preserves strict top1 for len4/case_a/case_b with SQ FP8 triple boundary count 69.",
+  "next_action": "Hold layer3+7+11 QKV q16/k16/v16 as the current QKV triple passing boundary, then test layer15 QKV or split layer15 q/k/v if strict top1 fails.",
+  "per_prompt": [
+    {
+      "aq4_margin_over_sq_top1_in_aq4": 0.0,
+      "aq4_top1": 24218,
+      "aq4_top1_logit_in_aq4": 7.201347828,
+      "aq4_top1_logit_in_sq": 7.105546951,
+      "aq4_top1_rank_in_sq_top8": 1,
+      "aq4_top8_tokens": [
+        24218,
+        41813,
+        88110,
+        14482,
+        81395,
+        61946,
+        56374,
+        60607
+      ],
+      "kind": "per_prompt",
+      "label": "len4",
+      "prompt_token_ids": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "sq_margin_over_aq4_top1_in_sq": 0.0,
+      "sq_top1": 24218,
+      "sq_top1_logit_in_aq4": 7.201347828,
+      "sq_top1_logit_in_sq": 7.105546951,
+      "sq_top1_margin_over_second_in_sq": 0.28031921400000037,
+      "sq_top1_rank_in_aq4_top8": 1,
+      "sq_top8_tokens": [
+        24218,
+        41813,
+        88110,
+        14482,
+        81395,
+        56374,
+        61946,
+        6
+      ],
+      "strict_top1_match": true,
+      "top8_overlap_count": 7
+    },
+    {
+      "aq4_margin_over_sq_top1_in_aq4": 0.0,
+      "aq4_top1": 4105,
+      "aq4_top1_logit_in_aq4": 4.995436668,
+      "aq4_top1_logit_in_sq": 5.094554424,
+      "aq4_top1_rank_in_sq_top8": 1,
+      "aq4_top8_tokens": [
+        4105,
+        5582,
+        42228,
+        513,
+        200,
+        1119,
+        998,
+        314
+      ],
+      "kind": "per_prompt",
+      "label": "case_a",
+      "prompt_token_ids": [
+        100,
+        200,
+        300,
+        400,
+        500,
+        600,
+        700,
+        800
+      ],
+      "sq_margin_over_aq4_top1_in_sq": 0.0,
+      "sq_top1": 4105,
+      "sq_top1_logit_in_aq4": 4.995436668,
+      "sq_top1_logit_in_sq": 5.094554424,
+      "sq_top1_margin_over_second_in_sq": 0.00970125200000016,
+      "sq_top1_rank_in_aq4_top8": 1,
+      "sq_top8_tokens": [
+        4105,
+        5582,
+        42228,
+        513,
+        200,
+        1119,
+        314,
+        998
+      ],
+      "strict_top1_match": true,
+      "top8_overlap_count": 8
+    },
+    {
+      "aq4_margin_over_sq_top1_in_aq4": 0.0,
+      "aq4_top1": 329,
+      "aq4_top1_logit_in_aq4": 4.806379318,
+      "aq4_top1_logit_in_sq": 4.838942528,
+      "aq4_top1_rank_in_sq_top8": 1,
+      "aq4_top8_tokens": [
+        329,
+        933,
+        8903,
+        261,
+        294,
+        1547,
+        334,
+        627
+      ],
+      "kind": "per_prompt",
+      "label": "case_b",
+      "prompt_token_ids": [
+        42,
+        314,
+        2718,
+        1618,
+        12345,
+        23456,
+        34567,
+        45678
+      ],
+      "sq_margin_over_aq4_top1_in_sq": 0.0,
+      "sq_top1": 329,
+      "sq_top1_logit_in_aq4": 4.806379318,
+      "sq_top1_logit_in_sq": 4.838942528,
+      "sq_top1_margin_over_second_in_sq": 0.19444465699999913,
+      "sq_top1_rank_in_aq4_top8": 1,
+      "sq_top8_tokens": [
+        329,
+        933,
+        8903,
+        261,
+        294,
+        334,
+        627,
+        1547
+      ],
+      "strict_top1_match": true,
+      "top8_overlap_count": 8
+    }
+  ],
+  "promoted_full_sq_policy": false,
+  "run_id": "phase-t2-sq-fp8-qkv-layers3-7-11-q16-k16-v16-prompt-bundle-v1",
+  "sq_case_id": "sq-qkv-layers3-7-11-q16-k16-v16",
+  "summary": {
+    "aq4_baseline_reused_from": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layers3-7-q16-k16-v16-prompt-bundle-v1",
+    "aq4_decode_tps": 80.883171,
+    "aq4_end_to_end_tps": 35.370726,
+    "aq4_prefill_tps": 66.811351,
+    "aq4_vram_consumed_bytes": 4443144192,
+    "candidate": {
+      "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-q16-k16-v16-policy-v0.1-artifact",
+      "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-q16-k16-v16"
+    },
+    "kind": "summary",
+    "run_id": "phase-t2-sq-fp8-qkv-layers3-7-11-q16-k16-v16-prompt-bundle-v1",
+    "sq_decode_tps": 76.326909,
+    "sq_end_to_end_tps": 33.173002,
+    "sq_fp8_tensor_count": 9,
+    "sq_fp8_triple_matvec_count": 69,
+    "sq_passthrough_tensor_count": 766,
+    "sq_prefill_tps": 63.183461,
+    "sq_projection_boundary": "triple",
+    "sq_vram_consumed_bytes": 4527161344,
+    "strict_top1_all_match": true,
+    "strict_top1_pass_count": 3,
+    "strict_top1_total": 3
+  }
+}
