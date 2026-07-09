@@ -1,0 +1,20 @@
+{
+  "metadata": {
+    "suite_id": "pre-sq-runtime-prompt-suite-smoke-v0.1",
+    "purpose": "Tiny AQ4/SQ prompt-suite wiring smoke for generated-token and generated-text guard plumbing.",
+    "tokenizer": "Qwen3.5-9B",
+    "decode_policy": "greedy, short generation, no output-health adoption decision"
+  },
+  "prompts": [
+    {
+      "id": "warmup_fragment_smoke",
+      "category": "technical",
+      "prompt": "GPU warmup can distort token/s because",
+      "generated_tokens": 2,
+      "output_health": false,
+      "notes": [
+        "Keeps runtime short while exercising tokenizer, package-token prompt bench, optional SQ artifact wiring, and v0.2 text guard comparison."
+      ]
+    }
+  ]
+}

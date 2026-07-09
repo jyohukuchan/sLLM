@@ -460,6 +460,25 @@ fn main() -> ExitCode {
                 env::args().nth(15),
             )
         }
+        Some("sq-fp8-token-ids-generate-smoke" | "sq-fp8-token-ids-bench") => {
+            sq_fp8_token_ids_generate_smoke(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+                env::args().nth(8),
+                env::args().nth(9),
+                env::args().nth(10),
+                env::args().nth(11),
+                env::args().nth(12),
+                env::args().nth(13),
+                env::args().nth(14),
+                env::args().nth(15),
+                env::args().nth(16),
+            )
+        }
         Some("package-batch-throughput-bench") => package_batch_throughput_bench(
             env::args().nth(2),
             env::args().nth(3),
@@ -20628,6 +20647,131 @@ fn package_token_ids_generate_smoke(
         lm_head_mode,
         stop_token_ids,
         stop_token_sequences,
+        None,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sq_fp8_token_ids_generate_smoke(
+    path: Option<String>,
+    artifact_path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_indices: Option<String>,
+    prompt_token_ids: Option<String>,
+    generated_tokens: Option<String>,
+    top_k: Option<String>,
+    lm_head_chunk_rows: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+    lm_head_mode: Option<String>,
+    stop_token_ids: Option<String>,
+    stop_token_sequences: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("sq-fp8-token-ids-generate-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(artifact_path) = artifact_path else {
+        eprintln!("sq-fp8-token-ids-generate-smoke requires an SQ FP8 artifact path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_indices =
+        match parse_package_token_ids_layer_indices_for_package(&path, layer_indices) {
+            Ok(value) => value,
+            Err(code) => return code,
+        };
+    let prompt_token_ids = match parse_package_prompt_token_ids(prompt_token_ids) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let generated_tokens = match parse_optional_usize(generated_tokens, 1, "generated tokens") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let top_k = match parse_optional_usize(top_k, 8, "top k") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("top k must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let lm_head_chunk_rows =
+        match parse_optional_usize(lm_head_chunk_rows, 1024, "lm head chunk rows") {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                eprintln!("lm head chunk rows must be greater than zero");
+                return ExitCode::from(2);
+            }
+            Err(code) => return code,
+        };
+    let lm_head_mode = match parse_package_lm_head_mode(lm_head_mode) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let rope_base = match parse_optional_f32(rope_base, 10_000_000.0, "rope base") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let position_offset = match parse_optional_usize(position_offset, 0, "position offset") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let stop_token_ids = match parse_package_stop_token_ids(stop_token_ids) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let stop_token_sequences = match parse_package_stop_token_sequences(stop_token_sequences) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let artifact = match read_sq_fp8_artifact(&artifact_path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to read SQ FP8 artifact: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match package_token_ids_generate_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_indices,
+        prompt_token_ids,
+        generated_tokens,
+        top_k,
+        lm_head_chunk_rows,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        lm_head_mode,
+        stop_token_ids,
+        stop_token_sequences,
+        Some(&artifact),
     ) {
         Ok(report) => {
             println!("{report}");
@@ -20969,6 +21113,7 @@ fn package_batch_throughput_bench_impl(
             lm_head_mode,
             stop_token_ids.clone(),
             stop_token_sequences.clone(),
+            None,
         )?;
         let external_request_wall_ms = request_started.elapsed().as_secs_f64() * 1000.0;
         let report = serde_json::from_str::<serde_json::Value>(&report_text)
@@ -28567,6 +28712,7 @@ fn package_token_ids_generate_smoke_impl(
     lm_head_mode: PackageLmHeadMode,
     stop_token_ids: Vec<usize>,
     stop_token_sequences: Vec<Vec<usize>>,
+    sq_artifact: Option<&ullm_engine::sq::SqFp8Artifact>,
 ) -> Result<String, String> {
     if env::var("ULLM_GENERATE_DECODE_MODE")
         .map(|value| value == "full_sequence_recompute_greedy")
@@ -28591,6 +28737,7 @@ fn package_token_ids_generate_smoke_impl(
             position_offset,
             stop_token_ids,
             stop_token_sequences,
+            sq_artifact,
         );
     }
     let sync_decode_layers_for_timing = env_flag_enabled("ULLM_SYNC_DECODE_LAYERS_FOR_TIMING");
@@ -28613,6 +28760,7 @@ fn package_token_ids_generate_smoke_impl(
         stop_token_sequences,
         sync_decode_layers_for_timing,
         sync_decode_each_layer_for_timing,
+        sq_artifact,
     )
 }
 
@@ -28631,6 +28779,7 @@ fn package_token_ids_generate_recompute_smoke_impl(
     position_offset: usize,
     stop_token_ids: Vec<usize>,
     stop_token_sequences: Vec<Vec<usize>>,
+    sq_artifact: Option<&ullm_engine::sq::SqFp8Artifact>,
 ) -> Result<String, String> {
     if prompt_token_ids.is_empty() {
         return Err(
@@ -28650,7 +28799,7 @@ fn package_token_ids_generate_recompute_smoke_impl(
     drop(context);
 
     let mut sequence_ids = prompt_token_ids.clone();
-    let prefill_report_text = package_token_ids_logits_smoke_impl(
+    let prefill_report_text = package_token_ids_logits_smoke_impl_with_sq_overlay(
         path,
         device_index,
         chunk_bytes,
@@ -28661,6 +28810,7 @@ fn package_token_ids_generate_recompute_smoke_impl(
         rotary_dim.clone(),
         rope_base,
         position_offset,
+        sq_artifact,
     )?;
     let prefill_report = serde_json::from_str::<serde_json::Value>(&prefill_report_text)
         .map_err(|err| format!("failed to decode prefill logits report: {err}"))?;
@@ -28704,7 +28854,7 @@ fn package_token_ids_generate_recompute_smoke_impl(
         && stopped_on_token_sequence.is_none()
     {
         let step_started = Instant::now();
-        let report_text = package_token_ids_logits_smoke_impl(
+        let report_text = package_token_ids_logits_smoke_impl_with_sq_overlay(
             path,
             device_index,
             chunk_bytes,
@@ -28715,6 +28865,7 @@ fn package_token_ids_generate_recompute_smoke_impl(
             rotary_dim.clone(),
             rope_base,
             position_offset,
+            sq_artifact,
         )?;
         let external_step_ms = step_started.elapsed().as_secs_f64() * 1000.0;
         let report = serde_json::from_str::<serde_json::Value>(&report_text)
@@ -30798,6 +30949,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     stop_token_sequences: Vec<Vec<usize>>,
     sync_decode_layers_for_timing: bool,
     sync_decode_each_layer_for_timing: bool,
+    sq_artifact: Option<&ullm_engine::sq::SqFp8Artifact>,
 ) -> Result<String, String> {
     if prompt_token_ids.is_empty() {
         return Err(
@@ -30831,6 +30983,20 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let mut stream = context
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
+    let sq_overlay = sq_artifact.map(|artifact| Qwen3PackageSqOverlay {
+        artifact,
+        row_chunk: 256,
+    });
+    let sq_overlay_json = sq_artifact.map(|artifact| {
+        serde_json::json!({
+            "artifact": artifact.artifact_dir,
+            "candidate": artifact.manifest.candidate.id,
+            "schema_version": artifact.manifest.schema_version,
+            "fp8_tensor_count": artifact.manifest.storage.fp8_tensor_count,
+            "passthrough_tensor_count": artifact.manifest.storage.passthrough_tensor_count,
+            "row_chunk": 256,
+        })
+    });
 
     let (embedding_vocab, hidden) = package_embedding_shape(path)?;
     if hidden == 0 {
@@ -30878,29 +31044,60 @@ fn package_token_ids_generate_incremental_smoke_impl(
         layer_kinds.push(layer_kind.as_str());
         match layer_kind {
             PackageDecoderLayerKind::LinearAttention => {
-                let layer = PackageLinearAttnResidentStepLayer::load(
-                    &mut context,
-                    &mut stream,
-                    path,
-                    chunk_bytes,
-                    layer_index,
-                )
+                let layer = if sq_overlay.is_some() {
+                    let mut registry = WeightRegistry::new();
+                    PackageLinearAttnResidentStepLayer::load_with_registry(
+                        &mut context,
+                        &mut stream,
+                        &mut registry,
+                        None,
+                        path,
+                        chunk_bytes,
+                        layer_index,
+                        sq_overlay.as_ref(),
+                    )
+                } else {
+                    PackageLinearAttnResidentStepLayer::load(
+                        &mut context,
+                        &mut stream,
+                        path,
+                        chunk_bytes,
+                        layer_index,
+                    )
+                }
                 .map_err(|err| {
                     format!("failed to load incremental linear-attn layer {layer_index}: {err}")
                 })?;
                 layers.push(PackageTokenIdsIncrementalLayer::LinearAttention(layer));
             }
             PackageDecoderLayerKind::SelfAttention => {
-                let layer = PackageSelfAttnResidentStepLayer::load(
-                    &mut context,
-                    &mut stream,
-                    path,
-                    chunk_bytes,
-                    layer_index,
-                    &block_table,
-                    block_size,
-                    cache_blocks,
-                )
+                let layer = if sq_overlay.is_some() {
+                    let mut registry = WeightRegistry::new();
+                    PackageSelfAttnResidentStepLayer::load_with_registry(
+                        &mut context,
+                        &mut stream,
+                        &mut registry,
+                        None,
+                        path,
+                        chunk_bytes,
+                        layer_index,
+                        &block_table,
+                        block_size,
+                        cache_blocks,
+                        sq_overlay.as_ref(),
+                    )
+                } else {
+                    PackageSelfAttnResidentStepLayer::load(
+                        &mut context,
+                        &mut stream,
+                        path,
+                        chunk_bytes,
+                        layer_index,
+                        &block_table,
+                        block_size,
+                        cache_blocks,
+                    )
+                }
                 .map_err(|err| {
                     format!("failed to load incremental self-attn layer {layer_index}: {err}")
                 })?;
@@ -31474,6 +31671,7 @@ fn package_token_ids_generate_incremental_smoke_impl(
     let report = serde_json::json!({
         "schema_version": "package-token-ids-generate-smoke-v0.1",
         "package": path,
+        "sq_overlay": sq_overlay_json,
         "git_commit": current_git_commit(),
         "backend": info.backend.to_string(),
         "device_index": device_index,
@@ -42417,6 +42615,9 @@ fn print_help() {
         "package-token-ids-generate-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all|manifest-all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
     );
     eprintln!(
+        "sq-fp8-token-ids-generate-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all|manifest-all] [TOKEN_IDS_CSV|len:N] [GENERATED_TOKENS] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"
+    );
+    eprintln!(
         "package-token-ids-logits-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all|manifest-all] [TOKEN_IDS_CSV|len:N] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
     );
     eprintln!(
@@ -42443,6 +42644,9 @@ fn print_help() {
     eprintln!("runtime-rocwmma-fp8-attn-probe-smoke: [DEVICE_INDEX] [PATTERN=ones|layout]");
     eprintln!(
         "package-token-ids-bench: same arguments as package-token-ids-generate-smoke; writes the same measured JSON report"
+    );
+    eprintln!(
+        "sq-fp8-token-ids-bench: same arguments as sq-fp8-token-ids-generate-smoke; writes the same measured JSON report"
     );
     eprintln!(
         "package-batch-throughput-bench: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYERS_CSV|all|manifest-all] [TOKEN_IDS_BATCH|len:NxM|REQ1;REQ2] [GENERATED_TOKENS|CSV] [TOP_K] [LM_HEAD_CHUNK_ROWS] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET] [LM_HEAD_MODE=cpu_chunked|gpu_resident_f32] [STOP_TOKEN_IDS_CSV|none] [STOP_TOKEN_SEQUENCES=SEQ1;SEQ2|none]"

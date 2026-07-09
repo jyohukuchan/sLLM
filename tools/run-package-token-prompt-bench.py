@@ -33,6 +33,9 @@ REQUIRED_HIP_KERNEL_ENVS = {
     "ULLM_REQUIRE_HIP_SEGMENTED_RMSNORM_SILU_MUL_KERNEL": "1",
     "ULLM_REQUIRE_HIP_SIGMOID_MUL_KERNEL": "1",
     "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_PAIR_KERNEL": "1",
+    "ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL": "1",
     "ULLM_REQUIRE_HIP_TOP1_KERNEL": "1",
 }
 
@@ -47,6 +50,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--package-dir", required=True, help="Path to the .ullm.d package")
     parser.add_argument("--tokenizer-dir", required=True, help="Local Hugging Face tokenizer dir")
+    parser.add_argument(
+        "--sq-artifact",
+        type=Path,
+        help="Optional SQ FP8 artifact directory; uses sq-fp8-token-ids-bench when set",
+    )
     parser.add_argument(
         "--engine",
         default="target/release/ullm-engine",
@@ -324,22 +332,26 @@ def run_engine(
     stop_token_sequences: list[list[int]],
 ) -> dict[str, Any]:
     token_csv = ",".join(str(token_id) for token_id in token_ids)
-    command = [
-        args.engine,
-        "package-token-ids-bench",
-        args.package_dir,
-        str(args.device_index),
-        str(args.chunk_bytes),
-        args.layers,
-        token_csv,
-        str(args.generated_tokens),
-        str(args.top_k),
-        str(args.lm_head_chunk_rows),
-        str(args.rotary_dim),
-        str(args.rope_base),
-        str(args.position_offset),
-        args.lm_head_mode,
-    ]
+    command = [args.engine]
+    if args.sq_artifact is not None:
+        command.extend(["sq-fp8-token-ids-bench", args.package_dir, str(args.sq_artifact)])
+    else:
+        command.extend(["package-token-ids-bench", args.package_dir])
+    command.extend(
+        [
+            str(args.device_index),
+            str(args.chunk_bytes),
+            args.layers,
+            token_csv,
+            str(args.generated_tokens),
+            str(args.top_k),
+            str(args.lm_head_chunk_rows),
+            str(args.rotary_dim),
+            str(args.rope_base),
+            str(args.position_offset),
+            args.lm_head_mode,
+        ]
+    )
     if stop_token_ids:
         command.append(",".join(str(token_id) for token_id in stop_token_ids))
     elif stop_token_sequences:
@@ -379,6 +391,7 @@ def run_engine(
     report["_runner"] = {
         "command": command,
         "required_hip_kernel_envs": REQUIRED_HIP_KERNEL_ENVS if args.require_hip_kernels else {},
+        "sq_artifact": str(args.sq_artifact) if args.sq_artifact is not None else None,
         "resolved_stop_token_ids": stop_token_ids,
         "resolved_stop_token_sequences": stop_token_sequences,
     }

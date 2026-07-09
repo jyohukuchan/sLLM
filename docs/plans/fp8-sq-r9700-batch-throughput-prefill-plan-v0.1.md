@@ -4620,6 +4620,54 @@ Artifacts:
 1. layer23 `k16` passing branchまたは次のSQ candidateを、v0.2 prompt-suite guardへ接続する。
 2. prompt-suiteを通したcandidateだけをbatch throughput / memory comparisonへ進める。
 
+## 2026-07-09 progress: T2 SQ FP8 prompt-suite text guard smoke
+
+前回の要点:
+
+- v0.2 prompt-suite guardでは、generated token IDだけでなくdecoded text一致も機械可読に保存できるようになった。
+- 次の作業は、layer23 `k16` passing branchまたは次のSQ candidateを、v0.2 prompt-suite guardへ接続することだった。
+
+今回の変更点:
+
+- `sq-fp8-token-ids-generate-smoke` と `sq-fp8-token-ids-bench` を追加し、既存のgenerate benchへSQ FP8 artifactを渡せるようにした。
+- `tools/run-package-token-prompt-bench.py` と `tools/run-package-token-prompt-suite.py` に `--sq-artifact` を追加した。
+- guard bundle runnerは、guard不合格時にもbundle summaryを保存してから非0終了するようにした。
+- `benchmarks/prompts/pre-sq-runtime-prompt-suite-smoke-v0.1.json` を追加し、1 prompt / 2 generated tokensの短いAQ4/SQ比較を実行した。
+
+検証結果:
+
+| row | generated token IDs | generated text | prefill tok/s | decode tok/s | verified |
+| --- | --- | --- | ---: | ---: | :---: |
+| AQ4 baseline | `314,279` | ` of the` | 23.530881 | 25.258380 | true |
+| SQ layer23 `k16` | `314,279` | ` of the` | 20.565812 | 24.336605 | true |
+
+Guard metrics:
+
+| guard | logit atol | generated token match | generated text match | no-stop text match | top logits match | passed |
+| --- | ---: | ---: | ---: | ---: | ---: | :---: |
+| strict | 0.001 | 1 / 1 | 1 / 1 | 1 / 1 | 0 / 1 | false |
+| loose value check | 0.2 | 1 / 1 | 1 / 1 | 1 / 1 | 0 / 1 | false |
+
+Artifacts:
+
+- `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1.md`
+- `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/aq4/summary.json`
+- `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/sq-layer23-k16/summary.json`
+- `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/guard/guard-bundle-summary.json`
+
+判断:
+
+- SQ artifact付きprompt-suite実行経路は接続できた。
+- layer23 `k16` branchはこのmini smokeでは生成tokenと生成textを維持した。
+- ただしtop-k logitsはrank driftを起こしており、full prompt-suite guardとしてはまだ不合格である。
+- この結果はSQ policy昇格ではなく、prompt-suite接続とtext-level観測が可能になったことのsmokeとして扱う。
+
+次の行動:
+
+1. rank driftを採用判断から分離するか、full SQ policyでは引き続きtop-k logits一致を要求するかを明文化する。
+2. SQ candidateをfull v0.3 prompt-suiteへ広げる前に、短い複数promptでtoken/text一致とrank driftの発生箇所を増やして見る。
+3. prompt-suiteを通過したcandidateだけをbatch throughput / memory comparisonへ進める方針は維持する。
+
 ## Risks
 
 | risk | impact | handling |

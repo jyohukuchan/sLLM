@@ -1,0 +1,81 @@
+{
+  "schema_version": "package-token-prompt-suite-summary-v0.3",
+  "suite": {
+    "suite_id": "pre-sq-runtime-prompt-suite-smoke-v0.1",
+    "purpose": "Tiny AQ4/SQ prompt-suite wiring smoke for generated-token and generated-text guard plumbing.",
+    "tokenizer": "Qwen3.5-9B",
+    "decode_policy": "greedy, short generation, no output-health adoption decision"
+  },
+  "package": "/tmp/ullm-quant-direct-package-fullpkg-qwen35-9b-p4p6-lmhead-aq4-g8-weighted-lmhead-calib32-proto.ullm.d",
+  "tokenizer_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3.5-9B",
+  "sq_artifact": null,
+  "device_index": 2,
+  "layers": "manifest-all",
+  "generated_tokens_default": 2,
+  "stop_policy": {
+    "stop_token_ids": null,
+    "stop_token_sequences": null,
+    "stop_text": [],
+    "stop_on_eos": false,
+    "stop_on_special_tokens": false
+  },
+  "case_count": 1,
+  "metrics": {
+    "decode_tps_mean": 25.25837996640686,
+    "decode_tps_min": 25.25837996640686,
+    "decode_tps_max": 25.25837996640686,
+    "prefill_tps_mean": 23.53088112981549,
+    "verified_all": true,
+    "stopped_count": 0,
+    "output_ok_count": 0,
+    "output_warn_count": 0,
+    "output_not_evaluated_count": 1,
+    "hit_generation_limit_count": 0,
+    "low_unique_token_ratio_count": 0,
+    "prompt_echo_count": 0
+  },
+  "category_metrics": {
+    "technical": {
+      "case_count": 1,
+      "decode_tps_mean": 25.25837996640686,
+      "decode_tps_min": 25.25837996640686,
+      "decode_tps_max": 25.25837996640686,
+      "prefill_tps_mean": 23.53088112981549,
+      "verified_all": true,
+      "output_ok_count": 0,
+      "output_warn_count": 0,
+      "output_not_evaluated_count": 1
+    }
+  },
+  "cases": [
+    {
+      "id": "warmup_fragment_smoke",
+      "category": "technical",
+      "report": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/aq4/warmup_fragment_smoke.json",
+      "prompt_tokens": 8,
+      "generated_tokens": 2,
+      "requested_generated_tokens": 2,
+      "verified": true,
+      "stop_reason": "max_generated_tokens",
+      "stopped": false,
+      "stopped_on_token_id": null,
+      "stopped_on_token_sequence": null,
+      "prefill_tps": 23.53088112981549,
+      "decode_tps": 25.25837996640686,
+      "skip2_tps": null,
+      "last8_tps": 25.25837996640686,
+      "p50_ms": 39.590821,
+      "generated_chars": 7,
+      "unique_generated_token_ratio": 1.0,
+      "output_health_evaluated": false,
+      "output_status": "not_evaluated",
+      "output_warnings": [],
+      "generated_preview": "of the",
+      "stop_texts": [],
+      "output_health": false,
+      "notes": [
+        "Keeps runtime short while exercising tokenizer, package-token prompt bench, optional SQ artifact wiring, and v0.2 text guard comparison."
+      ]
+    }
+  ]
+}

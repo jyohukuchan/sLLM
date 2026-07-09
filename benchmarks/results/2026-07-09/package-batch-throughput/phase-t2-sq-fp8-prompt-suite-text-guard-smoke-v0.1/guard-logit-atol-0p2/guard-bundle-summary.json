@@ -1,0 +1,30 @@
+{
+  "schema_version": "package-prompt-guard-bundle-v0.2",
+  "reference": {
+    "label": "aq4",
+    "summary": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/aq4/summary.json"
+  },
+  "candidate": {
+    "label": "sq-layer23-k16",
+    "summary": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/sq-layer23-k16/summary.json"
+  },
+  "passed": false,
+  "checks": [
+    {
+      "name": "prompt_suite_token_logits",
+      "json": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/guard-logit-atol-0p2/prompt-suite-token-logits-guard.json",
+      "md": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-prompt-suite-text-guard-smoke-v0.1/guard-logit-atol-0p2/prompt-suite-token-logits-guard.md",
+      "passed": false,
+      "metrics": {
+        "exit_code": 1,
+        "compared_case_count": 1,
+        "generated_token_match_count": 1,
+        "generated_text_match_count": 1,
+        "generated_without_stop_text_match_count": 1,
+        "top_logits_match_count": 0,
+        "max_prefill_top_logit_abs_diff": 0.04891014099121094,
+        "max_decode_last_top_logit_abs_diff": 0.1147451400756836
+      }
+    }
+  ]
+}

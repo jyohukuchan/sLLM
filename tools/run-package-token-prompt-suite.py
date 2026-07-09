@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--package-dir", required=True)
     parser.add_argument("--tokenizer-dir", required=True)
+    parser.add_argument(
+        "--sq-artifact",
+        type=Path,
+        help="Optional SQ FP8 artifact directory passed to run-package-token-prompt-bench.py",
+    )
     parser.add_argument("--bench-script", type=Path, default=DEFAULT_BENCH_SCRIPT)
     parser.add_argument("--engine", default="target/release/ullm-engine")
     parser.add_argument("--device-index", type=int, default=2)
@@ -201,6 +206,8 @@ def run_case(args: argparse.Namespace, case: PromptCase, output_json: Path) -> d
         "--lm-head-mode",
         args.lm_head_mode,
     ]
+    if args.sq_artifact is not None:
+        command.extend(["--sq-artifact", str(args.sq_artifact)])
     if case.target_prompt_tokens is not None:
         command.extend(["--target-prompt-tokens", str(case.target_prompt_tokens)])
     if case.apply_chat_template:
@@ -390,6 +397,7 @@ def write_summary_json(
         "suite": metadata,
         "package": args.package_dir,
         "tokenizer_dir": args.tokenizer_dir,
+        "sq_artifact": str(args.sq_artifact) if args.sq_artifact is not None else None,
         "device_index": args.device_index,
         "layers": args.layers,
         "generated_tokens_default": args.generated_tokens,

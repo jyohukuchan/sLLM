@@ -49,14 +49,13 @@ def load_json_object(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def run_command(command: list[str]) -> None:
+def run_command(command: list[str]) -> int:
     result = subprocess.run(command, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.stdout.strip():
         print(result.stdout.strip(), file=sys.stderr)
     if result.stderr.strip():
         print(result.stderr.strip(), file=sys.stderr)
-    if result.returncode != 0:
-        raise SystemExit(f"guard command failed with code {result.returncode}: {' '.join(command)}")
+    return result.returncode
 
 
 def write_md(path: Path, summary_json: Path, payload: dict[str, Any]) -> None:
@@ -107,7 +106,7 @@ def main() -> int:
 
     suite_guard_json = args.output_dir / "prompt-suite-token-logits-guard.json"
     suite_guard_md = args.output_dir / "prompt-suite-token-logits-guard.md"
-    run_command(
+    suite_guard_exit_code = run_command(
         [
             sys.executable,
             str(args.suite_guard_script),
@@ -136,6 +135,7 @@ def main() -> int:
             "md": str(suite_guard_md),
             "passed": bool(suite_metrics.get("passed")),
             "metrics": {
+                "exit_code": suite_guard_exit_code,
                 "compared_case_count": suite_metrics.get("compared_case_count"),
                 "generated_token_match_count": suite_metrics.get("generated_token_match_count"),
                 "generated_text_match_count": suite_metrics.get("generated_text_match_count"),
@@ -154,7 +154,7 @@ def main() -> int:
             raise SystemExit("--reference-logits and --candidate-logits must be provided together")
         logits_guard_json = args.output_dir / "standalone-logits-guard.json"
         logits_guard_md = args.output_dir / "standalone-logits-guard.md"
-        run_command(
+        logits_guard_exit_code = run_command(
             [
                 sys.executable,
                 str(args.logits_guard_script),
@@ -183,6 +183,7 @@ def main() -> int:
                 "md": str(logits_guard_md),
                 "passed": bool(logits_metrics.get("passed")),
                 "metrics": {
+                    "exit_code": logits_guard_exit_code,
                     "prompt_tokens": logits_metrics.get("prompt_tokens"),
                     "top_count": logits_metrics.get("top_count"),
                     "top_token_ids_match": logits_metrics.get("top_token_ids_match"),
