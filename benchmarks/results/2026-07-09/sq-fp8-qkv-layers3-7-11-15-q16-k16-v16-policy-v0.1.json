@@ -1,0 +1,101 @@
+{
+  "acceptance_rule": {
+    "diagnostic_only": [
+      "topk_common",
+      "baseline_top1_rank_in_sq_topk",
+      "sq_top1_minus_baseline_top1_logit"
+    ],
+    "promotion_rule": "strict_top1"
+  },
+  "artifacts": [
+    {
+      "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-15-q16-k16-v16-policy-v0.1-artifact",
+      "fp8_tensor_count": 12,
+      "passthrough_tensor_count": 763,
+      "summary_json": "benchmarks/results/2026-07-09/sq-fp8-qkv-layers3-7-11-15-q16-k16-v16-policy-artifact-v0.1.json"
+    }
+  ],
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-15-q16-k16-v16",
+  "date": "2026-07-09",
+  "fallback_policy": [
+    {
+      "family": "all_other_language_model_tensors",
+      "layers": "all",
+      "reason": "not_selected_in_current_qkv_layer15_extension"
+    },
+    {
+      "family": "visual_mtp_rdna2_tp_targets",
+      "layers": "all",
+      "reason": "deferred_target"
+    }
+  ],
+  "fp8_selection": {
+    "expected_fp8_tensor_count": 12,
+    "families": [
+      {
+        "family": "self_attn.q_proj",
+        "layers": [
+          3,
+          7,
+          11,
+          15
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          3,
+          7,
+          11,
+          15
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.v_proj",
+        "layers": [
+          3,
+          7,
+          11,
+          15
+        ],
+        "scale_block_cols": 16
+      }
+    ],
+    "include_regex": "^model\\.language_model\\.layers\\.(3|7|11|15)\\.self_attn\\.(q_proj|k_proj|v_proj)\\.weight$"
+  },
+  "next_steps": [
+    "Do not promote full layer15 QKV q16/k16/v16 under strict top1 policy.",
+    "Use layer15 split results to distinguish single-projection behavior from cumulative QKV drift.",
+    "Retry layer15 with pair split, smaller scale blocks, or wider text-level guard before promotion."
+  ],
+  "policy_id": "qkv_layers3_7_11_15_q16_k16_v16",
+  "prompt_bundle_result": {
+    "case_a_aq4_top1": 4105,
+    "case_a_aq4_top1_rank_in_sq_top8": 2,
+    "case_a_sq_margin_over_aq4_top1": 0.0013446809999999587,
+    "case_a_sq_top1": 5582,
+    "case_count": 3,
+    "promoted_full_sq_policy": false,
+    "result_path": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layers3-7-11-15-q16-k16-v16-prompt-bundle-v1.md",
+    "sq_fp8_triple_matvec_count": 92,
+    "sq_projection_boundary": "triple",
+    "strict_top1_pass_count": 2
+  },
+  "scale": {
+    "block_cols": 16,
+    "dtype": "f32",
+    "granularity": "row_block",
+    "overrides": []
+  },
+  "schema_version": "sq-fp8-policy-v0.1",
+  "source_boundary": {
+    "case_count": 3,
+    "policy": "benchmarks/results/2026-07-09/sq-fp8-qkv-layers3-7-11-q16-k16-v16-policy-v0.1.json",
+    "result_path": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layers3-7-11-q16-k16-v16-prompt-bundle-v1.md",
+    "strict_top1_pass_count": 3
+  },
+  "status": "qkv_layer15_extension_diagnostic_not_promoted",
+  "target_gpu": "R9700/RDNA4"
+}
