@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare generated token IDs between two package prompt suite runs."""
+"""Compare generated token IDs and decoded text between two package prompt suite runs."""
 
 from __future__ import annotations
 
@@ -104,6 +104,10 @@ def token_hash(tokens: list[int]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def first_mismatch(left: list[int], right: list[int]) -> int | None:
     for index, (left_token, right_token) in enumerate(zip(left, right, strict=False)):
         if left_token != right_token:
@@ -121,6 +125,14 @@ def stop_signature(report: dict[str, Any], label: str) -> dict[str, Any]:
         "stopped_on_token_id": stop.get("stopped_on_token_id"),
         "stopped_on_token_sequence": stop.get("stopped_on_token_sequence"),
     }
+
+
+def decoded_text(report: dict[str, Any], key: str, label: str) -> str:
+    decoded = as_mapping(report.get("decoded_text"), f"{label}.decoded_text")
+    value = decoded.get(key)
+    if not isinstance(value, str):
+        raise SystemExit(f"{label}.decoded_text.{key} must be a string")
+    return value
 
 
 def nested_top_logits(report: dict[str, Any], path: tuple[str, str], label: str) -> list[dict[str, Any]]:
@@ -194,8 +206,22 @@ def compare_case(
         candidate_report.get("generated_token_ids"),
         f"{candidate_label}.{case_id}.generated_token_ids",
     )
+    reference_text = decoded_text(reference_report, "generated", f"{reference_label}.{case_id}")
+    candidate_text = decoded_text(candidate_report, "generated", f"{candidate_label}.{case_id}")
+    reference_text_without_stop = decoded_text(
+        reference_report,
+        "generated_without_stop_sequence",
+        f"{reference_label}.{case_id}",
+    )
+    candidate_text_without_stop = decoded_text(
+        candidate_report,
+        "generated_without_stop_sequence",
+        f"{candidate_label}.{case_id}",
+    )
     prompt_match = reference_prompt == candidate_prompt
     generated_match = reference_generated == candidate_generated
+    generated_text_match = reference_text == candidate_text
+    generated_text_without_stop_match = reference_text_without_stop == candidate_text_without_stop
     reference_stop = stop_signature(reference_report, f"{reference_label}.{case_id}")
     candidate_stop = stop_signature(candidate_report, f"{candidate_label}.{case_id}")
     stop_match = reference_stop == candidate_stop
@@ -220,6 +246,16 @@ def compare_case(
         "generated_tokens_match": generated_match,
         "generated_first_mismatch_index": first_mismatch(reference_generated, candidate_generated),
         "generated_token_sha256": token_hash(reference_generated) if generated_match else None,
+        "reference_generated_text_chars": len(reference_text),
+        "candidate_generated_text_chars": len(candidate_text),
+        "generated_text_match": generated_text_match,
+        "generated_text_sha256": text_hash(reference_text) if generated_text_match else None,
+        "reference_generated_without_stop_text_chars": len(reference_text_without_stop),
+        "candidate_generated_without_stop_text_chars": len(candidate_text_without_stop),
+        "generated_without_stop_text_match": generated_text_without_stop_match,
+        "generated_without_stop_text_sha256": (
+            text_hash(reference_text_without_stop) if generated_text_without_stop_match else None
+        ),
         "stop_match": stop_match,
         "reference_stop": reference_stop,
         "candidate_stop": candidate_stop,
@@ -269,6 +305,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "extra_in_candidate_count": len(extra_in_candidate),
         "prompt_token_match_count": sum(1 for item in case_reports if item["prompt_tokens_match"]),
         "generated_token_match_count": sum(1 for item in case_reports if item["generated_tokens_match"]),
+        "generated_text_match_count": sum(1 for item in case_reports if item["generated_text_match"]),
+        "generated_without_stop_text_match_count": sum(
+            1 for item in case_reports if item["generated_without_stop_text_match"]
+        ),
         "stop_match_count": sum(1 for item in case_reports if item["stop_match"]),
         "both_verified_count": sum(1 for item in case_reports if item["both_verified"]),
         "output_status_match_count": sum(1 for item in case_reports if item["output_status_match"]),
@@ -296,13 +336,15 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         and not extra_in_candidate
         and all(item["prompt_tokens_match"] for item in case_reports)
         and all(item["generated_tokens_match"] for item in case_reports)
+        and all(item["generated_text_match"] for item in case_reports)
+        and all(item["generated_without_stop_text_match"] for item in case_reports)
         and all(item["stop_match"] for item in case_reports)
         and all(item["both_verified"] for item in case_reports)
         and all(item["top_logits_match"] for item in case_reports)
     )
     metrics["passed"] = passed
     return {
-        "schema_version": "package-token-prompt-suite-generated-token-guard-v0.1",
+        "schema_version": "package-token-prompt-suite-generated-text-guard-v0.2",
         "reference": {
             "label": args.reference_label,
             "summary": str(args.reference_summary),
@@ -338,7 +380,7 @@ def fmt_bool(value: Any) -> str:
 def write_md(path: Path, json_path: Path | None, report: dict[str, Any]) -> None:
     metrics = as_mapping(report.get("metrics"), "report.metrics")
     lines = [
-        "# Package Prompt Suite Generated-Token Guard",
+        "# Package Prompt Suite Generated-Text Guard",
         "",
     ]
     if json_path is not None:
@@ -350,23 +392,26 @@ def write_md(path: Path, json_path: Path | None, report: dict[str, Any]) -> None
             f"- Passed: `{fmt_bool(metrics.get('passed'))}`",
             f"- Compared cases: `{metrics.get('compared_case_count')}`",
             "",
-            "| case | category | prompt match | generated match | logits match | stop match | both verified | output status match | generated tokens | sha256 |",
-            "| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | ---: | --- |",
+            "| case | category | prompt match | token match | text match | no-stop text match | logits match | stop match | both verified | output status match | generated tokens | token sha256 | text sha256 |",
+            "| --- | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | ---: | --- | --- |",
         ]
     )
     for item in report["cases"]:
         lines.append(
-            "| {case} | {category} | {prompt} | {generated} | {logits} | {stop} | {verified} | {status} | {tokens} | {sha} |".format(
+            "| {case} | {category} | {prompt} | {tokens_match} | {text_match} | {no_stop_text_match} | {logits} | {stop} | {verified} | {status} | {tokens} | {token_sha} | {text_sha} |".format(
                 case=item["id"],
                 category=item.get("category", ""),
                 prompt=fmt_bool(item.get("prompt_tokens_match")),
-                generated=fmt_bool(item.get("generated_tokens_match")),
+                tokens_match=fmt_bool(item.get("generated_tokens_match")),
+                text_match=fmt_bool(item.get("generated_text_match")),
+                no_stop_text_match=fmt_bool(item.get("generated_without_stop_text_match")),
                 logits=fmt_bool(item.get("top_logits_match")),
                 stop=fmt_bool(item.get("stop_match")),
                 verified=fmt_bool(item.get("both_verified")),
                 status=fmt_bool(item.get("output_status_match")),
                 tokens=item.get("reference_generated_tokens"),
-                sha=(item.get("generated_token_sha256") or "")[:16],
+                token_sha=(item.get("generated_token_sha256") or "")[:16],
+                text_sha=(item.get("generated_without_stop_text_sha256") or "")[:16],
             )
         )
     lines.append("")

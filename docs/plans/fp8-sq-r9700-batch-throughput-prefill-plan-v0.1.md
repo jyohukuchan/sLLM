@@ -39,10 +39,11 @@
 - したがって現時点では、T2は「品質境界をかなり狭めたがfull-target SQ guard未完了」と扱う。
 - 一方で、prefill/cached-prefix attentionはSQ候補評価の前提速度としては一旦十分と判断する。追加のFlashAttention2-like最適化は有益だが、SQ策定フェーズを止めるblockerにはしない。
 - 以後の主軸は、FP8 SQ候補の品質境界を固定し、real batch total throughputを測り、AQ4 baselineとvLLM参考値へ同じschemaで接続することに移す。
+- prompt-suite guardはv0.2へ進み、`generated_token_ids` だけでなく `decoded_text.generated` と `decoded_text.generated_without_stop_sequence` の完全一致も合格条件にした。
 
 ## 次の行動
 
-1. T2 short guardの昇格条件は、text-level guardが実装・採用されるまではstrict top1一致にする。
+1. T2 short guardの昇格条件は引き続きstrict top1一致にする。prompt-suite guardではv0.2 text-level一致を正式採用し、full SQ policy昇格にはtoken/text/logit guard bundle通過を要求する。
 2. `kup6_gate5_down5` を現在の6層strict-top1 regression subsetとして固定する。これはfull SQ policyではなく、次の候補探索の基準点として扱う。
 3. 次の主タスクをSQ format evaluationに移す。追加のFlashAttention2-like最適化は、SQ候補比較で明確な阻害要因になったcaseだけに限定する。
 4. SQ候補探索では、row-block幅、scale dtype/layout、FP8 scale有無、fallback family/layer、W8A16/W8A8を候補軸として保存し、quality guardとthroughput/memoryを同じresult schemaに流す。
@@ -4573,6 +4574,51 @@ Quality:
 1. layer23 `q4` / `v8` / `v4` をfailure guardとして保持する。
 2. q/vをさらに追う場合は、row-block幅だけでなく別format/layout、text-level guard、またはlogit近傍を安定させるSQ基準を検討する。
 3. SQ候補評価基盤側へ戻る場合も、現時点のpassing branchはlayer23 `k16`までとして扱う。
+
+## 2026-07-09 progress: T2 text-level prompt suite guard v0.2
+
+前回の要点:
+
+- T2の短いtoken-id guardでは、text-level guardがまだ未採用だったためstrict top1一致をpromotion ruleにしていた。
+- 既存のprompt-suite guardは `generated_token_ids`、stop状態、top logitsを比較していたが、decoded text一致を独立した機械可読指標としては保存していなかった。
+
+今回の変更点:
+
+- `tools/compare-package-token-prompt-suite.py` を `package-token-prompt-suite-generated-text-guard-v0.2` に更新した。
+- caseごとに `decoded_text.generated` と `decoded_text.generated_without_stop_sequence` の完全一致、文字数、SHA256を保存する。
+- `metrics.generated_text_match_count` と `metrics.generated_without_stop_text_match_count` を追加し、どちらも全case一致しない限りprompt-suite guardはpassしない。
+- `tools/run-package-prompt-guard-bundle.py` のbundle summaryもv0.2へ上げ、新しいtext match metricsを露出した。
+- 既存R9700 AQ4 v0.3 prompt suiteをself-compareし、v0.2 guardが既存実測形式に適用できることを確認した。
+
+検証結果:
+
+| check | result |
+| --- | --- |
+| unit test | `python3 -m unittest tests.test_compare_package_guards` passed |
+| self compare source | `benchmarks/results/2026-07-06/prompt-suite-aq4-matvec-add-rpb8-r9700-v0.3/summary.json` |
+| schema | `package-token-prompt-suite-generated-text-guard-v0.2` |
+| compared cases | 7 |
+| generated token match | 7 / 7 |
+| generated text match | 7 / 7 |
+| no-stop generated text match | 7 / 7 |
+| top logits match | 7 / 7 |
+| passed | true |
+
+Artifacts:
+
+- `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-text-level-prompt-guard-v0.2/aq4-self-compare.json`
+- `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-text-level-prompt-guard-v0.2/aq4-self-compare.md`
+
+判断:
+
+- prompt-suiteでは、token ID一致だけでなくdecoded text一致も正式なguard条件として扱える。
+- short token-id model-loop guardは引き続きstrict top1で候補境界を切るが、full SQ policyへ昇格する段階ではv0.2 prompt-suite guard bundleを通す。
+- layer23 q/vのようなnear-missは、strict top1を満たさない限り短期候補にはしない。text-level guardはstrict top1を緩和するためではなく、実際の生成文字列が崩れないことを確認する追加gateとして使う。
+
+次の行動:
+
+1. layer23 `k16` passing branchまたは次のSQ candidateを、v0.2 prompt-suite guardへ接続する。
+2. prompt-suiteを通したcandidateだけをbatch throughput / memory comparisonへ進める。
 
 ## Risks
 

@@ -34,11 +34,14 @@ def write_json(path: Path, payload: dict) -> None:
 def prompt_report(
     *,
     generated_token_ids: list[int] | None = None,
+    generated_text: str = " hello world",
+    generated_without_stop_text: str | None = None,
     prefill_logit: float = 3.0,
     decode_logit: float = 4.0,
     verified: bool = True,
 ) -> dict:
     generated_token_ids = generated_token_ids or [30, 40]
+    generated_without_stop_text = generated_without_stop_text or generated_text
     return {
         "prompt_token_ids": [10, 20],
         "generated_token_ids": generated_token_ids,
@@ -47,6 +50,14 @@ def prompt_report(
             "stopped": True,
             "stopped_on_token_id": 99,
             "stopped_on_token_sequence": None,
+        },
+        "decoded_text": {
+            "skip_special_tokens": True,
+            "prompt": "prompt",
+            "generated": generated_text,
+            "full": "prompt" + generated_text,
+            "generated_without_stop_sequence": generated_without_stop_text,
+            "full_without_stop_sequence": "prompt" + generated_without_stop_text,
         },
         "verified": verified,
         "prefill": {
@@ -105,6 +116,8 @@ class PromptSuiteGuardTests(unittest.TestCase):
 
         self.assertTrue(report["metrics"]["passed"])
         self.assertEqual(report["metrics"]["generated_token_match_count"], 1)
+        self.assertEqual(report["metrics"]["generated_text_match_count"], 1)
+        self.assertEqual(report["metrics"]["generated_without_stop_text_match_count"], 1)
         self.assertEqual(report["metrics"]["top_logits_match_count"], 1)
         self.assertEqual(report["metrics"]["max_prefill_top_logit_abs_diff"], 0.0)
         self.assertEqual(report["metrics"]["max_decode_last_top_logit_abs_diff"], 0.0)
@@ -133,8 +146,38 @@ class PromptSuiteGuardTests(unittest.TestCase):
 
         self.assertFalse(report["metrics"]["passed"])
         self.assertEqual(report["metrics"]["generated_token_match_count"], 1)
+        self.assertEqual(report["metrics"]["generated_text_match_count"], 1)
+        self.assertEqual(report["metrics"]["generated_without_stop_text_match_count"], 1)
         self.assertEqual(report["metrics"]["top_logits_match_count"], 0)
         self.assertGreater(report["metrics"]["max_decode_last_top_logit_abs_diff"], 0.0)
+
+    def test_prompt_suite_guard_fails_decoded_text_mismatch(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reference_report = root / "reference" / "case_a.json"
+            candidate_report = root / "candidate" / "case_a.json"
+            write_json(reference_report, prompt_report(generated_text=" same token text"))
+            write_json(candidate_report, prompt_report(generated_text=" different decoded text"))
+            reference_summary = root / "reference" / "summary.json"
+            candidate_summary = root / "candidate" / "summary.json"
+            write_json(reference_summary, prompt_summary(reference_report))
+            write_json(candidate_summary, prompt_summary(candidate_report))
+
+            report = PROMPT_SUITE_TOOL.build_report(
+                types.SimpleNamespace(
+                    reference_summary=reference_summary,
+                    candidate_summary=candidate_summary,
+                    reference_label="ref",
+                    candidate_label="cand",
+                    logit_atol=1e-6,
+                )
+            )
+
+        self.assertFalse(report["metrics"]["passed"])
+        self.assertEqual(report["metrics"]["generated_token_match_count"], 1)
+        self.assertEqual(report["metrics"]["generated_text_match_count"], 0)
+        self.assertEqual(report["metrics"]["generated_without_stop_text_match_count"], 0)
+        self.assertIsNone(report["cases"][0]["generated_without_stop_text_sha256"])
 
 
 def logits_report(*, token_id: int = 30, logit: float = 3.0, verified: bool = True) -> dict:

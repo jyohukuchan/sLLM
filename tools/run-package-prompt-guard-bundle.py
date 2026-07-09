@@ -138,6 +138,10 @@ def main() -> int:
             "metrics": {
                 "compared_case_count": suite_metrics.get("compared_case_count"),
                 "generated_token_match_count": suite_metrics.get("generated_token_match_count"),
+                "generated_text_match_count": suite_metrics.get("generated_text_match_count"),
+                "generated_without_stop_text_match_count": suite_metrics.get(
+                    "generated_without_stop_text_match_count"
+                ),
                 "top_logits_match_count": suite_metrics.get("top_logits_match_count"),
                 "max_prefill_top_logit_abs_diff": suite_metrics.get("max_prefill_top_logit_abs_diff"),
                 "max_decode_last_top_logit_abs_diff": suite_metrics.get("max_decode_last_top_logit_abs_diff"),
@@ -188,7 +192,7 @@ def main() -> int:
         )
 
     payload = {
-        "schema_version": "package-prompt-guard-bundle-v0.1",
+        "schema_version": "package-prompt-guard-bundle-v0.2",
         "reference": {"label": args.reference_label, "summary": str(args.reference_summary)},
         "candidate": {"label": args.candidate_label, "summary": str(args.candidate_summary)},
         "passed": all(check["passed"] for check in checks),
