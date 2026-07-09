@@ -928,9 +928,9 @@ Expected outputs:
      selection without changing stdout/JSON schema.
    - SQ8_0 matvec projection dispatch now has active R9700-specific direct descriptor IDs and a
      conservative dispatch-only canonical name for the local `gfx1201` R9700 device.
-   - SQ8_0 projection rows now preserve `sq_projection_kernel_families`, which is currently
-     `direct` for executed matvec boundaries and keeps future C++ kernel family switching
-     machine-readable.
+   - SQ8_0 projection rows now preserve `sq_projection_kernel_families` as explicit
+     `boundary=family` pairs (for example `batch=direct`), with the kernel-family gate
+     validating each boundary entry while allowing future non-direct/fused names.
    - A short layer0 SQ8_0 mixed-request-state smoke confirms the local R9700 path selects
      `*_r9700_direct` descriptor IDs.
    - Non-direct descriptor fixtures now prove the current execution boundary fails closed before

@@ -387,6 +387,15 @@ def ullm_sq_kernel_families_gate_failures(
     rows: list[dict[str, Any]],
 ) -> list[str]:
     failures: list[str] = []
+
+    def _entry_is_valid(entry: str) -> bool:
+        if "=" not in entry:
+            return False
+        boundary, family = (part.strip() for part in entry.split("=", 1))
+        if not boundary or not family:
+            return False
+        return family.lower() != "none"
+
     for row in rows:
         engine_name = as_str(as_dict(row.get("engine")).get("name"))
         workload = as_dict(row.get("workload"))
@@ -396,8 +405,18 @@ def ullm_sq_kernel_families_gate_failures(
             continue
 
         kernel_families = workload.get("sq_projection_kernel_families")
-        if not isinstance(kernel_families, str) or (
-            not kernel_families.strip() or kernel_families.strip().lower() == "none"
+        if not isinstance(kernel_families, str):
+            failures.append(
+                f"selected uLLM SQ8_0 row missing valid workload.sq_projection_kernel_families: {harness_summary(row)}"
+            )
+            continue
+
+        entries = [part.strip() for part in kernel_families.split(",")]
+        if (
+            not kernel_families.strip()
+            or kernel_families.strip().lower() == "none"
+            or not entries
+            or any(not _entry_is_valid(entry) for entry in entries)
         ):
             failures.append(
                 f"selected uLLM SQ8_0 row missing valid workload.sq_projection_kernel_families: {harness_summary(row)}"

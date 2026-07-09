@@ -1408,6 +1408,135 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                 stderr.getvalue(),
             )
 
+    def test_require_ullm_sq_kernel_families_fails_when_value_is_batch_none(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "batch_none_kernel_families.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-qwen3-14b-sq8-smoke-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                        sq_projection_kernel_families="batch=none",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-kernel-families",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("sq_projection_kernel_families", stderr.getvalue())
+            self.assertIn(
+                "case_id=sq8-qwen3-14b-sq8-smoke-pp16-tg8-b2",
+                stderr.getvalue(),
+            )
+
+    def test_require_ullm_sq_kernel_families_fails_when_value_is_missing_family(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "missing_family_kernel_families.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-qwen3-14b-sq8-smoke-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                        sq_projection_kernel_families="batch=",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-kernel-families",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("sq_projection_kernel_families", stderr.getvalue())
+            self.assertIn(
+                "case_id=sq8-qwen3-14b-sq8-smoke-pp16-tg8-b2",
+                stderr.getvalue(),
+            )
+
+    def test_require_ullm_sq_kernel_families_fails_when_value_is_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "malformed_kernel_families.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-qwen3-14b-sq8-smoke-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                        sq_projection_kernel_families="batch",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-kernel-families",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 2)
+            self.assertIn("sq_projection_kernel_families", stderr.getvalue())
+            self.assertIn(
+                "case_id=sq8-qwen3-14b-sq8-smoke-pp16-tg8-b2",
+                stderr.getvalue(),
+            )
+
     def test_require_ullm_sq_kernel_families_passes_when_valid(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:
             path = Path(workdir) / "valid_kernel_families.jsonl"
@@ -1421,6 +1550,45 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                         batch_size=2,
                         format_id="SQ8_0",
                         sq_projection_kernel_families="batch=direct",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2",
+                    "--require-ullm-sq-kernel-families",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_require_ullm_sq_kernel_families_passes_with_future_family_names(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "future_family_kernel_families.jsonl"
+            path.write_text(
+                json.dumps(
+                    make_row(
+                        case_id="sq8-qwen3-14b-sq8-smoke-pp16-tg8-b2",
+                        engine_name="uLLM",
+                        prompt_tokens=16,
+                        generated_tokens=8,
+                        batch_size=2,
+                        format_id="SQ8_0",
+                        sq_projection_kernel_families="single=direct,batch=fused_v0",
                     )
                 )
                 + "\n",
