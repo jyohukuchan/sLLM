@@ -1,0 +1,69 @@
+{
+  "schema_version": "sq8-reference-batch-benchmark-v0.2",
+  "profile": "reference_w8a16",
+  "artifact_dir": "/tmp/ullm-qwen3-14b-fp8-sq8-canonical-layer0-k-v0.2",
+  "artifact_content_sha256": "5fc4c4d773d955dc833b53c80ffd31362914451384488c1eff654392f3367dfe",
+  "tensor": "model.layers.0.self_attn.k_proj.weight",
+  "m": 2,
+  "n": 1024,
+  "k": 5120,
+  "input_f32_le_sha256": "79e8d290873676177d7cbb1efd146580428063c5f9b7d31d7c81bb0da3f5776f",
+  "output_f32_le_sha256": "8b304a84f603456ec4def8d4b45801f89daccbf77a759ad30c5af0a112d932ff",
+  "output_nonfinite": 0,
+  "correctness": {
+    "coverage": "all_rows",
+    "sampled_rows": [
+      {
+        "row": 0,
+        "metrics": {
+          "element_count": 1024,
+          "nonfinite_count": 0,
+          "mse": 2.10469093116986e-15,
+          "max_abs": 2.384185791015625e-7,
+          "relative_l2": 8.620906128347798e-8,
+          "cosine_similarity": 0.9999999999999962
+        }
+      },
+      {
+        "row": 1,
+        "metrics": {
+          "element_count": 1024,
+          "nonfinite_count": 0,
+          "mse": 2.072960354837039e-15,
+          "max_abs": 2.384185791015625e-7,
+          "relative_l2": 8.346135893211398e-8,
+          "cosine_similarity": 0.9999999999999964
+        }
+      }
+    ],
+    "thresholds": {
+      "max_abs": 0.00002,
+      "relative_l2": 0.00001,
+      "cosine_similarity": 0.999999
+    },
+    "passed": true
+  },
+  "execution_path": "hip_kernel",
+  "fallback_state": "not_used",
+  "device": {
+    "requested_index": 1,
+    "runtime_device_id": 0,
+    "backend": "hip",
+    "name": "AMD Radeon Graphics",
+    "compute_major": 12,
+    "compute_minor": 0,
+    "gcn_arch_name": "",
+    "hip_visible_devices": "1",
+    "isolated_visibility": true
+  },
+  "timing": {
+    "source": "host_monotonic_launch_plus_sync",
+    "cache_state": "warm_repeated_same_buffers",
+    "warmups": 10,
+    "repeats": 50,
+    "p50_ms": 0.157263,
+    "p95_ms": 0.17565950000000002,
+    "aggregate_tflops_p50": 0.13335317271068212
+  },
+  "passed": true
+}

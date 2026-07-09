@@ -1,0 +1,73 @@
+{
+  "schema_version": "sq8-shape-expansion-environment-v0.1",
+  "component_source_commit": "0de350cd879d7d0566cd162d232478c7e414317c",
+  "benchmark_head_for_new_shapes": "287a3728fe0678b9c49b37ada7dba90a8087f94e",
+  "validator_commit": "a9b586c92c5a25c6204331af89bba3f057ba43a4",
+  "tracked_worktree_dirty_at_execution": false,
+  "q_results_source": "../sq8-optimized-component-v0.1",
+  "binaries": {
+    "ck_component_sha256": "c6d84afd74c3726a6137d1ee43bed5cc40df99a90b8ffe57f43d4d85e1f661e9",
+    "fixture_generator_sha256": "fbc752642ff0cfa660a3645928658f98bffdddcaf01088144901741a1365abe0",
+    "reference_benchmark_sha256": "283840708d91eeccfde0968ee0adf9e49c65e18efb0971d20d6e2a49f502e8ec"
+  },
+  "target": {
+    "model": "Qwen3-14B-FP8",
+    "source_model_dir": "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8",
+    "config_sha256": "c5d7d0e8ee42088bd535101d13c71d38c20b5c2afd46ee8fdfba351956233793",
+    "index_sha256": "6a9c8e17744118347080916d8f673b881941cf42989ee77266b14dc2062a7151",
+    "full_artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "layer": 0,
+    "one_tensor_artifacts": [
+      {"label": "q", "tensor": "model.layers.0.self_attn.q_proj.weight", "n": 5120, "k": 5120, "content_sha256": "29857be65d162ca1150f91e5c159186a0086d0f2eb463b2b113d92db4acd5c6a"},
+      {"label": "o", "tensor": "model.layers.0.self_attn.o_proj.weight", "n": 5120, "k": 5120, "content_sha256": "3b7acc4d829a6e34d2dcd7d143496e1dcf17e962efc7d5032ee01a8afc87b9c8"},
+      {"label": "k", "tensor": "model.layers.0.self_attn.k_proj.weight", "n": 1024, "k": 5120, "content_sha256": "5fc4c4d773d955dc833b53c80ffd31362914451384488c1eff654392f3367dfe"},
+      {"label": "v", "tensor": "model.layers.0.self_attn.v_proj.weight", "n": 1024, "k": 5120, "content_sha256": "583070f8aca9c86b3f4c23ae74b7eb9c0affd1e0ca21f72ff6904fe802f042c6"},
+      {"label": "gate", "tensor": "model.layers.0.mlp.gate_proj.weight", "n": 17408, "k": 5120, "content_sha256": "e026ad23b3e48c21ba5e501868bce84fef61ea97fb333510a028a967e9ff0949"},
+      {"label": "up", "tensor": "model.layers.0.mlp.up_proj.weight", "n": 17408, "k": 5120, "content_sha256": "f16505786cd66d62cf654dbf2eb55a9143b27db3fa2cac547c6f20a201f16319"},
+      {"label": "down", "tensor": "model.layers.0.mlp.down_proj.weight", "n": 5120, "k": 17408, "content_sha256": "1a74b4662f2577579bf850c463f84de6eafd489457ff3589083208960f579905"}
+    ]
+  },
+  "software": {
+    "rocm": "7.2.1",
+    "hip": "7.2.53211-e1a6bc5663",
+    "amd_clang": "22.0.0git roc-7.2.1 26084 f58b06dce1f9c15707c5f808fd002e18c2accf7e",
+    "composable_kernel": "1.2.0.70201-81~24.04",
+    "rocprofiler_sdk": "1.1.0",
+    "linux_kernel": "6.17.0-35-generic",
+    "amdgpu_module": "6.16.13"
+  },
+  "device": {
+    "expected_board": "Radeon AI PRO R9700",
+    "physical_hip_visibility_token": "1",
+    "isolated_hip_ordinal": 0,
+    "amd_smi_ordinal": 2,
+    "reported_name": "AMD Radeon Graphics",
+    "arch": "gfx1201",
+    "device_id": "0x7551",
+    "compute_units": 64,
+    "vram_bytes": 34208743424,
+    "l2_cache_bytes": 8388608,
+    "l3_cache_bytes": 67108864
+  },
+  "measurement": {
+    "m_grid": [1, 2, 4, 8, 16, 32, 128],
+    "warmups": 10,
+    "repeats": 50,
+    "timing_source": "HIP events",
+    "promotion_timing": "quant_plus_gemm",
+    "cache_modes": ["warm_repeated_same_buffers", "target_buffers_evicted"],
+    "cache_evict_bytes": 268435456,
+    "fixture_count": 49,
+    "optimized_result_count": 98,
+    "reference_result_count": 49,
+    "execution_order": "sequential",
+    "oom_policy": "2 GiB per-process working-set guard plus device free-memory check"
+  },
+  "profiler": {
+    "geometry_representatives": ["k-m8", "gate-m8", "down-m8"],
+    "cache_mode": "target_buffers_evicted",
+    "warmups": 0,
+    "repeats": 1,
+    "known_counter_limitation": "ROCm profiler SDK 1.1 returns invalid zero memory and occupancy counters on gfx1201; P4 records the bounded evidence."
+  }
+}

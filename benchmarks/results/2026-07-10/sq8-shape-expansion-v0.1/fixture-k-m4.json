@@ -1,0 +1,74 @@
+{
+  "schema_version": "sq8-optimized-fixture-v0.2",
+  "artifact_dir": "/tmp/ullm-qwen3-14b-fp8-sq8-canonical-layer0-k-v0.2",
+  "artifact_schema_version": "sq-fp8-artifact-v0.2",
+  "artifact_content_sha256": "5fc4c4d773d955dc833b53c80ffd31362914451384488c1eff654392f3367dfe",
+  "tensor": {
+    "name": "model.layers.0.self_attn.k_proj.weight",
+    "weight_shape": [
+      1024,
+      5120
+    ],
+    "weight_sha256": "ed7e0f605eaa909b1e5bfd01ff8cb89b2b34601db313eeaebc37c069dcf959a7",
+    "weight_scale_shape": [
+      8,
+      40
+    ],
+    "weight_scale_sha256": "5bf611a95aee4777d116aa2cd2c19754659b8844586642c739ce3691b43afe29",
+    "block_shape": [
+      128,
+      128
+    ]
+  },
+  "m": 4,
+  "n": 1024,
+  "k": 5120,
+  "activation_block_cols": 128,
+  "cpu_worker_threads": 1,
+  "estimated_working_bytes": 17192192,
+  "activation": {
+    "file": "activation.f32le",
+    "dtype": "f32-le",
+    "shape": [
+      4,
+      5120
+    ],
+    "bytes": 81920,
+    "sha256": "e3168a2f373e8758ad37dc5e6e269749693160fc30fa9d07a54149a68ac4d53a"
+  },
+  "quantized_activation": {
+    "file": "activation.f8",
+    "dtype": "ocp-fp8-e4m3",
+    "shape": [
+      4,
+      5120
+    ],
+    "bytes": 20480,
+    "sha256": "1ac2ee1240030ca74b7baa051a8fcefc623d6401ad1cb7f99fa45932363e30c1"
+  },
+  "activation_scales": {
+    "file": "activation_scales.f32le",
+    "dtype": "f32-le",
+    "shape": [
+      4,
+      40
+    ],
+    "bytes": 640,
+    "sha256": "a6b1d70b9caef8671be8eb77314a42505c417bbd892d8a7060746763f2c3e1f5"
+  },
+  "oracle_output": {
+    "file": "oracle_output.f32le",
+    "dtype": "f32-le",
+    "shape": [
+      4,
+      1024
+    ],
+    "bytes": 16384,
+    "sha256": "bf20a16e822df2419596808bd9ca3b6dc2aea9ca46369d73412e3370e0bdc11d"
+  },
+  "thresholds": {
+    "relative_l2_max": 0.005,
+    "cosine_min": 0.9999,
+    "finite_output_required": true
+  }
+}

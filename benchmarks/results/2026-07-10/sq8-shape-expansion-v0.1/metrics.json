@@ -1,0 +1,126 @@
+{
+  "schema_version": "sq8-shape-expansion-metrics-v0.1",
+  "results_dir": "benchmarks/results/2026-07-10/sq8-shape-expansion-v0.1",
+  "labels": [
+    "q",
+    "o",
+    "k",
+    "v",
+    "gate",
+    "up",
+    "down"
+  ],
+  "m_grid": [
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    128
+  ],
+  "case_count": 49,
+  "optimized_result_count": 98,
+  "reference_result_count": 49,
+  "thresholds": {
+    "relative_l2_max": 0.005,
+    "cosine_min": 0.9999,
+    "recommended_m8_over_m2_throughput_ratio_min": 2.5
+  },
+  "summaries": [
+    {
+      "label": "q",
+      "tensor": "model.layers.0.self_attn.q_proj.weight",
+      "n": 5120,
+      "k": 5120,
+      "warm_m8_over_m2_throughput_ratio": 3.8780053561660006,
+      "evicted_m8_over_m2_throughput_ratio": 3.899684135872309,
+      "warm_m8_speedup": 34.49679501803638,
+      "evicted_m8_vs_warm_reference": 18.321614119718998,
+      "maximum_relative_l2": 0.0016828584463595105,
+      "minimum_cosine": 0.9999985845197157
+    },
+    {
+      "label": "o",
+      "tensor": "model.layers.0.self_attn.o_proj.weight",
+      "n": 5120,
+      "k": 5120,
+      "warm_m8_over_m2_throughput_ratio": 3.8772717866984157,
+      "evicted_m8_over_m2_throughput_ratio": 3.899555987282265,
+      "warm_m8_speedup": 35.62772651988534,
+      "evicted_m8_vs_warm_reference": 18.827241398795486,
+      "maximum_relative_l2": 0.0016659796466664348,
+      "minimum_cosine": 0.9999986124454708
+    },
+    {
+      "label": "k",
+      "tensor": "model.layers.0.self_attn.k_proj.weight",
+      "n": 1024,
+      "k": 5120,
+      "warm_m8_over_m2_throughput_ratio": 3.8512258208913925,
+      "evicted_m8_over_m2_throughput_ratio": 3.8889080485826115,
+      "warm_m8_speedup": 27.952325210058238,
+      "evicted_m8_vs_warm_reference": 22.930966292653775,
+      "maximum_relative_l2": 0.001694147030714958,
+      "minimum_cosine": 0.9999985668930692
+    },
+    {
+      "label": "v",
+      "tensor": "model.layers.0.self_attn.v_proj.weight",
+      "n": 1024,
+      "k": 5120,
+      "warm_m8_over_m2_throughput_ratio": 3.895546660019491,
+      "evicted_m8_over_m2_throughput_ratio": 3.8838173172796338,
+      "warm_m8_speedup": 25.03511139416765,
+      "evicted_m8_vs_warm_reference": 20.586445068252225,
+      "maximum_relative_l2": 0.0016653856570809185,
+      "minimum_cosine": 0.9999986132454516
+    },
+    {
+      "label": "gate",
+      "tensor": "model.layers.0.mlp.gate_proj.weight",
+      "n": 17408,
+      "k": 5120,
+      "warm_m8_over_m2_throughput_ratio": 3.9319645862363948,
+      "evicted_m8_over_m2_throughput_ratio": 3.946064728631875,
+      "warm_m8_speedup": 28.437474988916936,
+      "evicted_m8_vs_warm_reference": 27.60768136711372,
+      "maximum_relative_l2": 0.0016934577266476173,
+      "minimum_cosine": 0.9999985662760025
+    },
+    {
+      "label": "up",
+      "tensor": "model.layers.0.mlp.up_proj.weight",
+      "n": 17408,
+      "k": 5120,
+      "warm_m8_over_m2_throughput_ratio": 3.935790247236364,
+      "evicted_m8_over_m2_throughput_ratio": 3.9516282751093117,
+      "warm_m8_speedup": 28.44780991459886,
+      "evicted_m8_vs_warm_reference": 27.607533216516284,
+      "maximum_relative_l2": 0.001666744031054349,
+      "minimum_cosine": 0.9999986109831467
+    },
+    {
+      "label": "down",
+      "tensor": "model.layers.0.mlp.down_proj.weight",
+      "n": 5120,
+      "k": 17408,
+      "warm_m8_over_m2_throughput_ratio": 3.8680187318521546,
+      "evicted_m8_over_m2_throughput_ratio": 3.885595040098788,
+      "warm_m8_speedup": 25.63806489455841,
+      "evicted_m8_vs_warm_reference": 24.618803305807457,
+      "maximum_relative_l2": 0.0016583833158687203,
+      "minimum_cosine": 0.9999986248965161
+    }
+  ],
+  "aggregate": {
+    "maximum_relative_l2": 0.001694147030714958,
+    "minimum_cosine": 0.9999985662760025,
+    "minimum_warm_speedup": 3.253785243448789,
+    "minimum_evicted_vs_warm_reference": 2.655698933338876,
+    "minimum_warm_m8_over_m2_throughput_ratio": 3.8512258208913925,
+    "minimum_evicted_m8_over_m2_throughput_ratio": 3.8838173172796338,
+    "all_passed": true,
+    "all_fallback": "not_used"
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "schema_version": "sq8-reference-batch-benchmark-v0.2",
+  "profile": "reference_w8a16",
+  "artifact_dir": "/tmp/ullm-qwen3-14b-fp8-sq8-canonical-layer0-q-v0.2",
+  "artifact_content_sha256": "29857be65d162ca1150f91e5c159186a0086d0f2eb463b2b113d92db4acd5c6a",
+  "tensor": "model.layers.0.self_attn.q_proj.weight",
+  "m": 128,
+  "n": 5120,
+  "k": 5120,
+  "input_f32_le_sha256": "e0ec5db35f30f3a3ec3fff77214829204a355e51193031c3d107ffd6352c3a70",
+  "output_f32_le_sha256": "df02eebe29ebdd954e3a3eef364adfb1cff125d8015ed29d57ae02ba9cdb2f45",
+  "output_nonfinite": 0,
+  "correctness": {
+    "coverage": "boundary_and_quartile_rows",
+    "sampled_rows": [
+      {
+        "row": 0,
+        "metrics": {
+          "element_count": 5120,
+          "nonfinite_count": 0,
+          "mse": 1.5194372341518414e-15,
+          "max_abs": 2.384185791015625e-7,
+          "relative_l2": 8.499422347560135e-8,
+          "cosine_similarity": 0.9999999999999909
+        }
+      },
+      {
+        "row": 32,
+        "metrics": {
+          "element_count": 5120,
+          "nonfinite_count": 0,
+          "mse": 1.4427301903072813e-15,
+          "max_abs": 2.384185791015625e-7,
+          "relative_l2": 8.115192619779877e-8,
+          "cosine_similarity": 0.9999999999999956
+        }
+      },
+      {
+        "row": 64,
+        "metrics": {
+          "element_count": 5120,
+          "nonfinite_count": 0,
+          "mse": 1.5173123669281279e-15,
+          "max_abs": 2.384185791015625e-7,
+          "relative_l2": 8.067505330427911e-8,
+          "cosine_similarity": 0.9999999999999923
+        }
+      },
+      {
+        "row": 96,
+        "metrics": {
+          "element_count": 5120,
+          "nonfinite_count": 0,
+          "mse": 1.4322983726697689e-15,
+          "max_abs": 2.384185791015625e-7,
+          "relative_l2": 8.02550003796652e-8,
+          "cosine_similarity": 0.9999999999999942
+        }
+      },
+      {
+        "row": 127,
+        "metrics": {
+          "element_count": 5120,
+          "nonfinite_count": 0,
+          "mse": 1.4497999559714181e-15,
+          "max_abs": 2.384185791015625e-7,
+          "relative_l2": 8.304369270246246e-8,
+          "cosine_similarity": 0.9999999999999947
+        }
+      }
+    ],
+    "thresholds": {
+      "max_abs": 0.00002,
+      "relative_l2": 0.00001,
+      "cosine_similarity": 0.999999
+    },
+    "passed": true
+  },
+  "execution_path": "hip_kernel",
+  "fallback_state": "not_used",
+  "device": {
+    "requested_index": 1,
+    "runtime_device_id": 0,
+    "backend": "hip",
+    "name": "AMD Radeon Graphics",
+    "compute_major": 12,
+    "compute_minor": 0,
+    "gcn_arch_name": "",
+    "hip_visible_devices": "1",
+    "isolated_visibility": true
+  },
+  "timing": {
+    "source": "host_monotonic_launch_plus_sync",
+    "cache_state": "warm_repeated_same_buffers",
+    "warmups": 10,
+    "repeats": 50,
+    "p50_ms": 17.315155,
+    "p95_ms": 17.36344095,
+    "aggregate_tflops_p50": 0.3875729902504482
+  },
+  "passed": true
+}
