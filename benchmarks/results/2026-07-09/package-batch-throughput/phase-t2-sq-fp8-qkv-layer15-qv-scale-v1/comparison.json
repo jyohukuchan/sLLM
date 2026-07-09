@@ -1,0 +1,536 @@
+{
+  "aq4_baseline_case_id": "aq4-qv-scale-baseline-reused",
+  "finding": "Layer15 q8/v16 and q8/v8 preserve strict top1, while q16/v8 still fails case_a. Reducing q_proj row-block from 16 to 8 is the effective recovery; v_proj row-block 8 alone is not sufficient.",
+  "next_action": "Use layer15 q8/v16 as the smallest passing q/v scale refinement candidate and validate it in combination with the previously passing layer15 k16 path.",
+  "run_id": "phase-t2-sq-fp8-qkv-layer15-qv-scale-v1",
+  "variants": [
+    {
+      "candidate": {
+        "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-plus-layer15-q8-v16-policy-v0.1-artifact",
+        "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-plus-layer15-q8-v16"
+      },
+      "case_id": "sq-qkv-layers3-7-11-plus-layer15-q8-v16",
+      "finding": "passes strict top1",
+      "per_prompt": [
+        {
+          "aq4_margin_over_sq_top1_in_aq4": 0.0,
+          "aq4_top1": 24218,
+          "aq4_top1_logit_in_aq4": 7.201347828,
+          "aq4_top1_logit_in_sq": 7.103235245,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            24218,
+            41813,
+            88110,
+            14482,
+            81395,
+            61946,
+            56374,
+            60607
+          ],
+          "kind": "per_prompt",
+          "label": "len4",
+          "prompt_token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "sq_margin_over_aq4_top1_in_sq": 0.0,
+          "sq_top1": 24218,
+          "sq_top1_logit_in_aq4": 7.201347828,
+          "sq_top1_logit_in_sq": 7.103235245,
+          "sq_top1_margin_over_second_in_sq": 0.2786045079999999,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            24218,
+            41813,
+            88110,
+            14482,
+            81395,
+            56374,
+            61946,
+            6
+          ],
+          "strict_top1_match": true,
+          "top8_overlap_count": 7
+        },
+        {
+          "aq4_margin_over_sq_top1_in_aq4": 0.0,
+          "aq4_top1": 4105,
+          "aq4_top1_logit_in_aq4": 4.995436668,
+          "aq4_top1_logit_in_sq": 5.10173893,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            4105,
+            5582,
+            42228,
+            513,
+            200,
+            1119,
+            998,
+            314
+          ],
+          "kind": "per_prompt",
+          "label": "case_a",
+          "prompt_token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "sq_margin_over_aq4_top1_in_sq": 0.0,
+          "sq_top1": 4105,
+          "sq_top1_logit_in_aq4": 4.995436668,
+          "sq_top1_logit_in_sq": 5.10173893,
+          "sq_top1_margin_over_second_in_sq": 0.0008587840000000568,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            4105,
+            5582,
+            42228,
+            513,
+            200,
+            1119,
+            314,
+            998
+          ],
+          "strict_top1_match": true,
+          "top8_overlap_count": 8
+        },
+        {
+          "aq4_margin_over_sq_top1_in_aq4": 0.0,
+          "aq4_top1": 329,
+          "aq4_top1_logit_in_aq4": 4.806379318,
+          "aq4_top1_logit_in_sq": 4.841921806,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            329,
+            933,
+            8903,
+            261,
+            294,
+            1547,
+            334,
+            627
+          ],
+          "kind": "per_prompt",
+          "label": "case_b",
+          "prompt_token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "sq_margin_over_aq4_top1_in_sq": 0.0,
+          "sq_top1": 329,
+          "sq_top1_logit_in_aq4": 4.806379318,
+          "sq_top1_logit_in_sq": 4.841921806,
+          "sq_top1_margin_over_second_in_sq": 0.19051837900000024,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            329,
+            933,
+            8903,
+            261,
+            294,
+            334,
+            627,
+            1547
+          ],
+          "strict_top1_match": true,
+          "top8_overlap_count": 8
+        }
+      ],
+      "summary": {
+        "aq4_baseline_reused_from": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer15-split-v1",
+        "aq4_decode_tps": 80.883171,
+        "aq4_end_to_end_tps": 35.370726,
+        "aq4_prefill_tps": 66.811351,
+        "aq4_vram_consumed_bytes": 4443144192,
+        "candidate": {
+          "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-plus-layer15-q8-v16-policy-v0.1-artifact",
+          "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-plus-layer15-q8-v16"
+        },
+        "case_id": "sq-qkv-layers3-7-11-plus-layer15-q8-v16",
+        "kind": "summary",
+        "run_id": "phase-t2-sq-fp8-qkv-layer15-qv-scale-v1",
+        "sq_decode_tps": 75.428031,
+        "sq_end_to_end_tps": 32.7774,
+        "sq_fp8_pair_matvec_count": 0,
+        "sq_fp8_single_matvec_count": 46,
+        "sq_fp8_tensor_count": 11,
+        "sq_fp8_triple_matvec_count": 69,
+        "sq_passthrough_tensor_count": 764,
+        "sq_prefill_tps": 59.384805,
+        "sq_projection_boundary": "single+triple",
+        "sq_vram_consumed_bytes": 5200433152,
+        "strict_top1_all_match": true,
+        "strict_top1_pass_count": 3,
+        "strict_top1_total": 3,
+        "variant": "q8-v16"
+      },
+      "variant": "q8-v16"
+    },
+    {
+      "candidate": {
+        "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-plus-layer15-q16-v8-policy-v0.1-artifact",
+        "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-plus-layer15-q16-v8"
+      },
+      "case_id": "sq-qkv-layers3-7-11-plus-layer15-q16-v8",
+      "finding": "fails strict top1",
+      "per_prompt": [
+        {
+          "aq4_margin_over_sq_top1_in_aq4": 0.0,
+          "aq4_top1": 24218,
+          "aq4_top1_logit_in_aq4": 7.201347828,
+          "aq4_top1_logit_in_sq": 7.100497723,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            24218,
+            41813,
+            88110,
+            14482,
+            81395,
+            61946,
+            56374,
+            60607
+          ],
+          "kind": "per_prompt",
+          "label": "len4",
+          "prompt_token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "sq_margin_over_aq4_top1_in_sq": 0.0,
+          "sq_top1": 24218,
+          "sq_top1_logit_in_aq4": 7.201347828,
+          "sq_top1_logit_in_sq": 7.100497723,
+          "sq_top1_margin_over_second_in_sq": 0.2783045770000001,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            24218,
+            41813,
+            88110,
+            14482,
+            81395,
+            56374,
+            61946,
+            6
+          ],
+          "strict_top1_match": true,
+          "top8_overlap_count": 7
+        },
+        {
+          "aq4_margin_over_sq_top1_in_aq4": 0.017878532000000114,
+          "aq4_top1": 4105,
+          "aq4_top1_logit_in_aq4": 4.995436668,
+          "aq4_top1_logit_in_sq": 5.100724697,
+          "aq4_top1_rank_in_sq_top8": 2,
+          "aq4_top8_tokens": [
+            4105,
+            5582,
+            42228,
+            513,
+            200,
+            1119,
+            998,
+            314
+          ],
+          "kind": "per_prompt",
+          "label": "case_a",
+          "prompt_token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "sq_margin_over_aq4_top1_in_sq": 0.0006017689999993081,
+          "sq_top1": 5582,
+          "sq_top1_logit_in_aq4": 4.977558136,
+          "sq_top1_logit_in_sq": 5.101326466,
+          "sq_top1_margin_over_second_in_sq": 0.0006017689999993081,
+          "sq_top1_rank_in_aq4_top8": 2,
+          "sq_top8_tokens": [
+            5582,
+            4105,
+            42228,
+            513,
+            200,
+            1119,
+            314,
+            998
+          ],
+          "strict_top1_match": false,
+          "top8_overlap_count": 8
+        },
+        {
+          "aq4_margin_over_sq_top1_in_aq4": 0.0,
+          "aq4_top1": 329,
+          "aq4_top1_logit_in_aq4": 4.806379318,
+          "aq4_top1_logit_in_sq": 4.842353344,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            329,
+            933,
+            8903,
+            261,
+            294,
+            1547,
+            334,
+            627
+          ],
+          "kind": "per_prompt",
+          "label": "case_b",
+          "prompt_token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "sq_margin_over_aq4_top1_in_sq": 0.0,
+          "sq_top1": 329,
+          "sq_top1_logit_in_aq4": 4.806379318,
+          "sq_top1_logit_in_sq": 4.842353344,
+          "sq_top1_margin_over_second_in_sq": 0.18993377700000025,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            329,
+            933,
+            8903,
+            261,
+            294,
+            334,
+            627,
+            1547
+          ],
+          "strict_top1_match": true,
+          "top8_overlap_count": 8
+        }
+      ],
+      "summary": {
+        "aq4_baseline_reused_from": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer15-split-v1",
+        "aq4_decode_tps": 80.883171,
+        "aq4_end_to_end_tps": 35.370726,
+        "aq4_prefill_tps": 66.811351,
+        "aq4_vram_consumed_bytes": 4443144192,
+        "candidate": {
+          "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-plus-layer15-q16-v8-policy-v0.1-artifact",
+          "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-plus-layer15-q16-v8"
+        },
+        "case_id": "sq-qkv-layers3-7-11-plus-layer15-q16-v8",
+        "kind": "summary",
+        "run_id": "phase-t2-sq-fp8-qkv-layer15-qv-scale-v1",
+        "sq_decode_tps": 75.197563,
+        "sq_end_to_end_tps": 32.678281,
+        "sq_fp8_pair_matvec_count": 0,
+        "sq_fp8_single_matvec_count": 46,
+        "sq_fp8_tensor_count": 11,
+        "sq_fp8_triple_matvec_count": 69,
+        "sq_passthrough_tensor_count": 764,
+        "sq_prefill_tps": 59.351654,
+        "sq_projection_boundary": "single+triple",
+        "sq_vram_consumed_bytes": 5194121216,
+        "strict_top1_all_match": false,
+        "strict_top1_pass_count": 2,
+        "strict_top1_total": 3,
+        "variant": "q16-v8"
+      },
+      "variant": "q16-v8"
+    },
+    {
+      "candidate": {
+        "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-plus-layer15-q8-v8-policy-v0.1-artifact",
+        "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-plus-layer15-q8-v8"
+      },
+      "case_id": "sq-qkv-layers3-7-11-plus-layer15-q8-v8",
+      "finding": "passes strict top1",
+      "per_prompt": [
+        {
+          "aq4_margin_over_sq_top1_in_aq4": 0.0,
+          "aq4_top1": 24218,
+          "aq4_top1_logit_in_aq4": 7.201347828,
+          "aq4_top1_logit_in_sq": 7.100723267,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            24218,
+            41813,
+            88110,
+            14482,
+            81395,
+            61946,
+            56374,
+            60607
+          ],
+          "kind": "per_prompt",
+          "label": "len4",
+          "prompt_token_ids": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "sq_margin_over_aq4_top1_in_sq": 0.0,
+          "sq_top1": 24218,
+          "sq_top1_logit_in_aq4": 7.201347828,
+          "sq_top1_logit_in_sq": 7.100723267,
+          "sq_top1_margin_over_second_in_sq": 0.27879714999999994,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            24218,
+            41813,
+            88110,
+            14482,
+            81395,
+            56374,
+            61946,
+            6
+          ],
+          "strict_top1_match": true,
+          "top8_overlap_count": 7
+        },
+        {
+          "aq4_margin_over_sq_top1_in_aq4": 0.0,
+          "aq4_top1": 4105,
+          "aq4_top1_logit_in_aq4": 4.995436668,
+          "aq4_top1_logit_in_sq": 5.100557327,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            4105,
+            5582,
+            42228,
+            513,
+            200,
+            1119,
+            998,
+            314
+          ],
+          "kind": "per_prompt",
+          "label": "case_a",
+          "prompt_token_ids": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ],
+          "sq_margin_over_aq4_top1_in_sq": 0.0,
+          "sq_top1": 4105,
+          "sq_top1_logit_in_aq4": 4.995436668,
+          "sq_top1_logit_in_sq": 5.100557327,
+          "sq_top1_margin_over_second_in_sq": 0.0008125300000001445,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            4105,
+            5582,
+            42228,
+            513,
+            200,
+            1119,
+            314,
+            998
+          ],
+          "strict_top1_match": true,
+          "top8_overlap_count": 8
+        },
+        {
+          "aq4_margin_over_sq_top1_in_aq4": 0.0,
+          "aq4_top1": 329,
+          "aq4_top1_logit_in_aq4": 4.806379318,
+          "aq4_top1_logit_in_sq": 4.841466427,
+          "aq4_top1_rank_in_sq_top8": 1,
+          "aq4_top8_tokens": [
+            329,
+            933,
+            8903,
+            261,
+            294,
+            1547,
+            334,
+            627
+          ],
+          "kind": "per_prompt",
+          "label": "case_b",
+          "prompt_token_ids": [
+            42,
+            314,
+            2718,
+            1618,
+            12345,
+            23456,
+            34567,
+            45678
+          ],
+          "sq_margin_over_aq4_top1_in_sq": 0.0,
+          "sq_top1": 329,
+          "sq_top1_logit_in_aq4": 4.806379318,
+          "sq_top1_logit_in_sq": 4.841466427,
+          "sq_top1_margin_over_second_in_sq": 0.19103384000000023,
+          "sq_top1_rank_in_aq4_top8": 1,
+          "sq_top8_tokens": [
+            329,
+            933,
+            8903,
+            261,
+            294,
+            334,
+            627,
+            1547
+          ],
+          "strict_top1_match": true,
+          "top8_overlap_count": 8
+        }
+      ],
+      "summary": {
+        "aq4_baseline_reused_from": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer15-split-v1",
+        "aq4_decode_tps": 80.883171,
+        "aq4_end_to_end_tps": 35.370726,
+        "aq4_prefill_tps": 66.811351,
+        "aq4_vram_consumed_bytes": 4443144192,
+        "candidate": {
+          "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-plus-layer15-q8-v8-policy-v0.1-artifact",
+          "id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-plus-layer15-q8-v8"
+        },
+        "case_id": "sq-qkv-layers3-7-11-plus-layer15-q8-v8",
+        "kind": "summary",
+        "run_id": "phase-t2-sq-fp8-qkv-layer15-qv-scale-v1",
+        "sq_decode_tps": 75.185622,
+        "sq_end_to_end_tps": 30.515812,
+        "sq_fp8_pair_matvec_count": 0,
+        "sq_fp8_single_matvec_count": 46,
+        "sq_fp8_tensor_count": 11,
+        "sq_fp8_triple_matvec_count": 69,
+        "sq_passthrough_tensor_count": 764,
+        "sq_prefill_tps": 55.62242,
+        "sq_projection_boundary": "single+triple",
+        "sq_vram_consumed_bytes": 5202513920,
+        "strict_top1_all_match": true,
+        "strict_top1_pass_count": 3,
+        "strict_top1_total": 3,
+        "variant": "q8-v8"
+      },
+      "variant": "q8-v8"
+    }
+  ]
+}

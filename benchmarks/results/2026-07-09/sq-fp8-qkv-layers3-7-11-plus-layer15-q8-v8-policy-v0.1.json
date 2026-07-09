@@ -1,0 +1,129 @@
+{
+  "acceptance_rule": {
+    "diagnostic_only": [
+      "topk_common",
+      "baseline_top1_rank_in_sq_topk",
+      "sq_top1_minus_baseline_top1_logit"
+    ],
+    "promotion_rule": "strict_top1"
+  },
+  "artifacts": [
+    {
+      "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-plus-layer15-q8-v8-policy-v0.1-artifact",
+      "fp8_tensor_count": 11,
+      "passthrough_tensor_count": 764,
+      "summary_json": "benchmarks/results/2026-07-09/sq-fp8-qkv-layers3-7-11-plus-layer15-q8-v8-policy-artifact-v0.1.json"
+    }
+  ],
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-plus-layer15-q8-v8",
+  "date": "2026-07-09",
+  "fallback_policy": [
+    {
+      "family": "all_other_language_model_tensors",
+      "layers": "all",
+      "reason": "not_selected_in_current_qv_scale_refinement"
+    },
+    {
+      "family": "visual_mtp_rdna2_tp_targets",
+      "layers": "all",
+      "reason": "deferred_target"
+    }
+  ],
+  "fp8_selection": {
+    "expected_fp8_tensor_count": 11,
+    "families": [
+      {
+        "family": "self_attn.q_proj",
+        "layers": [
+          3,
+          7,
+          11
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          3,
+          7,
+          11
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.v_proj",
+        "layers": [
+          3,
+          7,
+          11
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.q_proj",
+        "layers": [
+          15
+        ],
+        "scale_block_cols": 8
+      },
+      {
+        "family": "self_attn.v_proj",
+        "layers": [
+          15
+        ],
+        "scale_block_cols": 8
+      }
+    ],
+    "include_regex": "^model\\.language_model\\.layers\\.(3|7|11)\\.self_attn\\.(q_proj|k_proj|v_proj)\\.weight$|^model\\.language_model\\.layers\\.15\\.self_attn\\.q_proj\\.weight$|^model\\.language_model\\.layers\\.15\\.self_attn\\.v_proj\\.weight$"
+  },
+  "next_steps": [
+    "Keep as layer15 q/v scale diagnostic candidate; do not treat as full SQ policy.",
+    "Use q8/v16 as the smallest passing q/v refinement if strict top1 remains 3 / 3.",
+    "Require wider prompt/text guard before promotion."
+  ],
+  "policy_id": "qkv_layers3_7_11_plus_layer15_q8_v8",
+  "prompt_bundle_result": {
+    "case_a_aq4_top1": 4105,
+    "case_a_aq4_top1_rank_in_sq_top8": 1,
+    "case_a_sq_top1": 4105,
+    "case_a_sq_top1_margin_over_rank2": 0.0008125300000001445,
+    "case_count": 3,
+    "layer15_qv_scale_candidate_passed": true,
+    "promoted_full_sq_policy": false,
+    "result_path": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer15-qv-scale-v1.md",
+    "sq_fp8_pair_matvec_count": 0,
+    "sq_fp8_single_matvec_count": 46,
+    "sq_fp8_triple_matvec_count": 69,
+    "sq_projection_boundary": "single+triple",
+    "strict_top1_pass_count": 3
+  },
+  "scale": {
+    "block_cols": 16,
+    "dtype": "f32",
+    "granularity": "row_block",
+    "overrides": [
+      {
+        "block_cols": 8,
+        "granularity": "row_block",
+        "id": "layer15_q8",
+        "include_regex": "^model\\.language_model\\.layers\\.15\\.self_attn\\.q_proj\\.weight$"
+      },
+      {
+        "block_cols": 8,
+        "granularity": "row_block",
+        "id": "layer15_v8",
+        "include_regex": "^model\\.language_model\\.layers\\.15\\.self_attn\\.v_proj\\.weight$"
+      }
+    ]
+  },
+  "schema_version": "sq-fp8-policy-v0.1",
+  "source_boundary": {
+    "case_count": 3,
+    "failure_reason": "layer15 q16+v16 failed case_a; retry smaller row-block on q and/or v",
+    "policy": "benchmarks/results/2026-07-09/sq-fp8-qkv-layers3-7-11-plus-layer15-q16-v16-policy-v0.1.json",
+    "result_path": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer15-pair-v1.md",
+    "strict_top1_pass_count": 2
+  },
+  "status": "qkv_layer15_qv_scale_diagnostic_not_promoted",
+  "target_gpu": "R9700/RDNA4"
+}

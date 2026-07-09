@@ -4215,6 +4215,122 @@ Quality:
 2. layer15は `q+v` interactionをscale再調整の対象にし、`q8/v16`、`q16/v8`、または `q8/v8` を試す。
 3. `q+k` と `k+v` は診断passとして保存するが、full SQ policyにはしない。
 
+## 2026-07-09 progress: T2 SQ FP8 qkv layer15 q/v scale prompt bundle
+
+前回の要点:
+
+- layer15 `q16+v16` は`case_a`で `4105 -> 5582` に反転した。
+- layer15 `q16+k16` と `k16+v16` はstrict top1を維持したため、driftはQ/V interactionに寄っていると判断した。
+
+今回の変更点:
+
+- layer15 `q+v` interactionに対して、`q8/v16`、`q16/v8`、`q8/v8` を試した。
+- baseはlayer3+7+11 `q16/k16/v16` のまま維持した。
+- `scale.overrides[]` でlayer15 `q_proj` または `v_proj` だけrow-block8にした。
+- 実行telemetryは前回と同じ `single+triple` 境界だった。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer15-qv-scale-v1.md` に保存した。
+
+実測値:
+
+| row | FP8 tensors | single count | pair count | triple count | prefill tok/s | decode tok/s | end-to-end tok/s | VRAM consumed bytes | final top1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| AQ4 baseline reused | 0 | 0 | 0 | 0 | 66.811351 | 80.883171 | 35.370726 | 4443144192 | `24218,4105,329` |
+| SQ `layers3/7/11 + layer15 q8-v16` | 11 | 46 | 0 | 69 | 59.384805 | 75.428031 | 32.777400 | 5200433152 | `24218,4105,329` |
+| SQ `layers3/7/11 + layer15 q16-v8` | 11 | 46 | 0 | 69 | 59.351654 | 75.197563 | 32.678281 | 5194121216 | `24218,5582,329` |
+| SQ `layers3/7/11 + layer15 q8-v8` | 11 | 46 | 0 | 69 | 55.622420 | 75.185622 | 30.515812 | 5202513920 | `24218,4105,329` |
+
+判断:
+
+- layer15 `q8/v16` と `q8/v8` はstrict top1 `3 / 3` を維持した。
+- layer15 `q16/v8` は`case_a`で `4105 -> 5582` のまま失敗した。
+- したがって、回復に効いているのは主にlayer15 `q_proj` のrow-block16からrow-block8への細粒度化であり、`v_proj` だけ細かくしても足りない。
+- 最小のpassing q/v scale refinementは `q8/v16` として扱う。
+- このrunもtelemetry上はpair kernelではなく `single+triple` 境界なので、品質切り分けでありpair kernel速度評価ではない。
+
+次の行動:
+
+1. layer15 `q8/v16` を最小passing q/v refinementとして保存する。
+2. 次はlayer15 `q8/k16/v16` を試し、full layer15 QKV相当をstrict top1に戻せるか確認する。
+3. passした場合もfull SQ policyではなく、より広いprompt/text guardへ進める前の診断候補として扱う。
+
+## 2026-07-09 progress: T2 SQ FP8 qkv layer15 q8 full QKV prompt bundle
+
+前回の要点:
+
+- layer15 `q16/k16/v16` は`case_a`で `4105 -> 5582` に反転した。
+- layer15 `q8/v16` と `q8/v8` はstrict top1を回復し、回復に効いているのは主にlayer15 `q_proj` のrow-block8化だと判断した。
+
+今回の変更点:
+
+- layer15のQ/K/V同時追加に戻し、layer15 `q_proj` だけrow-block8、`k_proj` と `v_proj` はrow-block16にした。
+- layer3+7+11は従来どおり `q16/k16/v16` のまま維持した。
+- SQ側は `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL=1` を使い、triple direct kernelを必須化した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer15-q8-full-qkv-v1.md` に保存した。
+
+実測値:
+
+| row | FP8 tensors | prefill tok/s | decode tok/s | end-to-end tok/s | VRAM consumed bytes | final top1 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| AQ4 baseline reused | 0 | 66.811351 | 80.883171 | 35.370726 | 4443144192 | `24218,4105,329` |
+| SQ `layers3/7/11/15 q8/k16/v16` | 12 | 62.888070 | 74.903309 | 33.650360 | 4564938752 | `24218,4105,329` |
+
+Quality:
+
+| prompt | AQ4 top1 | SQ top1 | strict top1 | top8 overlap | AQ4 top1 rank in SQ top8 | SQ top1 margin over rank2 |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| `len4` | 24218 | 24218 | pass | 7 / 8 | 1 | 0.280117035 |
+| `case_a` | 4105 | 4105 | pass | 8 / 8 | 1 | 0.000087261 |
+| `case_b` | 329 | 329 | pass | 8 / 8 | 1 | 0.191808701 |
+
+判断:
+
+- layer15 `q8/k16/v16` はfull mixed prompt bundleでstrict top1 `3 / 3` を維持した。
+- `case_a` はpassしたがmarginは `0.000087261` と非常に薄い。
+- したがって、これはlayer15 QKV同時追加を回復できる診断候補であり、まだfull SQ policyとしてpromoteしない。
+- telemetryでは `sq_projection_boundary=triple`、`sq_fp8_triple_matvec_count=92` で、QKV triple direct kernelを踏んでいる。
+
+次の行動:
+
+1. layer15 `q8/k16/v16` をcurrent diagnostic recovery candidateとして保存する。
+2. 次はB=1/4/8 short guardまたは広いprompt/text guardで、薄い`case_a` marginがすぐ崩れないか確認する。
+3. その後にlayer19以降へ同じQKV boundaryを広げるか、text-level guard実装へ進むかを判断する。
+
+## 2026-07-09 progress: T2 SQ FP8 qkv layer15 q8 full QKV short batch guard
+
+前回の要点:
+
+- layer15 `q8/k16/v16` はfull mixed prompt bundleでstrict top1 `3 / 3` を維持した。
+- ただし `case_a` のSQ top1 marginは `0.000087261` と非常に薄く、短いbatch guardで安定性を確認する必要があった。
+
+今回の変更点:
+
+- `sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-15-q8-k16-v16` をB=1/4/8のshort guardへ流した。
+- promptは `len:2xB`、generated tokenは1、lm_head top_kは1にした。
+- AQ4 baselineは `phase-t2-sq-fp8-qkv-q16-k16-v16-short-batch-guard-v1` の同一workload結果を再利用した。
+- SQ側は `ULLM_REQUIRE_HIP_SQ_FP8_MATVEC_TRIPLE_KERNEL=1` でtriple direct kernelを必須化した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer15-q8-full-qkv-short-batch-guard-v1.md` に保存した。
+
+実測値:
+
+| B | AQ4 prefill tok/s | SQ prefill tok/s | AQ4 decode tok/s | SQ decode tok/s | AQ4 end-to-end tok/s | SQ end-to-end tok/s | top1 match | SQ triple count |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 1 | 24.997350 | 20.867536 | 80.313241 | 74.871646 | 10.012651 | 9.270267 | true | 12 |
+| 4 | 53.250215 | 50.204700 | 81.519502 | 75.248488 | 26.309008 | 25.245566 | true | 48 |
+| 8 | 65.369008 | 61.288319 | 81.728132 | 75.568954 | 36.593422 | 34.743101 | true | 96 |
+
+判断:
+
+- layer15 `q8/k16/v16` はB=1/4/8のshort guardでもstrict top1を維持した。
+- SQ FP8 direct triple境界はB=1/4/8でそれぞれ `12/48/96` 回踏まれている。
+- prefill/decode tok/sはAQ4 baselineより低いが、今回は品質境界とtriple path疎通のguardであり、速度採用判定ではない。
+- prompt bundleの`case_a` marginが薄いため、まだfull SQ policyとしてpromoteしない。
+
+次の行動:
+
+1. layer15 `q8/k16/v16` をcurrent diagnostic recovery candidateとして維持する。
+2. 次は広いprompt/text guard、またはlayer19 QKV extensionで薄いmarginが崩れないか確認する。
+3. full SQ policyへpromoteする前に、strict top1だけでなくtext-level guardを追加する。
+
 ## Risks
 
 | risk | impact | handling |
