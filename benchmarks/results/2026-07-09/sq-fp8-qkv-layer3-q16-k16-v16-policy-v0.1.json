@@ -65,6 +65,17 @@
     "case_a_sq_top1_margin_over_rank2": 0.002023697,
     "promoted_full_sq_policy": false
   },
+  "short_batch_guard_result": {
+    "strict_top1_pass_count": 3,
+    "case_count": 3,
+    "batches": [
+      1,
+      4,
+      8
+    ],
+    "result_path": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-q16-k16-v16-short-batch-guard-v1.md",
+    "sq_projection_boundary": "triple"
+  },
   "artifacts": [
     {
       "artifact": "/tmp/ullm-sq-fp8-qkv-layer3-q16-k16-v16-policy-v0.1-artifact",
