@@ -2934,16 +2934,60 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 ));
             }
             layer.last_component_step_ms = None;
+            let residual_start = batch_index.checked_mul(self.hidden).ok_or_else(|| {
+                format!("{label} self-attn resident batch residual offset overflows")
+            })?;
+            batch_residual_values[residual_start..residual_start + self.hidden]
+                .copy_from_slice(&item.residual);
+            slots.push(slot);
+        }
+
+        self.batch_residual_buffer
+            .copy_from_host(
+                0,
+                &encode_f32_to_bytes(&batch_residual_values),
+                Some(stream),
+            )
+            .map_err(|err| {
+                format!("failed to copy {label} self-attn resident batch residual: {err}")
+            })?;
+        record_sq_diagnostic_host_staging_f32_write(
+            batch_residual_values.len(),
+            "self-attn resident batch residual staging",
+        )?;
+
+        for (batch_index, item) in items.iter().enumerate() {
+            let item_label = format!(
+                "{label} request={} position={}",
+                item.request_id.0, item.rope_position
+            );
+            let layer = self.layers.get_mut(slots[batch_index]).ok_or_else(|| {
+                format!(
+                    "{label} self-attn resident batch missing state slot {} for request {:?}",
+                    slots[batch_index], item.request_id
+                )
+            })?;
+            let residual_src_offset = batch_index
+                .checked_mul(self.hidden)
+                .ok_or_else(|| {
+                    format!("{label} self-attn resident batch residual offset overflows")
+                })?;
+            let residual_src_offset = checked_f32_byte_len(
+                residual_src_offset,
+                "self-attn resident batch residual offset",
+            )?;
             layer
                 .input_buffer
-                .copy_from_host(0, &encode_f32_to_bytes(&item.residual), Some(stream))
+                .copy_from_buffer(
+                    0,
+                    &self.batch_residual_buffer,
+                    residual_src_offset,
+                    hidden_bytes,
+                    Some(stream),
+                )
                 .map_err(|err| {
                     format!("failed to copy {item_label} self-attn resident residual: {err}")
                 })?;
-            record_sq_diagnostic_host_staging_f32_write(
-                item.residual.len(),
-                "self-attn resident residual staging",
-            )?;
             let mut step_ms = PackageSelfAttnComponentStepMs::default();
             layer.run_device_step_input(
                 stream,
@@ -2970,12 +3014,6 @@ impl PackageSelfAttnResidentStepBatchLayer {
                         "failed to copy {item_label} self-attn resident input normed to batch buffer: {err}"
                     )
                 })?;
-            let residual_start = batch_index.checked_mul(self.hidden).ok_or_else(|| {
-                format!("{label} self-attn resident batch residual offset overflows")
-            })?;
-            batch_residual_values[residual_start..residual_start + self.hidden]
-                .copy_from_slice(&item.residual);
-            slots.push(slot);
             component_step_ms.push(step_ms);
         }
 
@@ -3140,19 +3178,6 @@ impl PackageSelfAttnResidentStepBatchLayer {
                 Ok(0.0)
             }
         };
-
-        self.batch_residual_buffer.copy_from_host(
-            0,
-            &encode_f32_to_bytes(&batch_residual_values),
-            Some(stream),
-        )
-        .map_err(|err| {
-            format!("failed to copy {label} self-attn resident batch residual: {err}")
-        })?;
-        record_sq_diagnostic_host_staging_f32_write(
-            batch_residual_values.len(),
-            "self-attn resident batch residual staging",
-        )?;
 
         let component_started = Instant::now();
         weights.o_matrix.matvec_batch(

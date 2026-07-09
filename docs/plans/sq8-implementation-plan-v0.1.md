@@ -996,7 +996,10 @@ Expected outputs:
      boundaries. A subsequent full-stack device handoff removes the layer-to-layer host reads,
      moving the full 40-layer short row from `156/240` read/write operations to `0/6`. The
      `TOP_K=0` rows record `0/72` for `pp16/tg8/b2`, `0/120` for `pp16/tg8/b4`, and `0/216` for
-     `pp16/tg8/b8`; the remaining counted writes are host residual inputs in this smoke path.
+     `pp16/tg8/b8`; the remaining counted writes were host residual inputs in this smoke path, but
+     SQ8_0 mixed request-state now packs per-timestep residuals once and uses device-to-device slice
+     copies to each layer input, reducing host residual writes to 1 per timestep. The short layer3
+     `len:2x2` smoke now records `0/3` read/write operations and `98304` write bytes.
 
 ## Risks
 
