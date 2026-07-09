@@ -443,6 +443,16 @@ Done:
   keeping `prefill_real_batch=false` / `decode_real_batch=false` until the layer path actually uses
   batched projection kernels. A layer0 `len:4x2` SQ8_0 smoke confirms grouped execution with
   `sq_fp8_batch_matvec_count=0`.
+- Mixed-request-state reports now also carry phase-local SQ8_0 batch projection counters:
+  `prefill_sq_fp8_batch_matvec_count`, `decode_sq_fp8_batch_matvec_count`, and
+  `mixed_request_state_real_batch_projection_used`. Future real-batch promotion is therefore tied
+  to the phase that actually used a batch projection.
+- A first local SQ8_0 real-batch projection smoke exists:
+  `sq-fp8-package-self-attn-layer-batch-smoke`. The R9700 layer3 Qwen3.5 run with a partial q/k/v
+  SQ8_0 artifact reports `real_batch=true`, `sq_projection_boundary=batch`,
+  `sq_fp8_batch_matvec_count=6`, and `sq_fp8_expected_all_batch_matvec_count=14`, proving the
+  SQ8_0 batch matvec path is callable inside the self-attention layer batch smoke while still
+  recording that the artifact is a partial overlay.
 
 Remaining:
 
@@ -760,6 +770,9 @@ Expected outputs:
      selection and now record `*_r9700_direct`.
    - Multi-request mixed-state rows are now classified as grouped, not real-batch, so they cannot
      accidentally satisfy the final serving-comparison gate.
+   - A local `sq-fp8-package-self-attn-layer-batch-smoke` now exercises the SQ8_0 batch matvec
+     runtime path with `real_batch=true`, but the checked run is still a partial selected-layer
+     q/k/v overlay, not a full-package serving row.
    - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
      final vLLM serving comparison still needs real-batch or server-style uLLM rows.
 

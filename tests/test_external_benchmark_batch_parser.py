@@ -846,6 +846,8 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "prefill_executor=mixed_request_state_layer_batch_step "
             "decode_executor=mixed_request_state_layer_batch_step "
             "prefill_real_batch=false decode_real_batch=false "
+            "mixed_request_state_real_batch_projection_used=false "
+            "prefill_sq_fp8_batch_matvec_count=0 decode_sq_fp8_batch_matvec_count=0 "
             "prefill_executor_request_parallelism=1 decode_executor_request_parallelism=1 "
             "final_top1_tokens_csv=151353 final_topk_tokens_csv=151353 "
             "final_topk_logits_csv=6.250000 "
@@ -896,6 +898,11 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertFalse(row["batching"]["decode_real_batch"])
         self.assertFalse(row["batching"]["prefill_request_grouped"])
         self.assertFalse(row["batching"]["decode_request_grouped"])
+        self.assertFalse(row["batching"]["mixed_request_state_real_batch_projection_used"])
+        self.assertEqual(row["batching"]["prefill_sq_fp8_batch_matvec_count"], 0)
+        self.assertEqual(row["batching"]["decode_sq_fp8_batch_matvec_count"], 0)
+        self.assertEqual(row["workload"]["prefill_sq_fp8_batch_matvec_count"], 0)
+        self.assertEqual(row["workload"]["decode_sq_fp8_batch_matvec_count"], 0)
 
     def test_parses_model_loop_grouped_request_state_csv_fields(self) -> None:
         stdout = (
@@ -908,8 +915,10 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
             "prefill_executor=mixed_request_state_layer_batch_step "
             "decode_executor=mixed_request_state_layer_batch_step "
             "prefill_real_batch=false decode_real_batch=false "
+            "mixed_request_state_real_batch_projection_used=false "
             "prefill_request_grouped=true decode_request_grouped=true "
             "prefill_grouped_request_parallelism=2 decode_grouped_request_parallelism=3 "
+            "prefill_sq_fp8_batch_matvec_count=0 decode_sq_fp8_batch_matvec_count=0 "
             "prefill_executor_request_parallelism=2 decode_executor_request_parallelism=3 "
             "final_top1_tokens_csv=151353,151354 final_topk_tokens_csv=151353,151354 "
             "final_topk_logits_csv=6.250000,5.500000 "
@@ -949,8 +958,13 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertFalse(row["batching"]["decode_real_batch"])
         self.assertTrue(row["batching"]["prefill_request_grouped"])
         self.assertTrue(row["batching"]["decode_request_grouped"])
+        self.assertFalse(row["batching"]["mixed_request_state_real_batch_projection_used"])
         self.assertEqual(row["batching"]["prefill_grouped_request_parallelism"], 2)
         self.assertEqual(row["batching"]["decode_grouped_request_parallelism"], 3)
+        self.assertEqual(row["batching"]["prefill_sq_fp8_batch_matvec_count"], 0)
+        self.assertEqual(row["batching"]["decode_sq_fp8_batch_matvec_count"], 0)
+        self.assertEqual(row["workload"]["prefill_sq_fp8_batch_matvec_count"], 0)
+        self.assertEqual(row["workload"]["decode_sq_fp8_batch_matvec_count"], 0)
         self.assertEqual(row["batching"]["prefill_batch_request_counts"], [2, 1])
         self.assertEqual(row["workload"]["prompt_tokens_per_request"], [2, 3])
 

@@ -58,6 +58,7 @@ use ullm_engine::scheduler::{
     SchedulerState,
 };
 use ullm_engine::sq::{
+    fp8_e4m3fn_to_f32,
     materialize_sq_fp8_tensor_rows_to_runtime_f32, read_sq_fp8_artifact,
     select_sq_fp8_tensor_index, sq_fp8_tensor_rows_cols,
 };
@@ -737,6 +738,21 @@ fn main() -> ExitCode {
             env::args().nth(9),
             env::args().nth(10),
         ),
+        Some("sq-fp8-package-self-attn-layer-batch-smoke") => {
+            sq_fp8_package_self_attn_layer_batch_smoke(
+                env::args().nth(2),
+                env::args().nth(3),
+                env::args().nth(4),
+                env::args().nth(5),
+                env::args().nth(6),
+                env::args().nth(7),
+                env::args().nth(8),
+                env::args().nth(9),
+                env::args().nth(10),
+                env::args().nth(11),
+                env::args().nth(12),
+            )
+        }
         Some("package-linear-attn-proj-batch-smoke") => package_linear_attn_proj_batch_smoke(
             env::args().nth(2),
             env::args().nth(3),

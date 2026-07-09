@@ -3268,6 +3268,9 @@ fn print_help() {
         "sq-fp8-materialize-smoke: ARTIFACT_DIR [DEVICE_INDEX] [TENSOR_SELECTOR] [ROW_COUNT] [START_ROW]"
     );
     eprintln!(
+        "sq-fp8-package-self-attn-layer-batch-smoke: PACKAGE_DIR ARTIFACT_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS] [ROW_CHUNK] [ROTARY_DIM] [ROPE_BASE] [POSITION_OFFSET]"
+    );
+    eprintln!(
         "package-prefill-rmsnorm-batch-smoke: PACKAGE_DIR [DEVICE_INDEX] [CHUNK_BYTES] [LAYER_INDEX] [TOKEN_IDS_CSV|len:N] [MEASURED_REPEATS]"
     );
     eprintln!(
@@ -5098,10 +5101,130 @@ impl PackageAq4ResidentMatvec {
                     .copy_from_host(0, &bytes, Some(stream))
                     .map_err(|err| format!("failed to copy {label} F32 row to runtime: {err}"))
             }
-            PackageResidentMatvecStorage::SqFp8 { .. } => {
-                Err(format!("{label} SQ FP8 row read is not implemented"))
+            PackageResidentMatvecStorage::SqFp8 {
+                payload_buffer,
+                scale_buffer,
+                scale_kind,
+                scale_block_cols,
+            } => {
+                let row = self.sq_fp8_row_to_host_f32(
+                    row_index,
+                    payload_buffer.as_ref(),
+                    scale_buffer.as_ref(),
+                    *scale_kind,
+                    *scale_block_cols,
+                    stream,
+                    label,
+                )?;
+                let output_bytes = checked_f32_byte_len(self.cols, label)?;
+                let actual_bytes = output_buffer
+                    .size()
+                    .map_err(|err| format!("failed to query {label} SQ FP8 row output size: {err}"))?;
+                if actual_bytes < output_bytes {
+                    return Err(format!(
+                        "{label} SQ FP8 row output buffer is too small: got {actual_bytes} bytes expected at least {output_bytes}"
+                    ));
+                }
+                output_buffer
+                    .copy_from_host(0, &encode_f32_to_bytes(&row), Some(stream))
+                    .map_err(|err| format!("failed to copy {label} SQ FP8 row to runtime: {err}"))
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sq_fp8_row_to_host_f32(
+        &self,
+        row_index: usize,
+        payload_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        scale_buffer: &ullm_runtime_sys::RuntimeBuffer,
+        scale_kind: u32,
+        scale_block_cols: usize,
+        stream: &mut ullm_runtime_sys::RuntimeStream,
+        label: &str,
+    ) -> Result<Vec<f32>, String> {
+        if row_index >= self.rows {
+            return Err(format!(
+                "{label} SQ FP8 row index {row_index} is out of range for {} rows",
+                self.rows
+            ));
+        }
+        let blocks_per_row = if scale_kind == ullm_runtime_sys::SQ_FP8_SCALE_ROW_BLOCK {
+            if scale_block_cols == 0 {
+                return Err(format!(
+                    "{label} SQ FP8 row_block scale_block_cols must be greater than zero"
+                ));
+            }
+            self.cols
+                .checked_add(scale_block_cols - 1)
+                .and_then(|value| value.checked_div(scale_block_cols))
+                .ok_or_else(|| format!("{label} SQ FP8 row_block count overflows"))?
+        } else {
+            1
+        };
+        let (scale_offset, scale_count) = match scale_kind {
+            ullm_runtime_sys::SQ_FP8_SCALE_TENSOR => (0, 1),
+            ullm_runtime_sys::SQ_FP8_SCALE_ROW => {
+                let offset = row_index
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| format!("{label} SQ FP8 row scale offset overflows"))?;
+                (offset, 1)
+            }
+            ullm_runtime_sys::SQ_FP8_SCALE_ROW_BLOCK => {
+                let row_scale_index = row_index
+                    .checked_mul(blocks_per_row)
+                    .ok_or_else(|| format!("{label} SQ FP8 row_block scale index overflows"))?;
+                let offset = row_scale_index
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| format!("{label} SQ FP8 row_block scale offset overflows"))?;
+                (offset, blocks_per_row)
+            }
+            other => {
+                return Err(format!(
+                    "{label} SQ FP8 scale kind must be tensor(0), row(1), or row_block(2), got {other}"
+                ));
+            }
+        };
+        let payload_offset = row_index
+            .checked_mul(self.cols)
+            .ok_or_else(|| format!("{label} SQ FP8 row payload offset overflows"))?;
+        let mut payload = vec![0_u8; self.cols];
+        payload_buffer
+            .copy_to_host(payload_offset, &mut payload, Some(stream))
+            .map_err(|err| format!("failed to copy {label} SQ FP8 row payload: {err}"))?;
+        let mut scale_bytes =
+            vec![0_u8; checked_f32_byte_len(scale_count, "SQ FP8 row scale")?];
+        scale_buffer
+            .copy_to_host(scale_offset, &mut scale_bytes, Some(stream))
+            .map_err(|err| format!("failed to copy {label} SQ FP8 row scales: {err}"))?;
+        stream
+            .synchronize()
+            .map_err(|err| format!("failed to synchronize {label} SQ FP8 row copy: {err}"))?;
+        let scales = decode_f32_le_values(&scale_bytes);
+        if scales.len() != scale_count {
+            return Err(format!(
+                "{label} SQ FP8 decoded scale count mismatch: got {} expected {scale_count}",
+                scales.len()
+            ));
+        }
+        let mut row = Vec::with_capacity(self.cols);
+        for (col, payload_value) in payload.iter().copied().enumerate() {
+            let scale = match scale_kind {
+                ullm_runtime_sys::SQ_FP8_SCALE_TENSOR | ullm_runtime_sys::SQ_FP8_SCALE_ROW => {
+                    scales[0]
+                }
+                ullm_runtime_sys::SQ_FP8_SCALE_ROW_BLOCK => scales[col / scale_block_cols],
+                _ => unreachable!("validated SQ FP8 scale kind"),
+            };
+            let value = fp8_e4m3fn_to_f32(payload_value);
+            if !value.is_finite() || !scale.is_finite() || scale <= 0.0 {
+                return Err(format!(
+                    "{label} SQ FP8 row {row_index} col {col} has invalid value={value} scale={scale}"
+                ));
+            }
+            row.push(value * scale);
+        }
+        Ok(row)
     }
 
     fn matvec(

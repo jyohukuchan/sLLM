@@ -2242,6 +2242,42 @@ mod package_model_loop_cli_tail_tests {
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn infer_mixed_request_state_real_batch_flags_keeps_grouped_as_single_without_batch_matvec() {
+        let (prefill, decode, used) =
+            infer_mixed_request_state_real_batch_flags(true, false, 0, 0);
+        assert!(!prefill);
+        assert!(!decode);
+        assert!(!used);
+    }
+
+    #[test]
+    fn infer_mixed_request_state_real_batch_flags_enables_both_phases_when_batch_matvec_used() {
+        let (prefill, decode, used) =
+            infer_mixed_request_state_real_batch_flags(true, true, 1, 1);
+        assert!(prefill);
+        assert!(decode);
+        assert!(used);
+    }
+
+    #[test]
+    fn infer_mixed_request_state_real_batch_flags_is_phase_local() {
+        let (prefill, decode, used) =
+            infer_mixed_request_state_real_batch_flags(true, false, 1, 0);
+        assert!(prefill);
+        assert!(!decode);
+        assert!(used);
+    }
+
+    #[test]
+    fn infer_mixed_request_state_real_batch_flags_requires_phase_local_batch_matvec() {
+        let (prefill, decode, used) =
+            infer_mixed_request_state_real_batch_flags(true, true, 1, 0);
+        assert!(prefill);
+        assert!(!decode);
+        assert!(used);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3115,6 +3151,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     stream
         .synchronize()
         .map_err(|err| format!("failed to synchronize mixed request-state prefill: {err}"))?;
+    let prefill_sq_fp8_projection_telemetry = snapshot_sq_fp8_projection_telemetry();
     let prefill_wall_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
 
     let decode_started = Instant::now();
@@ -3177,6 +3214,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     stream
         .synchronize()
         .map_err(|err| format!("failed to synchronize mixed request-state decode: {err}"))?;
+    let decode_sq_fp8_projection_telemetry = snapshot_sq_fp8_projection_telemetry();
     let decode_wall_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
 
     let final_norm = read_named_passthrough_f32(path, QWEN3_FINAL_NORM_TENSOR, chunk_bytes)
@@ -3303,6 +3341,18 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         .unwrap_or(0);
     let prefill_request_grouped = prefill_executor_request_parallelism > 1;
     let decode_request_grouped = decode_executor_request_parallelism > 1;
+    let prefill_sq_fp8_batch_matvec_count =
+        prefill_sq_fp8_projection_telemetry.batch_matvec_count;
+    let decode_sq_fp8_batch_matvec_count = decode_sq_fp8_projection_telemetry
+        .batch_matvec_count
+        .saturating_sub(prefill_sq_fp8_projection_telemetry.batch_matvec_count);
+    let (prefill_real_batch, decode_real_batch, real_batch_projection_used) =
+        infer_mixed_request_state_real_batch_flags(
+            prefill_request_grouped,
+            decode_request_grouped,
+            prefill_sq_fp8_batch_matvec_count,
+            decode_sq_fp8_batch_matvec_count,
+        );
     let batching_mode = if prefill_request_grouped || decode_request_grouped {
         "grouped"
     } else {
@@ -3356,7 +3406,7 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
     };
 
     Ok(format!(
-        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state format_id={} full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true sq_overlay={} sq_candidate={} sq_candidate_legacy={} sq_format_id={} sq_implementation_id={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_projection_implementation_ids={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch=false decode_real_batch=false prefill_request_grouped={} decode_request_grouped={} prefill_grouped_request_parallelism={} decode_grouped_request_parallelism={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
+        "{} package={} layers={:?} layers_csv={} layer_kinds={:?} input_source={} prefill_mode=token_id_full_mixed_request_state format_id={} full_mixed_request_state=true request_state_dispatch=true request_batch_executor=true fused_request_batch=false throughput_row=true load_excluded_from_total=true final_logits_in_total=true sq_overlay={} sq_candidate={} sq_candidate_legacy={} sq_format_id={} sq_implementation_id={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_projection_implementation_ids={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} prefill_sq_fp8_batch_matvec_count={} decode_sq_fp8_batch_matvec_count={} batching_mode={} prefill_executor=mixed_request_state_layer_batch_step decode_executor=mixed_request_state_layer_batch_step prefill_real_batch={} decode_real_batch={} mixed_request_state_real_batch_projection_used={} prefill_request_grouped={} decode_request_grouped={} prefill_grouped_request_parallelism={} decode_grouped_request_parallelism={} prefill_executor_request_parallelism={} decode_executor_request_parallelism={} prompt_token_ids_by_request={:?} decode_token_ids_by_request={:?} final_lm_head_guard=true lm_head_top_k={} lm_head_chunk_rows={} final_top1_tokens={:?} final_top1_tokens_csv={} final_top1_logits_csv={} final_topk_tokens_csv={} final_topk_logits_csv={} sequence_len={} request_count={} concurrent_requests={} request_ids={:?} prompt_tokens={:?} prompt_tokens_csv={} max_new_tokens={:?} max_new_tokens_csv={} total_tokens={:?} total_tokens_csv={} prefill_total_input_tokens={} decode_total_generated_tokens={} end_to_end_total_tokens={} prefill_wall_ms={:.6} decode_wall_ms={:.6} final_logits_wall_ms={:.6} layer_load_ms={:.6} total_wall_ms={:.6} outer_wall_ms={:.6} prefill_total_input_tps={} decode_total_generated_tps={} end_to_end_total_tps={} paged_block_size={} paged_cache_blocks={} per_request_cache_buffers=true slot_aq4_payload_registry_shared=true slot_aq4_scale_values_shared=true slot_passthrough_weight_buffers_shared=true self_attn_weight_bundle_shared={} linear_attn_weight_bundle_shared={} shared_paged_cache=false block_tables={:?} prefill_batch_request_counts={:?} prefill_batch_request_counts_csv={} decode_batch_request_counts={:?} decode_batch_request_counts_csv={} hidden={} embedding_vocab={} self_attn_shapes={} rotary_dim={} position_offset={} rope_base={} backend={} device_index={} name=\"{}\" verified=true",
         command_name,
         path,
         layer_indices,
@@ -3381,7 +3431,12 @@ fn package_token_ids_mixed_request_state_smoke_impl_with_sq_overlay(
         sq_fp8_projection_telemetry.batch_matvec_count,
         sq_fp8_projection_telemetry.pair_matvec_count,
         sq_fp8_projection_telemetry.triple_matvec_count,
+        prefill_sq_fp8_batch_matvec_count,
+        decode_sq_fp8_batch_matvec_count,
         batching_mode,
+        prefill_real_batch,
+        decode_real_batch,
+        real_batch_projection_used,
         prefill_request_grouped,
         decode_request_grouped,
         prefill_executor_request_parallelism,
@@ -3459,6 +3514,18 @@ fn optional_f64_string(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.6}"))
         .unwrap_or_else(|| "null".to_string())
+}
+
+fn infer_mixed_request_state_real_batch_flags(
+    prefill_request_grouped: bool,
+    decode_request_grouped: bool,
+    prefill_batch_matvec_count: u64,
+    decode_batch_matvec_count: u64,
+) -> (bool, bool, bool) {
+    let prefill_real_batch = prefill_request_grouped && prefill_batch_matvec_count > 0;
+    let decode_real_batch = decode_request_grouped && decode_batch_matvec_count > 0;
+    let real_batch_projection_used = prefill_real_batch || decode_real_batch;
+    (prefill_real_batch, decode_real_batch, real_batch_projection_used)
 }
 
 fn mixed_request_state_residual_slice<'a>(
@@ -5927,6 +5994,9 @@ fn package_self_attn_qkv_rope_batch_smoke(
         rope_base,
         position_offset,
         SelfAttnBatchSmokeStage::QkvRope,
+        None,
+        0,
+        None,
     ) {
         Ok(report) => {
             println!("{report}");
@@ -5996,6 +6066,9 @@ fn package_self_attn_attention_batch_smoke(
         rope_base,
         position_offset,
         SelfAttnBatchSmokeStage::Attention,
+        None,
+        0,
+        None,
     ) {
         Ok(report) => {
             println!("{report}");
@@ -6065,6 +6138,9 @@ fn package_self_attn_block_batch_smoke(
         rope_base,
         position_offset,
         SelfAttnBatchSmokeStage::Block,
+        None,
+        0,
+        None,
     ) {
         Ok(report) => {
             println!("{report}");
@@ -6134,6 +6210,102 @@ fn package_self_attn_layer_batch_smoke(
         rope_base,
         position_offset,
         SelfAttnBatchSmokeStage::Layer,
+        None,
+        0,
+        None,
+    ) {
+        Ok(report) => {
+            println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn sq_fp8_package_self_attn_layer_batch_smoke(
+    path: Option<String>,
+    artifact_path: Option<String>,
+    device_index: Option<String>,
+    chunk_bytes: Option<String>,
+    layer_index: Option<String>,
+    prompt_token_ids: Option<String>,
+    measured_repeats: Option<String>,
+    sq_row_chunk: Option<String>,
+    rotary_dim: Option<String>,
+    rope_base: Option<String>,
+    position_offset: Option<String>,
+) -> ExitCode {
+    let Some(path) = path else {
+        eprintln!("sq-fp8-package-self-attn-layer-batch-smoke requires a .ullm.d path");
+        return ExitCode::from(2);
+    };
+    let Some(artifact_path) = artifact_path else {
+        eprintln!("sq-fp8-package-self-attn-layer-batch-smoke requires an SQ8_0 artifact path");
+        return ExitCode::from(2);
+    };
+    let device_index = match parse_optional_device_index(device_index) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let chunk_bytes = match parse_optional_usize(chunk_bytes, 1024 * 1024, "chunk bytes") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("chunk bytes must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let layer_index = match parse_optional_usize(layer_index, 3, "layer index") {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let prompt_token_ids = match parse_package_prompt_token_ids(
+        prompt_token_ids.or_else(|| Some("len:4".to_string())),
+    ) {
+        Ok(value) => value,
+        Err(code) => return code,
+    };
+    let measured_repeats = match parse_optional_usize(measured_repeats, 1, "measured repeats") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("measured repeats must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let sq_row_chunk = match parse_optional_usize(sq_row_chunk, 256, "SQ row chunk") {
+        Ok(value) if value > 0 => value,
+        Ok(_) => {
+            eprintln!("SQ row chunk must be greater than zero");
+            return ExitCode::from(2);
+        }
+        Err(code) => return code,
+    };
+    let artifact = match read_sq_fp8_artifact(&artifact_path) {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("failed to load SQ8_0 artifact: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match package_self_attn_qkv_rope_batch_smoke_impl(
+        &path,
+        device_index,
+        chunk_bytes,
+        layer_index,
+        prompt_token_ids,
+        measured_repeats,
+        rotary_dim,
+        rope_base,
+        position_offset,
+        SelfAttnBatchSmokeStage::Layer,
+        Some(&artifact),
+        sq_row_chunk,
+        Some("sq-fp8-package-self-attn-layer-batch-smoke"),
     ) {
         Ok(report) => {
             println!("{report}");
@@ -6158,7 +6330,11 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
     rope_base_arg: Option<String>,
     position_offset_arg: Option<String>,
     stage: SelfAttnBatchSmokeStage,
+    sq_artifact: Option<&ullm_engine::sq::SqFp8Artifact>,
+    sq_row_chunk: usize,
+    command_name: Option<&'static str>,
 ) -> Result<String, String> {
+    let command_name = command_name.unwrap_or_else(|| stage.smoke_name());
     if prompt_token_ids.is_empty() {
         return Err("self-attn qkv RoPE batch smoke requires at least one token".to_string());
     }
@@ -6301,74 +6477,94 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         .create_stream()
         .map_err(|err| format!("failed to create runtime stream: {err}"))?;
     let mut registry = WeightRegistry::new();
-    let q_matrix = PackageAq4ResidentMatvec::load(
+    let sq_overlay = sq_artifact.map(|artifact| Qwen3PackageSqOverlay {
+        artifact,
+        row_chunk: sq_row_chunk,
+    });
+    let sq_overlay_info =
+        sq_artifact.map(|artifact| package_model_loop_sq_overlay_info(artifact, sq_row_chunk));
+    let q_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
         &mut context,
         &mut stream,
         &mut registry,
+        None,
         path,
         &q_tensor,
         chunk_bytes,
+        sq_overlay.as_ref(),
     )?;
-    let k_matrix = PackageAq4ResidentMatvec::load(
+    let k_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
         &mut context,
         &mut stream,
         &mut registry,
+        None,
         path,
         &k_tensor,
         chunk_bytes,
+        sq_overlay.as_ref(),
     )?;
-    let v_matrix = PackageAq4ResidentMatvec::load(
+    let v_matrix = PackageAq4ResidentMatvec::load_with_sq_overlay(
         &mut context,
         &mut stream,
         &mut registry,
+        None,
         path,
         &v_tensor,
         chunk_bytes,
+        sq_overlay.as_ref(),
     )?;
     let o_matrix = if stage.include_block() {
-        Some(PackageAq4ResidentMatvec::load(
+        Some(PackageAq4ResidentMatvec::load_with_sq_overlay(
             &mut context,
             &mut stream,
             &mut registry,
+            None,
             path,
             &o_tensor,
             chunk_bytes,
+            sq_overlay.as_ref(),
         )?)
     } else {
         None
     };
     let gate_matrix = if stage.include_layer() {
-        Some(PackageAq4ResidentMatvec::load(
+        Some(PackageAq4ResidentMatvec::load_with_sq_overlay(
             &mut context,
             &mut stream,
             &mut registry,
+            None,
             path,
             &gate_tensor,
             chunk_bytes,
+            sq_overlay.as_ref(),
         )?)
     } else {
         None
     };
     let up_matrix = if stage.include_layer() {
-        Some(PackageAq4ResidentMatvec::load(
+        Some(PackageAq4ResidentMatvec::load_with_sq_overlay(
             &mut context,
             &mut stream,
             &mut registry,
+            None,
             path,
             &up_tensor,
             chunk_bytes,
+            sq_overlay.as_ref(),
         )?)
     } else {
         None
     };
     let down_matrix = if stage.include_layer() {
-        Some(PackageAq4ResidentMatvec::load(
+        Some(PackageAq4ResidentMatvec::load_with_sq_overlay(
             &mut context,
             &mut stream,
             &mut registry,
+            None,
             path,
             &down_tensor,
             chunk_bytes,
+            sq_overlay.as_ref(),
         )?)
     } else {
         None
@@ -6940,6 +7136,7 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
             Ok(())
         };
 
+    reset_sq_fp8_projection_telemetry();
     run_qkv_rope_batch(&mut stream)?;
     stream
         .synchronize()
@@ -6954,6 +7151,7 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         })?;
         measured_ms.push(started.elapsed().as_secs_f64() * 1000.0);
     }
+    let sq_fp8_projection_telemetry = snapshot_sq_fp8_projection_telemetry();
     let wall_ms = measured_ms.iter().sum::<f64>() / measured_ms.len() as f64;
     let wall_ms_min = measured_ms
         .iter()
@@ -7532,14 +7730,81 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         })
         .ok_or_else(|| "self-attn qkv RoPE batch output element count overflows".to_string())?;
     let preview_len = q_rope.len().min(8);
-    let executor = if stage.include_layer() {
-        "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32+causal_attn_f32+sigmoid_mul_f32+aq4_matvec_batch_f32+add_f32+segmented_rmsnorm_f32+aq4_matvec_batch_f32+silu_mul_f32+aq4_matvec_batch_f32+add_f32"
+    let matvec_batch_calls_per_run = if stage.include_layer() {
+        7_u64
     } else if stage.include_block() {
-        "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32+causal_attn_f32+sigmoid_mul_f32+aq4_matvec_batch_f32+add_f32"
-    } else if stage.include_attention() {
-        "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32+causal_attn_f32"
+        4_u64
     } else {
-        "segmented_rmsnorm_f32+aq4_matvec_batch_f32+qwen35_qk_norm_rope_batch_f32"
+        3_u64
+    };
+    let expected_all_sq_batch_matvec_count = (measured_repeats as u64 + 1)
+        .checked_mul(matvec_batch_calls_per_run)
+        .ok_or_else(|| "self-attn batch expected SQ matvec count overflows".to_string())?;
+    let batch_matvec_executor = if sq_overlay_info.is_some()
+        && sq_fp8_projection_telemetry.batch_matvec_count == expected_all_sq_batch_matvec_count
+    {
+        "sq8_0_matvec_batch_f32"
+    } else if sq_overlay_info.is_some() && sq_fp8_projection_telemetry.batch_matvec_count > 0 {
+        "sq8_0_or_aq4_matvec_batch_f32"
+    } else {
+        "aq4_matvec_batch_f32"
+    };
+    let executor = if stage.include_layer() {
+        format!("segmented_rmsnorm_f32+{batch_matvec_executor}+qwen35_qk_norm_rope_batch_f32+causal_attn_f32+sigmoid_mul_f32+{batch_matvec_executor}+add_f32+segmented_rmsnorm_f32+{batch_matvec_executor}+silu_mul_f32+{batch_matvec_executor}+add_f32")
+    } else if stage.include_block() {
+        format!("segmented_rmsnorm_f32+{batch_matvec_executor}+qwen35_qk_norm_rope_batch_f32+causal_attn_f32+sigmoid_mul_f32+{batch_matvec_executor}+add_f32")
+    } else if stage.include_attention() {
+        format!("segmented_rmsnorm_f32+{batch_matvec_executor}+qwen35_qk_norm_rope_batch_f32+causal_attn_f32")
+    } else {
+        format!("segmented_rmsnorm_f32+{batch_matvec_executor}+qwen35_qk_norm_rope_batch_f32")
+    };
+    let sq_projection_boundary = sq_fp8_projection_boundary(sq_fp8_projection_telemetry);
+    let sq_fp8_projection_dispatches = SqFp8ProjectionDispatches::from_info(&info, None);
+    let sq_projection_implementation_ids = sq_fp8_projection_implementation_ids(
+        sq_fp8_projection_telemetry,
+        sq_fp8_projection_dispatches,
+    );
+    let sq_overlay_enabled = sq_overlay_info.is_some();
+    let format_id = sq_overlay_info
+        .as_ref()
+        .map(|info| info.format_id.as_str())
+        .unwrap_or(FORMAT_AQ4_0);
+    let sq_candidate = sq_overlay_info
+        .as_ref()
+        .map(|info| info.candidate.as_str())
+        .unwrap_or("none");
+    let sq_candidate_legacy = sq_overlay_info
+        .as_ref()
+        .and_then(|info| info.candidate_legacy.as_deref())
+        .unwrap_or("none");
+    let sq_implementation_id = sq_overlay_info
+        .as_ref()
+        .map(|info| info.implementation_id.as_str())
+        .unwrap_or("none");
+    let sq_artifact_path = sq_overlay_info
+        .as_ref()
+        .map(|info| info.artifact.as_str())
+        .unwrap_or("none");
+    let sq_schema_version = sq_overlay_info
+        .as_ref()
+        .map(|info| info.schema_version.as_str())
+        .unwrap_or("none");
+    let sq_fp8_tensor_count = sq_overlay_info
+        .as_ref()
+        .map(|info| info.fp8_tensor_count)
+        .unwrap_or(0);
+    let sq_passthrough_tensor_count = sq_overlay_info
+        .as_ref()
+        .map(|info| info.passthrough_tensor_count)
+        .unwrap_or(0);
+    let sq_row_chunk_value = sq_overlay_info
+        .as_ref()
+        .map(|info| info.row_chunk.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let sq_execution_mode = if sq_overlay_enabled {
+        "direct_fp8_dequant_matvec_batch"
+    } else {
+        "aq4_matvec_batch"
     };
     if let Some(layer_output) = layer_output.as_ref() {
         let attention_output = attention_output.as_ref().ok_or_else(|| {
@@ -7579,10 +7844,29 @@ fn package_self_attn_qkv_rope_batch_smoke_impl(
         ) = layer_verification
             .ok_or_else(|| "self-attn layer batch verification summary missing".to_string())?;
         return Ok(format!(
-            "{} package={} layer={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} intermediate={} q_rows={} k_rows={} v_rows={} o_rows={} gate_rows={} down_rows={} q_projection_layout={} q_gate_elements={} output_gate_layout=qwen3.5-sigmoid q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} input_elements={} intermediate_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} verification_wall_ms={verification_wall_ms:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_verification={} attention_checked_values={} attention_max_abs_diff={:.9} output_gate_max_abs_diff={output_gate_max_abs_diff:.9} o_proj_verification=sampled o_proj_checked_values={} o_proj_max_abs_diff={o_proj_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} mlp_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_gate_verification=sampled mlp_gate_checked_values={} mlp_gate_max_abs_diff={gate_max_abs_diff:.9} mlp_up_verification=sampled mlp_up_checked_values={} mlp_up_max_abs_diff={up_max_abs_diff:.9} mlp_activation_max_abs_diff={activation_max_abs_diff:.9} mlp_down_verification=sampled mlp_down_checked_values={} mlp_down_max_abs_diff={down_max_abs_diff:.9} layer_residual_max_abs_diff={layer_residual_max_abs_diff:.9} q_rope_preview={} attention_preview={} projection_input_preview={} projected_preview={} block_preview={} layer_preview={} verified=true",
-            stage.smoke_name(),
+            "{} package={} layer={} format_id={} sq_overlay={} sq_candidate={} sq_candidate_legacy={} sq_format_id={} sq_implementation_id={} sq_artifact={} sq_schema_version={} sq_fp8_tensor_count={} sq_passthrough_tensor_count={} sq_row_chunk={} sq_execution_mode={} sq_projection_boundary={} sq_projection_implementation_ids={} sq_fp8_single_matvec_count={} sq_fp8_batch_matvec_count={} sq_fp8_expected_all_batch_matvec_count={} sq_fp8_pair_matvec_count={} sq_fp8_triple_matvec_count={} tensors=[\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"] prompt_tokens={} hidden={} intermediate={} q_rows={} k_rows={} v_rows={} o_rows={} gate_rows={} down_rows={} q_projection_layout={} q_gate_elements={} output_gate_layout=qwen3.5-sigmoid q_heads={} kv_heads={} head_dim={} value_dim={} rotary_dim={} position_offset={} rope_base={} softmax_scale={softmax_scale:.9} input_elements={} intermediate_elements={} output_elements={} executor={} real_batch=true token_parallelism={} request_parallelism=1 backend={} device_index={} name=\"{}\" warmup_runs=1 measured_repeats={} wall_ms_mean={:.6} wall_ms_min={:.6} wall_ms_max={:.6} verification_wall_ms={verification_wall_ms:.6} token_tps_mean={} output_element_tps_mean={} input_norm_max_abs_diff={input_norm_max_abs_diff:.9} q_gate_max_abs_diff={q_gate_max_abs_diff:.9} q_rope_abs_floor={rope_abs_floor:.9} q_rope_max_abs_diff={q_rope_max_abs_diff:.9} k_rope_abs_floor={rope_abs_floor:.9} k_rope_max_abs_diff={k_rope_max_abs_diff:.9} attention_verification={} attention_checked_values={} attention_max_abs_diff={:.9} output_gate_max_abs_diff={output_gate_max_abs_diff:.9} o_proj_verification=sampled o_proj_checked_values={} o_proj_max_abs_diff={o_proj_max_abs_diff:.9} block_max_abs_diff={block_max_abs_diff:.9} mlp_norm_max_abs_diff={post_norm_max_abs_diff:.9} mlp_gate_verification=sampled mlp_gate_checked_values={} mlp_gate_max_abs_diff={gate_max_abs_diff:.9} mlp_up_verification=sampled mlp_up_checked_values={} mlp_up_max_abs_diff={up_max_abs_diff:.9} mlp_activation_max_abs_diff={activation_max_abs_diff:.9} mlp_down_verification=sampled mlp_down_checked_values={} mlp_down_max_abs_diff={down_max_abs_diff:.9} layer_residual_max_abs_diff={layer_residual_max_abs_diff:.9} q_rope_preview={} attention_preview={} projection_input_preview={} projected_preview={} block_preview={} layer_preview={} verified=true",
+            command_name,
             path,
             layer_index,
+            format_id,
+            sq_overlay_enabled,
+            sq_candidate,
+            sq_candidate_legacy,
+            format_id,
+            sq_implementation_id,
+            sq_artifact_path,
+            sq_schema_version,
+            sq_fp8_tensor_count,
+            sq_passthrough_tensor_count,
+            sq_row_chunk_value,
+            sq_execution_mode,
+            sq_projection_boundary,
+            sq_projection_implementation_ids,
+            sq_fp8_projection_telemetry.single_matvec_count,
+            sq_fp8_projection_telemetry.batch_matvec_count,
+            expected_all_sq_batch_matvec_count,
+            sq_fp8_projection_telemetry.pair_matvec_count,
+            sq_fp8_projection_telemetry.triple_matvec_count,
             input_norm_tensor,
             q_tensor,
             k_tensor,

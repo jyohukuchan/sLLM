@@ -1178,9 +1178,18 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "sq_fp8_batch_matvec_count",
         "sq_fp8_pair_matvec_count",
         "sq_fp8_triple_matvec_count",
+        "prefill_sq_fp8_batch_matvec_count",
+        "decode_sq_fp8_batch_matvec_count",
     ):
         value = parse_int(report.get(key))
-        if value is not None and (value > 0 or key.startswith("sq_fp8_")):
+        if value is not None and (
+            value > 0
+            or key.startswith("sq_fp8_")
+            or key in {
+                "prefill_sq_fp8_batch_matvec_count",
+                "decode_sq_fp8_batch_matvec_count",
+            }
+        ):
             row_workload[key] = value
     final_top1_tokens = parse_int_csv(report.get("final_top1_tokens_csv"))
     if final_top1_tokens:
@@ -1214,6 +1223,9 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "prefill_grouped_request_parallelism": parse_int(
             report.get("prefill_grouped_request_parallelism")
         ),
+        "prefill_sq_fp8_batch_matvec_count": parse_int(
+            report.get("prefill_sq_fp8_batch_matvec_count")
+        ),
         "decode_executor": report.get("decode_executor"),
         "decode_real_batch": report.get("decode_real_batch") is True,
         "decode_executor_request_parallelism": parse_int(
@@ -1223,6 +1235,13 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "decode_grouped_request_parallelism": parse_int(
             report.get("decode_grouped_request_parallelism")
         ),
+        "decode_sq_fp8_batch_matvec_count": parse_int(
+            report.get("decode_sq_fp8_batch_matvec_count")
+        ),
+        "mixed_request_state_real_batch_projection_used": report.get(
+            "mixed_request_state_real_batch_projection_used"
+        )
+        is True,
         "request_batch_executor": report.get("request_batch_executor") is True,
         "fused_request_batch": report.get("fused_request_batch") is True,
         "throughput_row": report.get("throughput_row") is True,
