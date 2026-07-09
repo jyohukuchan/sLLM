@@ -345,6 +345,13 @@ selected SQ8_0 projection set is batched, so the row remains a resident stack di
 a final all-projection row. Even when those counters match, selected-layer stack rows remain
 diagnostic until the same execution path is represented in full-package or server-style rows.
 
+Full mixed request-state rows, such as `sq-fp8-token-ids-mixed-request-state-smoke`, are not
+selected-layer diagnostics when they use `layers_csv` covering the full model. If these rows report
+`batching.mode="real"` and `sq_fp8_batch_matvec_count == sq_fp8_expected_all_batch_matvec_count`,
+they are implementation-valid full model-loop real-batch rows. They should still remain separate
+from serving rows when final logits are included in total latency or when host staging is part of the
+diagnostic resident path.
+
 SQ candidate rows may also carry a top-level `candidate` object:
 
 - `candidate.id`: e.g. `sq-fp8-w8a16-r9700-v0`

@@ -648,6 +648,12 @@ Current local baseline state:
   `sq_projection_implementation_ids=single=sq8_0_matvec_r9700_direct,triple=sq8_0_matvec_triple_r9700_direct`,
   with smoke decode `2.702039 tok/s` / consumed VRAM `13763952640` bytes and representative decode
   `2.858786 tok/s` / consumed VRAM `14242406400` bytes.
+- A short full 40-layer mixed-request-state real-batch row now exists at
+  `benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-smoke/results.jsonl`. It uses
+  the Qwen3-14B-FP8 thin package plus full SQ8_0 sidecar, `prompt_tokens=1x2`,
+  `generated_tokens=1x2`, `rotary_dim=128`, and `rope_base=1000000`. It records
+  `batching_mode=real`, `prefill_real_batch=true`, `decode_real_batch=true`,
+  `sq_projection_boundary=batch`, and `sq_fp8_batch_matvec_count=560/560`.
 - The config-aligned uLLM rows now have a self-behavioral prompt-suite smoke guard attached:
   `benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/qwen3-14b-sq8-prompt-suite-smoke-rope128-theta1e6/guard-self-behavioral/guard-bundle-summary.json`.
   It records `passed=true`, `acceptance_mode=behavioral`, `strict_passed=true`, and
@@ -715,7 +721,8 @@ Same-model prerequisites:
    same-model row: done for the config-aligned Qwen3-14B-FP8 row, and refreshed once after R9700
    projection dispatch descriptor selection was enabled.
 7. Add a real-batch or server-style uLLM measurement path before promoting this to a final serving
-   throughput conclusion.
+   throughput conclusion: partial. A short full 40-layer mixed-request-state real-batch row now
+   proves the model-loop path, but it still includes final logits and diagnostic host staging.
 
 Workload grid:
 
@@ -745,10 +752,14 @@ Comparison rules:
   Selected-layer uLLM rows are path-connectivity diagnostics only.
 - Full-package uLLM rows can be compared against vLLM serving rows when prompt/generation lengths,
   batch/concurrency, KV cache dtype, and model target are documented.
-- Current Qwen3-14B uLLM rows are full 40-layer model-loop rows with direct SQ8_0 projection
+- Earlier Qwen3-14B uLLM rows are full 40-layer model-loop rows with direct SQ8_0 projection
   execution, but `prefill_real_batch=false`, `decode_real_batch=false`, and final logits are included
   in total latency. Treat them as implementation-valid model-loop comparison rows, not final serving
   parity rows.
+- The short Qwen3-14B mixed-request-state row reaches `prefill_real_batch=true`,
+  `decode_real_batch=true`, and `sq_fp8_batch_matvec_count=560/560`. Treat it as full model-loop
+  real-batch evidence, but not final serving parity because final logits are included and the
+  resident path still uses diagnostic host staging.
 - AQ4-derived stack real-batch rows with SQ8_0 overlay are not comparable serving rows when they
   report `sq_execution_mode=materialized_f32_fallback`. They are scheduler-connectivity diagnostics
   until the stack/model-loop loader uses resident SQ8_0 matvec storage instead of materialized F32
@@ -833,8 +844,10 @@ Expected outputs:
      `sq_fp8_batch_matvec_count=21/21` for the selected layer3 self-attention projections. The
      remaining blocker is moving from selected-layer diagnostics with host staging to
      full-package/server rows.
-   - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
-     final vLLM serving comparison still needs real-batch or server-style uLLM rows.
+   - A short full 40-layer Qwen3-14B-FP8 mixed-request-state row now reaches
+     `batching_mode=real`, `sq_projection_boundary=batch`, and
+     `sq_fp8_batch_matvec_count=560/560`. The remaining blocker for final vLLM serving comparison is
+     reducing/annotating host staging and adding server-style or serving-equivalent rows.
 
 ## Risks
 
