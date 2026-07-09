@@ -97,6 +97,8 @@ struct Options {
     convert_jobs: usize,
     convert_verify: bool,
     convert_include_passthrough: bool,
+    convert_passthrough_dtypes: Vec<String>,
+    convert_passthrough_exclude_suffixes: Vec<String>,
     convert_copy_buffer_bytes: usize,
     convert_overwrite: bool,
     row_scale_overrides_json: Option<PathBuf>,
@@ -105,6 +107,8 @@ struct Options {
     merge_output_dir: Option<PathBuf>,
     merge_summary_output: Option<PathBuf>,
     merge_include_passthrough: bool,
+    merge_passthrough_dtypes: Vec<String>,
+    merge_passthrough_exclude_suffixes: Vec<String>,
     merge_copy_buffer_bytes: usize,
     merge_overwrite: bool,
     tensor_scale_override: Option<f32>,
@@ -533,6 +537,23 @@ fn parse_tensor_scale_estimator(value: Option<String>) -> Result<TensorScaleEsti
     }
 }
 
+fn parse_passthrough_filter_value(flag: &str, value: Option<String>) -> Result<String, String> {
+    let value = value.ok_or_else(|| format!("{flag} requires a value"))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{flag} value must not be empty"));
+    }
+    Ok(value.to_string())
+}
+
+fn parse_passthrough_dtype(value: Option<String>) -> Result<String, String> {
+    Ok(parse_passthrough_filter_value("--convert-passthrough-dtype", value)?.to_ascii_uppercase())
+}
+
+fn parse_merge_passthrough_dtype(value: Option<String>) -> Result<String, String> {
+    Ok(parse_passthrough_filter_value("--merge-passthrough-dtype", value)?.to_ascii_uppercase())
+}
+
 fn parse_options() -> Result<Options, String> {
     let mut args = env::args().skip(1);
     let mut options = Options {
@@ -563,6 +584,8 @@ fn parse_options() -> Result<Options, String> {
         convert_jobs: 1,
         convert_verify: false,
         convert_include_passthrough: false,
+        convert_passthrough_dtypes: Vec::new(),
+        convert_passthrough_exclude_suffixes: Vec::new(),
         convert_copy_buffer_bytes: 8 * 1024 * 1024,
         convert_overwrite: false,
         row_scale_overrides_json: None,
@@ -571,6 +594,8 @@ fn parse_options() -> Result<Options, String> {
         merge_output_dir: None,
         merge_summary_output: None,
         merge_include_passthrough: false,
+        merge_passthrough_dtypes: Vec::new(),
+        merge_passthrough_exclude_suffixes: Vec::new(),
         merge_copy_buffer_bytes: 8 * 1024 * 1024,
         merge_overwrite: false,
         tensor_scale_override: None,
@@ -700,6 +725,15 @@ fn parse_options() -> Result<Options, String> {
             }
             "--convert-verify" => options.convert_verify = true,
             "--convert-include-passthrough" => options.convert_include_passthrough = true,
+            "--convert-passthrough-dtype" => options
+                .convert_passthrough_dtypes
+                .push(parse_passthrough_dtype(args.next())?),
+            "--convert-passthrough-exclude-suffix" => options
+                .convert_passthrough_exclude_suffixes
+                .push(parse_passthrough_filter_value(
+                    "--convert-passthrough-exclude-suffix",
+                    args.next(),
+                )?),
             "--convert-copy-buffer-bytes" => {
                 options.convert_copy_buffer_bytes =
                     parse_usize("--convert-copy-buffer-bytes", args.next())?;
@@ -736,6 +770,15 @@ fn parse_options() -> Result<Options, String> {
                     })?));
             }
             "--merge-include-passthrough" => options.merge_include_passthrough = true,
+            "--merge-passthrough-dtype" => options
+                .merge_passthrough_dtypes
+                .push(parse_merge_passthrough_dtype(args.next())?),
+            "--merge-passthrough-exclude-suffix" => options
+                .merge_passthrough_exclude_suffixes
+                .push(parse_passthrough_filter_value(
+                    "--merge-passthrough-exclude-suffix",
+                    args.next(),
+                )?),
             "--merge-copy-buffer-bytes" => {
                 options.merge_copy_buffer_bytes =
                     parse_usize("--merge-copy-buffer-bytes", args.next())?;
@@ -841,6 +884,12 @@ fn print_help() {
     println!(
         "  --convert-include-passthrough include passthrough tensors in direct package output"
     );
+    println!(
+        "  --convert-passthrough-dtype <DTYPE> include only passthrough tensors with this dtype; repeatable"
+    );
+    println!(
+        "  --convert-passthrough-exclude-suffix <SUFFIX> exclude passthrough tensor names ending with suffix; repeatable"
+    );
     println!("  --convert-copy-buffer-bytes <N>");
     println!(
         "                                 payload copy buffer size for direct package passthrough"
@@ -855,6 +904,12 @@ fn print_help() {
     println!("  --merge-output-dir <PATH>     merged prototype .ullm.d output directory");
     println!("  --merge-summary-output <PATH> write merge summary JSON");
     println!("  --merge-include-passthrough   include passthrough tensors from --merge-plan-json");
+    println!(
+        "  --merge-passthrough-dtype <DTYPE> include only passthrough tensors with this dtype; repeatable"
+    );
+    println!(
+        "  --merge-passthrough-exclude-suffix <SUFFIX> exclude passthrough tensor names ending with suffix; repeatable"
+    );
     println!("  --merge-copy-buffer-bytes <N> payload copy buffer size for merge");
     println!("  --merge-overwrite             replace existing --merge-output-dir");
     println!("  --tensor-scale-override <F>   skip tensor-scale estimation for prototype output");
@@ -2938,6 +2993,8 @@ fn run_direct_prototype_package(
             options.convert_overwrite,
             options.convert_copy_buffer_bytes,
             &mut copied_files,
+            &options.convert_passthrough_dtypes,
+            &options.convert_passthrough_exclude_suffixes,
         )?
     } else {
         Vec::new()
@@ -3329,10 +3386,20 @@ fn merge_passthrough_tensors(
     overwrite: bool,
     buffer_bytes: usize,
     copied_files: &mut Vec<CopiedFileSummary>,
+    passthrough_dtypes: &[String],
+    passthrough_exclude_suffixes: &[String],
 ) -> Result<Vec<PrototypePassthroughTensorManifest>, String> {
     let mut passthrough = Vec::new();
     for (index, tensor) in plan.tensors.iter().enumerate() {
         if tensor.action != "passthrough" {
+            continue;
+        }
+        if !should_include_passthrough_tensor(
+            &tensor.dtype,
+            &tensor.name,
+            passthrough_dtypes,
+            passthrough_exclude_suffixes,
+        ) {
             continue;
         }
         let src_file = PathBuf::from(&tensor.source_file);
@@ -3372,6 +3439,27 @@ fn merge_passthrough_tensors(
     Ok(passthrough)
 }
 
+fn should_include_passthrough_tensor(
+    dtype: &str,
+    tensor_name: &str,
+    allowed_dtypes: &[String],
+    excluded_suffixes: &[String],
+) -> bool {
+    if excluded_suffixes
+        .iter()
+        .any(|suffix| tensor_name.ends_with(suffix))
+    {
+        return false;
+    }
+    if allowed_dtypes.is_empty() {
+        return true;
+    }
+    let dtype_upper = dtype.to_ascii_uppercase();
+    allowed_dtypes
+        .iter()
+        .any(|allowed| allowed.as_str().eq_ignore_ascii_case(dtype_upper.as_str()))
+}
+
 fn merge_source_result_succeeded(result: &PrototypePolicySmokeResult) -> bool {
     match result.status.as_deref() {
         Some(status) => status == "ok",
@@ -3385,6 +3473,8 @@ fn merge_prototype_dirs(
     output_dir: &Path,
     summary_output_path: &Path,
     include_passthrough: bool,
+    merge_passthrough_dtypes: &[String],
+    merge_passthrough_exclude_suffixes: &[String],
     copy_buffer_bytes: usize,
     overwrite: bool,
 ) -> Result<PrototypeMergeSummary, String> {
@@ -3484,6 +3574,8 @@ fn merge_prototype_dirs(
             overwrite,
             copy_buffer_bytes,
             &mut copied_files,
+            merge_passthrough_dtypes,
+            merge_passthrough_exclude_suffixes,
         )?
     } else {
         Vec::new()
@@ -4248,6 +4340,8 @@ fn run() -> Result<(), String> {
             output_dir,
             summary_output,
             options.merge_include_passthrough,
+            &options.merge_passthrough_dtypes,
+            &options.merge_passthrough_exclude_suffixes,
             options.merge_copy_buffer_bytes,
             options.merge_overwrite,
         )?;
@@ -4567,6 +4661,8 @@ mod tests {
             convert_jobs: 1,
             convert_verify: false,
             convert_include_passthrough: false,
+            convert_passthrough_dtypes: Vec::new(),
+            convert_passthrough_exclude_suffixes: Vec::new(),
             convert_copy_buffer_bytes: 1024,
             convert_overwrite: false,
             row_scale_overrides_json: None,
@@ -4575,6 +4671,8 @@ mod tests {
             merge_output_dir: None,
             merge_summary_output: None,
             merge_include_passthrough: false,
+            merge_passthrough_dtypes: Vec::new(),
+            merge_passthrough_exclude_suffixes: Vec::new(),
             merge_copy_buffer_bytes: 1024,
             merge_overwrite: false,
             tensor_scale_override: None,
@@ -5159,6 +5257,8 @@ mod tests {
             &output_dir,
             &merge_summary_path,
             true,
+            &[],
+            &[],
             2,
             false,
         )
@@ -5382,6 +5482,395 @@ mod tests {
             verify_passthrough_tensors(&output_dir, 2).expect("passthrough verification");
         assert_eq!(passthrough.count, 1);
         assert_eq!(passthrough.payload_bytes, 4);
+
+        fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[test]
+    fn direct_package_filters_passthrough_by_dtype_and_suffix() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ullm-direct-filter-test-{unique}"));
+        let model_dir = root.join("model");
+        let output_dir = root.join("direct-filter.ullm.d");
+        let plan_path = root.join("plan.json");
+        let codebook_path = root.join("codebooks.json");
+        let summary_path = root.join("summary.json");
+        let safetensors_path = model_dir.join("model.safetensors");
+        fs::create_dir_all(&model_dir).expect("model dir");
+
+        let header = br#"{"quant":{"dtype":"BF16","shape":[2,8],"data_offsets":[0,32]},"keep_bf16":{"dtype":"BF16","shape":[1],"data_offsets":[32,34]},"keep_fp8":{"dtype":"F8_E4M3","shape":[1],"data_offsets":[34,35]},"scale_inv":{"dtype":"BF16","shape":[1],"data_offsets":[35,37]}}"#;
+        let mut safetensors = fs::File::create(&safetensors_path).expect("safetensors");
+        safetensors
+            .write_all(&(header.len() as u64).to_le_bytes())
+            .expect("header len");
+        safetensors.write_all(header).expect("header");
+        safetensors
+            .write_all(&[
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32,
+            ])
+            .expect("quant");
+        safetensors.write_all(&[5, 6]).expect("keep_bf16");
+        safetensors.write_all(&[9]).expect("keep_fp8");
+        safetensors.write_all(&[13, 14]).expect("scale_inv");
+        drop(safetensors);
+        fs::write(
+            model_dir.join("model.safetensors.index.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "metadata": {},
+                "weight_map": {
+                    "quant": "model.safetensors",
+                    "keep_bf16": "model.safetensors",
+                    "keep_fp8": "model.safetensors",
+                    "scale_inv": "model.safetensors"
+                }
+            }))
+            .expect("index json"),
+        )
+        .expect("index");
+
+        let plan = serde_json::json!({
+            "schema_version": "ullm-quant-plan-v0.3",
+            "model_dir": model_dir.display().to_string(),
+            "aq_policy": {
+                "policy_id": "all-g16",
+                "low_format": "aq4_e4m3_g16_ts_flloyd16",
+                "high_format": "aq4_e4m3_g8_ts_flloyd16",
+                "high_families": []
+            },
+            "tensor_count": 4,
+            "supported_tensor_count": 1,
+            "passthrough_tensor_count": 3,
+            "total_tensor_bytes": 44,
+            "total_estimated_output_bytes": 22,
+            "estimated_output_to_input_ratio": 0.5,
+            "tensors": [{
+                "name": "quant",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "BF16",
+                "shape": [2, 8],
+                "family": "mlp_up",
+                "n_elements": 16,
+                "n_bytes": 32,
+                "supported_input": true,
+                "action": "quantize",
+                "quant_format": "aq4_e4m3_g16_ts_flloyd16",
+                "quant_role": "low",
+                "estimated_output_bytes": 18,
+                "estimated_effective_bpp": 4.5
+            }, {
+                "name": "keep_bf16",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "BF16",
+                "shape": [1],
+                "family": "other",
+                "n_elements": 1,
+                "n_bytes": 2,
+                "supported_input": false,
+                "action": "passthrough",
+                "quant_format": null,
+                "quant_role": null,
+                "estimated_output_bytes": 2,
+                "estimated_effective_bpp": 16.0
+            }, {
+                "name": "keep_fp8",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "F8_E4M3",
+                "shape": [1],
+                "family": "other",
+                "n_elements": 1,
+                "n_bytes": 1,
+                "supported_input": false,
+                "action": "passthrough",
+                "quant_format": null,
+                "quant_role": null,
+                "estimated_output_bytes": 1,
+                "estimated_effective_bpp": 8.0
+            }, {
+                "name": "model.language_model.layers.0.self_attn.q_proj.weight_scale_inv",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "BF16",
+                "shape": [1],
+                "family": "other",
+                "n_elements": 1,
+                "n_bytes": 2,
+                "supported_input": false,
+                "action": "passthrough",
+                "quant_format": null,
+                "quant_role": null,
+                "estimated_output_bytes": 2,
+                "estimated_effective_bpp": 16.0
+            }]
+        });
+        fs::write(
+            &plan_path,
+            serde_json::to_string_pretty(&plan).expect("plan json"),
+        )
+        .expect("plan");
+        fs::write(
+            &codebook_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "codebooks": [{
+                    "family": "mlp_up",
+                    "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+                    "values_f32": vec![1.0f32; 16]
+                }]
+            }))
+            .expect("codebook json"),
+        )
+        .expect("codebook");
+
+        let mut options = test_options("all-g16");
+        options.convert_plan_json = Some(plan_path);
+        options.codebook_json = Some(codebook_path);
+        options.convert_package_output_dir = Some(output_dir.clone());
+        options.convert_package_summary_output = Some(summary_path);
+        options.convert_include_passthrough = true;
+        options.convert_passthrough_dtypes = vec!["BF16".to_string()];
+        options.convert_passthrough_exclude_suffixes = vec![".weight_scale_inv".to_string()];
+        options.convert_copy_buffer_bytes = 2;
+        options.convert_jobs = 1;
+
+        let summary = run_direct_prototype_package(&options).expect("direct package");
+        assert_eq!(summary.selected_count, 1);
+        assert_eq!(summary.tensor_count, 1);
+        assert_eq!(summary.passthrough_tensor_count, 1);
+        assert_eq!(summary.jobs, 1);
+        let manifest: PrototypeManifest =
+            serde_json::from_str(&fs::read_to_string(output_dir.join("manifest.json")).unwrap())
+                .expect("direct manifest");
+        assert_eq!(manifest.passthrough_tensors.len(), 1);
+        assert_eq!(
+            manifest.passthrough_tensors[0].name,
+            "keep_bf16".to_string()
+        );
+        assert_eq!(
+            fs::read_dir(output_dir.join("passthrough"))
+                .expect("passthrough dir")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read passthrough dir")
+                .len(),
+            1
+        );
+        assert_eq!(
+            fs::read(output_dir.join("passthrough").join("001-keep_bf16.raw"))
+                .expect("keep bf16 passthrough"),
+            vec![5, 6]
+        );
+        let passthrough =
+            verify_passthrough_tensors(&output_dir, 2).expect("passthrough verification");
+        assert_eq!(passthrough.count, 1);
+        assert_eq!(passthrough.payload_bytes, 2);
+
+        fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[test]
+    fn merge_prototype_dirs_filters_passthrough_by_dtype_and_suffix() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ullm-merge-filter-test-{unique}"));
+        let part_dir = root.join("parts").join("000-quant.ullm.d");
+        let output_dir = root.join("merged-filter.ullm.d");
+        let summary_path = root.join("summary.json");
+        let plan_path = root.join("plan.json");
+        let merge_summary_path = root.join("merge-summary.json");
+        let safetensors_path = root.join("model.safetensors");
+
+        fs::create_dir_all(part_dir.join("tensors")).expect("part tensors dir");
+        fs::create_dir_all(part_dir.join("codebooks")).expect("part codebooks dir");
+        fs::write(part_dir.join("tensors").join("quant.idx4"), [0x21, 0x43]).expect("index");
+        fs::write(part_dir.join("tensors").join("quant.scale_u8"), [7]).expect("scale");
+        let mut codebook =
+            fs::File::create(part_dir.join("codebooks").join("mlp_up.f32")).expect("codebook");
+        for index in 0..16u32 {
+            codebook
+                .write_all(&(index as f32).to_le_bytes())
+                .expect("codebook value");
+        }
+        drop(codebook);
+
+        let header = br#"{"keep_bf16":{"dtype":"BF16","shape":[1],"data_offsets":[0,2]},"keep_fp8":{"dtype":"F8_E4M3","shape":[1],"data_offsets":[2,3]},"scale_inv":{"dtype":"BF16","shape":[1],"data_offsets":[3,5]}}"#;
+        let mut safetensors = fs::File::create(&safetensors_path).expect("safetensors");
+        safetensors
+            .write_all(&(header.len() as u64).to_le_bytes())
+            .expect("header len");
+        safetensors.write_all(header).expect("header");
+        safetensors.write_all(&[5, 6]).expect("keep_bf16");
+        safetensors.write_all(&[9]).expect("keep_fp8");
+        safetensors.write_all(&[13, 14]).expect("scale_inv");
+        drop(safetensors);
+        fs::write(
+            root.join("model.safetensors.index.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "metadata": {},
+                "weight_map": {
+                    "keep_bf16": "model.safetensors",
+                    "keep_fp8": "model.safetensors",
+                    "scale_inv": "model.safetensors",
+                }
+            }))
+            .expect("index json"),
+        )
+        .expect("index");
+
+        let manifest = serde_json::json!({
+            "schema_version": "ullm-prototype-manifest-v0.1",
+            "source_model_dir": root.join("model").display().to_string(),
+            "tensors": [{
+                "name": "quant",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "BF16",
+                "shape": [2],
+                "family": "mlp_up",
+                "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+                "scale_format": "e4m3",
+                "group_size": 16,
+                "tensor_scale": 1.0,
+                "scale_window": 4,
+                "elements": 2,
+                "groups": 1,
+                "index_file": "tensors/quant.idx4",
+                "index_encoding": "idx4_low_nibble_first",
+                "scale_file": "tensors/quant.scale_u8",
+                "scale_encoding": "u8_scale_table_index",
+                "codebook_file": "codebooks/mlp_up.f32",
+                "metrics": {
+                    "mse": 0.0,
+                    "relative_mse": 0.0,
+                    "max_abs_error": 0.0,
+                    "scale_index_min": 0,
+                    "scale_index_max": 0,
+                    "scale_window_improved_groups": 0,
+                    "index_counts": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+                }
+            }],
+            "codebooks": [{
+                "family": "mlp_up",
+                "candidate_id": "aq4_e4m3_g16_ts_flloyd16",
+                "file": "codebooks/mlp_up.f32",
+                "encoding": "f32_le",
+                "entries": 16
+            }]
+        });
+        fs::write(
+            part_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).expect("manifest json"),
+        )
+        .expect("manifest");
+
+        let summary = serde_json::json!({
+            "results": [{
+                "returncode": 0,
+                "output_dir": part_dir.display().to_string()
+            }]
+        });
+        fs::write(
+            &summary_path,
+            serde_json::to_string_pretty(&summary).expect("summary json"),
+        )
+        .expect("summary");
+
+        let plan = serde_json::json!({
+            "schema_version": "ullm-quant-plan-v0.3",
+            "model_dir": root.join("model").display().to_string(),
+            "aq_policy": {
+                "policy_id": "all-g16",
+                "low_format": "aq4_e4m3_g16_ts_flloyd16",
+                "high_format": "aq4_e4m3_g8_ts_flloyd16",
+                "high_families": []
+            },
+            "tensor_count": 3,
+            "supported_tensor_count": 0,
+            "passthrough_tensor_count": 3,
+            "total_tensor_bytes": 5,
+            "total_estimated_output_bytes": 5,
+            "estimated_output_to_input_ratio": 1.0,
+            "tensors": [{
+                "name": "keep_bf16",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "BF16",
+                "shape": [1],
+                "family": "other",
+                "n_elements": 1,
+                "n_bytes": 2,
+                "supported_input": false,
+                "action": "passthrough",
+                "quant_format": null,
+                "quant_role": null,
+                "estimated_output_bytes": 2,
+                "estimated_effective_bpp": 16.0
+            }, {
+                "name": "keep_fp8",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "F8_E4M3",
+                "shape": [1],
+                "family": "other",
+                "n_elements": 1,
+                "n_bytes": 1,
+                "supported_input": false,
+                "action": "passthrough",
+                "quant_format": null,
+                "quant_role": null,
+                "estimated_output_bytes": 1,
+                "estimated_effective_bpp": 8.0
+            }, {
+                "name": "model.language_model.layers.0.self_attn.q_proj.weight_scale_inv",
+                "source_file": safetensors_path.display().to_string(),
+                "dtype": "BF16",
+                "shape": [1],
+                "family": "other",
+                "n_elements": 1,
+                "n_bytes": 2,
+                "supported_input": false,
+                "action": "passthrough",
+                "quant_format": null,
+                "quant_role": null,
+                "estimated_output_bytes": 2,
+                "estimated_effective_bpp": 16.0
+            }]
+        });
+        fs::write(
+            &plan_path,
+            serde_json::to_string_pretty(&plan).expect("plan json"),
+        )
+        .expect("plan");
+
+        let merge = merge_prototype_dirs(
+            &summary_path,
+            Some(&plan_path),
+            &output_dir,
+            &merge_summary_path,
+            true,
+            &["BF16".to_string()],
+            &["weight_scale_inv".to_string()],
+            2,
+            false,
+        )
+        .expect("merge");
+        assert_eq!(merge.tensor_count, 1);
+        assert_eq!(merge.passthrough_tensor_count, 1);
+        let manifest: PrototypeManifest =
+            serde_json::from_str(&fs::read_to_string(output_dir.join("manifest.json")).unwrap())
+                .expect("merged manifest");
+        assert_eq!(manifest.passthrough_tensors.len(), 1);
+        assert_eq!(
+            manifest.passthrough_tensors[0].name,
+            "keep_bf16".to_string()
+        );
+        assert_eq!(
+            fs::read_dir(output_dir.join("passthrough"))
+                .expect("passthrough dir")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read passthrough dir")
+                .len(),
+            1
+        );
 
         fs::remove_dir_all(root).expect("remove temp root");
     }
