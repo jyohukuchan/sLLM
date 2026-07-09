@@ -1,0 +1,10 @@
+{
+  "schema_version": "sq8-hipblaslt-route-probe-v0.1",
+  "device": {"hip_device_id": 1, "name": "AMD Radeon Graphics", "arch": "gfx1201"},
+  "required_operation": {"input": "f8_e4m3_ocp_x_f8_e4m3_ocp", "weight_scale": "block_128x128_f32", "activation_scale": "outer_vector_f32", "output": "f32"},
+  "block_scale_probe": {"supported": false, "status": "exception", "detail": "Unsupported scaling type for A matrix"},
+  "scalar_fp8_sanity": {"passed": true, "set_problem_status": "success", "heuristic_status": "success", "algorithm_count": 8, "initialize_status": "success", "run_status": "success", "output0": 30720.00, "expected0": 30720.00, "solution": "Cijk_Alik_Bljk_F8SS_BH_Bias_SHB_HA_S_SAB_SCD_SAV_UserArgs_MT64x64x128_MI16x16x1_SN_LDSB0_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA0_DTLB0_DTVA0_DTVB1_EPS1_FDSI0_GRPM1_GRVWA16_GRVWB16_GSUn1_GSUAMB_GSUC0_GSUWGMRR0_GLS0_ISA1201_IU1_K1_LDSTI0_LBSPPA256_LBSPPB0_LBSPPM0_LPA32_LPB0_LPM0_LRVW16_LWPMn1_MIAV1_MIWT2_2_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS0_NLCA1_NLCB4_ONLL0_PGR1_PLR1_PKA0_SIA3_SS1_SU32_SUM0_SUS256_SPO0_SRVW0_SSO0_SVW2_SK0_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA2_VWB2_WSGRA0_WSGRB0_WS32_WG32_4_1_WGM8_WGMXCC1_WGMXCCGn1", "kernel": "Cijk_Alik_Bljk_F8SS_BH_Bias_SHB_HA_S_SAB_SCD_SAV_UserArgs_MT64x64x128_MI16x16x1_SN_LDSB0_AFC1_AFEM1_AFEM1_ASEM1_CLR1_CADS0_DTLA0_DTLB0_DTVA0_DTVB1_EPS1_FDSI0_GRPM1_GRVWA16_GRVWB16_GSUAMB_GLS0_ISA1201_IU1_K1_LDSTI0_LBSPPA256_LBSPPB0_LBSPPM0_LPA32_LPB0_LPM0_LRVW16_LWPMn1_MIAV1_MIWT2_2_MO40_NTn1_NTA0_NTB0_NTC0_NTD0_NTM0_NEPBS0_NLCA1_NLCB4_ONLL0_PGR1_PLR1_PKA0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW2_SK0_SKFTR0_SKXCCM0_TLDS1_ULSGRO0_USL1_UIOFGRO0_USFGROn1_VSn1_VWA2_VWB2_WSGRA0_WSGRB0_WS32_WG32_4_1"},
+  "selection": "rejected",
+  "reason_code": "block_128x128_scale_unsupported",
+  "passed": true
+}
