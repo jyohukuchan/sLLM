@@ -744,6 +744,11 @@ Current local baseline state:
 - Earlier uLLM Qwen3-14B rows with `rotary_dim=32` and `rope_base=10000000` are retained as
   preliminary connectivity rows only; the config-aligned rows should be used for M10 same-model
   discussion.
+- A 2026-07-10 refresh at
+  `benchmarks/results/2026-07-10/sq8-qwen3-14b-normalized-kernel-family-refresh/results.jsonl`
+  re-ran the b2/b4/b8 uLLM rows after `sq_projection_kernel_families` telemetry was added. The
+  refreshed rows record `sq_projection_kernel_families=batch=direct`,
+  `sq_fp8_batch_matvec_count=6720/6720`, and `final_logits_in_total=false`.
 
 Same-model readiness audit:
 
@@ -887,6 +892,8 @@ Expected outputs:
 - M10 comparison is now defined as a same-shape normalized throughput comparison gate, not serving parity.
   The gate requires `--require-normalized-throughput-comparison` so `uLLM` (`cli_model_loop_diagnostic`)
   and `vLLM` (`serving_throughput_benchmark`) rows are validated with explicit shape-homogenizing checks.
+- The refreshed 2026-07-10 uLLM rows plus the existing 2026-07-09 vLLM b2/b4/b8 rows now pass
+  `--require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families`.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
 - The vLLM row should be produced through the derived command template in
@@ -973,6 +980,8 @@ Expected outputs:
    - Same M10 gates should also start requiring
      `--require-ullm-sq-batch-coverage` so SQ8_0 rows with non-batch projection boundaries or
      incomplete batch matvec counters are blocked before mixing against serving rows.
+   - The 2026-07-10 b2/b4/b8 refresh now satisfies the normalized comparison gate together with
+     `--require-ullm-sq-batch-coverage` and `--require-ullm-sq-kernel-families`.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device

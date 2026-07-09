@@ -51,6 +51,12 @@ Same-shape normalized throughput gate:
 python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-09/sq8-qwen3-14b-full-mixed-real-batch-no-final-logits-smoke/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --require-normalized-throughput-comparison --require-ullm-sq-batch-coverage
 ```
 
+Current stricter normalized gate with refreshed uLLM kernel-family rows:
+
+```bash
+python3 tools/summarize-sq8-vllm-batch-grid.py benchmarks/results/2026-07-10/sq8-qwen3-14b-normalized-kernel-family-refresh/results.jsonl benchmarks/results/2026-07-09/sq8-vllm-fp8-comparison/results.jsonl --workload-prefix pp16-tg8 --requests 2,4,8 --require-normalized-throughput-comparison --require-ullm-sq-batch-coverage --require-ullm-sq-kernel-families
+```
+
 Final-comparison engine-presence gate:
 
 ```bash
@@ -68,6 +74,8 @@ bucket, so a partial b2-only or b4-only pairing cannot pass the final comparison
 The same-shape normalized throughput gate passes for the current b2/b4/b8 table while preserving
 the `cli_model_loop_diagnostic` vs `serving_throughput_benchmark` harness distinction. It should be
 read as an interim M10 comparison, not strict serving parity.
+The 2026-07-10 refresh adds `sq_projection_kernel_families=batch=direct` to the uLLM rows, so the
+stricter normalized command above also proves kernel-family telemetry is present.
 
 Compact batch-grid output:
 
