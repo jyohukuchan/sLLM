@@ -81,6 +81,8 @@ Important limitation:
 - They are still not a final serving-performance conclusion. uLLM is measured through the current
   token-id model-loop path with final logits included and `prefill_real_batch=false` /
   `decode_real_batch=false`, while vLLM is measured through its throughput benchmark.
+- Multi-request mixed-state uLLM runs are classified as `batching_mode=grouped`, not real-batch,
+  until batched projection kernels are actually used.
 - The Qwen3-14B-FP8 uLLM rows have sampled `verified=true`, and the config-aligned rows now have a
   self-behavioral prompt-suite smoke guard. This verifies prompt-suite/guard plumbing only; it is not
   an external reference quality check because the current smoke suite has `output_health=false`.

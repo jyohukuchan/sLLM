@@ -438,6 +438,11 @@ Done:
 - A layer0 Qwen3-14B-FP8 SQ8_0 mixed-request-state smoke on device index `2` now reports
   `sq_projection_implementation_ids=single=sq8_0_matvec_r9700_direct,triple=sq8_0_matvec_triple_r9700_direct`
   while preserving the human-facing runtime device name `AMD Radeon Graphics`.
+- Mixed-request-state multi-request rows now report request grouping separately from real batching:
+  `batching_mode=grouped`, `prefill_request_grouped=true`, and `decode_request_grouped=true`, while
+  keeping `prefill_real_batch=false` / `decode_real_batch=false` until the layer path actually uses
+  batched projection kernels. A layer0 `len:4x2` SQ8_0 smoke confirms grouped execution with
+  `sq_fp8_batch_matvec_count=0`.
 
 Remaining:
 
@@ -692,6 +697,10 @@ Comparison rules:
   execution, but `prefill_real_batch=false`, `decode_real_batch=false`, and final logits are included
   in total latency. Treat them as implementation-valid model-loop comparison rows, not final serving
   parity rows.
+- Mixed-request-state can group several ready requests at the same timestep, but this is now recorded
+  as `batching_mode=grouped` with `*_request_grouped=true`; it must not be promoted to real-batch
+  evidence unless `prefill_real_batch` / `decode_real_batch` are true and the relevant batched
+  projection counters are nonzero.
 - Differences in tokenizer/server overhead should be recorded. When possible, keep a raw model-loop
   uLLM row and a server-style vLLM row as separate comparison classes.
 
@@ -749,6 +758,8 @@ Expected outputs:
      prepared.
    - The config-aligned smoke and representative rows have been refreshed after R9700 descriptor
      selection and now record `*_r9700_direct`.
+   - Multi-request mixed-state rows are now classified as grouped, not real-batch, so they cannot
+     accidentally satisfy the final serving-comparison gate.
    - Current same-model rows are sufficient for implementation-valid model-loop discussion, but the
      final vLLM serving comparison still needs real-batch or server-style uLLM rows.
 

@@ -82,4 +82,5 @@
 
 - Qwen3-14B-FP8同一モデル行へ、非自己比較のbehavioral guardまたはoutput-healthを評価するprompt suiteを追加する。
 - uLLM行は現在token-id model-loop / final logits込み / `prefill_real_batch=false` / `decode_real_batch=false` なので、vLLM serving benchmarkと同格の最終性能結論にはしない。
+- mixed-request-stateの複数request処理は `batching_mode=grouped` として記録し、projectionがbatched kernelを使うまではreal-batch扱いにしない。
 - 次の比較昇格には、real-batchまたはserver-style uLLM pathで同じ `pp/tg/b1` を再測定する。

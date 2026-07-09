@@ -892,6 +892,67 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["final_topk_logits"], [[6.25]])
         self.assertEqual(row["batching"]["prefill_batch_request_counts"], [1])
         self.assertTrue(row["batching"]["throughput_row"])
+        self.assertFalse(row["batching"]["prefill_real_batch"])
+        self.assertFalse(row["batching"]["decode_real_batch"])
+        self.assertFalse(row["batching"]["prefill_request_grouped"])
+        self.assertFalse(row["batching"]["decode_request_grouped"])
+
+    def test_parses_model_loop_grouped_request_state_csv_fields(self) -> None:
+        stdout = (
+            "package-token-ids-mixed-request-state-smoke "
+            "package=/tmp/model.ullm.d layers_csv=0,1,2 input_source=embedding_token_ids "
+            "prefill_mode=token_id_full_mixed_request_state "
+            "request_batch_executor=true fused_request_batch=false throughput_row=true "
+            "load_excluded_from_total=true final_logits_in_total=true "
+            "batching_mode=grouped "
+            "prefill_executor=mixed_request_state_layer_batch_step "
+            "decode_executor=mixed_request_state_layer_batch_step "
+            "prefill_real_batch=false decode_real_batch=false "
+            "prefill_request_grouped=true decode_request_grouped=true "
+            "prefill_grouped_request_parallelism=2 decode_grouped_request_parallelism=3 "
+            "prefill_executor_request_parallelism=2 decode_executor_request_parallelism=3 "
+            "final_top1_tokens_csv=151353,151354 final_topk_tokens_csv=151353,151354 "
+            "final_topk_logits_csv=6.250000,5.500000 "
+            "sequence_len=3 request_count=2 concurrent_requests=2 "
+            "prompt_tokens_csv=2,3 max_new_tokens_csv=1,2 total_tokens_csv=3,5 "
+            "prefill_total_input_tokens=5 decode_total_generated_tokens=3 end_to_end_total_tokens=8 "
+            "prefill_wall_ms=88.0 decode_wall_ms=12.0 final_logits_wall_ms=200.0 "
+            "layer_load_ms=9000.0 total_wall_ms=300.0 outer_wall_ms=9300.0 "
+            "prefill_total_input_tps=22.727273 decode_total_generated_tps=83.333333 "
+            "end_to_end_total_tps=10.000000 "
+            "prefill_batch_request_counts_csv=2,1 decode_batch_request_counts_csv=3,1 "
+            "backend=hip device_index=2 name=\"AMD Radeon Graphics\" verified=true"
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_model_loop_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 1,
+                "concurrent_requests": 1,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+        TOOL.enrich_ullm_model_loop_row(row, report)
+
+        self.assertEqual(row["batching"]["mode"], "grouped")
+        self.assertFalse(row["batching"]["prefill_real_batch"])
+        self.assertFalse(row["batching"]["decode_real_batch"])
+        self.assertTrue(row["batching"]["prefill_request_grouped"])
+        self.assertTrue(row["batching"]["decode_request_grouped"])
+        self.assertEqual(row["batching"]["prefill_grouped_request_parallelism"], 2)
+        self.assertEqual(row["batching"]["decode_grouped_request_parallelism"], 3)
+        self.assertEqual(row["batching"]["prefill_batch_request_counts"], [2, 1])
+        self.assertEqual(row["workload"]["prompt_tokens_per_request"], [2, 3])
 
 
 if __name__ == "__main__":

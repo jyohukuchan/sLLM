@@ -1199,6 +1199,8 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
     prefill_batch_request_counts = parse_int_csv(
         report.get("prefill_batch_request_counts_csv")
     )
+    prefill_request_grouped = parse_bool(report.get("prefill_request_grouped")) is True
+    decode_request_grouped = parse_bool(report.get("decode_request_grouped")) is True
     row["batching"] = {
         "mode": batching_mode if isinstance(batching_mode, str) else "hybrid",
         "prefill_executor": report.get("prefill_executor"),
@@ -1208,10 +1210,18 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
         "prefill_executor_request_parallelism": parse_int(
             report.get("prefill_executor_request_parallelism")
         ),
+        "prefill_request_grouped": prefill_request_grouped,
+        "prefill_grouped_request_parallelism": parse_int(
+            report.get("prefill_grouped_request_parallelism")
+        ),
         "decode_executor": report.get("decode_executor"),
         "decode_real_batch": report.get("decode_real_batch") is True,
         "decode_executor_request_parallelism": parse_int(
             report.get("decode_executor_request_parallelism")
+        ),
+        "decode_request_grouped": decode_request_grouped,
+        "decode_grouped_request_parallelism": parse_int(
+            report.get("decode_grouped_request_parallelism")
         ),
         "request_batch_executor": report.get("request_batch_executor") is True,
         "fused_request_batch": report.get("fused_request_batch") is True,
