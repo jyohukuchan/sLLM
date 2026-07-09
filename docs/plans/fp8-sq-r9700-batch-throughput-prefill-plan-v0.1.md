@@ -4506,6 +4506,40 @@ Quality:
 2. layer23 `q_proj` と `v_proj` はfallbackまたは別scale/layout候補として再探索する。
 3. 次はlayer27 k-only extension、layer23 q/v scale強化、または広いprompt/text guardのどれを優先するか決める。
 
+## 2026-07-09 progress: T2 SQ FP8 qkv layer27 k scale prompt bundle
+
+前回の要点:
+
+- layer23 `k16` はprompt bundleとB=1/4/8 short guardでstrict top1を維持した。
+- layer23 `q_proj` と `v_proj` は単体でも`case_a`を崩すため、現branchではfallbackに残す判断だった。
+- 次のcoverage候補として、layer27 `k_proj` を追加できるか確認する必要があった。
+
+今回の変更点:
+
+- layer23 `k16` 通過boundaryにlayer27 `k16` を追加した。
+- layer27 `k16` が`case_a`で失敗したため、layer27 `k_proj` だけrow-block8にした `k8` recoveryも試した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer27-k16-v1.md`、`phase-t2-sq-fp8-qkv-layer27-k8-v1.md`、および `phase-t2-sq-fp8-qkv-layer27-k-scale-v1-comparison.json` に保存した。
+
+実測値:
+
+| row | FP8 tensors | prefill tok/s | decode tok/s | end-to-end tok/s | final top1 | strict top1 |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| SQ `layer27 k16` | 17 | 59.984624 | 72.659910 | 33.269703 | `24218,5582,329` | 2 / 3 |
+| SQ `layer27 k8` | 17 | 60.600922 | 72.557192 | 33.416884 | `24218,5582,329` | 2 / 3 |
+
+判断:
+
+- layer27 `k_proj` はrow-block16でもrow-block8でも`case_a`を `4105 -> 5582` に反転させた。
+- row-block8化だけではlayer27 kのquality boundaryを回復できない。
+- short batch guardへは進めず、layer27 `k_proj` はこのbranchではfailure guardとして保存する。
+- layer31 k-onlyへ単純に進むより、text-level guard、またはlayer23 q/vとlayer27 kの別format/layoutを先に検討する方がよい。
+
+次の行動:
+
+1. layer27 `k16` / `k8` をfailure guardとして保持する。
+2. 現branchのcoverage拡大はlayer23 `k16` までで止める。
+3. 次はtext-level guardの追加、layer23 q/vの別scale/layout、またはSQ候補の評価基盤側へ戻る。
+
 ## Risks
 
 | risk | impact | handling |
