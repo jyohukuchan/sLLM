@@ -80,6 +80,34 @@ class SummarizeBenchmarkResultsTests(unittest.TestCase):
         self.assertIn("unmarked-fallback.jsonl", table)
         self.assertIn("materialized_f32_fallback", table)
 
+    def test_table_includes_sq_projection_and_dispatch_implementation_ids(self) -> None:
+        projection = row(
+            "projection",
+            workload={
+                "sq_projection_implementation_ids": ["sq-proj-0", "sq-proj-1"],
+                "dispatch_selected_implementation_id": "should-not-be-used",
+                "selected_implementation_id": "should-not-be-used-either",
+            },
+        )
+        dispatch = row(
+            "dispatch",
+            workload={"dispatch_selected_implementation_id": "dispatch-id"},
+        )
+        selected = row(
+            "selected",
+            workload={"selected_implementation_id": "selected-id"},
+        )
+
+        table = TOOL.markdown_table([projection, dispatch, selected], include_failed=True)
+
+        self.assertIn("| Impl |", table)
+        self.assertIn("| FP8 | SQ8_0 |", table)
+        self.assertIn("sq-proj-0, sq-proj-1", table)
+        self.assertIn("dispatch-id", table)
+        self.assertIn("selected-id", table)
+        self.assertNotIn("should-not-be-used", table)
+        self.assertNotIn("should-not-be-used-either", table)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -381,6 +381,9 @@ Done:
 - `tools/run-external-benchmark.py --parse ullm-component-prefill` now preserves cached-prefix
   dispatch metadata (`selected_implementation_id`, `executor_selection`, `dispatch_*`) and
   cached-prefix token breakdown fields in result rows.
+- `tools/summarize-benchmark-results.py` now exposes a compact `Impl` column from
+  `sq_projection_implementation_ids`, `dispatch_selected_implementation_id`, or
+  `selected_implementation_id`, and classifies `SQ8_0` rows as FP8 family rows.
 
 Remaining:
 

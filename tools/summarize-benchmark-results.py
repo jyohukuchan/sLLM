@@ -15,7 +15,7 @@ def quant_family(quantization: str) -> str:
         return "I-Quant"
     if upper.startswith("UD") or "-UD-" in upper or "UD-" in upper:
         return "UD"
-    if "FP8" in upper:
+    if "FP8" in upper or upper == "SQ8_0" or upper.startswith("SQ8_"):
         return "FP8"
     if "_K" in upper or upper.endswith("_K") or "K_" in upper:
         return "K-Quant"
@@ -62,6 +62,23 @@ def valid_default_summary_row(row: dict[str, Any]) -> bool:
     return True
 
 
+def workload_implementation(workload: dict[str, Any] | None) -> str:
+    if not workload:
+        return "-"
+    projection = workload.get("sq_projection_implementation_ids")
+    if projection:
+        if isinstance(projection, list):
+            return ", ".join(str(item) for item in projection)
+        return str(projection)
+    dispatch_selected = workload.get("dispatch_selected_implementation_id")
+    if dispatch_selected:
+        return str(dispatch_selected)
+    selected = workload.get("selected_implementation_id")
+    if selected:
+        return str(selected)
+    return "-"
+
+
 def load_rows(paths: list[Path]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in paths:
@@ -106,8 +123,8 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
         )
     )
     lines = [
-        "| Status | Engine | Model | Family | Quant | SQ mode | Target | Workload | Batching | Prefill total tok/s | Decode total tok/s | End-to-end tok/s | Consumed GiB | Decode x GiB | Source |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Status | Engine | Model | Family | Quant | SQ mode | Impl | Target | Workload | Batching | Prefill total tok/s | Decode total tok/s | End-to-end tok/s | Consumed GiB | Decode x GiB | Source |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in selected:
         metrics = row.get("metrics") or {}
@@ -127,6 +144,7 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
                     quant_family(model.get("quantization") or ""),
                     model.get("quantization") or "-",
                     workload.get("sq_execution_mode") or "-",
+                    workload_implementation(workload),
                     target_label(row),
                     f"pp{workload.get('prompt_tokens')}/tg{workload.get('generated_tokens')}/b{workload.get('batch_size')}",
                     batching.get("mode") or "-",
