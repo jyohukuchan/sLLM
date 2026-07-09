@@ -425,6 +425,100 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertTrue(row["batching"]["final_logits_in_total"])
         self.assertEqual(row["batching"]["component_package"], "/tmp/model.ullm.d")
 
+    def test_accepts_materialized_fallback_for_selected_layer_diagnostic(self) -> None:
+        stdout = (
+            "sq-fp8-token-ids-model-loop-smoke "
+            "package=/tmp/model.ullm.d layers=[3, 7] layers_csv=3,7 "
+            "sq_execution_mode=materialized_f32_fallback "
+            "throughput_row=true "
+            "prefill_wall_ms=40.124272 decode_wall_ms=35.822329 "
+            "final_logits_wall_ms=12.000000 layer_load_ms=34.000000 total_wall_ms=94.946601 "
+            "outer_wall_ms=128.946601 prefill_total_input_tokens=4 "
+            "decode_total_generated_tokens=3 end_to_end_total_tokens=7 "
+            "prefill_total_input_tps=84.881948 decode_total_generated_tps=83.746649 "
+            "end_to_end_total_tps=73.725646 generated_tokens_csv=2,1 request_count=2 "
+            "prompt_tokens_csv=1,2 backend=hip device_index=2 name=\"AMD Radeon Graphics\" "
+            "verified=true"
+        )
+        report = TOOL.parse_key_value_stdout(stdout)
+
+        status, error = TOOL.classify_sq_execution_fallback(
+            "ok", None, "ullm-model-loop-throughput", report, False
+        )
+        self.assertEqual(status, "ok")
+        self.assertIsNone(error)
+
+    def test_rejects_materialized_fallback_for_non_diagnostic_full_model_loop(self) -> None:
+        stdout = (
+            "package-self-attn-mlp-block-model-loop-smoke "
+            "package=/tmp/model.ullm.d layers=[3, 7] layers_csv=3,7 "
+            "sq_execution_mode=materialized_f32_fallback "
+            "throughput_row=true "
+            "prefill_wall_ms=47.124272 decode_wall_ms=35.822329 final_logits_wall_ms=12.000000 "
+            "layer_load_ms=34.000000 total_wall_ms=94.946601 outer_wall_ms=128.946601 "
+            "prefill_total_input_tokens=4 decode_total_generated_tokens=3 end_to_end_total_tokens=7 "
+            "prefill_total_input_tps=84.881948 decode_total_generated_tps=83.746649 "
+            "end_to_end_total_tps=73.725646 generated_tokens_csv=2,1 request_count=2 "
+            "prompt_tokens_csv=1,2 backend=hip device_index=2 name=\"AMD Radeon Graphics\" "
+            "verified=true"
+        )
+        report = TOOL.parse_key_value_stdout(stdout)
+
+        status, error = TOOL.classify_sq_execution_fallback(
+            "ok", None, "ullm-model-loop-throughput", report, False
+        )
+        self.assertEqual(status, "failed")
+        self.assertIsNotNone(error)
+        self.assertEqual(error["type"], "invalid_fallback")
+
+    def test_accepts_materialized_fallback_when_cli_marked(self) -> None:
+        stdout = (
+            "package-self-attn-mlp-block-model-loop-smoke "
+            "sq_execution_mode=materialized_f32_fallback "
+            "throughput_row=true "
+            "backend=hip device_index=2 name=\"AMD Radeon Graphics\" "
+            "verified=true"
+        )
+        report = TOOL.parse_key_value_stdout(stdout)
+
+        status, error = TOOL.classify_sq_execution_fallback(
+            "ok", None, "ullm-model-loop-throughput", report, True
+        )
+        self.assertEqual(status, "ok")
+        self.assertIsNone(error)
+
+    def test_accepts_materialized_fallback_when_report_marks_allowed(self) -> None:
+        stdout = (
+            "package-self-attn-mlp-block-model-loop-smoke "
+            "fallback_allowed=true sq_execution_mode=materialized_f32_fallback "
+            "throughput_row=true "
+            "backend=hip device_index=2 name=\"AMD Radeon Graphics\" "
+            "verified=true"
+        )
+        report = TOOL.parse_key_value_stdout(stdout)
+
+        status, error = TOOL.classify_sq_execution_fallback(
+            "ok", None, "ullm-model-loop-throughput", report, False
+        )
+        self.assertEqual(status, "ok")
+        self.assertIsNone(error)
+
+    def test_accepts_materialized_fallback_when_report_marks_diagnostic(self) -> None:
+        stdout = (
+            "package-self-attn-mlp-block-model-loop-smoke "
+            "diagnostic=true sq_execution_mode=materialized_f32_fallback "
+            "throughput_row=true "
+            "backend=hip device_index=2 name=\"AMD Radeon Graphics\" "
+            "verified=true"
+        )
+        report = TOOL.parse_key_value_stdout(stdout)
+
+        status, error = TOOL.classify_sq_execution_fallback(
+            "ok", None, "ullm-model-loop-throughput", report, False
+        )
+        self.assertEqual(status, "ok")
+        self.assertIsNone(error)
+
     def test_parses_sq_fp8_selected_layer_model_loop_projection_telemetry(self) -> None:
         stdout = (
             "sq-fp8-token-ids-model-loop-smoke "

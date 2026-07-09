@@ -304,11 +304,15 @@ Done:
 - selected-layer `sq-fp8-token-ids-model-loop-smoke` rows now report SQ8_0 projection telemetry
   (execution mode, boundary, implementation IDs, and per-kernel counters), including the
   fallback case where projection is materialized to F32.
+- full-throughput/benchmark summary rows now reject `materialized_f32_fallback` unless the run is
+  explicitly marked as fallback (CLI flag/report marker) or it is the selected-layer diagnostic
+  path (`sq-fp8-token-ids-model-loop-smoke`).
+- benchmark Markdown summaries also exclude unmarked materialized SQ8_0 fallback rows from the
+  default success table and expose `SQ mode` as a comparison column.
 
 Remaining:
 
 - keep coverage for remaining throughput rows where projection telemetry is still pending;
-- ensure performance summaries reject accidental `materialized_f32_fallback` rows unless explicitly marked as fallback.
 
 Verification:
 
@@ -516,6 +520,10 @@ Expected outputs:
    - Dispatch decisions now reach the direct matvec execution boundary.
    - Selected-layer model-loop rows now distinguish direct-path runs from
      `materialized_f32_fallback`.
+   - Accidental `materialized_f32_fallback` throughput rows are now rejected unless explicitly
+     allowed (or explicitly saved as selected-layer diagnostics).
+   - Benchmark summary tables now exclude unmarked materialized SQ8_0 fallback rows by default and
+     show `SQ mode` for retained rows.
    - C++ kernel-family switching remains a follow-up.
    - Selected-layer model-loop rows now carry projection boundary and counter telemetry for
      `sq-fp8-token-ids-model-loop-smoke`.

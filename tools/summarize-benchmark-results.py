@@ -44,6 +44,24 @@ def metric(metrics: dict[str, Any], *names: str) -> Any:
     return None
 
 
+def materialized_sq_fallback(row: dict[str, Any]) -> bool:
+    workload = row.get("workload") if isinstance(row.get("workload"), dict) else {}
+    return workload.get("sq_execution_mode") == "materialized_f32_fallback"
+
+
+def explicit_sq_fallback(row: dict[str, Any]) -> bool:
+    workload = row.get("workload") if isinstance(row.get("workload"), dict) else {}
+    return workload.get("fallback_allowed") is True or workload.get("diagnostic") is True
+
+
+def valid_default_summary_row(row: dict[str, Any]) -> bool:
+    if row.get("status") != "ok":
+        return False
+    if materialized_sq_fallback(row) and not explicit_sq_fallback(row):
+        return False
+    return True
+
+
 def load_rows(paths: list[Path]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in paths:
@@ -75,7 +93,7 @@ def target_label(row: dict[str, Any]) -> str:
 
 
 def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
-    selected = rows if include_failed else [row for row in rows if row.get("status") == "ok"]
+    selected = rows if include_failed else [row for row in rows if valid_default_summary_row(row)]
     selected.sort(
         key=lambda row: (
             row.get("engine", {}).get("name") or "",
@@ -88,8 +106,8 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
         )
     )
     lines = [
-        "| Status | Engine | Model | Family | Quant | Target | Workload | Batching | Prefill total tok/s | Decode total tok/s | End-to-end tok/s | Consumed GiB | Decode x GiB | Source |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Status | Engine | Model | Family | Quant | SQ mode | Target | Workload | Batching | Prefill total tok/s | Decode total tok/s | End-to-end tok/s | Consumed GiB | Decode x GiB | Source |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in selected:
         metrics = row.get("metrics") or {}
@@ -108,6 +126,7 @@ def markdown_table(rows: list[dict[str, Any]], include_failed: bool) -> str:
                     model.get("name") or "-",
                     quant_family(model.get("quantization") or ""),
                     model.get("quantization") or "-",
+                    workload.get("sq_execution_mode") or "-",
                     target_label(row),
                     f"pp{workload.get('prompt_tokens')}/tg{workload.get('generated_tokens')}/b{workload.get('batch_size')}",
                     batching.get("mode") or "-",

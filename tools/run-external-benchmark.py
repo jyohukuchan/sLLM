@@ -45,6 +45,21 @@ def parse_float(value: Any) -> float | None:
         return None
 
 
+def parse_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off", "none", ""}:
+        return False
+    return None
+
+
 def first_non_null(*values: Any) -> Any:
     for value in values:
         if value is not None:
@@ -372,6 +387,35 @@ def parse_scalar_text(value: str) -> Any:
     if parsed_float is not None:
         return parsed_float
     return value
+
+
+def is_selected_layer_sq8_diagnostic_command(command: Any) -> bool:
+    return (
+        isinstance(command, str)
+        and command.startswith("sq-fp8-token-ids-model-loop-smoke")
+    )
+
+
+def sq_execution_mode_allows_fallback(report: dict[str, Any], allow_cli: bool) -> bool:
+    if allow_cli:
+        return True
+    diagnostic = parse_bool(report.get("diagnostic"))
+    if diagnostic is True:
+        return True
+    fallback_allowed = parse_bool(report.get("fallback_allowed"))
+    if fallback_allowed is True:
+        return True
+    command = report.get("command")
+    if is_selected_layer_sq8_diagnostic_command(command):
+        return True
+    return False
+
+
+def is_materialized_sq_fallback(report: dict[str, Any]) -> bool:
+    return (
+        isinstance(report.get("sq_execution_mode"), str)
+        and report.get("sq_execution_mode") == "materialized_f32_fallback"
+    )
 
 
 def parse_int_csv(value: Any) -> list[int]:
@@ -1049,6 +1093,28 @@ def classify_failure(returncode: int, timed_out: bool, text: str) -> tuple[str, 
     return "failed", {"type": "command_failed", "message": f"Benchmark command exited with code {returncode}."}
 
 
+def classify_sq_execution_fallback(
+    status: str,
+    error: dict[str, str] | None,
+    parse_name: str,
+    report: dict[str, Any],
+    allow_cli: bool,
+) -> tuple[str, dict[str, str] | None]:
+    if status != "ok" or parse_name != "ullm-model-loop-throughput":
+        return status, error
+    if not is_materialized_sq_fallback(report):
+        return status, error
+    if sq_execution_mode_allows_fallback(report, allow_cli):
+        return status, error
+    return "failed", {
+        "type": "invalid_fallback",
+        "message": (
+            "materialized_f32_fallback rows must be explicitly marked fallback "
+            "or excluded from comparable throughput."
+        ),
+    }
+
+
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as output:
@@ -1098,6 +1164,11 @@ def main() -> int:
             "ullm-model-loop-throughput",
         ],
         default="none",
+    )
+    parser.add_argument(
+        "--allow-materialized-fallback",
+        action="store_true",
+        help="Allow materialized_f32_fallback model-loop rows to stay valid.",
     )
     parser.add_argument("--result-json", type=Path)
     parser.add_argument("--timeout-seconds", type=float, default=None)
@@ -1169,6 +1240,11 @@ def main() -> int:
         metrics = parse_sglang_serving_metrics(args.result_json, memory)
     else:
         metrics = default_metrics(memory)
+
+    allow_materialized_fallback = sq_execution_mode_allows_fallback(
+        ullm_report, args.allow_materialized_fallback
+    )
+    saw_materialized_fallback = is_materialized_sq_fallback(ullm_report)
 
     env_names = [
         "CUDA_VISIBLE_DEVICES",
@@ -1326,6 +1402,19 @@ def main() -> int:
             ),
         }
         ullm_correctness = None
+    if args.parse == "ullm-model-loop-throughput" and saw_materialized_fallback:
+        workload = row.get("workload")
+        if isinstance(workload, dict):
+            workload["fallback_allowed"] = allow_materialized_fallback
+            workload["diagnostic"] = (
+                parse_bool(ullm_report.get("diagnostic")) is True
+                or is_selected_layer_sq8_diagnostic_command(ullm_report.get("command"))
+            )
+        status, error = classify_sq_execution_fallback(
+            status, error, args.parse, ullm_report, args.allow_materialized_fallback
+        )
+        row["status"] = status
+        row["error"] = error
     if ullm_correctness is not None:
         row["correctness"] = ullm_correctness
         if args.parse == "ullm-package-batch-throughput":
