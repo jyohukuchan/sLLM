@@ -1,0 +1,23 @@
+{
+  "schema_version": "sq8-real-checkpoint-fixture-v0.1",
+  "model": "Qwen3-14B-FP8",
+  "config_sha256": "c5d7d0e8ee42088bd535101d13c71d38c20b5c2afd46ee8fdfba351956233793",
+  "index_sha256": "6a9c8e17744118347080916d8f673b881941cf42989ee77266b14dc2062a7151",
+  "weight": {
+    "name": "model.layers.0.self_attn.q_proj.weight",
+    "dtype": "F8_E4M3",
+    "shape": [5120, 5120],
+    "bytes": 26214400,
+    "sha256": "55b69346ebbd88c2946655d91617ee2abcaddd0942ca4835349df648063894ca"
+  },
+  "scale": {
+    "name": "model.layers.0.self_attn.q_proj.weight_scale_inv",
+    "dtype": "BF16",
+    "shape": [40, 40],
+    "block_shape": [128, 128],
+    "bytes": 3200,
+    "sha256": "297ad4da1210a22ac5114cc6a4811e8141014f7ebf48e613e7705285e669e948"
+  },
+  "reconstruction_blocks": [[0, 0], [0, 39], [20, 20], [39, 0], [39, 39]],
+  "reconstruction_f32_le_sha256": "a33d5e3d995a32597855384a191d110030b7a995d54e35029872952e1a083ac3"
+}

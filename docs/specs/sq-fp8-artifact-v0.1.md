@@ -8,6 +8,11 @@ This specification defines the first FP8 SQ8_0 artifact produced by
 The public format ID is `SQ8_0`. The previous `sq-fp8-w8a16-r9700-v0` name is retained as an
 implementation lineage / legacy alias, not as the public format name.
 
+This schema is retained for legacy BF16/F16 requantization and connection diagnostics. The builder
+must reject selected `F8_E4M3` source tensors because v0.1 cannot preserve their source 2D block
+scales. Existing FP8 checkpoints must use the source-correct canonical
+[`sq-fp8-artifact-v0.2`](sq-fp8-artifact-v0.2.md) importer.
+
 ## Layout
 
 ```text

@@ -168,6 +168,35 @@ class BuildSqFp8ArtifactPolicyTest(unittest.TestCase):
         self.assertNotIn("model.language_model.layers.3.self_attn.q_proj.weight", selected_names)
         self.assertNotIn("lm_head.weight", selected_names)
 
+    def test_selected_f8_e4m3_source_requires_canonical_v02_importer(self):
+        tensor = self.builder.SourceTensor(
+            name="model.language_model.layers.0.self_attn.q_proj.weight",
+            source_file=Path("model.safetensors"),
+            dtype="F8_E4M3",
+            shape=[8, 8],
+        )
+
+        with self.assertRaisesRegex(
+            SystemExit,
+            r"F8_E4M3 source tensor .*canonical sq-fp8-artifact-v0\.2 importer",
+        ):
+            self.builder.selected_tensors([tensor], Path("artifact"), [], [], 0)
+
+    def test_selected_bf16_source_remains_supported(self):
+        tensor = self.builder.SourceTensor(
+            name="model.language_model.layers.0.self_attn.q_proj.weight",
+            source_file=Path("model.safetensors"),
+            dtype="BF16",
+            shape=[8, 8],
+        )
+
+        selected, passthrough = self.builder.selected_tensors(
+            [tensor], Path("artifact"), [], [], 0
+        )
+
+        self.assertEqual([item.source for item in selected], [tensor])
+        self.assertEqual(passthrough, [])
+
     def test_policy_scale_override_resolves_per_tensor_scale(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

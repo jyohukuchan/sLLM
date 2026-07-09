@@ -27,6 +27,7 @@ SCHEMA_VERSION = "sq-fp8-artifact-v0.1"
 POLICY_SCHEMA_VERSION = "sq-fp8-policy-v0.1"
 DEFAULT_IMPLEMENTATION_ID = "sq-fp8-w8a16-r9700-v0"
 FP8_E4M3_MAX = 448.0
+F8_E4M3_SOURCE_DTYPE = "F8_E4M3"
 
 
 @dataclass(frozen=True)
@@ -319,6 +320,17 @@ def resolve_tensor_scale(
     return scale
 
 
+def reject_unsupported_source_dtype(tensor: SourceTensor) -> None:
+    if tensor.dtype.upper() != F8_E4M3_SOURCE_DTYPE:
+        return
+    raise SystemExit(
+        "legacy sq-fp8-artifact-v0.1 builder cannot import selected "
+        f"{F8_E4M3_SOURCE_DTYPE} source tensor {tensor.name!r}: re-quantizing "
+        "checkpoint FP8 values would discard their source block scales; use the "
+        "canonical sq-fp8-artifact-v0.2 importer"
+    )
+
+
 def selected_tensors(
     tensors: list[SourceTensor],
     output: Path,
@@ -344,6 +356,7 @@ def selected_tensors(
         if max_tensors > 0 and len(selected) >= max_tensors:
             included = False
         if included and not excluded:
+            reject_unsupported_source_dtype(tensor)
             stem = sanitize(tensor.name)
             selected.append(
                 SelectedTensor(
@@ -411,6 +424,7 @@ def encode_selected_tensor(
     if scale_block_cols <= 0:
         raise SystemExit("scale-block-cols must be positive")
     source = tensor.source
+    reject_unsupported_source_dtype(source)
     if len(source.shape) != 2:
         raise SystemExit(f"FP8 target must be 2D: {source.name}")
     rows, cols = source.shape
