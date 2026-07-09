@@ -2,15 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::Instant;
 use ullm_engine::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
 use ullm_engine::sq_canonical::read_sq8_canonical_artifact;
-use ullm_engine::sq_reference::{sq8_f32_le_sha256, sq8_reference_activation};
+use ullm_engine::sq_reference::{
+    SQ8_CORRECTNESS_THRESHOLDS, Sq8CorrectnessMetrics, Sq8CorrectnessThresholds,
+    compare_sq8_correctness, run_sq8_reference_projection, sq8_f32_le_sha256,
+    sq8_reference_activation,
+};
 use ullm_engine::sq_runtime::{
     SQ8_CANONICAL_UPLOAD_CHUNK_BYTES, load_sq8_canonical_resident_tensor,
 };
 use ullm_runtime_sys::{RuntimeContext, SqFp8ExecutionPath, sq_fp8_matvec_block2d_batch_f32};
+
+const MAX_REFERENCE_BENCH_WORKING_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug)]
 struct Args {
@@ -28,17 +35,36 @@ struct DeviceReport {
     runtime_device_id: i32,
     backend: String,
     name: String,
+    compute_major: i32,
+    compute_minor: i32,
     gcn_arch_name: String,
+    hip_visible_devices: Option<String>,
+    isolated_visibility: bool,
 }
 
 #[derive(Serialize)]
 struct TimingReport {
     source: &'static str,
+    cache_state: &'static str,
     warmups: usize,
     repeats: usize,
     p50_ms: f64,
     p95_ms: f64,
     aggregate_tflops_p50: f64,
+}
+
+#[derive(Serialize)]
+struct SampledRowReport {
+    row: usize,
+    metrics: Sq8CorrectnessMetrics,
+}
+
+#[derive(Serialize)]
+struct SampledCorrectnessReport {
+    coverage: &'static str,
+    sampled_rows: Vec<SampledRowReport>,
+    thresholds: Sq8CorrectnessThresholds,
+    passed: bool,
 }
 
 #[derive(Serialize)]
@@ -54,6 +80,7 @@ struct BenchmarkReport {
     input_f32_le_sha256: String,
     output_f32_le_sha256: String,
     output_nonfinite: usize,
+    correctness: SampledCorrectnessReport,
     execution_path: &'static str,
     fallback_state: &'static str,
     device: DeviceReport,
@@ -153,6 +180,46 @@ fn execution_path_label(path: SqFp8ExecutionPath) -> &'static str {
     }
 }
 
+fn sampled_reference_rows(rows: usize) -> Vec<usize> {
+    if rows <= 8 {
+        return (0..rows).collect();
+    }
+    let mut sampled = vec![0, rows / 4, rows / 2, (3 * rows) / 4, rows - 1];
+    sampled.sort_unstable();
+    sampled.dedup();
+    sampled
+}
+
+fn raw_bytes_sha256(bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
+}
+
+fn checked_working_bytes(
+    m: usize,
+    n: usize,
+    k: usize,
+    weight_elements: usize,
+) -> Result<usize, String> {
+    let input_elements = m
+        .checked_mul(k)
+        .ok_or_else(|| format!("activation shape [{m},{k}] overflows usize"))?;
+    let output_elements = m
+        .checked_mul(n)
+        .ok_or_else(|| format!("output shape [{m},{n}] overflows usize"))?;
+    let input_bytes = input_elements
+        .checked_mul(3 * std::mem::size_of::<f32>())
+        .ok_or_else(|| "reference input working bytes overflow usize".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(3 * std::mem::size_of::<f32>())
+        .ok_or_else(|| "reference output working bytes overflow usize".to_string())?;
+    weight_elements
+        .checked_add(input_bytes)
+        .and_then(|bytes| bytes.checked_add(output_bytes))
+        .ok_or_else(|| "reference benchmark working bytes overflow usize".to_string())
+}
+
 fn main() -> Result<(), String> {
     let Some(args) = parse_args()? else {
         return Ok(());
@@ -163,6 +230,16 @@ fn main() -> Result<(), String> {
         .map_err(|_| format!("SQ8 tensor {} N does not fit usize", pair.name))?;
     let k = usize::try_from(pair.shape[1])
         .map_err(|_| format!("SQ8 tensor {} K does not fit usize", pair.name))?;
+    let weight_elements = n
+        .checked_mul(k)
+        .ok_or_else(|| format!("weight shape [{n},{k}] overflows usize"))?;
+    let working_bytes = checked_working_bytes(args.m, n, k, weight_elements)?;
+    if working_bytes > MAX_REFERENCE_BENCH_WORKING_BYTES {
+        return Err(format!(
+            "reference benchmark estimated working set {working_bytes} exceeds {} bytes",
+            MAX_REFERENCE_BENCH_WORKING_BYTES
+        ));
+    }
     let input_elements = args
         .m
         .checked_mul(k)
@@ -229,15 +306,55 @@ fn main() -> Result<(), String> {
     stream.synchronize()?;
     let output = decode_f32_le_values(&output_bytes);
     let output_nonfinite = output.iter().filter(|value| !value.is_finite()).count();
+    let sampled_rows = sampled_reference_rows(args.m)
+        .into_iter()
+        .map(|row| {
+            let input_start = row * k;
+            let output_start = row * n;
+            let reference = run_sq8_reference_projection(
+                &artifact,
+                &args.tensor,
+                &input[input_start..input_start + k],
+            )?;
+            let metrics = compare_sq8_correctness(
+                &reference.output,
+                &output[output_start..output_start + n],
+            )?;
+            Ok(SampledRowReport { row, metrics })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let correctness_passed = sampled_rows
+        .iter()
+        .all(|sample| sample.metrics.passes_fixed_thresholds());
+    let correctness = SampledCorrectnessReport {
+        coverage: if args.m <= 8 {
+            "all_rows"
+        } else {
+            "boundary_and_quartile_rows"
+        },
+        sampled_rows,
+        thresholds: SQ8_CORRECTNESS_THRESHOLDS,
+        passed: correctness_passed,
+    };
     let p50_ms = percentile(samples_ms.clone(), 0.50)?;
     let p95_ms = percentile(samples_ms, 0.95)?;
     let operations = 2.0 * args.m as f64 * n as f64 * k as f64;
     let aggregate_tflops_p50 = operations / (p50_ms * 1.0e9);
+    let hip_visible_devices = std::env::var("HIP_VISIBLE_DEVICES")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let isolated_visibility = hip_visible_devices
+        .as_deref()
+        .is_some_and(|value| !value.contains(','));
     let passed = execution_path == SqFp8ExecutionPath::HipKernel
         && output_nonfinite == 0
-        && device.backend == "hip";
+        && correctness.passed
+        && device.backend == "hip"
+        && device.compute_major == 12
+        && device.compute_minor == 0
+        && isolated_visibility;
     let result = BenchmarkReport {
-        schema_version: "sq8-reference-batch-benchmark-v0.1",
+        schema_version: "sq8-reference-batch-benchmark-v0.2",
         profile: "reference_w8a16",
         artifact_dir: artifact.artifact_dir().display().to_string(),
         artifact_content_sha256: artifact.manifest().integrity.content_sha256.clone(),
@@ -246,23 +363,29 @@ fn main() -> Result<(), String> {
         n,
         k,
         input_f32_le_sha256: sq8_f32_le_sha256(&input)?,
-        output_f32_le_sha256: sq8_f32_le_sha256(&output)?,
+        output_f32_le_sha256: raw_bytes_sha256(&output_bytes),
         output_nonfinite,
+        correctness,
         execution_path: execution_path_label(execution_path),
-        fallback_state: if execution_path == SqFp8ExecutionPath::HipKernel {
-            "not_used"
-        } else {
-            "used"
+        fallback_state: match (device.backend.as_str(), execution_path) {
+            ("hip", SqFp8ExecutionPath::HipKernel) => "not_used",
+            ("cpu", SqFp8ExecutionPath::CpuReference) => "not_applicable",
+            _ => "used",
         },
         device: DeviceReport {
             requested_index: args.device_index,
             runtime_device_id: device.device_id,
             backend: device.backend,
             name: device.name,
+            compute_major: device.compute_major,
+            compute_minor: device.compute_minor,
             gcn_arch_name: device.gcn_arch_name,
+            hip_visible_devices,
+            isolated_visibility,
         },
         timing: TimingReport {
             source: "host_monotonic_launch_plus_sync",
+            cache_state: "warm_repeated_same_buffers",
             warmups: args.warmups,
             repeats: args.repeats,
             p50_ms,

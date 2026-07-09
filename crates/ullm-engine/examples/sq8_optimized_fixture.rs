@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::Serialize;
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::raw::{c_char, c_int, c_uint};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use ullm_engine::host_bytes::encode_f32_to_bytes;
 use ullm_engine::sq_canonical::read_sq8_canonical_artifact;
@@ -14,7 +16,20 @@ use ullm_engine::sq_optimized_reference::{
 };
 use ullm_engine::sq_reference::sq8_reference_activation;
 
-const SCHEMA_VERSION: &str = "sq8-optimized-fixture-v0.1";
+const SCHEMA_VERSION: &str = "sq8-optimized-fixture-v0.2";
+const MAX_FIXTURE_WORKING_BYTES: usize = 2 * 1024 * 1024 * 1024;
+const AT_FDCWD: c_int = -100;
+const RENAME_NOREPLACE: c_uint = 1;
+
+unsafe extern "C" {
+    fn renameat2(
+        old_dir_fd: c_int,
+        old_path: *const c_char,
+        new_dir_fd: c_int,
+        new_path: *const c_char,
+        flags: c_uint,
+    ) -> c_int;
+}
 
 #[derive(Debug)]
 struct Args {
@@ -62,6 +77,7 @@ struct FixtureReport {
     k: usize,
     activation_block_cols: usize,
     cpu_worker_threads: usize,
+    estimated_working_bytes: usize,
     activation: RawFileReport,
     quantized_activation: RawFileReport,
     activation_scales: RawFileReport,
@@ -134,6 +150,66 @@ fn staging_dir_for(output_dir: &Path) -> Result<PathBuf, String> {
     Ok(parent.join(staging_name))
 }
 
+fn path_exists(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(format!("failed to inspect {}: {err}", path.display())),
+    }
+}
+
+fn rename_noreplace(source: &Path, destination: &Path) -> Result<(), String> {
+    let source_c = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| format!("source path {} contains NUL", source.display()))?;
+    let destination_c = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| format!("destination path {} contains NUL", destination.display()))?;
+    // Linux renameat2 makes the no-clobber check and directory promotion one operation.
+    let result = unsafe {
+        renameat2(
+            AT_FDCWD,
+            source_c.as_ptr(),
+            AT_FDCWD,
+            destination_c.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "failed to publish fixture {} from {} without replacement: {}",
+        destination.display(),
+        source.display(),
+        std::io::Error::last_os_error()
+    ))
+}
+
+fn checked_fixture_working_bytes(m: usize, n: usize, k: usize) -> Result<usize, String> {
+    let activation_elements = m
+        .checked_mul(k)
+        .ok_or_else(|| format!("activation shape [{m},{k}] overflows usize"))?;
+    let output_elements = m
+        .checked_mul(n)
+        .ok_or_else(|| format!("output shape [{m},{n}] overflows usize"))?;
+    let scale_elements = m
+        .checked_mul(k.div_ceil(128))
+        .ok_or_else(|| "activation scale shape overflows usize".to_string())?;
+    let activation_bytes = activation_elements
+        .checked_mul(17)
+        .ok_or_else(|| "activation working bytes overflow usize".to_string())?;
+    let output_bytes = output_elements
+        .checked_mul(16)
+        .ok_or_else(|| "output working bytes overflow usize".to_string())?;
+    let scale_bytes = scale_elements
+        .checked_mul(8)
+        .ok_or_else(|| "activation scale working bytes overflow usize".to_string())?;
+    activation_bytes
+        .checked_add(output_bytes)
+        .and_then(|bytes| bytes.checked_add(scale_bytes))
+        .and_then(|bytes| bytes.checked_add(16 * 1024 * 1024))
+        .ok_or_else(|| "fixture working bytes overflow usize".to_string())
+}
+
 fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -154,7 +230,7 @@ fn publish_fixture(
     oracle_output_f32: &[u8],
     report_json: &[u8],
 ) -> Result<(), String> {
-    if output_dir.exists() {
+    if path_exists(output_dir)? {
         return Err(format!(
             "refusing to replace existing fixture directory {}",
             output_dir.display()
@@ -194,13 +270,19 @@ fn publish_fixture(
                     staging_dir.display()
                 )
             })?;
-        fs::rename(&staging_dir, output_dir).map_err(|err| {
-            format!(
-                "failed to publish fixture {} from {}: {err}",
-                output_dir.display(),
-                staging_dir.display()
-            )
-        })
+        rename_noreplace(&staging_dir, output_dir)?;
+        let parent = output_dir
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|err| {
+                format!(
+                    "failed to sync published fixture parent {}: {err}",
+                    parent.display()
+                )
+            })
     })();
     if write_result.is_err() {
         let _ = fs::remove_dir_all(&staging_dir);
@@ -212,7 +294,7 @@ fn main() -> Result<(), String> {
     let Some(args) = parse_args()? else {
         return Ok(());
     };
-    if args.output_dir.exists() {
+    if path_exists(&args.output_dir)? {
         return Err(format!(
             "refusing to replace existing fixture directory {}",
             args.output_dir.display()
@@ -225,6 +307,13 @@ fn main() -> Result<(), String> {
         .map_err(|_| format!("SQ8 tensor {} N does not fit usize", pair.name))?;
     let k = usize::try_from(pair.shape[1])
         .map_err(|_| format!("SQ8 tensor {} K does not fit usize", pair.name))?;
+    let estimated_working_bytes = checked_fixture_working_bytes(args.m, n, k)?;
+    if estimated_working_bytes > MAX_FIXTURE_WORKING_BYTES {
+        return Err(format!(
+            "fixture estimated working set {estimated_working_bytes} exceeds {} bytes",
+            MAX_FIXTURE_WORKING_BYTES
+        ));
+    }
     let input_elements = args
         .m
         .checked_mul(k)
@@ -261,6 +350,7 @@ fn main() -> Result<(), String> {
         k,
         activation_block_cols: quantized.block_cols(),
         cpu_worker_threads: projection.cpu_worker_threads,
+        estimated_working_bytes,
         activation: RawFileReport {
             file: "activation.f32le",
             dtype: "f32-le",
