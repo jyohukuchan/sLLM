@@ -200,6 +200,88 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["batching"]["prefill_executor_request_parallelism"], 2)
         self.assertEqual(row["batching"]["prefill_executor_token_parallelism"], 32)
 
+    def test_parses_cached_prefix_prefill_dispatch_selected_info(self) -> None:
+        stdout = (
+            "runtime-cached-prefix-attn-smoke backend=hip device_index=2 "
+            'name="AMD Radeon Graphics" prefill_mode=cached_prefix '
+            "executor=cached_prefix_rdna4_fp8_auto resolved_executor=cached_prefix_flash2_fp8q "
+            "executor_selection=backend_dispatch "
+            "selected_implementation_id=cached_prefix_rdna4_fp8_auto "
+            "dispatch_operation=cached_prefix_attention "
+            "dispatch_phase=prefill dispatch_format_id=SQ8_0 dispatch_gpu_arch=RDNA4 "
+            "kv_cache_dtype=fp8_e4m3 cached_prefix_tokens=4096 new_prefill_tokens=16 "
+            "total_context_tokens_after_prefill=4112 "
+            "q_heads=16 kv_heads=1 head_dim=256 value_dim=256 "
+            "estimated_prefill_attention_work_tokens=65536 measured_repeats=1 "
+            "wall_ms_mean=0.050000 wall_ms_min=0.050000 wall_ms_max=0.050000 "
+            "prefill_total_input_tps=320000.000000 "
+            "attention_pair_tps_mean=1310720000.000000 "
+            "verification=sampled sample_count=10 sampled_max_abs_diff=0.000000001 "
+            "verified=true"
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_component_prefill_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 1,
+                "concurrent_requests": 1,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+        TOOL.enrich_ullm_component_prefill_row(row, report)
+
+        self.assertEqual(report["command"], "runtime-cached-prefix-attn-smoke")
+        self.assertEqual(row["workload"]["prefill_executor"], "cached_prefix_rdna4_fp8_auto")
+        self.assertEqual(
+            row["workload"]["resolved_prefill_executor"],
+            "cached_prefix_flash2_fp8q",
+        )
+        self.assertEqual(row["workload"]["prompt_tokens_per_request"], [16])
+        self.assertEqual(row["workload"]["cached_prefix_tokens_per_request"], [4096])
+        self.assertEqual(row["workload"]["new_prefill_tokens_per_request"], [16])
+        self.assertEqual(
+            row["workload"]["total_context_tokens_after_prefill_per_request"],
+            [4112],
+        )
+        self.assertEqual(row["workload"]["cached_prefix_total_tokens"], 4096)
+        self.assertEqual(row["workload"]["total_context_tokens_after_prefill"], 4112)
+        self.assertEqual(row["workload"]["component_total_input_tokens"], 16)
+        self.assertEqual(row["workload"]["estimated_prefill_attention_work_tokens"], 65536)
+        self.assertEqual(metrics["prefill_total_input_tokens"], 16)
+        self.assertEqual(row["batching"]["prefill_executor"], "cached_prefix_rdna4_fp8_auto")
+        self.assertEqual(
+            row["batching"]["resolved_prefill_executor"],
+            "cached_prefix_flash2_fp8q",
+        )
+        self.assertEqual(
+            row["workload"]["selected_implementation_id"],
+            "cached_prefix_rdna4_fp8_auto",
+        )
+        self.assertEqual(
+            row["workload"]["dispatch_selected_implementation_id"],
+            "cached_prefix_rdna4_fp8_auto",
+        )
+        self.assertEqual(row["workload"]["executor_selection"], "backend_dispatch")
+        self.assertEqual(row["workload"]["dispatch_operation"], "cached_prefix_attention")
+        self.assertEqual(row["workload"]["dispatch_phase"], "prefill")
+        self.assertEqual(row["workload"]["dispatch_format_id"], "SQ8_0")
+        self.assertEqual(row["workload"]["dispatch_gpu_arch"], "RDNA4")
+        self.assertEqual(row["batching"]["executor_selection"], "backend_dispatch")
+        self.assertEqual(row["batching"]["dispatch_operation"], "cached_prefix_attention")
+        self.assertEqual(row["batching"]["dispatch_phase"], "prefill")
+        self.assertEqual(row["batching"]["dispatch_format_id"], "SQ8_0")
+        self.assertEqual(row["batching"]["dispatch_gpu_arch"], "RDNA4")
+
     def test_parses_package_prefill_component_real_batch_key_value_output(self) -> None:
         stdout = (
             "package-prefill-aq4-matvec-batch-smoke "

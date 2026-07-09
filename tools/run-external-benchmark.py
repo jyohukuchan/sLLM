@@ -634,6 +634,7 @@ def parse_ullm_component_prefill_metrics(
     prompt_tokens = first_non_null(
         parse_int(report.get("prompt_tokens_per_request")),
         parse_int(report.get("prompt_tokens")),
+        parse_int(report.get("new_prefill_tokens")),
     )
     request_parallelism = first_non_null(
         parse_int(report.get("request_parallelism")),
@@ -642,7 +643,11 @@ def parse_ullm_component_prefill_metrics(
         1,
     )
     prefill_tokens = parse_int(report.get("prefill_total_input_tokens"))
-    if prefill_tokens is None and prompt_tokens is not None and request_parallelism is not None:
+    if (
+        prefill_tokens is None
+        and prompt_tokens is not None
+        and request_parallelism is not None
+    ):
         prefill_tokens = prompt_tokens * request_parallelism
     prefill_tps = first_non_null(
         parse_float(report.get("prefill_total_input_tps")),
@@ -883,19 +888,36 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
     )
     reported_prompt_tokens_per_request = parse_int(report.get("prompt_tokens_per_request"))
     component_prompt_tokens = parse_int(report.get("prompt_tokens"))
+    cached_prefix_tokens = parse_int(report.get("cached_prefix_tokens"))
+    new_prefill_tokens = parse_int(report.get("new_prefill_tokens"))
+    total_context_tokens_after_prefill = parse_int(
+        report.get("total_context_tokens_after_prefill")
+    )
     prompt_tokens = first_non_null(
         reported_prompt_tokens_per_request,
         parse_int(row_workload.get("prompt_tokens")),
         component_prompt_tokens,
+        new_prefill_tokens,
     )
     prefill_tokens = parse_int(report.get("prefill_total_input_tokens"))
     if prefill_tokens is None:
-        if component_prompt_tokens is not None:
+        if new_prefill_tokens is not None and concurrent_requests is not None:
+            prefill_tokens = new_prefill_tokens * concurrent_requests
+        elif component_prompt_tokens is not None:
             prefill_tokens = component_prompt_tokens
         elif prompt_tokens is not None and concurrent_requests is not None:
             prefill_tokens = prompt_tokens * concurrent_requests
     estimated_work = parse_int(report.get("estimated_prefill_attention_work_tokens"))
     executor = report.get("executor")
+    resolved_executor = report.get("resolved_executor")
+    selected_implementation_id = report.get("selected_implementation_id")
+    dispatch_metadata = {
+        "executor_selection": report.get("executor_selection"),
+        "dispatch_operation": report.get("dispatch_operation"),
+        "dispatch_phase": report.get("dispatch_phase"),
+        "dispatch_format_id": report.get("dispatch_format_id"),
+        "dispatch_gpu_arch": report.get("dispatch_gpu_arch"),
+    }
     batching_mode = report.get("batching_mode")
     if not isinstance(batching_mode, str):
         batching_mode = "real" if report.get("real_batch") is True else None
@@ -906,22 +928,56 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
     row_workload["prefill_mode"] = report.get("prefill_mode") or "cold"
     if isinstance(executor, str):
         row_workload["prefill_executor"] = executor
+    if isinstance(resolved_executor, str):
+        row_workload["resolved_prefill_executor"] = resolved_executor
+    elif isinstance(executor, str):
         row_workload["resolved_prefill_executor"] = executor
+    if isinstance(selected_implementation_id, str):
+        row_workload["selected_implementation_id"] = selected_implementation_id
+        row_workload["dispatch_selected_implementation_id"] = selected_implementation_id
+    for key, value in dispatch_metadata.items():
+        if value is not None:
+            row_workload[key] = value
     if prompt_tokens is not None and concurrent_requests is not None:
         per_request = [prompt_tokens for _ in range(concurrent_requests)]
         row_workload["prompt_tokens_per_request"] = per_request
-        row_workload["cached_prefix_tokens_per_request"] = [0 for _ in range(concurrent_requests)]
-        row_workload["new_prefill_tokens_per_request"] = per_request
-        row_workload["total_context_tokens_after_prefill_per_request"] = per_request
+        per_request_cached_prefix = cached_prefix_tokens if cached_prefix_tokens is not None else 0
+        per_request_new_prefill = (
+            new_prefill_tokens if new_prefill_tokens is not None else prompt_tokens
+        )
+        per_request_total_context = first_non_null(
+            total_context_tokens_after_prefill,
+            (
+                per_request_cached_prefix + per_request_new_prefill
+                if cached_prefix_tokens is not None or new_prefill_tokens is not None
+                else None
+            ),
+            prompt_tokens,
+        )
+        row_workload["cached_prefix_tokens_per_request"] = [
+            per_request_cached_prefix for _ in range(concurrent_requests)
+        ]
+        row_workload["new_prefill_tokens_per_request"] = [
+            per_request_new_prefill for _ in range(concurrent_requests)
+        ]
+        row_workload["total_context_tokens_after_prefill_per_request"] = [
+            per_request_total_context for _ in range(concurrent_requests)
+        ]
     if prefill_tokens is not None:
         row_workload["total_context_tokens_after_prefill"] = prefill_tokens
         row_workload["component_total_input_tokens"] = prefill_tokens
+    if cached_prefix_tokens is not None and concurrent_requests is not None:
+        row_workload["cached_prefix_total_tokens"] = cached_prefix_tokens * concurrent_requests
+    if total_context_tokens_after_prefill is not None and concurrent_requests is not None:
+        row_workload["total_context_tokens_after_prefill"] = (
+            total_context_tokens_after_prefill * concurrent_requests
+        )
     if estimated_work is not None:
         row_workload["estimated_prefill_attention_work_tokens"] = estimated_work
     row["batching"] = {
         "mode": batching_mode,
         "prefill_executor": executor,
-        "resolved_prefill_executor": executor,
+        "resolved_prefill_executor": row_workload.get("resolved_prefill_executor"),
         "prefill_real_batch": batching_mode == "real",
         "prefill_executor_token_parallelism": parse_int(report.get("token_parallelism")),
         "prefill_executor_request_parallelism": parse_int(report.get("request_parallelism")),
@@ -932,6 +988,17 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
         "component_command": report.get("command"),
         "component_package": report.get("package"),
     }
+    for key in (
+        "dispatch_selected_implementation_id",
+        "executor_selection",
+        "dispatch_operation",
+        "dispatch_phase",
+        "dispatch_format_id",
+        "dispatch_gpu_arch",
+    ):
+        value = row_workload.get(key)
+        if value is not None:
+            row["batching"][key] = value
 
 
 def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> None:

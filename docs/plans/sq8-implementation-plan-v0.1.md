@@ -378,6 +378,9 @@ Done:
   `mlp_gate_up`, `mlp_down`, `linear_attn_qkv`, `linear_attn_out`) have been added to
   `backend_dispatch.rs` as `SQ8_0_FUSED_PROJECTION_DESCRIPTOR_CATALOG` (not yet in active runtime
   selection).
+- `tools/run-external-benchmark.py --parse ullm-component-prefill` now preserves cached-prefix
+  dispatch metadata (`selected_implementation_id`, `executor_selection`, `dispatch_*`) and
+  cached-prefix token breakdown fields in result rows.
 
 Remaining:
 
