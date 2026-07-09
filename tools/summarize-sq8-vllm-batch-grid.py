@@ -119,9 +119,16 @@ def iter_selected_rows(
     workload_prefix_filter: str,
     case_substring: str,
     requests_filter: set[int],
+    harness_class_filter: str = "",
 ) -> Iterator[dict[str, Any]]:
     for row in iter_rows(paths):
-        if should_keep(row, workload_prefix_filter, case_substring, requests_filter):
+        if should_keep(
+            row,
+            workload_prefix_filter,
+            case_substring,
+            requests_filter,
+            harness_class_filter,
+        ):
             yield row
 
 
@@ -130,10 +137,15 @@ def selected_rows(
     workload_prefix_filter: str,
     case_substring: str,
     requests_filter: set[int],
+    harness_class_filter: str = "",
 ) -> list[dict[str, Any]]:
     return list(
         iter_selected_rows(
-            paths, workload_prefix_filter, case_substring, requests_filter
+            paths,
+            workload_prefix_filter,
+            case_substring,
+            requests_filter,
+            harness_class_filter,
         )
     )
 
@@ -166,6 +178,7 @@ def should_keep(
     workload_prefix_filter: str,
     case_substring: str,
     requests_filter: set[int],
+    harness_class_filter: str = "",
 ) -> bool:
     case_id = as_str(row.get("case_id"))
     workload = as_dict(row.get("workload"))
@@ -194,7 +207,18 @@ def should_keep(
     status = row.get("status")
     status_match = status == "ok" if status is not None else True
 
-    return case_match and workload_match and requests_match and status_match
+    if harness_class_filter:
+        harness_match = harness_class(row) == harness_class_filter
+    else:
+        harness_match = True
+
+    return (
+        case_match
+        and workload_match
+        and requests_match
+        and status_match
+        and harness_match
+    )
 
 
 def iter_rows(paths: Iterable[Path]) -> Iterator[dict[str, Any]]:
@@ -291,9 +315,14 @@ def markdown_table(
     workload_prefix_filter: str,
     case_substring: str,
     requests_filter: set[int] | None = None,
+    harness_class_filter: str = "",
 ) -> str:
     rows = selected_rows(
-        paths, workload_prefix_filter, case_substring, requests_filter or set()
+        paths,
+        workload_prefix_filter,
+        case_substring,
+        requests_filter or set(),
+        harness_class_filter,
     )
     return "\n".join(markdown_lines(rows))
 
@@ -317,6 +346,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="fail when selected rows are not serving parity candidates",
     )
+    parser.add_argument(
+        "--harness-class",
+        default="",
+        help="filter by harness class, for example serving_throughput_benchmark",
+    )
     return parser.parse_args()
 
 
@@ -328,15 +362,24 @@ def main() -> int:
             return 1
     try:
         requests_filter = parse_requests_filter(args.requests)
+        harness_class_filter = args.harness_class
         if args.require_serving_parity:
             rows = selected_rows(
-                args.jsonl, args.workload_prefix, args.case_substring, requests_filter
+                args.jsonl,
+                args.workload_prefix,
+                args.case_substring,
+                requests_filter,
+                harness_class_filter,
             )
             selected_count = len(rows)
             serving_parity_failures = serving_parity_gate_failures(rows)
         else:
             rows = iter_selected_rows(
-                args.jsonl, args.workload_prefix, args.case_substring, requests_filter
+                args.jsonl,
+                args.workload_prefix,
+                args.case_substring,
+                requests_filter,
+                harness_class_filter,
             )
             selected_count = None
             serving_parity_failures = []

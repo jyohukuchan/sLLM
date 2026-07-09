@@ -238,6 +238,117 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                     status = TOOL.main()
             self.assertEqual(status, 0)
 
+    def test_harness_class_filter_prefers_vllm_serving_rows_and_passes_parity_gate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            path = Path(workdir) / "mixed.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            make_row(
+                                case_id="sq8-mixed-real-batch-no-final-pp16-tg8-b2",
+                                engine_name="uLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-pp16-tg8-b2-tp1-rocr",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "serving_throughput_benchmark"},
+                            )
+                        ),
+                        json.dumps(
+                            make_row(
+                                case_id="vllm-r9700-qwen3-14b-fp8-pp16-tg8-b2-legacy",
+                                engine_name="vLLM",
+                                prompt_tokens=16,
+                                generated_tokens=8,
+                                batch_size=2,
+                                harness={"class": "cli_model_loop_diagnostic"},
+                            )
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            rows = TOOL.selected_rows(
+                [path],
+                "pp16-tg8",
+                "",
+                {2, 4, 8},
+                "serving_throughput_benchmark",
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(
+                rows[0]["case_id"],
+                "vllm-r9700-qwen3-14b-fp8-pp16-tg8-b2-tp1-rocr",
+            )
+
+            streamed_rows = list(
+                TOOL.iter_selected_rows(
+                    [path],
+                    "pp16-tg8",
+                    "",
+                    {2, 4, 8},
+                    "serving_throughput_benchmark",
+                )
+            )
+            self.assertEqual(len(streamed_rows), 1)
+
+            table = TOOL.markdown_table(
+                [path],
+                "pp16-tg8",
+                "",
+                {2, 4, 8},
+                "serving_throughput_benchmark",
+            )
+            self.assertEqual(len(table.splitlines()), 3)
+            self.assertIn(
+                "vllm-r9700-qwen3-14b-fp8-pp16-tg8-b2-tp1-rocr",
+                table,
+            )
+            self.assertNotIn("mixed-real-batch-no-final", table)
+            self.assertNotIn("legacy", table)
+
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "summarize.py",
+                    str(path),
+                    "--workload-prefix",
+                    "pp16-tg8",
+                    "--requests",
+                    "2,4,8",
+                    "--harness-class",
+                    "serving_throughput_benchmark",
+                    "--require-serving-parity",
+                ],
+            ):
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = TOOL.main()
+            self.assertEqual(status, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            out = stdout.getvalue()
+            self.assertIn(
+                "vLLM | vllm-r9700-qwen3-14b-fp8-pp16-tg8-b2-tp1-rocr",
+                out,
+            )
+            self.assertNotIn("mixed-real-batch-no-final", out)
+            self.assertNotIn("legacy", out)
+
     def test_require_serving_parity_fails_when_no_rows_selected(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:
             path = Path(workdir) / "nomatch.jsonl"
