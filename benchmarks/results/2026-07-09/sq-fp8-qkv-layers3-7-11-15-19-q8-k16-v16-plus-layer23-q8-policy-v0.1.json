@@ -1,0 +1,151 @@
+{
+  "acceptance_rule": {
+    "diagnostic_only": [
+      "topk_common",
+      "baseline_top1_rank_in_sq_topk",
+      "sq_top1_minus_baseline_top1_logit"
+    ],
+    "promotion_rule": "strict_top1"
+  },
+  "artifacts": [
+    {
+      "artifact": "/tmp/ullm-sq-fp8-qkv-layers3-7-11-15-19-q8-k16-v16-plus-layer23-q8-policy-v0.1-artifact",
+      "fp8_tensor_count": 16,
+      "passthrough_tensor_count": 759,
+      "summary_json": "benchmarks/results/2026-07-09/sq-fp8-qkv-layers3-7-11-15-19-q8-k16-v16-plus-layer23-q8-policy-artifact-v0.1.json"
+    }
+  ],
+  "candidate_id": "sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-15-19-q8-k16-v16-plus-layer23-q8",
+  "date": "2026-07-09",
+  "fallback_policy": [
+    {
+      "family": "all_other_language_model_tensors",
+      "layers": "all",
+      "reason": "not_selected_in_layer23_q8_split_probe"
+    },
+    {
+      "family": "visual_mtp_rdna2_tp_targets",
+      "layers": "all",
+      "reason": "deferred_target"
+    }
+  ],
+  "fp8_selection": {
+    "expected_fp8_tensor_count": 16,
+    "families": [
+      {
+        "family": "self_attn.q_proj",
+        "layers": [
+          3,
+          7,
+          11
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.q_proj",
+        "layers": [
+          15,
+          19
+        ],
+        "scale_block_cols": 8
+      },
+      {
+        "family": "self_attn.k_proj",
+        "layers": [
+          3,
+          7,
+          11,
+          15,
+          19
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.v_proj",
+        "layers": [
+          3,
+          7,
+          11,
+          15,
+          19
+        ],
+        "scale_block_cols": 16
+      },
+      {
+        "family": "self_attn.q_proj",
+        "layers": [
+          23
+        ],
+        "scale_block_cols": 8
+      }
+    ],
+    "include_regex": "^model\\.language_model\\.layers\\.((3|7|11|15|19)\\.self_attn\\.(q_proj|k_proj|v_proj)|23\\.self_attn\\.q_proj)\\.weight$"
+  },
+  "next_steps": [
+    "Keep layer23 q8 in fallback under strict_top1.",
+    "Use this as a failure guard for future scale/layout experiments.",
+    "Do not combine into full layer23 QKV until recovered by a stronger format or accepted text-level guard."
+  ],
+  "policy_id": "qkv_layers3_7_11_15_19_q8_k16_v16_plus_layer23_q8",
+  "prompt_bundle_result": {
+    "candidate_passed": false,
+    "case_a_aq4_top1": 4105,
+    "case_a_aq4_top1_rank_in_sq_top8": 2,
+    "case_a_sq_top1": 5582,
+    "case_a_sq_top1_margin_over_aq4_top1": 0.0008497240000000517,
+    "case_a_sq_top1_margin_over_rank2": 0.0008497240000000517,
+    "case_count": 3,
+    "comparison_json": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer23-split-v1/comparison.json",
+    "final_top1_tokens": [
+      24218,
+      5582,
+      329
+    ],
+    "promoted_full_sq_policy": false,
+    "result_path": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer23-split-v1.md",
+    "sq_fp8_single_matvec_count": 23,
+    "sq_fp8_triple_matvec_count": 115,
+    "sq_projection_boundary": "single+triple",
+    "strict_top1_all_match": false,
+    "strict_top1_pass_count": 2
+  },
+  "scale": {
+    "block_cols": 16,
+    "dtype": "f32",
+    "granularity": "row_block",
+    "overrides": [
+      {
+        "block_cols": 8,
+        "granularity": "row_block",
+        "id": "layer15_q8",
+        "include_regex": "^model\\.language_model\\.layers\\.15\\.self_attn\\.q_proj\\.weight$"
+      },
+      {
+        "block_cols": 8,
+        "granularity": "row_block",
+        "id": "layer19_q8",
+        "include_regex": "^model\\.language_model\\.layers\\.19\\.self_attn\\.q_proj\\.weight$"
+      },
+      {
+        "block_cols": 8,
+        "granularity": "row_block",
+        "id": "layer23_q8",
+        "include_regex": "^model\\.language_model\\.layers\\.23\\.self_attn\\.q_proj\\.weight$"
+      }
+    ]
+  },
+  "schema_version": "sq-fp8-policy-v0.1",
+  "short_batch_guard_result": {
+    "reason": "split prompt bundle failed strict_top1; not advanced to short batch guard",
+    "skipped": true
+  },
+  "source_boundary": {
+    "case_count": 3,
+    "policy": "benchmarks/results/2026-07-09/sq-fp8-qkv-layers3-7-11-15-19-q8-k16-v16-policy-v0.1.json",
+    "recovery_reason": "layer23 full QKV failed case_a; isolate layer23 q8 on top of layer19 q8/k16/v16 boundary",
+    "result_path": "benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer19-q8-full-qkv-short-batch-guard-v1.md",
+    "strict_top1_pass_count": 3
+  },
+  "status": "layer23_q8_split_prompt_bundle_failed_case_a_not_promoted",
+  "target_gpu": "R9700/RDNA4"
+}

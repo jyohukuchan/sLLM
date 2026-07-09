@@ -4409,6 +4409,103 @@ Quality:
 2. 次はlayer23 QKV extension、または広いprompt/text guardで薄いmarginが崩れないか確認する。
 3. full SQ policyへpromoteする前に、strict top1だけでなくtext-level guardを追加する。
 
+## 2026-07-09 progress: T2 SQ FP8 qkv layer23 q8 full QKV prompt bundle
+
+前回の要点:
+
+- layer19 `q8/k16/v16` はprompt bundleとB=1/4/8 short guardでstrict top1を維持した。
+- 次のT2対象は、同じQKV patternをlayer23へ広げられるか確認することだった。
+
+今回の変更点:
+
+- `sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-15-19-23-q8-k16-v16` を作成し、R9700 full mixed prompt bundleへ流した。
+- artifactは18 FP8 tensor / 757 passthrough tensorになった。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer23-q8-full-qkv-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| row | FP8 tensors | prefill tok/s | decode tok/s | end-to-end tok/s | final top1 | strict top1 |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| SQ `layers3/7/11/15/19/23 q8/k16/v16` | 18 | 60.821302 | 72.084189 | 33.395723 | `24218,5582,329` | 2 / 3 |
+
+判断:
+
+- layer23 full QKV extensionは`case_a`でAQ4 top1 `4105` からSQ top1 `5582` に入れ替わった。
+- AQ4 top1はSQ top8内の2位に残るが、現T2 promotion ruleはstrict top1なので失敗として扱う。
+- full QKV candidateはshort batch guardへ進めず、layer23 q/k/v splitで切り分けた。
+
+次の行動:
+
+1. layer23 `q_proj`、`k_proj`、`v_proj` を個別に追加したsplit probeを実行する。
+2. passしたprojectionだけをshort batch guardへ進める。
+3. 失敗したprojectionはfallbackまたは別scale/layout候補として扱う。
+
+## 2026-07-09 progress: T2 SQ FP8 qkv layer23 split prompt bundle
+
+前回の要点:
+
+- layer23 full QKV extensionは`case_a`でstrict top1に失敗した。
+- 失敗がlayer23の単一projection由来か、Q/K/V同時追加の累積driftかを切り分ける必要があった。
+
+今回の変更点:
+
+- layer19 `q8/k16/v16` 通過boundaryをbaseにして、layer23 `q8`、`k16`、`v16` を1本ずつ追加した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer23-split-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| row | FP8 tensors | prefill tok/s | decode tok/s | end-to-end tok/s | final top1 | strict top1 |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| SQ `layer23 q8` | 16 | 59.189428 | 72.379743 | 32.133131 | `24218,5582,329` | 2 / 3 |
+| SQ `layer23 k16` | 16 | 59.818278 | 72.952135 | 33.050611 | `24218,4105,329` | 3 / 3 |
+| SQ `layer23 v16` | 16 | 59.042268 | 72.719037 | 32.798374 | `24218,5582,329` | 2 / 3 |
+
+判断:
+
+- layer23 `k16` だけがprompt bundleでstrict top1 `3 / 3` を維持した。
+- layer23 `q8` と `v16` は単体追加でも`case_a`を崩すため、full QKV失敗は単なる累積driftではなくq/v側のhard boundaryを含む。
+- layer23 `k16` は`case_a`のmarginが薄いため、B=1/4/8 short guardで追加確認する。
+
+次の行動:
+
+1. layer23 `k16` をshort batch guardへ進める。
+2. layer23 `q_proj` と `v_proj` はfallback維持、またはrow-block幅/scale layoutの別候補で再探索する。
+3. full SQ policyへpromoteする前に、strict top1だけでなくtext-level guardを追加する。
+
+## 2026-07-09 progress: T2 SQ FP8 qkv layer23 k16 short batch guard
+
+前回の要点:
+
+- layer23 split prompt bundleでは、`k16` だけがstrict top1 `3 / 3` を維持した。
+- ただし`case_a`のmarginが非常に薄いため、短いbatch guardで崩れないか確認する必要があった。
+
+今回の変更点:
+
+- `sq-fp8-w8a16-r9700-v0-qkv-layers3-7-11-15-19-q8-k16-v16-plus-layer23-k16` をB=1/4/8のshort guardへ流した。
+- AQ4 baselineは `phase-t2-sq-fp8-qkv-q16-k16-v16-short-batch-guard-v1` の同一workload結果を再利用した。
+- 結果は `benchmarks/results/2026-07-09/package-batch-throughput/phase-t2-sq-fp8-qkv-layer23-k16-short-batch-guard-v1.md` と `comparison.json` に保存した。
+
+実測値:
+
+| B | AQ4 prefill tok/s | SQ prefill tok/s | AQ4 decode tok/s | SQ decode tok/s | AQ4 end-to-end tok/s | SQ end-to-end tok/s | top1 match | SQ single count | SQ triple count |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| 1 | 24.997350 | 17.649348 | 80.313241 | 70.880232 | 10.012651 | 8.779914 | true | 3 | 15 |
+| 4 | 53.250215 | 48.840512 | 81.519502 | 73.523424 | 26.309008 | 24.964220 | true | 12 | 60 |
+| 8 | 65.369008 | 60.051932 | 81.728132 | 73.442133 | 36.593422 | 34.338277 | true | 24 | 120 |
+
+判断:
+
+- layer23 `k16` はB=1/4/8のshort guardでもstrict top1を維持した。
+- SQ direct pathは、既存5層QKVのtriple境界に加えてlayer23 `k_proj` のsingle direct境界を踏んでいる。
+- layer23 `q8` と `v16` はprompt bundleで単体失敗しているため、現時点ではlayer23 `k16`だけをdiagnostic extensionとして扱う。
+- prompt bundleの`case_a` marginが薄いため、まだfull SQ policyとしてpromoteしない。
+
+次の行動:
+
+1. layer23 `k16` をcurrent diagnostic extensionとして維持する。
+2. layer23 `q_proj` と `v_proj` はfallbackまたは別scale/layout候補として再探索する。
+3. 次はlayer27 k-only extension、layer23 q/v scale強化、または広いprompt/text guardのどれを優先するか決める。
+
 ## Risks
 
 | risk | impact | handling |
