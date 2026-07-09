@@ -371,12 +371,17 @@ Done:
   resolve to `sq8_0_matvec_*_rdna4_direct` instead of generic direct IDs.
 - SQ8_0 projection matvec registry (`operation`, `phase`, and descriptor IDs) is now defined in
   `backend_dispatch.rs`, and `part_00.rs` consumes it through public APIs.
+- higher-level SQ8_0 fused projection descriptor catalog entries (`self_attn_qkv`, `self_attn_o`,
+  `mlp_gate_up`, `mlp_down`, `linear_attn_qkv`, `linear_attn_out`) have been added to
+  `backend_dispatch.rs` as `SQ8_0_FUSED_PROJECTION_DESCRIPTOR_CATALOG` (not yet in active runtime
+  selection).
 
 Remaining:
 
 - use dispatch-selected SQ8_0 projection descriptors to select between multiple C++ kernel
   families once non-direct implementations exist;
-- add registry entries for higher-level SQ8_0 fused projection kernels;
+- keep runtime dispatch switched off for higher-level fused projection kernels; only the catalog is
+  published in `backend_dispatch.rs`;
 - keep selected implementation IDs in all result rows that represent dispatch-selected execution.
 
 Example intent:
@@ -409,6 +414,8 @@ Now:
 - Done: descriptor naming template and descriptor IDs are now centralized as a registry API in
   `backend_dispatch.rs` (`sq8_0_<operation>_<target>_<family>`), including single/batch/pair/triple
   matvec entries and RDNA4/generic targets.
+- Done: higher-level SQ8_0 fused projection descriptor catalog entries were added in
+  `backend_dispatch.rs`, and descriptor naming coverage tests now include fused entries.
 - Remaining: additional SQ8_0 kernel source split and fused kernel families are still pending.
 
 ### M8: Regression Suite
