@@ -352,6 +352,28 @@ def required_engines_gate_failures(
     return [f"missing required engine(s): {', '.join(missing)}"]
 
 
+def ullm_sq_kernel_families_gate_failures(
+    rows: list[dict[str, Any]],
+) -> list[str]:
+    failures: list[str] = []
+    for row in rows:
+        engine_name = as_str(as_dict(row.get("engine")).get("name"))
+        workload = as_dict(row.get("workload"))
+        if engine_name != "uLLM":
+            continue
+        if as_str(workload.get("format_id")) != "SQ8_0":
+            continue
+
+        kernel_families = workload.get("sq_projection_kernel_families")
+        if not isinstance(kernel_families, str) or (
+            not kernel_families.strip() or kernel_families.strip().lower() == "none"
+        ):
+            failures.append(
+                f"selected uLLM SQ8_0 row missing valid workload.sq_projection_kernel_families: {harness_summary(row)}"
+            )
+    return failures
+
+
 def required_engines_grid_gate_failures(
     rows: list[dict[str, Any]],
     required_engines: set[str],
@@ -424,6 +446,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="require required engines per request count instead of global coverage",
     )
+    parser.add_argument(
+        "--require-ullm-sq-kernel-families",
+        action="store_true",
+        help="fail when uLLM SQ8_0 rows miss a non-none workload.sq_projection_kernel_families",
+    )
     return parser.parse_args()
 
 
@@ -442,7 +469,11 @@ def main() -> int:
             )
 
         harness_class_filter = args.harness_class
-        requires_gate = args.require_serving_parity or bool(required_engines)
+        requires_gate = (
+            args.require_serving_parity
+            or bool(required_engines)
+            or args.require_ullm_sq_kernel_families
+        )
         if requires_gate:
             rows = selected_rows(
                 args.jsonl,
@@ -464,6 +495,12 @@ def main() -> int:
                 required_engine_failures = required_engines_gate_failures(
                     rows, required_engines
                 )
+            if args.require_ullm_sq_kernel_families:
+                ullm_sq_kernel_families_failures = (
+                    ullm_sq_kernel_families_gate_failures(rows)
+                )
+            else:
+                ullm_sq_kernel_families_failures = []
         else:
             rows = iter_selected_rows(
                 args.jsonl,
@@ -475,14 +512,23 @@ def main() -> int:
             selected_count = None
             serving_parity_failures = []
             required_engine_failures = []
+            ullm_sq_kernel_families_failures = []
         for line in markdown_lines(rows):
             print(line)
-        if serving_parity_failures or required_engine_failures:
+        if (
+            serving_parity_failures
+            or required_engine_failures
+            or ullm_sq_kernel_families_failures
+        ):
             print(
                 f"serving parity gate failed: {selected_count} selected row(s)",
                 file=sys.stderr,
             )
-            for line in serving_parity_failures + required_engine_failures:
+            for line in (
+                serving_parity_failures
+                + required_engine_failures
+                + ullm_sq_kernel_families_failures
+            ):
                 print(line, file=sys.stderr)
             return 2
     except ValueError as exc:

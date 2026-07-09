@@ -957,13 +957,16 @@ Expected outputs:
      full-package/server rows.
    - Full 40-layer Qwen3-14B-FP8 mixed-request-state rows now reach
      `batching_mode=real`, `sq_projection_boundary=batch`, and direct SQ8_0 batch projection
-   coverage. The `TOP_K=0` `pp16/tg8/b2`, `pp16/tg8/b4`, and `pp16/tg8/b8` rows record
-   `final_logits_in_total=false`, `sq_fp8_batch_matvec_count=6720/6720`, and host staging read `0`,
-   giving serving-nearer model-loop diagnostics. The matching vLLM rows now record decode
-   `17.21` tok/s and total `51.62` tok/s for b2, and decode `67.52` tok/s and total `202.56`
-   tok/s for b4, and decode `118.01` tok/s and total `354.02` tok/s for b8. The remaining blocker
-   for final vLLM serving comparison is adding server-style uLLM measurement or explicitly
-   normalizing the harness difference.
+     coverage. The `TOP_K=0` `pp16/tg8/b2`, `pp16/tg8/b4`, and `pp16/tg8/b8` rows record
+     `final_logits_in_total=false`, `sq_fp8_batch_matvec_count=6720/6720`, and host staging read `0`,
+     giving serving-nearer model-loop diagnostics. The matching vLLM rows now record decode
+     `17.21` tok/s and total `51.62` tok/s for b2, and decode `67.52` tok/s and total `202.56`
+     tok/s for b4, and decode `118.01` tok/s and total `354.02` tok/s for b8. The remaining blocker
+     for final vLLM serving comparison is adding server-style uLLM measurement or explicitly
+     normalizing the harness difference.
+   - Comparison scripts should now fail M10 runs unless SQ8_0 uLLM rows pass
+     `--require-ullm-sq-kernel-families`, so fallback/no-kernel SQ8_0 rows do not silently leak
+     into direct-projection comparison cases.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device
