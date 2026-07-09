@@ -292,6 +292,13 @@ stdout does not emit the package-batch field name directly. These rows prove tha
 component path is connected to a `.ullm.d` package, but they are still not whole-model package total
 throughput rows.
 
+SQ8_0 package-backed component rows, such as `sq-fp8-package-self-attn-layer-batch-smoke`, should
+also preserve SQ projection telemetry under `workload`: `sq_execution_mode`,
+`sq_projection_boundary`, `sq_projection_implementation_ids`, `sq_fp8_batch_matvec_count`, and
+`sq_fp8_expected_all_batch_matvec_count`. A row with `batching.mode="real"` and
+`sq_fp8_batch_matvec_count == sq_fp8_expected_all_batch_matvec_count` proves the selected component
+used the direct SQ8_0 batch projection boundary. It is still not a full-package serving row.
+
 For package-backed component rows that flatten a workload batch into token parallelism, preserve the
 requested workload batch and the executor's actual parallelism separately. A row may therefore have
 `workload.batch_size=4`, `workload.prompt_tokens_per_request=[2,2,2,2]`, and

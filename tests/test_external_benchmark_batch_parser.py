@@ -770,6 +770,87 @@ class ExternalBenchmarkBatchParserTests(unittest.TestCase):
         self.assertEqual(row["workload"]["format_id"], "SQ8_0")
         self.assertTrue(row["workload"]["sq_overlay"])
 
+    def test_parses_sq_fp8_package_self_attn_layer_batch_smoke_key_value_output(self) -> None:
+        stdout = (
+            "sq-fp8-package-self-attn-layer-batch-smoke "
+            "package=/tmp/model.ullm.d layer=3 format_id=SQ8_0 "
+            "sq_overlay=true sq_candidate=SQ8_0 "
+            "sq_candidate_legacy=sq-fp8-w8a16-r9700-v0 "
+            "sq_format_id=SQ8_0 sq_implementation_id=sq-fp8-w8a16-r9700-v0 "
+            "sq_artifact=/tmp/sq-artifact sq_schema_version=sq-fp8-artifact-v0.1 "
+            "sq_fp8_tensor_count=22 sq_passthrough_tensor_count=753 sq_row_chunk=256 "
+            "sq_execution_mode=direct_fp8_dequant_matvec_batch "
+            "sq_projection_boundary=batch "
+            "sq_projection_implementation_ids=batch=sq8_0_matvec_batch_r9700_direct "
+            "sq_fp8_single_matvec_count=0 sq_fp8_batch_matvec_count=14 "
+            "sq_fp8_expected_all_batch_matvec_count=14 sq_fp8_pair_matvec_count=0 "
+            "sq_fp8_triple_matvec_count=0 real_batch=true token_parallelism=32 "
+            "request_parallelism=2 "
+            "executor=segmented_rmsnorm_f32+sq8_0_matvec_batch_r9700_direct+"
+            "qwen35_qk_norm_rope_batch_f32+causal_attn_f32+sigmoid_mul_f32+"
+            "sq8_0_matvec_batch_r9700_direct+add_f32 "
+            "prefill_total_input_tokens=14 decode_total_generated_tokens=0 "
+            "end_to_end_total_tokens=14 prefill_total_input_tps=120.5 "
+            "decode_total_generated_tps=0.0 end_to_end_total_tps=120.5 "
+            "prefill_wall_ms=12.345678 decode_wall_ms=0.0 final_logits_wall_ms=0.0 "
+            "layer_load_ms=100.0 total_wall_ms=112.345678 outer_wall_ms=115.345678 "
+            "backend=hip device_index=2 name=\"AMD Radeon Graphics\" "
+            "verified=true"
+        )
+        memory = {
+            "baseline_total_bytes": 1000,
+            "peak_total_bytes": 2000,
+            "consumed_total_bytes": 1000,
+        }
+
+        report = TOOL.parse_key_value_stdout(stdout)
+        metrics = TOOL.parse_ullm_component_prefill_metrics(report, memory)
+        row = {
+            "workload": {
+                "batch_size": 1,
+                "concurrent_requests": 1,
+                "kv_cache_dtype": "f32",
+                "prefill_executor": None,
+                "resolved_prefill_executor": None,
+            },
+            "metrics": metrics,
+            "memory": memory.copy(),
+        }
+        TOOL.enrich_ullm_component_prefill_row(row, report)
+
+        self.assertEqual(report["command"], "sq-fp8-package-self-attn-layer-batch-smoke")
+        self.assertEqual(metrics["prefill_total_input_tokens"], 14)
+        self.assertEqual(metrics["prefill_total_input_tokens_per_second"], 120.5)
+        self.assertTrue(row["workload"]["sq_overlay"])
+        self.assertEqual(row["workload"]["format_id"], "SQ8_0")
+        self.assertEqual(row["workload"]["sq_projection_boundary"], "batch")
+        self.assertEqual(
+            row["workload"]["sq_projection_implementation_ids"],
+            "batch=sq8_0_matvec_batch_r9700_direct",
+        )
+        self.assertEqual(row["workload"]["sq_fp8_batch_matvec_count"], 14)
+        self.assertEqual(row["workload"]["sq_fp8_expected_all_batch_matvec_count"], 14)
+        self.assertEqual(
+            row["workload"]["prefill_executor"],
+            "segmented_rmsnorm_f32+sq8_0_matvec_batch_r9700_direct+qwen35_qk_norm_rope_batch_f32+causal_attn_f32+sigmoid_mul_f32+sq8_0_matvec_batch_r9700_direct+add_f32",
+        )
+        self.assertEqual(row["batching"]["mode"], "real")
+        self.assertEqual(
+            row["batching"]["component_command"],
+            "sq-fp8-package-self-attn-layer-batch-smoke",
+        )
+        self.assertEqual(
+            row["batching"]["prefill_executor"],
+            row["workload"]["prefill_executor"],
+        )
+        self.assertEqual(
+            row["batching"]["resolved_prefill_executor"],
+            row["workload"]["prefill_executor"],
+        )
+        self.assertTrue(row["batching"]["prefill_real_batch"])
+        self.assertEqual(row["batching"]["prefill_executor_token_parallelism"], 32)
+        self.assertEqual(row["batching"]["prefill_executor_request_parallelism"], 2)
+
     def test_parses_vllm_throughput_metrics_with_json_and_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "vllm_output.json"

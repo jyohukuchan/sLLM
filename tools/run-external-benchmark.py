@@ -1027,6 +1027,7 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
     if isinstance(selected_implementation_id, str):
         row_workload["selected_implementation_id"] = selected_implementation_id
         row_workload["dispatch_selected_implementation_id"] = selected_implementation_id
+    enrich_ullm_sq_projection_workload(row_workload, report)
     for key, value in dispatch_metadata.items():
         if value is not None:
             row_workload[key] = value
@@ -1093,52 +1094,9 @@ def enrich_ullm_component_prefill_row(row: dict[str, Any], report: dict[str, Any
             row["batching"][key] = value
 
 
-def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> None:
-    row_workload = row.get("workload")
-    if not isinstance(row_workload, dict):
-        return
-    request_count = first_non_null(
-        parse_int(report.get("concurrent_requests")),
-        parse_int(report.get("request_count")),
-        parse_int(row_workload.get("concurrent_requests")),
-    )
-    prompt_tokens_per_request = parse_int_csv(report.get("prompt_tokens_csv"))
-    generated_tokens_per_request = parse_int_csv(report.get("generated_tokens_csv"))
-    if not generated_tokens_per_request:
-        generated_tokens_per_request = parse_int_csv(report.get("max_new_tokens_csv"))
-    total_context_tokens_per_request = parse_int_csv(report.get("total_tokens_csv"))
-    layers_csv = report.get("layers_csv")
-    if request_count is not None:
-        row_workload["batch_size"] = request_count
-        row_workload["concurrent_requests"] = request_count
-    row_workload["prefill_mode"] = report.get("prefill_mode") or "synthetic_layer_stack"
-    if isinstance(report.get("prefill_executor"), str):
-        row_workload["prefill_executor"] = report.get("prefill_executor")
-        row_workload["resolved_prefill_executor"] = report.get("prefill_executor")
-    if prompt_tokens_per_request:
-        row_workload["prompt_tokens_per_request"] = prompt_tokens_per_request
-        row_workload["cached_prefix_tokens_per_request"] = [
-            0 for _ in prompt_tokens_per_request
-        ]
-        row_workload["new_prefill_tokens_per_request"] = prompt_tokens_per_request
-    if total_context_tokens_per_request:
-        row_workload[
-            "total_context_tokens_after_prefill_per_request"
-        ] = total_context_tokens_per_request
-    if generated_tokens_per_request:
-        row_workload["generated_tokens_per_request"] = generated_tokens_per_request
-    for key in (
-        "prefill_total_input_tokens",
-        "decode_total_generated_tokens",
-        "end_to_end_total_tokens",
-    ):
-        value = parse_int(report.get(key))
-        if value is not None:
-            row_workload[key] = value
-    if isinstance(layers_csv, str):
-        row_workload["layers_csv"] = layers_csv
-    if isinstance(report.get("input_source"), str):
-        row_workload["input_source"] = report.get("input_source")
+def enrich_ullm_sq_projection_workload(
+    row_workload: dict[str, Any], report: dict[str, Any]
+) -> None:
     sq_overlay = report.get("sq_overlay") is True
     if sq_overlay:
         row_workload["sq_overlay"] = True
@@ -1192,6 +1150,61 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
             }
         ):
             row_workload[key] = value
+
+
+def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> None:
+    row_workload = row.get("workload")
+    if not isinstance(row_workload, dict):
+        return
+    request_count = first_non_null(
+        parse_int(report.get("concurrent_requests")),
+        parse_int(report.get("request_count")),
+        parse_int(row_workload.get("concurrent_requests")),
+    )
+    prompt_tokens_per_request = parse_int_csv(report.get("prompt_tokens_csv"))
+    generated_tokens_per_request = parse_int_csv(report.get("generated_tokens_csv"))
+    if not generated_tokens_per_request:
+        generated_tokens_per_request = parse_int_csv(report.get("max_new_tokens_csv"))
+    total_context_tokens_per_request = parse_int_csv(report.get("total_tokens_csv"))
+    layers_csv = report.get("layers_csv")
+    if request_count is not None:
+        row_workload["batch_size"] = request_count
+        row_workload["concurrent_requests"] = request_count
+    row_workload["prefill_mode"] = report.get("prefill_mode") or "synthetic_layer_stack"
+    if isinstance(report.get("prefill_executor"), str):
+        row_workload["prefill_executor"] = report.get("prefill_executor")
+        row_workload["resolved_prefill_executor"] = report.get("prefill_executor")
+    if prompt_tokens_per_request:
+        row_workload["prompt_tokens_per_request"] = prompt_tokens_per_request
+        row_workload["cached_prefix_tokens_per_request"] = [
+            0 for _ in prompt_tokens_per_request
+        ]
+        row_workload["new_prefill_tokens_per_request"] = prompt_tokens_per_request
+    if total_context_tokens_per_request:
+        row_workload[
+            "total_context_tokens_after_prefill_per_request"
+        ] = total_context_tokens_per_request
+    if generated_tokens_per_request:
+        row_workload["generated_tokens_per_request"] = generated_tokens_per_request
+    for key in (
+        "prefill_total_input_tokens",
+        "decode_total_generated_tokens",
+        "end_to_end_total_tokens",
+    ):
+        value = parse_int(report.get(key))
+        if value is not None:
+            row_workload[key] = value
+    if isinstance(layers_csv, str):
+        row_workload["layers_csv"] = layers_csv
+    if isinstance(report.get("input_source"), str):
+        row_workload["input_source"] = report.get("input_source")
+    executor = report.get("executor")
+    real_batch = parse_bool(report.get("real_batch")) is True
+    request_parallelism = parse_int(report.get("request_parallelism"))
+    batching_mode = report.get("batching_mode")
+    if not isinstance(batching_mode, str):
+        batching_mode = "real" if real_batch else None
+    enrich_ullm_sq_projection_workload(row_workload, report)
     final_top1_tokens = parse_int_csv(report.get("final_top1_tokens_csv"))
     if final_top1_tokens:
         row_workload["final_top1_tokens"] = final_top1_tokens
@@ -1205,7 +1218,9 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
     if sequence_len is not None:
         row_workload["sequence_len"] = sequence_len
 
-    batching_mode = report.get("batching_mode")
+    if isinstance(executor, str) and isinstance(row_workload.get("prefill_executor"), str) is False:
+        row_workload["prefill_executor"] = executor
+        row_workload["resolved_prefill_executor"] = executor
     prefill_batch_request_counts = parse_int_csv(
         report.get("prefill_batch_request_counts_csv")
     )
@@ -1213,12 +1228,15 @@ def enrich_ullm_model_loop_row(row: dict[str, Any], report: dict[str, Any]) -> N
     decode_request_grouped = parse_bool(report.get("decode_request_grouped")) is True
     row["batching"] = {
         "mode": batching_mode if isinstance(batching_mode, str) else "hybrid",
-        "prefill_executor": report.get("prefill_executor"),
-        "resolved_prefill_executor": report.get("prefill_executor"),
-        "prefill_real_batch": report.get("prefill_real_batch") is True,
-        "prefill_executor_token_parallelism": None,
-        "prefill_executor_request_parallelism": parse_int(
-            report.get("prefill_executor_request_parallelism")
+        "prefill_executor": row_workload.get("prefill_executor") or executor,
+        "resolved_prefill_executor": row_workload.get("resolved_prefill_executor")
+        or executor,
+        "prefill_real_batch": report.get("prefill_real_batch") is True
+        or real_batch,
+        "prefill_executor_token_parallelism": parse_int(report.get("token_parallelism")),
+        "prefill_executor_request_parallelism": first_non_null(
+            parse_int(report.get("prefill_executor_request_parallelism")),
+            request_parallelism,
         ),
         "prefill_request_grouped": prefill_request_grouped,
         "prefill_grouped_request_parallelism": parse_int(

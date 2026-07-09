@@ -459,6 +459,12 @@ Done:
   `sq_fp8_batch_matvec_count=14`, and `sq_fp8_expected_all_batch_matvec_count=14`. This proves the
   local layer-level batch smoke can run every supported projection in that layer through the direct
   SQ8_0 batch matvec boundary. It is still a selected-layer proof, not a full-package serving row.
+- The same full layer3 projection smoke is now saved as an `inference-benchmark-result-v0.1`
+  component row at `benchmarks/results/2026-07-09/sq8-layer-batch-component/results.jsonl`. The row
+  preserves `batching.mode=real`, `prefill_real_batch=true`,
+  `sq_projection_implementation_ids=batch=sq8_0_matvec_batch_r9700_direct`, and
+  `sq_fp8_batch_matvec_count=14/14`. This makes the layer-level proof machine-readable while still
+  keeping it separate from full-package serving throughput.
 
 Remaining:
 
