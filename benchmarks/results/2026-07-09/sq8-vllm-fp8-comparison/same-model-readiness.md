@@ -38,9 +38,20 @@
   - 修正後の `ullm-quant --dry-run`: total tensor `723`、supported tensor `0`、passthrough `723`
 - `ullm-quant` の修正後分類では、Qwen系FP8の補助テンソル `*.weight_scale_inv` は `family=other` / `action=passthrough` になる。
 - この結果、`Qwen3-14B-FP8` を現在のAQ4 direct package converterで再量子化してuLLM package化する経路は採らない。source matrixが既に `F8_E4M3` で、AQ4 converterはBF16/F16/F32 source matrixを対象にしているため。
+- `ullm-quant` に passthrough filter を追加し、Qwen3-14B-FP8 sourceからBF16-onlyの薄い `.ullm.d` package shellを作れるようにした。
+  - 実生成物: `/tmp/ullm-qwen3-14b-fp8-bf16-thin.ullm.d`
+  - `quantized_tensors=0`, `passthrough_tensors=163`, `codebooks=0`
+  - `F8_E4M3` weight本体と `*.weight_scale_inv` は薄いpackageにはコピーしない。
+- `ullm-engine` の `manifest-all` / explicit layer kind検出を、薄いpackageの passthrough `self_attn.q_norm.weight` / `self_attn.k_norm.weight` でも動くようにした。
+  - 実packageで `layer_count=40`, `self_attention_count=40`, `contiguous_layer_indices=true` を確認。
+- 同じQwen3-14B-FP8 sourceからlayer0用SQ8_0 sidecar artifactを作成した。
+  - 実生成物: `/tmp/ullm-qwen3-14b-fp8-layer0-sq8-artifact`
+  - `fp8_tensor_count=7`, `passthrough_tensor_count=716`
+- 薄いpackage + layer0 SQ8_0 artifactで `sq-fp8-token-ids-logits-smoke` が `verified=true` まで到達した。
+  - これはsame-modelの最小接続確認であり、まだ40-layer throughput rowではない。
 - Same-model rowの必要条件を列挙
-  - FP8/SQ8_0 package import（Qwen3-14B-FP8の`F8_E4M3`本体、BF16 `weight_scale_inv`、BF16 passthroughをAQ再量子化なしで扱う）
-  - SQ8_0 artifact生成/import
+  - FP8/SQ8_0 package import（短期はBF16 thin package + SQ8_0 sidecar overlay、長期はnative `.ullm.d` SQ tensor統合）
+  - SQ8_0 artifact生成/import（layer0は確認済み、40層は未完了）
   - tensor-name互換の解消
   - 40-layer `manifest-all` rowの整備
   - prompt guard bundleまたは同等のbehavioral guard
@@ -48,8 +59,8 @@
 
 ## 次の行動
 
-- まず `Qwen3-14B-FP8` 向けに、AQ4変換ではなくFP8/SQ8_0 package import経路を作る。
-- 生成済みQwen3-14B packageを使ってSQ8_0 artifactを作成・導入し、`40-layer manifest-all` を追加する。
+- layer0で通った thin package + SQ8_0 sidecar overlay 経路を、40層artifactへ拡張する。
+- 生成済みQwen3-14B thin packageを使って `40-layer manifest-all` のuLLM行を追加する。
 - tensor-nameの整合（`model.*`/`model.language_model.*`）はruntime側で吸収済み。次は実packageで自動検証する。
 - 同条件（`pp16/tg8/b1` を含む）でvLLM smoke/代表bothを再実行し、初めて同一モデルsame-model throughputとして扱う。
 - その時点で、比較結論の表記を「same-model throughput conclusion」として更新できるか判定する。

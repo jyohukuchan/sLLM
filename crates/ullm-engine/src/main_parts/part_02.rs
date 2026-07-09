@@ -57,24 +57,24 @@ fn package_manifest_layer_entries(path: &str) -> Result<Vec<PackageManifestLayer
     let mut layers =
         std::collections::BTreeMap::<usize, std::collections::BTreeSet<&'static str>>::new();
     for bundle in bundles {
-        if let Some(layer_index) = parse_language_model_layer_tensor_suffix(
+        record_package_layer_kind_from_suffix(
+            &mut layers,
             &bundle.tensor_name,
             ".self_attn.q_proj.weight",
-        ) {
-            layers
-                .entry(layer_index)
-                .or_default()
-                .insert("self_attention");
-        }
-        if let Some(layer_index) = parse_language_model_layer_tensor_suffix(
+            "self_attention",
+        );
+        record_package_layer_kind_from_suffix(
+            &mut layers,
             &bundle.tensor_name,
             ".linear_attn.in_proj_qkv.weight",
-        ) {
-            layers
-                .entry(layer_index)
-                .or_default()
-                .insert("linear_attention");
-        }
+            "linear_attention",
+        );
+    }
+    for layer_index in package_self_attn_passthrough_layer_set(path)? {
+        layers
+            .entry(layer_index)
+            .or_default()
+            .insert("self_attention");
     }
     if layers.is_empty() {
         return Err(format!(
@@ -97,6 +97,20 @@ fn package_manifest_layer_entries(path: &str) -> Result<Vec<PackageManifestLayer
         entries.push(PackageManifestLayerEntry { layer_index, kind });
     }
     Ok(entries)
+}
+
+fn record_package_layer_kind_from_suffix(
+    layers: &mut std::collections::BTreeMap<
+        usize,
+        std::collections::BTreeSet<&'static str>,
+    >,
+    tensor_name: &str,
+    suffix: &str,
+    kind: &'static str,
+) {
+    if let Some(layer_index) = parse_language_model_layer_tensor_suffix(tensor_name, suffix) {
+        layers.entry(layer_index).or_default().insert(kind);
+    }
 }
 
 fn package_layer_entries_for_indices(
@@ -132,6 +146,10 @@ fn package_decoder_layer_kind(
         format!("model.language_model.layers.{layer_index}.linear_attn.in_proj_qkv.weight");
     if select_tensor_payload_bundle(path, &TensorSelector::Name(linear_qkv)).is_ok() {
         return Ok(PackageDecoderLayerKind::LinearAttention);
+    }
+
+    if package_self_attn_passthrough_layer_set(path)?.contains(&layer_index) {
+        return Ok(PackageDecoderLayerKind::SelfAttention);
     }
 
     Err(format!(
@@ -2509,6 +2527,18 @@ fn parse_package_token_ids_model_loop_layer_indices(
 }
 
 fn package_model_loop_self_attn_layer_indices(path: &str) -> Result<Vec<usize>, String> {
+    let q_norm_layers = package_self_attn_passthrough_layer_set(path)?;
+    if q_norm_layers.is_empty() {
+        return Err(format!(
+            "package {path} has no manifest self-attention q_norm layers"
+        ));
+    }
+    Ok(q_norm_layers.into_iter().collect())
+}
+
+fn package_self_attn_passthrough_layer_set(
+    path: &str,
+) -> Result<std::collections::BTreeSet<usize>, String> {
     let bundles = list_passthrough_payload_bundles(path)?;
     let mut q_norm_layers = std::collections::BTreeSet::new();
     let mut k_norm_layers = std::collections::BTreeSet::new();
@@ -2526,10 +2556,8 @@ fn package_model_loop_self_attn_layer_indices(path: &str) -> Result<Vec<usize>, 
             k_norm_layers.insert(layer_index);
         }
     }
-    if q_norm_layers.is_empty() {
-        return Err(format!(
-            "package {path} has no manifest self-attention q_norm layers"
-        ));
+    if q_norm_layers.is_empty() && k_norm_layers.is_empty() {
+        return Ok(std::collections::BTreeSet::new());
     }
     if q_norm_layers != k_norm_layers {
         return Err(format!(
@@ -2537,7 +2565,7 @@ fn package_model_loop_self_attn_layer_indices(path: &str) -> Result<Vec<usize>, 
             q_norm_layers, k_norm_layers
         ));
     }
-    Ok(q_norm_layers.into_iter().collect())
+    Ok(q_norm_layers)
 }
 
 fn parse_language_model_layer_tensor_suffix(tensor_name: &str, suffix: &str) -> Option<usize> {

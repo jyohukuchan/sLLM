@@ -279,6 +279,105 @@ mod package_token_ids_logits_tests {
     }
 
     #[test]
+    fn package_manifest_layer_entries_detects_thin_qwen3_passthrough_layers() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-manifest-layer-entries-thin-qwen3-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("payload")).unwrap();
+        for name in [
+            "layer0-q.raw",
+            "layer0-k.raw",
+            "layer1-q.raw",
+            "layer1-k.raw",
+            "embed.raw",
+        ] {
+            std::fs::write(root.join("payload").join(name), [0_u8; 2]).unwrap();
+        }
+        std::fs::write(
+            root.join("manifest.json"),
+            r#"{
+              "schema_version": "test",
+              "passthrough_tensors": [
+                {
+                  "name": "model.embed_tokens.weight",
+                  "dtype": "BF16",
+                  "shape": [1, 1],
+                  "elements": 1,
+                  "payload_bytes": 2,
+                  "payload_file": "payload/embed.raw"
+                },
+                {
+                  "name": "model.layers.1.self_attn.q_norm.weight",
+                  "dtype": "BF16",
+                  "shape": [1],
+                  "elements": 1,
+                  "payload_bytes": 2,
+                  "payload_file": "payload/layer1-q.raw"
+                },
+                {
+                  "name": "model.layers.0.self_attn.q_norm.weight",
+                  "dtype": "BF16",
+                  "shape": [1],
+                  "elements": 1,
+                  "payload_bytes": 2,
+                  "payload_file": "payload/layer0-q.raw"
+                },
+                {
+                  "name": "model.layers.1.self_attn.k_norm.weight",
+                  "dtype": "BF16",
+                  "shape": [1],
+                  "elements": 1,
+                  "payload_bytes": 2,
+                  "payload_file": "payload/layer1-k.raw"
+                },
+                {
+                  "name": "model.layers.0.self_attn.k_norm.weight",
+                  "dtype": "BF16",
+                  "shape": [1],
+                  "elements": 1,
+                  "payload_bytes": 2,
+                  "payload_file": "payload/layer0-k.raw"
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let entries = package_manifest_layer_entries(root.to_str().unwrap()).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                PackageManifestLayerEntry {
+                    layer_index: 0,
+                    kind: PackageDecoderLayerKind::SelfAttention,
+                },
+                PackageManifestLayerEntry {
+                    layer_index: 1,
+                    kind: PackageDecoderLayerKind::SelfAttention,
+                },
+            ]
+        );
+        assert!(package_layer_entries_are_contiguous(&entries));
+
+        let layers = parse_package_token_ids_layer_indices_for_package(
+            root.to_str().unwrap(),
+            Some("manifest-all".to_string()),
+        )
+        .unwrap();
+        assert_eq!(layers, vec![0, 1]);
+
+        let explicit_entries =
+            package_layer_entries_for_indices(root.to_str().unwrap(), &[0, 1]).unwrap();
+        assert_eq!(explicit_entries, entries);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn package_generated_tokens_batch_accepts_scalar_or_csv() {
         assert_eq!(
             parse_package_generated_tokens_batch(Some("8".to_string()), 3).unwrap(),

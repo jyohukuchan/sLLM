@@ -93,6 +93,11 @@ Done:
 - SQ8_0 selected-layer model-loop bridge exists through `sq-fp8-token-ids-model-loop-smoke`.
 - R9700 cached-prefix FP8 KV cache and FlashAttention2-style executor experiments exist.
 - RDNA4 FP8 WMMA probes exist.
+- Qwen3-14B-FP8 now has a same-model connectivity path for the first layer:
+  - `ullm-quant` can build a BF16-only thin `.ullm.d` shell with passthrough dtype/suffix filters;
+  - `ullm-engine` can infer Qwen3 self-attention layers from thin package `q_norm/k_norm`
+    passthrough tensors;
+  - a layer0 SQ8_0 sidecar artifact reaches `sq-fp8-token-ids-logits-smoke` with `verified=true`.
 
 Partial:
 
@@ -101,11 +106,14 @@ Partial:
 - Direct SQ8_0 execution is available at projection API boundaries, but not all higher-level fused layer boundaries are SQ8_0-aware.
 - `backend_dispatch` exists as a typed selector, but is not yet wired into real runtime operations.
 - C++ runtime still has broad `.inc` chunks rather than explicit model/GPU/format implementation modules.
+- Qwen3-14B-FP8 same-model work has passed package/layer0 connectivity, but not the full 40-layer
+  SQ8_0 throughput row.
 
 Not done:
 
 - Integrated SQ8_0 package format inside `.ullm.d`.
 - Full-package SQ8_0 real-batch throughput row with artifact load/materialization accounting.
+- Full 40-layer `Qwen3-14B-FP8` same-model uLLM row for comparison with vLLM.
 - C++ implementation registry that can choose kernels by model architecture, GPU architecture, GPU name, phase, and format.
 - SQ8_0 fused MLP / attention-specific direct kernels beyond matvec pair/triple boundaries.
 - Stable regression suite named around `SQ8_0` rather than old SQ FP8 candidate language.
@@ -567,19 +575,29 @@ Same-model readiness audit:
   correct classification for the local FP8 artifact: the projection matrices are already
   `F8_E4M3`, while current AQ direct package conversion only quantizes BF16/F16/F32 source
   matrices.
-- The tensor namespace issue is closed for runtime lookup, but the same-model uLLM row still needs
-  an FP8/SQ8_0 package import path or an equivalent package manifest mode. Building an AQ4 package
-  directly from `Qwen3-14B-FP8` is not the right route.
+- `ullm-quant` now has passthrough filters for direct package import. Using those filters, the local
+  `Qwen3-14B-FP8` source can produce a BF16-only thin package shell with `163` passthrough tensors,
+  `0` quantized tensors, and no copied `F8_E4M3` or `*.weight_scale_inv` tensors. The observed
+  temporary package was `/tmp/ullm-qwen3-14b-fp8-bf16-thin.ullm.d` at about `2.9G`.
+- `ullm-engine package-layer-kind-inventory-smoke` now detects the thin package's `40` Qwen3
+  self-attention layers from passthrough `q_norm/k_norm` names.
+- A layer0 SQ8_0 sidecar artifact with `7` FP8 tensors and `716` passthrough metadata entries was
+  built from the same Qwen3-14B-FP8 source. Combined with the thin package, it passes
+  `sq-fp8-token-ids-logits-smoke` for layer `0` with `verified=true`.
+- The tensor namespace issue is closed for runtime lookup, and the minimum same-model connectivity
+  path is now proven for layer0. Building an AQ4 package directly from `Qwen3-14B-FP8` remains the
+  wrong route.
 
 Same-model prerequisites:
 
 1. Choose the Qwen3 tensor namespace strategy: Done. Runtime lookup now accepts both `model.*` and
    `model.language_model.*` for Qwen3 layers, embeddings, and final norm.
-2. Add an FP8/SQ8_0 package import path for `Qwen3-14B-FP8`, or define an equivalent package
-   manifest mode that can reference/import `F8_E4M3` weights, BF16 `weight_scale_inv` block scales,
-   and BF16 passthrough tensors without AQ re-quantization.
+2. Add an FP8/SQ8_0 package import path for `Qwen3-14B-FP8`: partial. The current minimum route is a
+   BF16-only thin `.ullm.d` package plus SQ8_0 sidecar artifact overlay; native FP8 tensors are not
+   yet integrated into `.ullm.d`.
 3. Build or import the matching `SQ8_0` artifact and verify the selected FP8 tensor count against
-   the imported package tensors.
+   the imported package tensors: partial. A layer0 artifact with `7` FP8 tensors is verified; the
+   full 40-layer artifact remains.
 4. Run a 40-layer `manifest-all` uLLM smoke row with `prompt_tokens=16`, `generated_tokens=8`, and
    `concurrent_requests=1`.
 5. Attach the prompt guard bundle or an equivalent behavioral guard before comparing against vLLM

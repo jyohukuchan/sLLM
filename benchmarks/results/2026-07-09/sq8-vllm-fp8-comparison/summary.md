@@ -61,11 +61,11 @@ Important limitation:
   model architecture/size. Treat this as a local feasibility and measurement-path comparison, not a
   same-model throughput conclusion.
 - Same-model readiness is tracked in `same-model-readiness.md`; tensor namespace compatibility is
-  now handled in runtime lookup. The current blocker is an FP8/SQ8_0 package import path for
-  `Qwen3-14B-FP8`, because the current AQ direct package converter correctly treats the existing
-  `F8_E4M3` weights and `*.weight_scale_inv` tensors as passthrough rather than AQ source tensors.
+  handled in runtime lookup. The current blocker has moved from basic package connectivity to a
+  full 40-layer `Qwen3-14B-FP8` uLLM row: the BF16 thin package plus layer0 SQ8_0 sidecar overlay
+  reaches `verified=true`, but no full same-model throughput row has been produced yet.
 
 ## 次の行動
 
-- Add or build a same-model uLLM SQ8_0 row before making final throughput claims.
+- Build the full 40-layer same-model uLLM SQ8_0 row before making final throughput claims.
 - If same-model uLLM is not ready, keep future rows labeled as external feasibility baselines.
