@@ -18,6 +18,13 @@ use ullm_runtime_sys::{
 pub const QWEN3_14B_SQ8_LAYER_ACTIVATION_QUANTIZATIONS: usize = 4;
 pub const QWEN3_14B_SQ8_LAYER_PROJECTIONS: usize = 7;
 pub const QWEN3_14B_SQ8_MAX_EXACT_F32_POSITION: usize = 1 << 24;
+pub const QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV: [&str; 5] = [
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL",
+    "ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL",
+    "ULLM_REQUIRE_HIP_ADD_KERNEL",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sq8LayerExecutionProfile {
@@ -70,8 +77,8 @@ impl Sq8LayerExecutionReport {
 pub struct Qwen3Sq8LayerConfig {
     pub sequence_len: usize,
     pub position_offset: usize,
-    pub rms_norm_epsilon: f32,
-    pub rope_theta: f32,
+    rms_norm_epsilon: f32,
+    rope_theta: f32,
 }
 
 impl Qwen3Sq8LayerConfig {
@@ -99,6 +106,12 @@ impl Qwen3Sq8LayerConfig {
                 self.sequence_len, QWEN3_14B_SQ8_LAYER_ORACLE_MAX_SEQUENCE_LEN
             ));
         }
+        if self.position_offset != 0 {
+            return Err(
+                "Qwen3-14B SQ8 layer position_offset requires a past-KV input and is unsupported by the isolated layer runner"
+                    .to_string(),
+            );
+        }
         let final_position = self
             .position_offset
             .checked_add(self.sequence_len - 1)
@@ -115,6 +128,11 @@ impl Qwen3Sq8LayerConfig {
             return Err(
                 "Qwen3-14B SQ8 layer RoPE theta must be finite and greater than one".into(),
             );
+        }
+        if self.rms_norm_epsilon.to_bits() != QWEN3_14B_RMS_NORM_EPSILON.to_bits()
+            || self.rope_theta.to_bits() != QWEN3_14B_ROPE_THETA.to_bits()
+        {
+            return Err("Qwen3-14B SQ8 layer model constants do not match the oracle".to_string());
         }
         Ok(())
     }
@@ -350,7 +368,24 @@ impl Qwen3Sq8LayerWorkspace {
         &self.output
     }
 
-    pub fn run(
+    pub fn run_synchronized(
+        &mut self,
+        weights: &Qwen3Sq8LayerWeights,
+        input: &RuntimeBuffer,
+        profile: Sq8LayerExecutionProfile,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8LayerExecutionReport, String> {
+        let report = self.enqueue(weights, input, profile, stream)?;
+        if let Err(err) = stream.synchronize() {
+            self.last_profile = None;
+            return Err(format!(
+                "failed to synchronize Qwen3-14B SQ8 layer execution: {err}"
+            ));
+        }
+        Ok(report)
+    }
+
+    fn enqueue(
         &mut self,
         weights: &Qwen3Sq8LayerWeights,
         input: &RuntimeBuffer,
@@ -359,6 +394,7 @@ impl Qwen3Sq8LayerWorkspace {
     ) -> Result<Sq8LayerExecutionReport, String> {
         self.last_profile = None;
         self.config.validate()?;
+        validate_no_host_staging_contract()?;
         let m = self.config.sequence_len;
         let hidden_elements = checked_elements(m, QWEN3_14B_HIDDEN_SIZE, "hidden")?;
         let intermediate_elements =
@@ -578,34 +614,33 @@ impl Qwen3Sq8LayerWorkspace {
         let kv = checked_elements(m, QWEN3_14B_KV_HEADS * QWEN3_14B_HEAD_DIM, "trace kv")?;
         let intermediate = checked_elements(m, QWEN3_14B_INTERMEDIATE_SIZE, "trace intermediate")?;
 
-        let input_normed = enqueue_f32_read(&self.input_normed, hidden, stream)?;
-        let q_projected = enqueue_f32_read(&self.q_projected, hidden, stream)?;
-        let k_projected = enqueue_f32_read(&self.k_projected, kv, stream)?;
-        let v_projected = enqueue_f32_read(&self.v_projected, kv, stream)?;
-        let q_normed = enqueue_f32_read(&self.q_normed, hidden, stream)?;
-        let k_normed = enqueue_f32_read(&self.k_normed, kv, stream)?;
-        let q_rope = enqueue_f32_read(&self.q_rope, hidden, stream)?;
-        let k_rope = enqueue_f32_read(&self.k_rope, kv, stream)?;
-        let attention = enqueue_f32_read(&self.attention, hidden, stream)?;
-        let o_projected = enqueue_f32_read(&self.o_projected, hidden, stream)?;
-        let attention_residual = enqueue_f32_read(&self.attention_residual, hidden, stream)?;
-        let post_normed = enqueue_f32_read(&self.post_normed, hidden, stream)?;
-        let gate_projected = enqueue_f32_read(&self.gate_projected, intermediate, stream)?;
-        let up_projected = enqueue_f32_read(&self.up_projected, intermediate, stream)?;
-        let mlp_activation = enqueue_f32_read(&self.mlp_activation, intermediate, stream)?;
-        let down_projected = enqueue_f32_read(&self.down_projected, hidden, stream)?;
-        let output = enqueue_f32_read(&self.output, hidden, stream)?;
+        let input_normed = read_f32_synchronized(&self.input_normed, hidden, stream)?;
+        let q_projected = read_f32_synchronized(&self.q_projected, hidden, stream)?;
+        let k_projected = read_f32_synchronized(&self.k_projected, kv, stream)?;
+        let v_projected = read_f32_synchronized(&self.v_projected, kv, stream)?;
+        let q_normed = read_f32_synchronized(&self.q_normed, hidden, stream)?;
+        let k_normed = read_f32_synchronized(&self.k_normed, kv, stream)?;
+        let q_rope = read_f32_synchronized(&self.q_rope, hidden, stream)?;
+        let k_rope = read_f32_synchronized(&self.k_rope, kv, stream)?;
+        let attention = read_f32_synchronized(&self.attention, hidden, stream)?;
+        let o_projected = read_f32_synchronized(&self.o_projected, hidden, stream)?;
+        let attention_residual = read_f32_synchronized(&self.attention_residual, hidden, stream)?;
+        let post_normed = read_f32_synchronized(&self.post_normed, hidden, stream)?;
+        let gate_projected = read_f32_synchronized(&self.gate_projected, intermediate, stream)?;
+        let up_projected = read_f32_synchronized(&self.up_projected, intermediate, stream)?;
+        let mlp_activation = read_f32_synchronized(&self.mlp_activation, intermediate, stream)?;
+        let down_projected = read_f32_synchronized(&self.down_projected, hidden, stream)?;
+        let output = read_f32_synchronized(&self.output, hidden, stream)?;
         let activations = if profile == Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
             Some([
-                enqueue_activation_read(&self.qkv_activation, stream)?,
-                enqueue_activation_read(&self.o_activation, stream)?,
-                enqueue_activation_read(&self.gate_up_activation, stream)?,
-                enqueue_activation_read(&self.down_activation, stream)?,
+                read_activation_synchronized(&self.qkv_activation, stream)?,
+                read_activation_synchronized(&self.o_activation, stream)?,
+                read_activation_synchronized(&self.gate_up_activation, stream)?,
+                read_activation_synchronized(&self.down_activation, stream)?,
             ])
         } else {
             None
         };
-        stream.synchronize()?;
 
         let (qkv_activation, o_activation, gate_up_activation, down_activation) = match activations
         {
@@ -784,6 +819,20 @@ fn validate_norm_values(norms: &Qwen3Sq8LayerNormValues) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_no_host_staging_contract() -> Result<(), String> {
+    let missing = QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_none())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Qwen3-14B SQ8 layer requires HIP-only primitive execution; set these no-staging guards before process start: {}",
+            missing.join(",")
+        ));
+    }
+    Ok(())
+}
+
 fn validate_resident_shape(
     tensor: &Sq8CanonicalResidentRuntimeTensor,
     rows: usize,
@@ -850,7 +899,7 @@ fn upload_f32(
     Ok(buffer)
 }
 
-fn enqueue_f32_read(
+fn read_f32_synchronized(
     buffer: &RuntimeBuffer,
     elements: usize,
     stream: &mut RuntimeStream,
@@ -859,28 +908,41 @@ fn enqueue_f32_read(
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| "Qwen3-14B SQ8 layer trace byte size overflows".to_string())?;
     let mut host = vec![0_u8; bytes];
-    buffer.copy_to_host(0, &mut host, Some(stream))?;
+    copy_to_host_synchronized(buffer, &mut host, stream)?;
     Ok(host)
 }
 
-fn enqueue_activation_read(
+fn read_activation_synchronized(
     activation: &Sq8CkQuantizedActivation,
     stream: &mut RuntimeStream,
 ) -> Result<PendingActivationRead, String> {
     let mut values = vec![0_u8; activation.quantized_bytes()];
     let mut scales = vec![0_u8; activation.scale_bytes()];
-    activation
-        .quantized_buffer()
-        .copy_to_host(0, &mut values, Some(&mut *stream))?;
-    activation
-        .scale_buffer()
-        .copy_to_host(0, &mut scales, Some(&mut *stream))?;
+    copy_to_host_synchronized(activation.quantized_buffer(), &mut values, stream)?;
+    copy_to_host_synchronized(activation.scale_buffer(), &mut scales, stream)?;
     Ok(PendingActivationRead {
         m: activation.m(),
         k: activation.k(),
         values,
         scales,
     })
+}
+
+fn copy_to_host_synchronized(
+    buffer: &RuntimeBuffer,
+    destination: &mut [u8],
+    stream: &mut RuntimeStream,
+) -> Result<(), String> {
+    let copy_result = buffer.copy_to_host(0, destination, Some(&mut *stream));
+    let synchronize_result = stream.synchronize();
+    match (copy_result, synchronize_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(copy_error), Ok(())) => Err(copy_error),
+        (Ok(()), Err(sync_error)) => Err(sync_error),
+        (Err(copy_error), Err(sync_error)) => Err(format!(
+            "runtime buffer read failed: {copy_error}; subsequent stream synchronization also failed: {sync_error}"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -899,7 +961,7 @@ mod tests {
 
     #[test]
     fn qwen3_14b_layer_config_rejects_inexact_rope_positions() {
-        assert!(Qwen3Sq8LayerConfig::qwen3_14b(1, QWEN3_14B_SQ8_MAX_EXACT_F32_POSITION).is_ok());
+        assert!(Qwen3Sq8LayerConfig::qwen3_14b(1, 1).is_err());
         assert!(Qwen3Sq8LayerConfig::qwen3_14b(2, QWEN3_14B_SQ8_MAX_EXACT_F32_POSITION).is_err());
     }
 
