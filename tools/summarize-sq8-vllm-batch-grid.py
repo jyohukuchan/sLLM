@@ -713,6 +713,10 @@ def ullm_sq_no_host_staging_gate_failures(
         for field in host_staging_fields:
             raw_value = workload.get(field)
             if raw_value is None:
+                failures.append(
+                    f"selected uLLM SQ8_0 row missing host staging metric: "
+                    f"{harness_summary(row)} {field} is missing"
+                )
                 continue
             value = as_int(raw_value)
             if value is None:
@@ -850,8 +854,8 @@ def parse_args() -> argparse.Namespace:
         "--require-ullm-sq-no-host-staging",
         action="store_true",
         help=(
-            "fail when selected uLLM SQ8_0 rows have non-zero "
-            "workload.sq_diagnostic_host_staging_* values"
+            "fail when selected uLLM SQ8_0 rows are missing "
+            "workload.sq_diagnostic_host_staging_* values or any value is non-zero"
         ),
     )
     parser.add_argument(

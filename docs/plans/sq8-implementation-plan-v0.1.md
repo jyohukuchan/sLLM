@@ -909,6 +909,9 @@ Expected outputs:
   `SQ batch`, `SQ staging ops`, and `SQ staging MiB` in the comparison table.
 - `--require-ullm-sq-no-host-staging` is available as an optional stricter gate for final
   serving-style comparisons; it is not required for the current normalized model-loop comparison.
+  When enabled, it now requires all four `workload.sq_diagnostic_host_staging_*` fields to be
+  present and zero, so pre-counter or partially reported rows cannot pass as no-host-staging
+  evidence.
 - A note linking to `docs/plans/r9700-qwen3-14b-fp8-external-engine-plan-v0.1.md` and the exact
   vLLM environment used.
 - The vLLM row should be produced through the derived command template in
@@ -999,7 +1002,8 @@ Expected outputs:
      incomplete batch matvec counters are blocked before mixing against serving rows.
    - The 2026-07-10 no-host-staging b2/b4/b8 refresh now satisfies the normalized comparison gate together with
      `--require-ullm-sq-batch-coverage`, `--require-ullm-sq-kernel-families`, and
-     `--require-ullm-sq-no-host-staging`.
+     `--require-ullm-sq-no-host-staging`. The no-host-staging gate now fails missing
+     `sq_diagnostic_host_staging_*` fields as well as malformed or nonzero values.
    - Host staging is now annotated by `sq_diagnostic_host_staging_*` counters in SQ8_0 mixed
      request-state rows. A first reduction moved the selected-layer layer3 shape from `39/48`
      read/write operations to `33/42` by keeping the o residual add and post-RMSNorm on batch device

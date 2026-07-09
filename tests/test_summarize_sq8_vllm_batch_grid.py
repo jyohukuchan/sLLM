@@ -2006,7 +2006,7 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(stderr.getvalue(), "")
 
-    def test_require_ullm_sq_no_host_staging_passes_when_missing_metrics(self) -> None:
+    def test_require_ullm_sq_no_host_staging_fails_when_missing_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:
             path = Path(workdir) / "missing_host_staging.jsonl"
             path.write_text(
@@ -2041,8 +2041,12 @@ class SummarizeSq8VllmBatchGridTests(unittest.TestCase):
                 stderr = StringIO()
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     status = TOOL.main()
-            self.assertEqual(status, 0)
-            self.assertEqual(stderr.getvalue(), "")
+            self.assertEqual(status, 2)
+            self.assertIn("missing host staging metric", stderr.getvalue())
+            self.assertIn("sq_diagnostic_host_staging_read_count", stderr.getvalue())
+            self.assertIn("sq_diagnostic_host_staging_write_count", stderr.getvalue())
+            self.assertIn("sq_diagnostic_host_staging_read_bytes", stderr.getvalue())
+            self.assertIn("sq_diagnostic_host_staging_write_bytes", stderr.getvalue())
 
     def test_require_ullm_sq_no_host_staging_fails_when_metric_is_malformed(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:
