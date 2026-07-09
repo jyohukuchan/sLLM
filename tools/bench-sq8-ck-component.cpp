@@ -100,8 +100,16 @@ static_assert(sizeof(float) == 4);
 
 constexpr std::size_t kScaleBlock = 128;
 constexpr std::size_t kMaxWorkingBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kCacheEvictionBytes = 256ULL * 1024ULL * 1024ULL;
+constexpr unsigned int kCacheEvictionBlocks = 4096;
+constexpr unsigned int kCacheEvictionThreads = 256;
 constexpr double kRelativeL2Limit = 5.0e-3;
 constexpr double kCosineLimit = 0.9999;
+
+enum class CacheMode {
+    Warm,
+    TargetBuffersEvicted,
+};
 
 struct Options {
     int device = 0;
@@ -116,6 +124,7 @@ struct Options {
     std::optional<std::filesystem::path> expected_activation_scale_path;
     int warmups = 5;
     int repeats = 20;
+    CacheMode cache_mode = CacheMode::Warm;
 };
 
 class DeviceBuffer {
@@ -380,6 +389,226 @@ class QuantizationKernel {
     hipFunction_t function_ = nullptr;
 };
 
+std::uint32_t cache_eviction_hash(std::uint32_t value) {
+    value ^= value >> 16U;
+    value *= 0x7feb352dU;
+    value ^= value >> 15U;
+    value *= 0x846ca68bU;
+    return value ^ (value >> 16U);
+}
+
+const char* cache_eviction_kernel_source() {
+    return R"HIP(
+__device__ unsigned int ullm_sq8_eviction_hash(unsigned int value) {
+    value ^= value >> 16U;
+    value *= 0x7feb352dU;
+    value ^= value >> 15U;
+    value *= 0x846ca68bU;
+    return value ^ (value >> 16U);
+}
+
+extern "C" __global__ void ullm_sq8_initialize_eviction_buffer(
+    uint4* output,
+    unsigned long vectors) {
+    unsigned long index = (unsigned long)blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned long stride = (unsigned long)gridDim.x * blockDim.x;
+    while (index < vectors) {
+        const unsigned int base = (unsigned int)(index * 4UL);
+        output[index] = make_uint4(ullm_sq8_eviction_hash(base),
+                                   ullm_sq8_eviction_hash(base + 1U),
+                                   ullm_sq8_eviction_hash(base + 2U),
+                                   ullm_sq8_eviction_hash(base + 3U));
+        index += stride;
+    }
+}
+
+extern "C" __global__ void ullm_sq8_evict_cache(
+    const uint4* input,
+    unsigned long vectors,
+    unsigned long long* block_sums) {
+    __shared__ unsigned long long partial_sums[256];
+    const unsigned int lane = threadIdx.x;
+    unsigned long index = (unsigned long)blockIdx.x * blockDim.x + lane;
+    const unsigned long stride = (unsigned long)gridDim.x * blockDim.x;
+    unsigned long long sum = 0ULL;
+    while (index < vectors) {
+        const uint4 value = input[index];
+        sum += (unsigned long long)value.x + value.y + value.z + value.w;
+        index += stride;
+    }
+    partial_sums[lane] = sum;
+    __syncthreads();
+    for (unsigned int offset = 128U; offset != 0U; offset >>= 1U) {
+        if (lane < offset) {
+            partial_sums[lane] += partial_sums[lane + offset];
+        }
+        __syncthreads();
+    }
+    if (lane == 0U) {
+        block_sums[blockIdx.x] = partial_sums[0];
+    }
+}
+)HIP";
+}
+
+class CacheEvictionKernel {
+  public:
+    explicit CacheEvictionKernel(std::string_view arch) {
+        HipRtcProgram program(cache_eviction_kernel_source(), "ullm_sq8_cache_evict.hip");
+        const std::string architecture_option = "--gpu-architecture=" + std::string(arch);
+        const char* options[] = {
+            "--std=c++17",
+            "-O3",
+            architecture_option.c_str(),
+        };
+        const hiprtcResult compile_status =
+            hiprtcCompileProgram(program.get(), static_cast<int>(std::size(options)), options);
+        if (compile_status != HIPRTC_SUCCESS) {
+            std::size_t log_size = 0;
+            HIPRTC_CHECK(hiprtcGetProgramLogSize(program.get(), &log_size));
+            std::string log(log_size, '\0');
+            if (log_size != 0) {
+                HIPRTC_CHECK(hiprtcGetProgramLog(program.get(), log.data()));
+            }
+            throw std::runtime_error("HIPRTC cache eviction compile failed: " + log);
+        }
+
+        std::size_t code_size = 0;
+        HIPRTC_CHECK(hiprtcGetCodeSize(program.get(), &code_size));
+        if (code_size == 0) {
+            throw std::runtime_error("HIPRTC cache eviction produced empty code");
+        }
+        std::vector<char> code(code_size);
+        HIPRTC_CHECK(hiprtcGetCode(program.get(), code.data()));
+        HIP_CHECK(hipModuleLoadData(&module_, code.data()));
+        hipError_t function_status = hipModuleGetFunction(
+            &initialize_function_, module_, "ullm_sq8_initialize_eviction_buffer");
+        if (function_status == hipSuccess) {
+            function_status = hipModuleGetFunction(&evict_function_, module_, "ullm_sq8_evict_cache");
+        }
+        if (function_status != hipSuccess) {
+            const hipError_t unload_status = hipModuleUnload(module_);
+            module_ = nullptr;
+            if (unload_status != hipSuccess) {
+                report_cleanup_error(unload_status,
+                                     "hipModuleUnload after cache get-function failure");
+            }
+            hip_check(function_status, "hipModuleGetFunction", __FILE__, __LINE__);
+        }
+    }
+
+    CacheEvictionKernel(const CacheEvictionKernel&) = delete;
+    CacheEvictionKernel& operator=(const CacheEvictionKernel&) = delete;
+
+    ~CacheEvictionKernel() {
+        if (module_ != nullptr) {
+            report_cleanup_error(hipModuleUnload(module_), "hipModuleUnload cache eviction");
+        }
+    }
+
+    void initialize(DeviceBuffer& output, hipStream_t stream) const {
+        if (output.bytes() % sizeof(uint4) != 0) {
+            throw std::runtime_error("cache eviction buffer is not uint4 aligned in size");
+        }
+        auto* output_pointer = static_cast<uint4*>(output.get());
+        unsigned long vectors = static_cast<unsigned long>(output.bytes() / sizeof(uint4));
+        void* arguments[] = {&output_pointer, &vectors};
+        HIP_CHECK(hipModuleLaunchKernel(initialize_function_,
+                                        kCacheEvictionBlocks,
+                                        1,
+                                        1,
+                                        kCacheEvictionThreads,
+                                        1,
+                                        1,
+                                        0,
+                                        stream,
+                                        arguments,
+                                        nullptr));
+    }
+
+    void launch(const DeviceBuffer& input, DeviceBuffer& block_sums, hipStream_t stream) const {
+        if (input.bytes() % sizeof(uint4) != 0) {
+            throw std::runtime_error("cache eviction input is not uint4 aligned in size");
+        }
+        const auto* input_pointer = static_cast<const uint4*>(input.get());
+        unsigned long vectors = static_cast<unsigned long>(input.bytes() / sizeof(uint4));
+        auto* output_pointer = static_cast<unsigned long long*>(block_sums.get());
+        void* arguments[] = {&input_pointer, &vectors, &output_pointer};
+        HIP_CHECK(hipModuleLaunchKernel(evict_function_,
+                                        kCacheEvictionBlocks,
+                                        1,
+                                        1,
+                                        kCacheEvictionThreads,
+                                        1,
+                                        1,
+                                        0,
+                                        stream,
+                                        arguments,
+                                        nullptr));
+    }
+
+  private:
+    hipModule_t module_ = nullptr;
+    hipFunction_t initialize_function_ = nullptr;
+    hipFunction_t evict_function_ = nullptr;
+};
+
+class CacheEvictionState {
+  public:
+    CacheEvictionState(std::string_view arch, hipStream_t stream)
+        : kernel_(arch),
+          input_(kCacheEvictionBytes),
+          block_sums_(static_cast<std::size_t>(kCacheEvictionBlocks) *
+                      sizeof(unsigned long long)) {
+        kernel_.initialize(input_, stream);
+        HIP_CHECK(hipMemsetAsync(block_sums_.get(), 0, block_sums_.bytes(), stream));
+        HipEvent start;
+        HipEvent stop;
+        HIP_CHECK(hipEventRecord(start.get(), stream));
+        kernel_.launch(input_, block_sums_, stream);
+        HIP_CHECK(hipEventRecord(stop.get(), stream));
+        HIP_CHECK(hipEventSynchronize(stop.get()));
+        float elapsed_ms = 0.0f;
+        HIP_CHECK(hipEventElapsedTime(&elapsed_ms, start.get(), stop.get()));
+        if (!std::isfinite(elapsed_ms) || elapsed_ms <= 0.0f) {
+            throw std::runtime_error("cache eviction validation returned an invalid duration");
+        }
+        validation_ms_ = elapsed_ms;
+        std::vector<unsigned long long> host_sums(kCacheEvictionBlocks);
+        HIP_CHECK(hipMemcpyAsync(host_sums.data(),
+                                 block_sums_.get(),
+                                 block_sums_.bytes(),
+                                 hipMemcpyDeviceToHost,
+                                 stream));
+        HIP_CHECK(hipStreamSynchronize(stream));
+        for (const unsigned long long value : host_sums) {
+            checksum_ += value;
+        }
+        std::uint64_t expected_checksum = 0;
+        const std::size_t word_count = kCacheEvictionBytes / sizeof(std::uint32_t);
+        for (std::size_t index = 0; index < word_count; ++index) {
+            expected_checksum += cache_eviction_hash(static_cast<std::uint32_t>(index));
+        }
+        if (checksum_ != expected_checksum) {
+            throw std::runtime_error("cache eviction validation checksum mismatch");
+        }
+    }
+
+    CacheEvictionState(const CacheEvictionState&) = delete;
+    CacheEvictionState& operator=(const CacheEvictionState&) = delete;
+
+    void launch(hipStream_t stream) { kernel_.launch(input_, block_sums_, stream); }
+    std::uint64_t checksum() const { return checksum_; }
+    double validation_ms() const { return validation_ms_; }
+
+  private:
+    CacheEvictionKernel kernel_;
+    DeviceBuffer input_;
+    DeviceBuffer block_sums_;
+    std::uint64_t checksum_ = 0;
+    double validation_ms_ = 0.0;
+};
+
 struct Timing {
     double p50_ms = 0.0;
     double p95_ms = 0.0;
@@ -439,7 +668,7 @@ struct QuantizationCheck {
         << "Usage: " << argv0 << " --device N --m M --n N --k K"
         << " --weight FILE --weight-scale FILE --activation FILE --oracle FILE"
         << " [--expected-activation-fp8 FILE] [--expected-activation-scales FILE]"
-        << " [--warmups N] [--repeats N]\n";
+        << " [--warmups N] [--repeats N] [--cache-mode warm|evicted]\n";
     std::exit(2);
 }
 
@@ -507,6 +736,15 @@ Options parse_args(int argc, char** argv) {
                 throw ExitError(2, "--repeats must be in [1, 100000]");
             }
             options.repeats = static_cast<int>(parsed);
+        } else if (argument == "--cache-mode") {
+            const std::string_view mode = value();
+            if (mode == "warm") {
+                options.cache_mode = CacheMode::Warm;
+            } else if (mode == "evicted") {
+                options.cache_mode = CacheMode::TargetBuffersEvicted;
+            } else {
+                throw ExitError(2, "--cache-mode must be warm or evicted");
+            }
         } else if (argument == "--help" || argument == "-h") {
             usage(argv[0]);
         } else {
@@ -748,12 +986,14 @@ Timing summarize_timing(const std::vector<float>& samples) {
     return Timing{percentile(samples, 0.50), percentile(samples, 0.95)};
 }
 
-template <typename Launch>
+template <typename Prepare, typename Launch>
 std::vector<float> measure_gpu_events(int warmups,
                                       int repeats,
                                       hipStream_t stream,
+                                      Prepare&& prepare,
                                       Launch&& launch) {
     for (int iteration = 0; iteration < warmups; ++iteration) {
+        prepare();
         launch();
     }
     HIP_CHECK(hipStreamSynchronize(stream));
@@ -763,6 +1003,7 @@ std::vector<float> measure_gpu_events(int warmups,
     std::vector<float> samples;
     samples.reserve(static_cast<std::size_t>(repeats));
     for (int iteration = 0; iteration < repeats; ++iteration) {
+        prepare();
         HIP_CHECK(hipEventRecord(start.get(), stream));
         launch();
         HIP_CHECK(hipEventRecord(stop.get(), stream));
@@ -841,6 +1082,7 @@ CandidateMeasurement measure_candidate(std::size_t group_index,
                                        std::size_t output_elements,
                                        const std::vector<float>& oracle,
                                        const Options& options,
+                                       CacheEvictionState* cache_eviction,
                                        hipStream_t stream) {
     CandidateMeasurement measurement;
     measurement.group = group.name;
@@ -851,10 +1093,19 @@ CandidateMeasurement measure_candidate(std::size_t group_index,
     try {
         auto invoker = group.instances[instance_index]->MakeInvokerPointer();
         const StreamConfig config = stream_config(stream);
-        const auto samples = measure_gpu_events(options.warmups, options.repeats, stream, [&]() {
-            (void)invoker->Run(&argument, config);
-            HIP_CHECK(hipGetLastError());
-        });
+        const auto samples = measure_gpu_events(
+            options.warmups,
+            options.repeats,
+            stream,
+            [&]() {
+                if (cache_eviction != nullptr) {
+                    cache_eviction->launch(stream);
+                }
+            },
+            [&]() {
+                (void)invoker->Run(&argument, config);
+                HIP_CHECK(hipGetLastError());
+            });
         measurement.gemm = summarize_timing(samples);
         std::vector<ck::bhalf_t> host_output(output_elements);
         HIP_CHECK(hipMemcpyAsync(host_output.data(),
@@ -945,7 +1196,7 @@ ByteComparison compare_bytes(const std::vector<std::uint8_t>& actual,
 }
 
 void print_error_json(std::string_view error) {
-    std::cout << "{\"schema_version\":\"ullm.sq8.ck_component.v1\","
+    std::cout << "{\"schema_version\":\"ullm.sq8.ck_component.v2\","
               << "\"status\":\"error\",\"fallback\":\"not_used\",\"error\":"
               << json_string(error) << "}\n";
 }
@@ -961,7 +1212,10 @@ void print_result_json(const Options& options,
                        const std::optional<Timing>& combined_timing,
                        const std::optional<ErrorMetrics>& error_metrics,
                        const QuantizationCheck& quant_check,
+                       const CacheEvictionState* cache_eviction,
                        std::size_t working_bytes,
+                       std::size_t device_allocation_bytes,
+                       std::size_t free_device_bytes,
                        bool passed,
                        std::string_view failure_reason) {
     const double operations = 2.0 * static_cast<double>(options.m) *
@@ -973,7 +1227,7 @@ void print_result_json(const Options& options,
 
     std::cout << std::setprecision(17);
     std::cout << "{\n"
-              << "  \"schema_version\": \"ullm.sq8.ck_component.v1\",\n"
+              << "  \"schema_version\": \"ullm.sq8.ck_component.v2\",\n"
               << "  \"status\": " << json_string(passed ? "passed" : "failed") << ",\n"
               << "  \"passed\": " << (passed ? "true" : "false") << ",\n"
               << "  \"fallback\": \"not_used\",\n"
@@ -987,6 +1241,8 @@ void print_result_json(const Options& options,
               << "  \"shape\": {\"m\": " << options.m << ", \"n\": " << options.n
               << ", \"k\": " << options.k << "},\n"
               << "  \"memory\": {\"estimated_working_bytes\": " << working_bytes
+              << ", \"device_allocation_bytes\": " << device_allocation_bytes
+              << ", \"free_device_bytes_at_check\": " << free_device_bytes
               << ", \"limit_bytes\": " << kMaxWorkingBytes << "},\n"
               << "  \"contract\": {\"a_type\": \"fp8_e4m3_ocp\", \"b_type\": "
                  "\"fp8_e4m3_ocp\", \"output_type\": \"bf16\", \"a_layout\": "
@@ -1030,8 +1286,15 @@ void print_result_json(const Options& options,
         std::cout << "{\"group\": " << json_string(selected->group) << ", \"instance\": "
                   << json_string(selected->instance) << "},\n";
     }
-    std::cout << "  \"timing\": {\"source\": \"hip_event\", "
-                 "\"cache_state\": \"warm_repeated_same_buffers\", \"warmups\": "
+    const bool target_buffers_evicted =
+        options.cache_mode == CacheMode::TargetBuffersEvicted;
+    std::cout << "  \"timing\": {\"source\": \"hip_event\", \"cache_state\": "
+              << json_string(target_buffers_evicted ? "target_buffers_evicted"
+                                                    : "warm_repeated_same_buffers")
+              << ", \"cache_evict_bytes\": "
+              << (target_buffers_evicted ? kCacheEvictionBytes : 0)
+              << ", \"cache_evict_in_timed_region\": false, \"quant_only_cache_state\": "
+              << json_string("warm_repeated_same_buffers") << ", \"warmups\": "
               << options.warmups << ", \"repeats\": " << options.repeats
               << ", \"quant_only\": {\"p50_ms\": " << quant_timing.p50_ms
               << ", \"p95_ms\": " << quant_timing.p95_ms << "}, \"gemm_only\": ";
@@ -1044,6 +1307,24 @@ void print_result_json(const Options& options,
                   << "}, \"quant_plus_gemm\": {\"p50_ms\": " << combined_timing->p50_ms
                   << ", \"p95_ms\": " << combined_timing->p95_ms
                   << ", \"tflops_p50\": " << tflops(combined_timing->p50_ms) << "}},\n";
+    }
+    std::cout << "  \"cache_eviction\": {\"enabled\": "
+              << (cache_eviction == nullptr ? "false" : "true")
+              << ", \"bytes\": " << (cache_eviction == nullptr ? 0 : kCacheEvictionBytes)
+              << ", \"passes_per_gemm_sample\": " << (cache_eviction == nullptr ? 0 : 1)
+              << ", \"outside_timed_region\": true, \"device_l2_cache_bytes\": "
+              << properties.l2CacheSize << ", \"validation_checksum_u64\": ";
+    if (cache_eviction == nullptr) {
+        std::cout << "null, \"validation_checksum_matches\": null, \"validation_ms\": null, "
+                     "\"validation_bandwidth_gbps\": null},\n";
+    } else {
+        const double validation_ms = cache_eviction->validation_ms();
+        const double bandwidth_gbps =
+            static_cast<double>(kCacheEvictionBytes) / (validation_ms * 1.0e6);
+        std::cout << json_string(std::to_string(cache_eviction->checksum()))
+                  << ", \"validation_checksum_matches\": true, \"validation_ms\": "
+                  << validation_ms
+                  << ", \"validation_bandwidth_gbps\": " << bandwidth_gbps << "},\n";
     }
     std::cout << "  \"activation_quantization_check\": {\"passed\": "
               << (quant_check.passed() ? "true" : "false")
@@ -1105,16 +1386,52 @@ int run(const Options& options) {
         checked_mul(options.m, options.k / kScaleBlock, "activation scale elements");
     const std::size_t weight_scale_elements =
         checked_mul(options.n / kScaleBlock, options.k / kScaleBlock, "weight scale elements");
-    const std::size_t working_bytes = estimated_working_bytes(activation_elements,
-                                                              weight_elements,
-                                                              output_elements,
-                                                              activation_scale_elements,
-                                                              weight_scale_elements);
+    std::size_t working_bytes = estimated_working_bytes(activation_elements,
+                                                        weight_elements,
+                                                        output_elements,
+                                                        activation_scale_elements,
+                                                        weight_scale_elements);
+    if (options.cache_mode == CacheMode::TargetBuffersEvicted) {
+        working_bytes = checked_add(working_bytes, kCacheEvictionBytes, "component working bytes");
+        working_bytes = checked_add(
+            working_bytes,
+            static_cast<std::size_t>(kCacheEvictionBlocks) * sizeof(unsigned long long),
+            "component working bytes");
+    }
     if (working_bytes > kMaxWorkingBytes) {
         throw ExitError(2,
                         "SQ8 CK component estimated working set " +
                             std::to_string(working_bytes) + " exceeds " +
                             std::to_string(kMaxWorkingBytes) + " bytes");
+    }
+    std::size_t device_allocation_bytes = 0;
+    const auto add_device_bytes = [&](std::size_t bytes) {
+        device_allocation_bytes =
+            checked_add(device_allocation_bytes, bytes, "device allocation bytes");
+    };
+    add_device_bytes(checked_mul(activation_elements, sizeof(float), "device activation bytes"));
+    add_device_bytes(activation_elements);
+    add_device_bytes(checked_mul(
+        activation_scale_elements, sizeof(float), "device activation scale bytes"));
+    add_device_bytes(weight_elements);
+    add_device_bytes(
+        checked_mul(weight_scale_elements, sizeof(float), "device weight scale bytes"));
+    add_device_bytes(
+        checked_mul(output_elements, sizeof(ck::bhalf_t), "device output bytes"));
+    if (options.cache_mode == CacheMode::TargetBuffersEvicted) {
+        add_device_bytes(kCacheEvictionBytes);
+        add_device_bytes(static_cast<std::size_t>(kCacheEvictionBlocks) *
+                         sizeof(unsigned long long));
+    }
+    std::size_t free_device_bytes = 0;
+    std::size_t total_device_bytes = 0;
+    HIP_CHECK(hipMemGetInfo(&free_device_bytes, &total_device_bytes));
+    if (device_allocation_bytes > free_device_bytes) {
+        throw ExitError(2,
+                        "SQ8 CK component requires " +
+                            std::to_string(device_allocation_bytes) +
+                            " device bytes but only " + std::to_string(free_device_bytes) +
+                            " are free");
     }
 
     auto weight_bytes = read_exact_bytes(options.weight_path, weight_elements, "weight");
@@ -1176,6 +1493,10 @@ int run(const Options& options) {
         checked_mul(output_elements, sizeof(ck::bhalf_t), "device output bytes"));
     HipStream stream;
     QuantizationKernel quantization_kernel(arch);
+    std::unique_ptr<CacheEvictionState> cache_eviction;
+    if (options.cache_mode == CacheMode::TargetBuffersEvicted) {
+        cache_eviction = std::make_unique<CacheEvictionState>(arch, stream.get());
+    }
 
     HIP_CHECK(hipMemcpyAsync(device_activation.get(),
                              activation.data(),
@@ -1197,13 +1518,18 @@ int run(const Options& options) {
     std::vector<std::uint8_t>().swap(weight_bytes);
     std::vector<float>().swap(weight_scales);
 
-    const auto quant_samples = measure_gpu_events(options.warmups, options.repeats, stream.get(), [&]() {
-        quantization_kernel.launch(device_activation,
-                                   device_activation_fp8,
-                                   device_activation_scales,
-                                   options,
-                                   stream.get());
-    });
+    const auto quant_samples = measure_gpu_events(
+        options.warmups,
+        options.repeats,
+        stream.get(),
+        []() {},
+        [&]() {
+            quantization_kernel.launch(device_activation,
+                                       device_activation_fp8,
+                                       device_activation_scales,
+                                       options,
+                                       stream.get());
+        });
     const Timing quant_timing = summarize_timing(quant_samples);
 
     std::vector<std::uint8_t> actual_activation_fp8(activation_elements);
@@ -1273,6 +1599,7 @@ int run(const Options& options) {
                                                                output_elements,
                                                                oracle,
                                                                options,
+                                                               cache_eviction.get(),
                                                                stream.get()));
         }
     }
@@ -1301,8 +1628,16 @@ int run(const Options& options) {
                                       options);
         auto invoker = operation.MakeInvokerPointer();
         const StreamConfig config = stream_config(stream.get());
-        const auto combined_samples =
-            measure_gpu_events(options.warmups, options.repeats, stream.get(), [&]() {
+        const auto combined_samples = measure_gpu_events(
+            options.warmups,
+            options.repeats,
+            stream.get(),
+            [&]() {
+                if (cache_eviction != nullptr) {
+                    cache_eviction->launch(stream.get());
+                }
+            },
+            [&]() {
                 quantization_kernel.launch(device_activation,
                                            device_activation_fp8,
                                            device_activation_scales,
@@ -1367,7 +1702,10 @@ int run(const Options& options) {
                       combined_timing,
                       error_metrics,
                       quant_check,
+                      cache_eviction.get(),
                       working_bytes,
+                      device_allocation_bytes,
+                      free_device_bytes,
                       passed,
                       failure_reason);
     return passed ? 0 : 5;

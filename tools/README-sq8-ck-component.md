@@ -22,6 +22,18 @@ ULLM_R9700_HIP_VISIBLE_DEVICE=1 tools/run-sq8-ck-component.sh \
   --warmups 10 --repeats 50
 ```
 
+To rule out a result that depends on the 26 MiB weight remaining in cache, add
+`--cache-mode evicted`. Before every GEMM sample, the benchmark reads a separate
+256 MiB hash-initialized GPU buffer on the same stream. The eviction dispatch is
+ordered before the start event and excluded from the reported duration. Its
+checksum, validation duration, byte count, and device L2 size are recorded in JSON.
+
 The wrapper requires exactly one HIP visibility token and maps it to internal device zero. The result is one JSON document. A passing result requires exact activation FP8 bytes and scale bits when expected files are supplied, finite BF16 output, relative L2 at most `5e-3`, cosine similarity at least `0.9999`, a numerically valid CK candidate, and no fallback.
 
-`quant_only`, `gemm_only`, and `quant_plus_gemm` are HIP-event timings over warm repeated use of the same resident buffers. The promotion number is `quant_plus_gemm`; cold model load, file I/O, and host-to-device weight upload are outside the timed region. A 2 GiB estimated host/device working-set budget rejects accidental oversized dimensions before input files are allocated.
+`quant_only`, `gemm_only`, and `quant_plus_gemm` are HIP-event timings. Warm mode
+repeats the same resident buffers; evicted mode replaces target data from cache
+before each GEMM measurement while leaving `quant_only` warm. The promotion number
+is `quant_plus_gemm`; model load, file I/O, host-to-device weight upload, and cache
+eviction are outside the timed region. A 2 GiB estimated host/device working-set
+budget and an available-device-memory check reject accidental oversized dimensions
+before input files are allocated.
