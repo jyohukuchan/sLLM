@@ -10,10 +10,12 @@ use crate::sq8_layer_oracle::{
 };
 use crate::sq8_layer_runtime::{
     QWEN3_14B_SQ8_LAYER_ACTIVATION_QUANTIZATIONS, QWEN3_14B_SQ8_LAYER_PROJECTIONS,
-    QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
-    Qwen3Sq8LayerConfig, Qwen3Sq8LayerNormValues, Qwen3Sq8LayerWeights, Qwen3Sq8LayerWorkspace,
-    Sq8LayerExecutionProfile, Sq8LayerExecutionReport, Sq8LayerProjectionExecution,
-    load_qwen3_14b_sq8_layer_weights, qwen3_sq8_layer_tensor_names, validate_norm_values,
+    QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV,
+    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+    QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV, Qwen3Sq8LayerConfig, Qwen3Sq8LayerNormValues,
+    Qwen3Sq8LayerWeights, Qwen3Sq8LayerWorkspace, Sq8LayerExecutionProfile,
+    Sq8LayerExecutionReport, Sq8LayerProjectionExecution, load_qwen3_14b_sq8_layer_weights,
+    qwen3_sq8_layer_tensor_names, validate_norm_values,
 };
 use ullm_runtime_sys::{RuntimeBuffer, RuntimeContext, RuntimeStream, Sq8CkImplementation};
 
@@ -96,6 +98,53 @@ impl Sq8PagedStackExecutionReport {
         {
             return Err(format!(
                 "SQ8 paged stack layer {layer_index} cache length mismatch: expected={expected_cache_len} actual={actual}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Sq8ServingChunkExecutionReport {
+    pub(crate) prefix_position: usize,
+    pub(crate) chunk_len: usize,
+    pub(crate) stack: Sq8StackExecutionReport,
+    pub(crate) cache_lengths: [usize; QWEN3_14B_SQ8_STACK_LAYERS],
+    pub(crate) kv_write_calls: usize,
+    pub(crate) cached_prefix_attention_calls: usize,
+    pub(crate) input_d2d_copy_count: usize,
+}
+
+impl Sq8ServingChunkExecutionReport {
+    pub(crate) fn validate_contract(&self) -> Result<(), String> {
+        self.stack.validate_optimized_promotion()?;
+        if !self
+            .prefix_position
+            .is_multiple_of(QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS)
+            || self.chunk_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+            || self.stack.sequence_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+            || self.stack.host_staging_used
+            || self.stack.host_readback_count != 0
+            || self.kv_write_calls
+                != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS * QWEN3_14B_SQ8_STACK_LAYERS
+            || self.cached_prefix_attention_calls != QWEN3_14B_SQ8_STACK_LAYERS
+            || self.input_d2d_copy_count != 1
+        {
+            return Err("SQ8 serving cached-prefix chunk operation contract mismatch".into());
+        }
+        let expected_cache_len = self
+            .prefix_position
+            .checked_add(self.chunk_len)
+            .ok_or_else(|| "SQ8 serving cached-prefix chunk position overflows".to_string())?;
+        if let Some((layer_index, actual)) = self
+            .cache_lengths
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, actual)| *actual != expected_cache_len)
+        {
+            return Err(format!(
+                "SQ8 serving cached-prefix chunk layer {layer_index} cache length mismatch: expected={expected_cache_len} actual={actual}"
             ));
         }
         Ok(())
@@ -412,6 +461,7 @@ pub struct Qwen3Sq8StackRuntime {
     resident_hidden: RuntimeBuffer,
     state: Sq8StackResidentState,
     last_execution_report: Option<Sq8StackExecutionReport>,
+    last_serving_chunk_report: Option<Sq8ServingChunkExecutionReport>,
     next_paged_decode_position: Option<usize>,
     paged_m1_sequence_active: bool,
 }
@@ -576,6 +626,7 @@ impl Qwen3Sq8StackRuntime {
             resident_hidden,
             state: Sq8StackResidentState::NeedsInput,
             last_execution_report: None,
+            last_serving_chunk_report: None,
             next_paged_decode_position: None,
             paged_m1_sequence_active: false,
         })
@@ -606,18 +657,46 @@ impl Qwen3Sq8StackRuntime {
     }
 
     /// Validates the complete serving baseline without changing scheduler or runtime state.
-    pub(crate) fn validate_paged_m1_sequence_start(
+    pub(crate) fn validate_paged_serving_sequence_start(
         &self,
         decode: &Qwen3Sq8PagedDecodeRuntime,
         caches: &[PagedDecodeState],
+        use_prefill_chunks: bool,
     ) -> Result<(), String> {
         self.validate_runtime_contract()?;
         self.workspace.validate_serving_baseline()?;
         decode.validate_serving_baseline()?;
         validate_paged_cache_layer_count(caches)?;
         validate_paged_hip_only_guards()?;
+        if use_prefill_chunks {
+            if self.config.sequence_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS {
+                return Err(format!(
+                    "Qwen3-14B SQ8 serving chunks require stack M={}, got M={}",
+                    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS, self.config.sequence_len
+                ));
+            }
+            validate_paged_prefill_chunk_hip_only_guards()?;
+            if let Some((layer_index, logical_block, physical_block)) =
+                caches.iter().enumerate().find_map(|(layer_index, cache)| {
+                    cache.block_table().iter().copied().enumerate().find_map(
+                        |(logical_block, physical_block)| {
+                            (physical_block as usize != logical_block).then_some((
+                                layer_index,
+                                logical_block,
+                                physical_block,
+                            ))
+                        },
+                    )
+                })
+            {
+                return Err(format!(
+                    "Qwen3-14B SQ8 serving chunk layer {layer_index} requires identity block mapping: block_table[{logical_block}]={physical_block}"
+                ));
+            }
+        }
         if self.status() != Sq8StackRuntimeStatus::NeedsInput
             || self.last_execution_report.is_some()
+            || self.last_serving_chunk_report.is_some()
             || self.next_paged_decode_position.is_some()
             || self.paged_m1_sequence_active
         {
@@ -636,10 +715,11 @@ impl Qwen3Sq8StackRuntime {
         Ok(())
     }
 
-    /// Starts a sequence only after `validate_paged_m1_sequence_start` succeeds.
-    pub(crate) fn begin_paged_m1_sequence(&mut self) {
+    /// Starts a sequence only after `validate_paged_serving_sequence_start` succeeds.
+    pub(crate) fn begin_paged_serving_sequence(&mut self) {
         debug_assert!(!self.paged_m1_sequence_active);
         debug_assert!(self.next_paged_decode_position.is_none());
+        debug_assert!(self.last_serving_chunk_report.is_none());
         self.paged_m1_sequence_active = true;
         self.next_paged_decode_position = Some(0);
     }
@@ -667,6 +747,7 @@ impl Qwen3Sq8StackRuntime {
         self.workspace.commit_serving_reset();
         self.state = Sq8StackResidentState::NeedsInput;
         self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
         self.next_paged_decode_position = None;
         self.paged_m1_sequence_active = false;
         decode.commit_serving_reset();
@@ -681,6 +762,7 @@ impl Qwen3Sq8StackRuntime {
         decode.validate_serving_baseline()?;
         if self.status() != Sq8StackRuntimeStatus::NeedsInput
             || self.last_execution_report.is_some()
+            || self.last_serving_chunk_report.is_some()
             || self.next_paged_decode_position.is_some()
             || self.paged_m1_sequence_active
         {
@@ -693,6 +775,20 @@ impl Qwen3Sq8StackRuntime {
     pub(crate) fn resident_hidden_buffer(&self) -> Result<&RuntimeBuffer, String> {
         self.state.require_output_ready()?;
         Ok(&self.resident_hidden)
+    }
+
+    pub(crate) fn resident_serving_chunk_output(
+        &self,
+    ) -> Result<(&RuntimeBuffer, &Sq8ServingChunkExecutionReport), String> {
+        self.state.require_output_ready()?;
+        let report = self.last_serving_chunk_report.as_ref().ok_or_else(|| {
+            "Qwen3-14B SQ8 stack has no completed serving prefill chunk".to_string()
+        })?;
+        report.validate_contract()?;
+        if self.last_execution_report.as_ref() != Some(&report.stack) {
+            return Err("Qwen3-14B SQ8 serving chunk stack report changed".into());
+        }
+        Ok((&self.resident_hidden, report))
     }
 
     pub(crate) fn resident_optimized_output(
@@ -760,6 +856,7 @@ impl Qwen3Sq8StackRuntime {
         let bytes = encode_f32_to_bytes(input);
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
         self.next_paged_decode_position = None;
         self.paged_m1_sequence_active = false;
         let copy_result = self
@@ -804,6 +901,7 @@ impl Qwen3Sq8StackRuntime {
         }
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
         self.next_paged_decode_position = None;
         self.paged_m1_sequence_active = false;
         let copy_result = self
@@ -874,6 +972,7 @@ impl Qwen3Sq8StackRuntime {
         self.validate_execution_preconditions()?;
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
         self.next_paged_decode_position = None;
         self.paged_m1_sequence_active = false;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
@@ -951,6 +1050,7 @@ impl Qwen3Sq8StackRuntime {
 
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
         let profile = Sq8LayerExecutionProfile::Rdna4W8a8BlockCk;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
         for (layer_index, cache) in caches.iter_mut().enumerate() {
@@ -998,6 +1098,139 @@ impl Qwen3Sq8StackRuntime {
         self.state.mark_output_ready()?;
         self.last_execution_report = Some(stack);
         self.next_paged_decode_position = Some(self.config.sequence_len);
+        Ok(report)
+    }
+
+    pub(crate) fn run_paged_serving_m8_chunk_optimized_synchronized(
+        &mut self,
+        input: &RuntimeBuffer,
+        prefix_position: usize,
+        caches: &mut [PagedDecodeState],
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ServingChunkExecutionReport, String> {
+        self.validate_runtime_contract()?;
+        self.state.ensure_usable()?;
+        if !self.paged_m1_sequence_active {
+            return Err("Qwen3-14B SQ8 serving paged sequence is not active".into());
+        }
+        if self.config.sequence_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving prefill chunk requires M={}, got M={}",
+                QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS, self.config.sequence_len
+            ));
+        }
+        if !prefix_position.is_multiple_of(QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS) {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving prefill chunk position must be a multiple of {}, got {prefix_position}",
+                QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+            ));
+        }
+        validate_paged_cache_layer_count(caches)?;
+        validate_hip_only_guards()?;
+        validate_paged_prefill_chunk_hip_only_guards()?;
+        let expected_position = self.next_paged_decode_position.ok_or_else(|| {
+            "Qwen3-14B SQ8 serving prefill chunk requires an active cursor".to_string()
+        })?;
+        if prefix_position != expected_position {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving prefill chunk position is not monotonic: expected={expected_position} actual={prefix_position}"
+            ));
+        }
+        let expected_input_bytes = hidden_bytes(self.config)?;
+        if input.size()? != expected_input_bytes {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving prefill chunk input byte size mismatch: expected={expected_input_bytes} actual={}",
+                input.size()?
+            ));
+        }
+        if let Some((layer_index, cache)) = caches
+            .iter()
+            .enumerate()
+            .find(|(_, cache)| cache.written_len() != prefix_position)
+        {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving prefill chunk layer {layer_index} cache position mismatch: expected={prefix_position} actual={}",
+                cache.written_len()
+            ));
+        }
+
+        self.state.mark_needs_input()?;
+        self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
+        if let Err(err) = self.resident_hidden.copy_from_buffer(
+            0,
+            input,
+            0,
+            expected_input_bytes,
+            Some(&mut *stream),
+        ) {
+            return Err(self.poison_after_stream_recovery(
+                stream,
+                format!("failed to copy Qwen3-14B SQ8 serving prefill chunk input D2D: {err}"),
+            ));
+        }
+
+        let profile = Sq8LayerExecutionProfile::Rdna4W8a8BlockCk;
+        let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
+        for (layer_index, cache) in caches.iter_mut().enumerate() {
+            match self.enqueue_layer_and_copy_cached_prefix_chunk(
+                layer_index,
+                profile,
+                prefix_position,
+                cache,
+                stream,
+            ) {
+                Ok(report) => layer_reports.push(report),
+                Err(err) => return Err(self.poison_after_stream_recovery(stream, err)),
+            }
+        }
+        if let Err(err) = stream.synchronize() {
+            return Err(self.poison_with_error(format!(
+                "failed to synchronize Qwen3-14B SQ8 serving prefill chunk: {err}"
+            )));
+        }
+        let stack = build_report(
+            self.config,
+            &self.artifact_content_sha256,
+            profile,
+            Sq8StackExecutionMode::SynchronizedResident,
+            Sq8StackInputOrigin::PreviouslyUploadedResident,
+            layer_reports,
+            0,
+            1,
+            0,
+            false,
+        )
+        .map_err(|err| {
+            self.poison_with_error(format!(
+                "Qwen3-14B SQ8 serving prefill chunk report validation failed: {err}"
+            ))
+        })?;
+        let report = Sq8ServingChunkExecutionReport {
+            prefix_position,
+            chunk_len: QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+            cache_lengths: cache_lengths_array(caches)?,
+            kv_write_calls: QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS * QWEN3_14B_SQ8_STACK_LAYERS,
+            cached_prefix_attention_calls: QWEN3_14B_SQ8_STACK_LAYERS,
+            input_d2d_copy_count: 1,
+            stack: stack.clone(),
+        };
+        if let Err(err) = report.validate_contract() {
+            return Err(self.poison_with_error(format!(
+                "Qwen3-14B SQ8 serving prefill chunk contract failed: {err}"
+            )));
+        }
+        let next_position = prefix_position
+            .checked_add(QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS)
+            .ok_or_else(|| {
+                self.poison_with_error(
+                    "Qwen3-14B SQ8 serving prefill chunk cursor overflows".into(),
+                )
+            })?;
+        self.state.mark_output_ready()?;
+        self.last_execution_report = Some(stack);
+        self.last_serving_chunk_report = Some(report.clone());
+        self.next_paged_decode_position = Some(next_position);
         Ok(report)
     }
 
@@ -1069,6 +1302,7 @@ impl Qwen3Sq8StackRuntime {
             ));
         }
 
+        self.last_serving_chunk_report = None;
         decode.output_ready = false;
         decode.last_execution_report = None;
         if let Err(err) = decode.resident_hidden.copy_from_buffer(
@@ -1169,6 +1403,7 @@ impl Qwen3Sq8StackRuntime {
         let output_bytes = hidden_bytes(self.config)?;
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
         self.next_paged_decode_position = None;
         self.paged_m1_sequence_active = false;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
@@ -1323,6 +1558,52 @@ impl Qwen3Sq8StackRuntime {
         Ok(report)
     }
 
+    fn enqueue_layer_and_copy_cached_prefix_chunk(
+        &mut self,
+        layer_index: usize,
+        profile: Sq8LayerExecutionProfile,
+        prefix_position: usize,
+        cache: &mut PagedDecodeState,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8LayerExecutionReport, String> {
+        let weights = self.weights.get(layer_index).ok_or_else(|| {
+            format!("Qwen3-14B SQ8 stack layer index {layer_index} is out of range")
+        })?;
+        if weights.layer_index != layer_index {
+            return Err(format!(
+                "Qwen3-14B SQ8 stack layer order mismatch: slot={layer_index} weight={}",
+                weights.layer_index
+            ));
+        }
+        let report = self
+            .workspace
+            .enqueue_cached_prefix_chunk_with_paged_kv(
+                weights,
+                &self.resident_hidden,
+                profile,
+                prefix_position,
+                cache,
+                stream,
+            )
+            .map_err(|err| {
+                format!("Qwen3-14B SQ8 serving prefill chunk layer {layer_index} failed: {err}")
+            })?;
+        self.resident_hidden
+            .copy_from_buffer(
+                0,
+                self.workspace.output_buffer(),
+                0,
+                hidden_bytes(self.config)?,
+                Some(&mut *stream),
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to copy Qwen3-14B SQ8 serving prefill chunk layer {layer_index} output D2D: {err}"
+                )
+            })?;
+        Ok(report)
+    }
+
     fn enqueue_paged_decode_layer_and_copy(
         &self,
         decode: &mut Qwen3Sq8PagedDecodeRuntime,
@@ -1414,6 +1695,7 @@ impl Qwen3Sq8StackRuntime {
 
     fn poison_with_error(&mut self, error: String) -> String {
         self.last_execution_report = None;
+        self.last_serving_chunk_report = None;
         self.next_paged_decode_position = None;
         self.paged_m1_sequence_active = false;
         self.state.poison(error.clone());
@@ -1722,6 +2004,20 @@ fn validate_paged_hip_only_guards() -> Result<(), String> {
     Ok(())
 }
 
+fn validate_paged_prefill_chunk_hip_only_guards() -> Result<(), String> {
+    let missing = QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_none())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Qwen3-14B SQ8 serving prefill chunk requires HIP-only KV primitives; set these no-staging guards before process start: {}",
+            missing.join(",")
+        ));
+    }
+    Ok(())
+}
+
 fn validate_sha256(value: &str) -> Result<(), String> {
     if value.len() != 64
         || !value
@@ -1971,6 +2267,46 @@ mod tests {
         let mut wrong_decode = decode.clone();
         wrong_decode.input_d2d_copy_count = 0;
         assert!(wrong_decode.validate_contract().is_err());
+    }
+
+    #[test]
+    fn serving_chunk_report_binds_m8_prefix_and_cache_progress() {
+        let stack = build_report(
+            Qwen3Sq8LayerConfig::qwen3_14b(8, 0).unwrap(),
+            &"b".repeat(64),
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+            Sq8StackExecutionMode::SynchronizedResident,
+            Sq8StackInputOrigin::PreviouslyUploadedResident,
+            vec![ck_report(8); 40],
+            0,
+            1,
+            0,
+            false,
+        )
+        .unwrap();
+        let report = Sq8ServingChunkExecutionReport {
+            prefix_position: 16,
+            chunk_len: 8,
+            stack,
+            cache_lengths: [24; 40],
+            kv_write_calls: 320,
+            cached_prefix_attention_calls: 40,
+            input_d2d_copy_count: 1,
+        };
+        report.validate_contract().unwrap();
+
+        let mut bad = report.clone();
+        bad.prefix_position = 17;
+        assert!(bad.validate_contract().is_err());
+        let mut bad = report.clone();
+        bad.cache_lengths[17] = 23;
+        assert!(bad.validate_contract().is_err());
+        let mut bad = report.clone();
+        bad.kv_write_calls = 319;
+        assert!(bad.validate_contract().is_err());
+        let mut bad = report;
+        bad.cached_prefix_attention_calls = 39;
+        assert!(bad.validate_contract().is_err());
     }
 
     #[test]

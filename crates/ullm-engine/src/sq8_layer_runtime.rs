@@ -30,6 +30,11 @@ pub const QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV: [&str; 2] = [
     "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
 ];
+pub const QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS: usize = 8;
+pub const QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV: [&str; 2] = [
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sq8LayerExecutionProfile {
@@ -303,6 +308,10 @@ pub struct Qwen3Sq8LayerWorkspace {
 enum Sq8LayerAttentionMode<'a> {
     Causal,
     PrefillPaged(&'a mut PagedDecodeState),
+    CachedPrefixChunk {
+        prefix_position: usize,
+        cache: &'a mut PagedDecodeState,
+    },
     DecodePaged {
         position: usize,
         cache: &'a mut PagedDecodeState,
@@ -541,6 +550,27 @@ impl Qwen3Sq8LayerWorkspace {
         )
     }
 
+    pub(crate) fn enqueue_cached_prefix_chunk_with_paged_kv(
+        &mut self,
+        weights: &Qwen3Sq8LayerWeights,
+        input: &RuntimeBuffer,
+        profile: Sq8LayerExecutionProfile,
+        prefix_position: usize,
+        cache: &mut PagedDecodeState,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8LayerExecutionReport, String> {
+        self.enqueue_with_attention(
+            weights,
+            input,
+            profile,
+            Sq8LayerAttentionMode::CachedPrefixChunk {
+                prefix_position,
+                cache,
+            },
+            stream,
+        )
+    }
+
     fn enqueue_with_attention(
         &mut self,
         weights: &Qwen3Sq8LayerWeights,
@@ -566,6 +596,30 @@ impl Qwen3Sq8LayerWorkspace {
                 }
                 validate_paged_no_host_staging_contract()?;
                 0
+            }
+            Sq8LayerAttentionMode::CachedPrefixChunk {
+                prefix_position,
+                cache,
+            } => {
+                if m != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS {
+                    return Err(format!(
+                        "Qwen3-14B SQ8 cached-prefix prefill requires M={}, got M={m}",
+                        QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+                    ));
+                }
+                if *prefix_position != cache.written_len() {
+                    return Err(format!(
+                        "Qwen3-14B SQ8 cached-prefix prefill position {prefix_position} does not match cache written_len {}",
+                        cache.written_len()
+                    ));
+                }
+                let required_len = prefix_position.checked_add(m).ok_or_else(|| {
+                    "Qwen3-14B SQ8 cached-prefix prefill position overflows".to_string()
+                })?;
+                validate_paged_cache_contract(cache, required_len)?;
+                validate_identity_block_table(cache)?;
+                validate_paged_prefill_chunk_no_host_staging_contract()?;
+                *prefix_position
             }
             Sq8LayerAttentionMode::DecodePaged { position, cache } => {
                 if m != 1 {
@@ -723,6 +777,28 @@ impl Qwen3Sq8LayerWorkspace {
                     &mut self.attention,
                     Some(&mut *stream),
                 )?;
+            }
+            Sq8LayerAttentionMode::CachedPrefixChunk {
+                prefix_position,
+                cache,
+            } => {
+                let written = cache.prefill_chunk_from_device(
+                    stream,
+                    &self.q_rope,
+                    &self.k_rope,
+                    &self.v_projected,
+                    m,
+                    softmax_scale,
+                    &mut self.attention,
+                )?;
+                let expected_end = prefix_position.checked_add(m).ok_or_else(|| {
+                    "Qwen3-14B SQ8 cached-prefix prefill range overflows".to_string()
+                })?;
+                if written != (prefix_position..expected_end) {
+                    return Err(format!(
+                        "Qwen3-14B SQ8 cached-prefix prefill KV range mismatch: expected={prefix_position}..{expected_end} actual={written:?}"
+                    ));
+                }
             }
             Sq8LayerAttentionMode::DecodePaged { position, cache } => {
                 let step = cache.decode_step_from_device(
@@ -1215,6 +1291,35 @@ fn validate_paged_no_host_staging_contract() -> Result<(), String> {
         return Err(format!(
             "Qwen3-14B SQ8 paged decode requires HIP-only KV primitives; set these no-staging guards before process start: {}",
             missing.join(",")
+        ));
+    }
+    Ok(())
+}
+
+fn validate_paged_prefill_chunk_no_host_staging_contract() -> Result<(), String> {
+    let missing = QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_none())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Qwen3-14B SQ8 cached-prefix prefill requires HIP-only KV primitives; set these no-staging guards before process start: {}",
+            missing.join(",")
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identity_block_table(cache: &PagedDecodeState) -> Result<(), String> {
+    if let Some((logical_block, physical_block)) = cache
+        .block_table()
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(logical_block, physical_block)| *physical_block as usize != *logical_block)
+    {
+        return Err(format!(
+            "Qwen3-14B SQ8 cached-prefix prefill requires an identity block table: block_table[{logical_block}]={physical_block}"
         ));
     }
     Ok(())

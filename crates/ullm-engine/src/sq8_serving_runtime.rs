@@ -631,8 +631,11 @@ impl Qwen3Sq8ServingSession {
         }
         let expected_table = qwen3_14b_sq8_serving_block_table()?;
         let preflight = (|| {
-            self.stack
-                .validate_paged_m1_sequence_start(&self.decode, self.caches.as_ref())?;
+            self.stack.validate_paged_serving_sequence_start(
+                &self.decode,
+                self.caches.as_ref(),
+                false,
+            )?;
             self.embedding.validate_serving_preflight()?;
             self.head.validate_serving_preflight()?;
             Ok::<(), String>(())
@@ -670,7 +673,7 @@ impl Qwen3Sq8ServingSession {
                 ),
             ));
         }
-        self.stack.begin_paged_m1_sequence();
+        self.stack.begin_paged_serving_sequence();
         self.active = Some(active);
         self.state = Sq8ServingRuntimeStatus::Prefilling;
         Ok(())
