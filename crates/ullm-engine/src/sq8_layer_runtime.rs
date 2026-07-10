@@ -1,6 +1,7 @@
 // Copyright 2026 uLLM contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::decoder::{PagedDecodeShape, PagedDecodeState};
 use crate::host_bytes::{decode_f32_le_values, encode_f32_to_bytes};
 use crate::sq_canonical::Sq8CanonicalArtifact;
 use crate::sq_runtime::{Sq8CanonicalResidentRuntimeTensor, load_sq8_canonical_resident_tensor};
@@ -24,6 +25,10 @@ pub const QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV: [&str; 5] = [
     "ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL",
     "ULLM_REQUIRE_HIP_ADD_KERNEL",
     "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL",
+];
+pub const QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV: [&str; 2] = [
+    "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
+    "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +300,15 @@ pub struct Qwen3Sq8LayerWorkspace {
     down_activation: Sq8CkQuantizedActivation,
 }
 
+enum Sq8LayerAttentionMode<'a> {
+    Causal,
+    PrefillPaged(&'a mut PagedDecodeState),
+    DecodePaged {
+        position: usize,
+        cache: &'a mut PagedDecodeState,
+    },
+}
+
 impl Qwen3Sq8LayerWorkspace {
     pub fn allocate(
         context: &mut RuntimeContext,
@@ -413,11 +427,103 @@ impl Qwen3Sq8LayerWorkspace {
         profile: Sq8LayerExecutionProfile,
         stream: &mut RuntimeStream,
     ) -> Result<Sq8LayerExecutionReport, String> {
+        self.enqueue_with_attention(
+            weights,
+            input,
+            profile,
+            Sq8LayerAttentionMode::Causal,
+            stream,
+        )
+    }
+
+    pub(crate) fn enqueue_prefill_with_paged_kv(
+        &mut self,
+        weights: &Qwen3Sq8LayerWeights,
+        input: &RuntimeBuffer,
+        profile: Sq8LayerExecutionProfile,
+        cache: &mut PagedDecodeState,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8LayerExecutionReport, String> {
+        self.enqueue_with_attention(
+            weights,
+            input,
+            profile,
+            Sq8LayerAttentionMode::PrefillPaged(cache),
+            stream,
+        )
+    }
+
+    pub(crate) fn enqueue_paged_decode(
+        &mut self,
+        weights: &Qwen3Sq8LayerWeights,
+        input: &RuntimeBuffer,
+        profile: Sq8LayerExecutionProfile,
+        position: usize,
+        cache: &mut PagedDecodeState,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8LayerExecutionReport, String> {
+        self.enqueue_with_attention(
+            weights,
+            input,
+            profile,
+            Sq8LayerAttentionMode::DecodePaged { position, cache },
+            stream,
+        )
+    }
+
+    fn enqueue_with_attention(
+        &mut self,
+        weights: &Qwen3Sq8LayerWeights,
+        input: &RuntimeBuffer,
+        profile: Sq8LayerExecutionProfile,
+        attention_mode: Sq8LayerAttentionMode<'_>,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8LayerExecutionReport, String> {
         self.ensure_usable()?;
         self.last_profile = None;
         self.config.validate()?;
         validate_no_host_staging_contract()?;
         let m = self.config.sequence_len;
+        let position_offset = match &attention_mode {
+            Sq8LayerAttentionMode::Causal => self.config.position_offset,
+            Sq8LayerAttentionMode::PrefillPaged(cache) => {
+                validate_paged_cache_contract(cache, m)?;
+                if cache.written_len() != 0 {
+                    return Err(format!(
+                        "Qwen3-14B SQ8 prefill requires an empty paged KV cache, got written_len={}",
+                        cache.written_len()
+                    ));
+                }
+                validate_paged_no_host_staging_contract()?;
+                0
+            }
+            Sq8LayerAttentionMode::DecodePaged { position, cache } => {
+                if m != 1 {
+                    return Err(format!(
+                        "Qwen3-14B SQ8 paged decode requires M=1, got M={m}"
+                    ));
+                }
+                if *position != cache.written_len() {
+                    return Err(format!(
+                        "Qwen3-14B SQ8 paged decode position {position} does not match cache written_len {}",
+                        cache.written_len()
+                    ));
+                }
+                validate_paged_cache_contract(
+                    cache,
+                    position.checked_add(1).ok_or_else(|| {
+                        "Qwen3-14B SQ8 paged decode position overflows".to_string()
+                    })?,
+                )?;
+                validate_paged_no_host_staging_contract()?;
+                *position
+            }
+        };
+        if position_offset > QWEN3_14B_SQ8_MAX_EXACT_F32_POSITION {
+            return Err(format!(
+                "Qwen3-14B SQ8 layer position {position_offset} exceeds exact F32 integer range"
+            ));
+        }
         let hidden_elements = checked_elements(m, QWEN3_14B_HIDDEN_SIZE, "hidden")?;
         let intermediate_elements =
             checked_elements(m, QWEN3_14B_INTERMEDIATE_SIZE, "intermediate")?;
@@ -495,7 +601,7 @@ impl Qwen3Sq8LayerWorkspace {
             QWEN3_14B_Q_HEADS,
             QWEN3_14B_HEAD_DIM,
             QWEN3_14B_HEAD_DIM,
-            self.config.position_offset,
+            position_offset,
             self.config.rope_theta,
             &mut self.q_rope,
             Some(&mut *stream),
@@ -506,24 +612,75 @@ impl Qwen3Sq8LayerWorkspace {
             QWEN3_14B_KV_HEADS,
             QWEN3_14B_HEAD_DIM,
             QWEN3_14B_HEAD_DIM,
-            self.config.position_offset,
+            position_offset,
             self.config.rope_theta,
             &mut self.k_rope,
             Some(&mut *stream),
         )?;
-        causal_attn_f32(
-            &self.q_rope,
-            &self.k_rope,
-            &self.v_projected,
-            m,
-            QWEN3_14B_Q_HEADS,
-            QWEN3_14B_KV_HEADS,
-            QWEN3_14B_HEAD_DIM,
-            QWEN3_14B_VALUE_DIM,
-            1.0 / (QWEN3_14B_HEAD_DIM as f32).sqrt(),
-            &mut self.attention,
-            Some(&mut *stream),
-        )?;
+        let softmax_scale = 1.0 / (QWEN3_14B_HEAD_DIM as f32).sqrt();
+        match attention_mode {
+            Sq8LayerAttentionMode::Causal => causal_attn_f32(
+                &self.q_rope,
+                &self.k_rope,
+                &self.v_projected,
+                m,
+                QWEN3_14B_Q_HEADS,
+                QWEN3_14B_KV_HEADS,
+                QWEN3_14B_HEAD_DIM,
+                QWEN3_14B_VALUE_DIM,
+                softmax_scale,
+                &mut self.attention,
+                Some(&mut *stream),
+            )?,
+            Sq8LayerAttentionMode::PrefillPaged(cache) => {
+                let written =
+                    cache.write_sequence_from_device(stream, &self.k_rope, &self.v_projected, m)?;
+                if written != (0..m) {
+                    return Err(format!(
+                        "Qwen3-14B SQ8 prefill paged KV range mismatch: expected=0..{m} actual={written:?}"
+                    ));
+                }
+                causal_attn_f32(
+                    &self.q_rope,
+                    &self.k_rope,
+                    &self.v_projected,
+                    m,
+                    QWEN3_14B_Q_HEADS,
+                    QWEN3_14B_KV_HEADS,
+                    QWEN3_14B_HEAD_DIM,
+                    QWEN3_14B_VALUE_DIM,
+                    softmax_scale,
+                    &mut self.attention,
+                    Some(&mut *stream),
+                )?;
+            }
+            Sq8LayerAttentionMode::DecodePaged { position, cache } => {
+                let step = cache.decode_step_from_device(
+                    stream,
+                    &self.q_rope,
+                    &self.k_rope,
+                    &self.v_projected,
+                    softmax_scale,
+                )?;
+                if step.cache_position != position || step.cache_len != position + 1 {
+                    return Err(format!(
+                        "Qwen3-14B SQ8 paged decode state mismatch: position={} cache_len={} expected_position={position}",
+                        step.cache_position, step.cache_len
+                    ));
+                }
+                self.attention
+                    .copy_from_buffer(
+                        0,
+                        cache.output_buffer(),
+                        0,
+                        hidden_elements * std::mem::size_of::<f32>(),
+                        Some(&mut *stream),
+                    )
+                    .map_err(|err| {
+                        format!("failed to copy Qwen3-14B SQ8 paged attention output: {err}")
+                    })?;
+            }
+        }
 
         if profile == Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
             self.o_activation
@@ -974,6 +1131,52 @@ fn validate_no_host_staging_contract() -> Result<(), String> {
         return Err(format!(
             "Qwen3-14B SQ8 layer requires HIP-only primitive execution; set these no-staging guards before process start: {}",
             missing.join(",")
+        ));
+    }
+    Ok(())
+}
+
+fn validate_paged_no_host_staging_contract() -> Result<(), String> {
+    let missing = QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_none())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Qwen3-14B SQ8 paged decode requires HIP-only KV primitives; set these no-staging guards before process start: {}",
+            missing.join(",")
+        ));
+    }
+    Ok(())
+}
+
+fn validate_paged_cache_contract(
+    cache: &PagedDecodeState,
+    required_len: usize,
+) -> Result<(), String> {
+    let shape = cache.shape();
+    let expected = PagedDecodeShape {
+        block_size: shape.block_size,
+        cache_blocks: shape.cache_blocks,
+        q_heads: QWEN3_14B_Q_HEADS,
+        kv_heads: QWEN3_14B_KV_HEADS,
+        head_dim: QWEN3_14B_HEAD_DIM,
+        value_dim: QWEN3_14B_VALUE_DIM,
+    };
+    if shape != expected {
+        return Err(format!(
+            "Qwen3-14B SQ8 paged KV shape mismatch: expected q_heads={} kv_heads={} head_dim={} value_dim={} actual={shape:?}",
+            QWEN3_14B_Q_HEADS, QWEN3_14B_KV_HEADS, QWEN3_14B_HEAD_DIM, QWEN3_14B_VALUE_DIM
+        ));
+    }
+    let logical_capacity = cache
+        .block_table()
+        .len()
+        .checked_mul(shape.block_size)
+        .ok_or_else(|| "Qwen3-14B SQ8 paged KV logical capacity overflows".to_string())?;
+    if required_len == 0 || required_len > logical_capacity {
+        return Err(format!(
+            "Qwen3-14B SQ8 paged KV required length {required_len} exceeds logical capacity {logical_capacity}"
         ));
     }
     Ok(())

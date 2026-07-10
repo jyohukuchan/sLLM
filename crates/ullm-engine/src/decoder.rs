@@ -70,9 +70,9 @@ pub struct Qwen3DecoderLayerOutputStep {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PagedDecodeDeviceStepOutput {
-    cache_position: usize,
-    cache_len: usize,
+pub(crate) struct PagedDecodeDeviceStepOutput {
+    pub(crate) cache_position: usize,
+    pub(crate) cache_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2078,6 +2078,66 @@ impl PagedDecodeState {
         Ok(())
     }
 
+    pub(crate) fn write_sequence_from_device(
+        &mut self,
+        stream: &mut RuntimeStream,
+        k_sequence: &RuntimeBuffer,
+        v_sequence: &RuntimeBuffer,
+        token_count: usize,
+    ) -> Result<std::ops::Range<usize>, String> {
+        if token_count == 0 {
+            return Err("paged decoder device KV sequence must contain at least one token".into());
+        }
+        let start = self.written_len;
+        let end = start
+            .checked_add(token_count)
+            .ok_or_else(|| "paged decoder device KV sequence position overflows".to_string())?;
+        self.validate_cache_position(end - 1)?;
+
+        let k_token_bytes = f32_bytes(self.shape.k_token_elements()?);
+        let v_token_bytes = f32_bytes(self.shape.v_token_elements()?);
+        let expected_k_bytes = k_token_bytes
+            .checked_mul(token_count)
+            .ok_or_else(|| "paged decoder device K sequence byte size overflows".to_string())?;
+        let expected_v_bytes = v_token_bytes
+            .checked_mul(token_count)
+            .ok_or_else(|| "paged decoder device V sequence byte size overflows".to_string())?;
+        validate_device_buffer_bytes(k_sequence, expected_k_bytes, "K sequence")?;
+        validate_device_buffer_bytes(v_sequence, expected_v_bytes, "V sequence")?;
+
+        for token_index in 0..token_count {
+            let k_offset = k_token_bytes
+                .checked_mul(token_index)
+                .ok_or_else(|| "paged decoder device K offset overflows".to_string())?;
+            let v_offset = v_token_bytes
+                .checked_mul(token_index)
+                .ok_or_else(|| "paged decoder device V offset overflows".to_string())?;
+            self.k_token_buffer
+                .copy_from_buffer(0, k_sequence, k_offset, k_token_bytes, Some(&mut *stream))
+                .map_err(|err| format!("failed to copy paged decoder device K token: {err}"))?;
+            self.v_token_buffer
+                .copy_from_buffer(0, v_sequence, v_offset, v_token_bytes, Some(&mut *stream))
+                .map_err(|err| format!("failed to copy paged decoder device V token: {err}"))?;
+            ullm_runtime_sys::paged_kv_write_f32(
+                &self.k_token_buffer,
+                &self.v_token_buffer,
+                &self.block_table_buffer,
+                start + token_index,
+                self.shape.block_size,
+                self.shape.cache_blocks,
+                self.shape.kv_heads,
+                self.shape.head_dim,
+                self.shape.value_dim,
+                &mut self.k_cache_buffer,
+                &mut self.v_cache_buffer,
+                Some(&mut *stream),
+            )
+            .map_err(|err| format!("failed to run paged decoder device KV write: {err}"))?;
+            self.written_len = start + token_index + 1;
+        }
+        Ok(start..end)
+    }
+
     pub fn decode_step(
         &mut self,
         stream: &mut RuntimeStream,
@@ -2178,6 +2238,89 @@ impl PagedDecodeState {
         })
     }
 
+    pub(crate) fn decode_step_from_device(
+        &mut self,
+        stream: &mut RuntimeStream,
+        q: &RuntimeBuffer,
+        k: &RuntimeBuffer,
+        v: &RuntimeBuffer,
+        softmax_scale: f32,
+    ) -> Result<PagedDecodeDeviceStepOutput, String> {
+        validate_softmax_scale(softmax_scale)?;
+        validate_device_buffer_bytes(q, f32_bytes(self.shape.q_elements()?), "Q token")?;
+        validate_device_buffer_bytes(k, f32_bytes(self.shape.k_token_elements()?), "K token")?;
+        validate_device_buffer_bytes(v, f32_bytes(self.shape.v_token_elements()?), "V token")?;
+
+        let cache_position = self.written_len;
+        self.validate_cache_position(cache_position)?;
+        self.q_buffer
+            .copy_from_buffer(
+                0,
+                q,
+                0,
+                f32_bytes(self.shape.q_elements()?),
+                Some(&mut *stream),
+            )
+            .map_err(|err| format!("failed to copy paged decoder device Q token: {err}"))?;
+        self.k_token_buffer
+            .copy_from_buffer(
+                0,
+                k,
+                0,
+                f32_bytes(self.shape.k_token_elements()?),
+                Some(&mut *stream),
+            )
+            .map_err(|err| format!("failed to copy paged decoder device K token: {err}"))?;
+        self.v_token_buffer
+            .copy_from_buffer(
+                0,
+                v,
+                0,
+                f32_bytes(self.shape.v_token_elements()?),
+                Some(&mut *stream),
+            )
+            .map_err(|err| format!("failed to copy paged decoder device V token: {err}"))?;
+
+        ullm_runtime_sys::paged_kv_write_f32(
+            &self.k_token_buffer,
+            &self.v_token_buffer,
+            &self.block_table_buffer,
+            cache_position,
+            self.shape.block_size,
+            self.shape.cache_blocks,
+            self.shape.kv_heads,
+            self.shape.head_dim,
+            self.shape.value_dim,
+            &mut self.k_cache_buffer,
+            &mut self.v_cache_buffer,
+            Some(&mut *stream),
+        )
+        .map_err(|err| format!("failed to run paged decoder device KV write: {err}"))?;
+        self.written_len = cache_position + 1;
+        let cache_len = self.written_len;
+        ullm_runtime_sys::paged_decode_attn_f32(
+            &self.q_buffer,
+            &self.k_cache_buffer,
+            &self.v_cache_buffer,
+            &self.block_table_buffer,
+            cache_len,
+            self.shape.block_size,
+            self.shape.cache_blocks,
+            self.shape.q_heads,
+            self.shape.kv_heads,
+            self.shape.head_dim,
+            self.shape.value_dim,
+            softmax_scale,
+            &mut self.output_buffer,
+            Some(&mut *stream),
+        )
+        .map_err(|err| format!("failed to run paged decoder device attention: {err}"))?;
+        Ok(PagedDecodeDeviceStepOutput {
+            cache_position,
+            cache_len,
+        })
+    }
+
     pub fn decode_written(
         &mut self,
         stream: &mut RuntimeStream,
@@ -2224,7 +2367,7 @@ impl PagedDecodeState {
         read_f32_buffer(&self.output_buffer, stream, self.shape.output_elements()?)
     }
 
-    fn output_buffer(&self) -> &RuntimeBuffer {
+    pub(crate) fn output_buffer(&self) -> &RuntimeBuffer {
         &self.output_buffer
     }
 
@@ -2289,6 +2432,27 @@ impl PagedDecodeState {
         }
         Ok(())
     }
+}
+
+fn validate_device_buffer_bytes(
+    buffer: &RuntimeBuffer,
+    expected_bytes: usize,
+    label: &str,
+) -> Result<(), String> {
+    let actual_bytes = buffer.size()?;
+    if actual_bytes != expected_bytes {
+        return Err(format!(
+            "paged decoder device {label} byte size mismatch: expected={expected_bytes} actual={actual_bytes}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_softmax_scale(softmax_scale: f32) -> Result<(), String> {
+    if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
+        return Err("paged decoder softmax_scale must be finite and greater than zero".into());
+    }
+    Ok(())
 }
 
 impl Qwen3SelfAttnDecodeState {
@@ -3150,6 +3314,93 @@ mod tests {
             assert_f32s_close(&step.output, &expected, 1e-5);
         }
         assert_eq!(state.written_len(), cache_len);
+    }
+
+    #[test]
+    fn paged_decode_state_device_sequence_and_step_match_host_path_cpu() {
+        let mut context = RuntimeContext::create(0).unwrap();
+        let mut stream = context.create_stream().unwrap();
+        let shape = PagedDecodeShape {
+            block_size: 2,
+            cache_blocks: 4,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 3,
+            value_dim: 2,
+        };
+        let block_table = vec![3_u32, 0_u32];
+        let prompt_len = 2_usize;
+        let logical_k = (0..(prompt_len + 1) * shape.k_token_elements().unwrap())
+            .map(|index| ((index * 3) as f32 - 7.0) / 13.0)
+            .collect::<Vec<_>>();
+        let logical_v = (0..(prompt_len + 1) * shape.v_token_elements().unwrap())
+            .map(|index| ((index * 5) as f32 - 9.0) / 17.0)
+            .collect::<Vec<_>>();
+        let q = (0..shape.q_elements().unwrap())
+            .map(|index| ((index * 7) as f32 - 11.0) / 19.0)
+            .collect::<Vec<_>>();
+
+        let prompt_k = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_k[..prompt_len * shape.k_token_elements().unwrap()],
+        );
+        let prompt_v = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_v[..prompt_len * shape.v_token_elements().unwrap()],
+        );
+        let q_buffer = upload_test_f32_buffer(&mut context, &mut stream, &q);
+        let decode_k = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_k[prompt_len * shape.k_token_elements().unwrap()..],
+        );
+        let decode_v = upload_test_f32_buffer(
+            &mut context,
+            &mut stream,
+            &logical_v[prompt_len * shape.v_token_elements().unwrap()..],
+        );
+
+        let mut state =
+            PagedDecodeState::new(&mut context, &mut stream, shape, block_table.clone()).unwrap();
+        let written = state
+            .write_sequence_from_device(&mut stream, &prompt_k, &prompt_v, prompt_len)
+            .unwrap();
+        assert_eq!(written, 0..prompt_len);
+        let step = state
+            .decode_step_from_device(
+                &mut stream,
+                &q_buffer,
+                &decode_k,
+                &decode_v,
+                1.0 / (shape.head_dim as f32).sqrt(),
+            )
+            .unwrap();
+        assert_eq!(step.cache_position, prompt_len);
+        assert_eq!(step.cache_len, prompt_len + 1);
+
+        let cache = state.read_cache_to_host(&mut stream).unwrap();
+        let (expected_k, expected_v) =
+            pack_paged_kv_for_test(&logical_k, &logical_v, &block_table, prompt_len + 1, shape);
+        assert_f32s_close(&cache.k, &expected_k, 1e-6);
+        assert_f32s_close(&cache.v, &expected_v, 1e-6);
+        let output = read_f32_buffer(
+            state.output_buffer(),
+            &mut stream,
+            shape.output_elements().unwrap(),
+        )
+        .unwrap();
+        let expected = expected_paged_decode_attn(
+            &q,
+            &expected_k,
+            &expected_v,
+            &block_table,
+            prompt_len + 1,
+            shape,
+            1.0 / (shape.head_dim as f32).sqrt(),
+        );
+        assert_f32s_close(&output, &expected, 1e-5);
     }
 
     #[test]
@@ -4990,6 +5241,18 @@ mod tests {
         )
         .expect("pack_paged_kv_cache_for_block_table helper");
         (readback.k, readback.v)
+    }
+
+    fn upload_test_f32_buffer(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        values: &[f32],
+    ) -> RuntimeBuffer {
+        let mut buffer = context.alloc_buffer(f32_bytes(values.len())).unwrap();
+        buffer
+            .copy_from_host(0, &f32s_to_le_bytes(values), Some(stream))
+            .unwrap();
+        buffer
     }
 
     fn expected_paged_decode_attn(
