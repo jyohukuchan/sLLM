@@ -14,6 +14,7 @@ pub mod qwen3_loader;
 pub mod qwen3_names;
 pub mod scheduler;
 pub mod sq;
+pub mod sq8_embedding_runtime;
 pub mod sq8_layer_oracle;
 pub mod sq8_layer_runtime;
 pub mod sq8_model_head_runtime;
