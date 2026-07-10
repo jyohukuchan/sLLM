@@ -10,6 +10,8 @@ rocm-ck-gfx1201 = ["ullm-runtime-sys/rocm-ck-gfx1201"]
 
 [dependencies]
 memchr = "2.7"
+rand_chacha = "=0.3.1"
+rand_core = "=0.6.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

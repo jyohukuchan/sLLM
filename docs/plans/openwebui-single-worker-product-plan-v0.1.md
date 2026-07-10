@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 is complete with selected M=128 correctness, deep-boundary, and formal performance gates passed; P8-C is next
+Status: in progress; P8-B2 is complete; P8-C deterministic CPU sampler is implemented and awaiting transactional session/publication integration
 
 Date: 2026-07-10
 
