@@ -34,6 +34,17 @@ Clean build-identity evidence for prompt 32/128/512 is under `p32-p512-clean-28c
 - chunk vs all-M1 worst relative L2: `0.055494862`; minimum cosine: `0.998492050`; top-1 exact for all three prompts
 - chunk vs vLLM source: top-1 exact and top-10 overlap at least 9 for all three prompts
 
+Clean build-identity evidence for prompt 4095 is under `p4095-clean-55562d9/`:
+
+- runner commit: `55562d901d4f8e356b1d1a097903b84515b570cb`
+- binary SHA-256: `74310b7b576cfc4c38e78587553a01fc161fd4a6732dad6df498170c965c43db`
+- both chunk/all-M1 producers recorded `runner_worktree_clean=true`
+- chunk/all-M1 request time: `78.043268 / 369.181784` seconds
+- both paths emitted token `291`, reached position 4094 with all 40 cache lengths at 4095, and returned to the Ready/reset baseline
+- chunk vs all-M1 hidden relative L2/cosine: `0.011411250 / 0.999950021`; logits relative L2/cosine: `0.008940925 / 0.999987181`
+- chunk vs vLLM source hidden relative L2/cosine: `0.019835477 / 0.999888264`; logits relative L2/cosine: `0.020959889 / 0.999974552`
+- both comparisons have exact top-1 and top-10 overlap 10
+
 ## 次の行動
 
-これは接続確認の初期evidenceであり、P8-B2の最終acceptanceではない。prompt 32/128/512/4095、3584+512 deep boundary、TTFT/decode性能gateを別evidenceで追加する。
+prompt 8/32/128/512/4095のcorrectness oracleは完了した。P8-B2の残件は3584+512 deep boundaryと、warmup 2 / repeat 5のTTFT/decode性能gateである。

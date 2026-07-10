@@ -1,0 +1,272 @@
+{
+  "evidence": [
+    {
+      "prefill_implementation": "sq8.fixed-m8-cached-prefix.v1",
+      "prefill_mode": "m8-chunk8",
+      "result_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/p4095-clean-55562d9/chunk.json",
+      "result_sha256": "a134d0462c10641e536a1b2a05325cc8e84bc89a99487db40194940f6038c8e0",
+      "runner_binary_sha256": "74310b7b576cfc4c38e78587553a01fc161fd4a6732dad6df498170c965c43db",
+      "runner_git_commit": "55562d901d4f8e356b1d1a097903b84515b570cb",
+      "runner_worktree_clean": true,
+      "schema_version": "ullm.sq8.serving_chunks.v3"
+    },
+    {
+      "prefill_implementation": "sq8.sequential-m1.v1",
+      "prefill_mode": "all-m1",
+      "result_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/p4095-clean-55562d9/m1.json",
+      "result_sha256": "79418e32e1c970fc192fef6ebf264f3aec8393b27809d3112bf6cc5bae7e2434",
+      "runner_binary_sha256": "74310b7b576cfc4c38e78587553a01fc161fd4a6732dad6df498170c965c43db",
+      "runner_git_commit": "55562d901d4f8e356b1d1a097903b84515b570cb",
+      "runner_worktree_clean": true,
+      "schema_version": "ullm.sq8.serving_smoke.v2"
+    }
+  ],
+  "passed": true,
+  "prompts": [
+    {
+      "captures": {
+        "all_m1_hidden_sha256": "76f5a6825c83a431e5c52bd6f598c31596552c448737cc5f00cccc08cdd12a2f",
+        "all_m1_logits_sha256": "4f5f84fd0b2e708a0a6310d24dec0738f385719ecc83fc7759e8a18319741cc9",
+        "chunk_hidden_sha256": "81010b0d08da2c6d031f4a90a59a76499822dff95469b96c5e6cf0e5593d9cb8",
+        "chunk_logits_sha256": "3cdc2ea9f02a51072f37e3148db243c905c9ff6560092ebf57caf686c05ea3fa"
+      },
+      "chunk_vs_all_m1": {
+        "final_hidden": {
+          "cosine_similarity": 0.9999500205214227,
+          "elements": 5120,
+          "max_abs": 0.6273155212402344,
+          "nonfinite_count": 0,
+          "relative_l2": 0.01141125027055283
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 5.696537971496582,
+              "token_id": 291
+            },
+            {
+              "logit": 3.5798091888427734,
+              "token_id": 280
+            },
+            {
+              "logit": 3.447136878967285,
+              "token_id": 198
+            },
+            {
+              "logit": 3.0526866912841797,
+              "token_id": 287
+            },
+            {
+              "logit": 2.8994483947753906,
+              "token_id": 11
+            },
+            {
+              "logit": 2.8295178413391113,
+              "token_id": 14621
+            },
+            {
+              "logit": 2.770970582962036,
+              "token_id": 1022
+            },
+            {
+              "logit": 2.7676243782043457,
+              "token_id": 17642
+            },
+            {
+              "logit": 2.7666101455688477,
+              "token_id": 271
+            },
+            {
+              "logit": 2.558655261993408,
+              "token_id": 401
+            }
+          ],
+          "cosine_similarity": 0.99998718084352,
+          "elements": 151936,
+          "max_abs": 0.1997690200805664,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 5.603614807128906,
+              "token_id": 291
+            },
+            {
+              "logit": 3.5562033653259277,
+              "token_id": 280
+            },
+            {
+              "logit": 3.3699569702148438,
+              "token_id": 198
+            },
+            {
+              "logit": 3.0349855422973633,
+              "token_id": 287
+            },
+            {
+              "logit": 2.8721351623535156,
+              "token_id": 11
+            },
+            {
+              "logit": 2.8569819927215576,
+              "token_id": 14621
+            },
+            {
+              "logit": 2.79616641998291,
+              "token_id": 1022
+            },
+            {
+              "logit": 2.772732973098755,
+              "token_id": 17642
+            },
+            {
+              "logit": 2.7204012870788574,
+              "token_id": 271
+            },
+            {
+              "logit": 2.5549285411834717,
+              "token_id": 401
+            }
+          ],
+          "relative_l2": 0.00894092461570441,
+          "top_10_overlap": 10,
+          "top_1_exact": true
+        }
+      },
+      "chunk_vs_source": {
+        "final_hidden": {
+          "cosine_similarity": 0.9998882644861765,
+          "elements": 5120,
+          "max_abs": 1.4543724060058594,
+          "nonfinite_count": 0,
+          "relative_l2": 0.01983547703726538
+        },
+        "logits": {
+          "actual_top_10": [
+            {
+              "logit": 5.696537971496582,
+              "token_id": 291
+            },
+            {
+              "logit": 3.5798091888427734,
+              "token_id": 280
+            },
+            {
+              "logit": 3.447136878967285,
+              "token_id": 198
+            },
+            {
+              "logit": 3.0526866912841797,
+              "token_id": 287
+            },
+            {
+              "logit": 2.8994483947753906,
+              "token_id": 11
+            },
+            {
+              "logit": 2.8295178413391113,
+              "token_id": 14621
+            },
+            {
+              "logit": 2.770970582962036,
+              "token_id": 1022
+            },
+            {
+              "logit": 2.7676243782043457,
+              "token_id": 17642
+            },
+            {
+              "logit": 2.7666101455688477,
+              "token_id": 271
+            },
+            {
+              "logit": 2.558655261993408,
+              "token_id": 401
+            }
+          ],
+          "cosine_similarity": 0.9999745524608256,
+          "elements": 151936,
+          "max_abs": 0.32842159271240234,
+          "nonfinite_count": 0,
+          "reference_top_10": [
+            {
+              "logit": 5.5625,
+              "token_id": 291
+            },
+            {
+              "logit": 3.53125,
+              "token_id": 280
+            },
+            {
+              "logit": 3.34375,
+              "token_id": 198
+            },
+            {
+              "logit": 3.0,
+              "token_id": 287
+            },
+            {
+              "logit": 2.859375,
+              "token_id": 11
+            },
+            {
+              "logit": 2.84375,
+              "token_id": 14621
+            },
+            {
+              "logit": 2.765625,
+              "token_id": 1022
+            },
+            {
+              "logit": 2.65625,
+              "token_id": 17642
+            },
+            {
+              "logit": 2.59375,
+              "token_id": 271
+            },
+            {
+              "logit": 2.453125,
+              "token_id": 401
+            }
+          ],
+          "relative_l2": 0.020959888982342658,
+          "top_10_overlap": 10,
+          "top_1_exact": true
+        },
+        "source_greedy_g1_sha256": "b6b377341928ee7f4acc7425ce929e81dce2f1e6bae365fea798897ead9138bc",
+        "source_hidden_sha256": "cd2e9bb7a3a5f28db8388e6ec7d94049f2fa5606cb01658e3c82fd622d139f2d",
+        "source_logits_sha256": "6f1bb44b2c1792e0c0c63db858d939e8a7460e49f3a51f143e97c3591794f9d3"
+      },
+      "prompt_tokens": 4095,
+      "token_id": 291
+    }
+  ],
+  "required_prompts": [
+    4095
+  ],
+  "schema_version": "ullm.sq8.serving_chunks_validation.v1",
+  "source_oracle": {
+    "fixture_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tests/fixtures/sq8-serving-v0.1/oracles/vllm-source-v0.1",
+    "fixture_set_id": "qwen3-14b-fp8-sq8-serving-v0.1",
+    "metadata_sha256": "1710ebf504c3cf84616f265f57575d48b91804635a0c0151875eadc91fbc122b",
+    "payload_manifest_sha256": "5972a024c91509b432e68ee39a3dd1cf7a0f0ba2ba48fe7ef5c0bfb02957405c",
+    "sha256sums_sha256": "d6d083fc5881480de3a60ae413b56c057d4eaed6d96286db554d0e3c50fecec5"
+  },
+  "source_prompts": [
+    4095
+  ],
+  "thresholds": {
+    "chunk_vs_all_m1": {
+      "max_relative_l2": 0.1,
+      "min_cosine_similarity": 0.995,
+      "min_top_10_overlap": 5,
+      "top_1": "exact"
+    },
+    "chunk_vs_source": {
+      "max_relative_l2": 0.2,
+      "min_cosine_similarity": 0.98,
+      "min_top_10_overlap": 3,
+      "top_1": "exact"
+    }
+  }
+}
