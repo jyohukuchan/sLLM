@@ -24,6 +24,16 @@ Files:
 - `runtime-*-captures/`: final prompt hidden/logits raw F32 payloads
 - `runtime-p8-p17-validation.json`: independent validation result
 
+Clean build-identity evidence for prompt 32/128/512 is under `p32-p512-clean-28cd88e/`:
+
+- runner commit: `28cd88eef728c35a492c3c50e22a9b036eeb83c1`
+- binary SHA-256: `74310b7b576cfc4c38e78587553a01fc161fd4a6732dad6df498170c965c43db`
+- both chunk/all-M1 producers recorded `runner_worktree_clean=true`
+- chunk request time at prompt 32/128/512: `0.313870 / 0.613021 / 3.054293` seconds
+- all-M1 request time at prompt 32/128/512: `1.131851 / 3.988003 / 18.741727` seconds
+- chunk vs all-M1 worst relative L2: `0.055494862`; minimum cosine: `0.998492050`; top-1 exact for all three prompts
+- chunk vs vLLM source: top-1 exact and top-10 overlap at least 9 for all three prompts
+
 ## 次の行動
 
 これは接続確認の初期evidenceであり、P8-B2の最終acceptanceではない。prompt 32/128/512/4095、3584+512 deep boundary、TTFT/decode性能gateを別evidenceで追加する。
