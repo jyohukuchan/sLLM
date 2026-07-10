@@ -20,21 +20,23 @@ use crate::sq8_layer_oracle::{
     QWEN3_14B_HEAD_DIM, QWEN3_14B_HIDDEN_SIZE, QWEN3_14B_KV_HEADS, QWEN3_14B_Q_HEADS,
     QWEN3_14B_VALUE_DIM,
 };
-use crate::sq8_layer_runtime::{Qwen3Sq8LayerNormValues, validate_norm_values};
+use crate::sq8_layer_runtime::{
+    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS, Qwen3Sq8LayerNormValues, validate_norm_values,
+};
 use crate::sq8_model_head_runtime::{
     QWEN3_14B_VOCAB_SIZE, Qwen3Sq8ModelHeadRuntime, Sq8ModelHeadDeviceIdentity,
-    validate_qwen3_14b_sq8_r9700_device_info,
+    Sq8ModelHeadServingSource, validate_qwen3_14b_sq8_r9700_device_info,
 };
 use crate::sq8_stack_runtime::{
     QWEN3_14B_SQ8_STACK_LAYERS, Qwen3Sq8PagedDecodeRuntime, Qwen3Sq8StackRuntime,
-    Sq8PagedStackExecutionReport, Sq8PagedStackPhase,
+    Sq8PagedStackExecutionReport, Sq8PagedStackPhase, Sq8ServingChunkExecutionReport,
 };
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use ullm_runtime_sys::{DeviceInfo, RuntimeContext, RuntimeStream};
+use ullm_runtime_sys::{DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream};
 
 pub const QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS: usize = 4096;
 pub const QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS: usize = 16;
@@ -49,6 +51,34 @@ pub const QWEN3_14B_SQ8_SERVING_PACKAGE_MANIFEST_SHA256: &str =
     "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb";
 
 const SERVING_INTERNAL_REQUEST_ID: RequestId = RequestId(1);
+const SQ8_SEQUENTIAL_M1_PREFILL_IMPLEMENTATION: &str = "sq8.sequential-m1.v1";
+const SQ8_FIXED_M8_PREFILL_IMPLEMENTATION: &str = "sq8.fixed-m8-cached-prefix.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sq8ServingPrefillMode {
+    SequentialM1,
+    FixedM8Chunks,
+}
+
+impl Sq8ServingPrefillMode {
+    fn execution_width(self) -> usize {
+        match self {
+            Self::SequentialM1 => 1,
+            Self::FixedM8Chunks => QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+        }
+    }
+
+    fn implementation_id(self) -> &'static str {
+        match self {
+            Self::SequentialM1 => SQ8_SEQUENTIAL_M1_PREFILL_IMPLEMENTATION,
+            Self::FixedM8Chunks => SQ8_FIXED_M8_PREFILL_IMPLEMENTATION,
+        }
+    }
+
+    fn uses_chunks(self) -> bool {
+        self == Self::FixedM8Chunks
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sq8SamplingParams {
@@ -312,6 +342,9 @@ pub struct Sq8ServingLoadReport {
     pub block_table_entries: usize,
     pub kv_cache_bytes_per_layer: usize,
     pub total_kv_cache_bytes: usize,
+    pub prefill_mode: Sq8ServingPrefillMode,
+    pub prefill_chunk_tokens: usize,
+    pub prefill_implementation: String,
     pub prompt_execution_width: usize,
     pub embedding_payload_sha256: String,
     pub final_norm_payload_sha256: String,
@@ -341,7 +374,9 @@ impl Sq8ServingLoadReport {
             || self.kv_cache_bytes_per_layer != qwen3_14b_sq8_serving_kv_cache_bytes_per_layer()?
             || self.total_kv_cache_bytes
                 != qwen3_14b_sq8_serving_total_kv_cache_bytes(QWEN3_14B_SQ8_STACK_LAYERS)?
-            || self.prompt_execution_width != 1
+            || self.prefill_chunk_tokens != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+            || self.prefill_implementation != self.prefill_mode.implementation_id()
+            || self.prompt_execution_width != self.prefill_mode.execution_width()
         {
             return Err(Sq8ServingError::invalid_configuration(
                 "serving resident geometry/load report mismatch",
@@ -413,6 +448,66 @@ enum GeneratedTokenCommit<'a> {
     Decode(&'a [SchedulerDecodeRequest]),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sq8PrefillUnit {
+    start_position: usize,
+    width: usize,
+    is_final: bool,
+}
+
+#[cfg(test)]
+fn plan_prefill_units(
+    prompt_tokens: usize,
+    mode: Sq8ServingPrefillMode,
+) -> Result<Vec<Sq8PrefillUnit>, String> {
+    if prompt_tokens == 0 || prompt_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS {
+        return Err(format!(
+            "serving prefill planner prompt length must be in 1..={}, got {prompt_tokens}",
+            QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
+        ));
+    }
+    let mut units = Vec::with_capacity(prompt_tokens);
+    let mut start_position = 0_usize;
+    while start_position < prompt_tokens {
+        let unit = plan_next_prefill_unit(start_position, prompt_tokens, mode)?;
+        start_position = unit
+            .start_position
+            .checked_add(unit.width)
+            .ok_or_else(|| "serving prefill planner position overflows".to_string())?;
+        units.push(unit);
+    }
+    Ok(units)
+}
+
+fn plan_next_prefill_unit(
+    start_position: usize,
+    prompt_tokens: usize,
+    mode: Sq8ServingPrefillMode,
+) -> Result<Sq8PrefillUnit, String> {
+    if prompt_tokens == 0
+        || prompt_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
+        || start_position >= prompt_tokens
+    {
+        return Err(format!(
+            "serving prefill planner position {start_position} is invalid for prompt length {prompt_tokens}"
+        ));
+    }
+    let remaining = prompt_tokens - start_position;
+    let width = if mode.uses_chunks() && remaining >= QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS {
+        QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+    } else {
+        1
+    };
+    let end = start_position
+        .checked_add(width)
+        .ok_or_else(|| "serving prefill planner position overflows".to_string())?;
+    Ok(Sq8PrefillUnit {
+        start_position,
+        width,
+        is_final: end == prompt_tokens,
+    })
+}
+
 /// Owns one resident Qwen3-14B SQ8 model and one reusable active1/waiting0 session.
 #[derive(Debug)]
 pub struct Qwen3Sq8ServingSession {
@@ -421,6 +516,7 @@ pub struct Qwen3Sq8ServingSession {
     decode: Qwen3Sq8PagedDecodeRuntime,
     caches: Box<[PagedDecodeState; QWEN3_14B_SQ8_STACK_LAYERS]>,
     embedding: Qwen3Sq8EmbeddingRuntime,
+    prompt_chunk_hidden: RuntimeBuffer,
     head: Qwen3Sq8ModelHeadRuntime,
     scheduler: SchedulerState,
     active: Option<ActiveServingRequest>,
@@ -436,6 +532,26 @@ impl Qwen3Sq8ServingSession {
         package_path: impl AsRef<Path>,
         norms: Vec<Qwen3Sq8LayerNormValues>,
         upload_chunk_bytes: usize,
+    ) -> Result<Self, Sq8ServingError> {
+        Self::load_with_prefill_mode(
+            context,
+            stream,
+            artifact,
+            package_path,
+            norms,
+            upload_chunk_bytes,
+            Sq8ServingPrefillMode::FixedM8Chunks,
+        )
+    }
+
+    pub fn load_with_prefill_mode(
+        context: &mut RuntimeContext,
+        stream: &mut RuntimeStream,
+        artifact: &Sq8CanonicalArtifact,
+        package_path: impl AsRef<Path>,
+        norms: Vec<Qwen3Sq8LayerNormValues>,
+        upload_chunk_bytes: usize,
+        prefill_mode: Sq8ServingPrefillMode,
     ) -> Result<Self, Sq8ServingError> {
         if upload_chunk_bytes == 0 {
             return Err(Sq8ServingError::invalid_configuration(
@@ -459,7 +575,7 @@ impl Qwen3Sq8ServingSession {
                 context,
                 stream,
                 artifact,
-                1,
+                QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
                 norms,
                 upload_chunk_bytes,
             )?;
@@ -485,6 +601,17 @@ impl Qwen3Sq8ServingSession {
                     head.package_manifest_sha256()
                 ));
             }
+
+            let prompt_chunk_bytes = qwen3_14b_sq8_serving_prompt_chunk_bytes()?;
+            let mut prompt_chunk_hidden = context
+                .alloc_buffer(prompt_chunk_bytes)
+                .map_err(|err| format!("failed to allocate serving prompt chunk: {err}"))?;
+            prompt_chunk_hidden
+                .zero(0, prompt_chunk_bytes, Some(&mut *stream))
+                .map_err(|err| format!("failed to initialize serving prompt chunk: {err}"))?;
+            stream.synchronize().map_err(|err| {
+                format!("failed to synchronize serving prompt chunk setup: {err}")
+            })?;
 
             let decode = Qwen3Sq8PagedDecodeRuntime::allocate(context)?;
             let cache_shape = qwen3_14b_sq8_serving_cache_shape();
@@ -530,7 +657,10 @@ impl Qwen3Sq8ServingSession {
                     QWEN3_14B_SQ8_STACK_LAYERS,
                 )
                 .map_err(|err| err.to_string())?,
-                prompt_execution_width: 1,
+                prefill_mode,
+                prefill_chunk_tokens: QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+                prefill_implementation: prefill_mode.implementation_id().to_string(),
+                prompt_execution_width: prefill_mode.execution_width(),
                 embedding_payload_sha256: embedding.load_report().payload.payload_sha256.clone(),
                 final_norm_payload_sha256: head.final_norm_identity().payload_sha256.clone(),
                 lm_head_payload_sha256: head.lm_head_identity().payload_sha256.clone(),
@@ -542,6 +672,7 @@ impl Qwen3Sq8ServingSession {
                 decode,
                 caches: Box::new(caches),
                 embedding,
+                prompt_chunk_hidden,
                 head,
                 scheduler: SchedulerState::with_block_size(
                     u32::try_from(QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS)
@@ -574,6 +705,10 @@ impl Qwen3Sq8ServingSession {
 
     pub fn load_report(&self) -> &Sq8ServingLoadReport {
         &self.load_report
+    }
+
+    pub fn prefill_mode(&self) -> Sq8ServingPrefillMode {
+        self.load_report.prefill_mode
     }
 
     pub fn snapshot(&self) -> Sq8ServingSnapshot {
@@ -634,7 +769,7 @@ impl Qwen3Sq8ServingSession {
             self.stack.validate_paged_serving_sequence_start(
                 &self.decode,
                 self.caches.as_ref(),
-                false,
+                self.load_report.prefill_mode.uses_chunks(),
             )?;
             self.embedding.validate_serving_preflight()?;
             self.head.validate_serving_preflight()?;
@@ -810,26 +945,46 @@ impl Qwen3Sq8ServingSession {
         stream: &mut RuntimeStream,
         capture_oracle: bool,
     ) -> Result<Sq8ServingOracleAdvance, String> {
-        let (position, prompt_tokens, token_id) = {
+        let (unit, prompt_tokens, token_ids) = {
             let active = self
                 .active
                 .as_ref()
                 .ok_or_else(|| "serving Prefilling state has no active request".to_string())?;
             let position = active.prompt_tokens_processed;
-            let token_id = *active
+            let prompt_tokens = active.request.prompt_token_ids.len();
+            let unit =
+                plan_next_prefill_unit(position, prompt_tokens, self.load_report.prefill_mode)?;
+            let end = unit
+                .start_position
+                .checked_add(unit.width)
+                .ok_or_else(|| "serving prompt execution range overflows".to_string())?;
+            let token_ids = active
                 .request
                 .prompt_token_ids
-                .get(position)
+                .get(unit.start_position..end)
                 .ok_or_else(|| {
                     format!(
-                        "serving prompt position {position} exceeds prompt length {}",
-                        active.request.prompt_token_ids.len()
+                        "serving prompt range {}..{end} exceeds prompt length {prompt_tokens}",
+                        unit.start_position
                     )
-                })?;
-            (position, active.request.prompt_token_ids.len(), token_id)
+                })?
+                .to_vec();
+            (unit, prompt_tokens, token_ids)
         };
-        self.execute_m1_stack_token(token_id, position, stream)?;
-        let scheduler_cached = self.commit_prompt_progress(position)?;
+        match unit.width {
+            1 => {
+                self.execute_m1_stack_token(token_ids[0], unit.start_position, stream)?;
+            }
+            QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS => {
+                self.execute_m8_stack_chunk(&token_ids, unit.start_position, stream)?;
+            }
+            width => {
+                return Err(format!(
+                    "serving prefill planner produced unsupported execution width {width}"
+                ));
+            }
+        }
+        let scheduler_cached = self.commit_prompt_progress(unit.start_position, unit.width)?;
         if self.active_cancelled()? {
             self.state = Sq8ServingRuntimeStatus::Cancelling;
             return Ok(Sq8ServingOracleAdvance {
@@ -837,18 +992,32 @@ impl Qwen3Sq8ServingSession {
                 capture: None,
             });
         }
-        if scheduler_cached < prompt_tokens {
+        if !unit.is_final {
+            if scheduler_cached >= prompt_tokens {
+                return Err("serving non-final prefill unit reached prompt boundary".into());
+            }
             return Ok(Sq8ServingOracleAdvance {
                 advance: Sq8ServingAdvance::PromptProgress {
                     prompt_tokens_processed: scheduler_cached,
                     cache_len: scheduler_cached,
-                    execution_width: 1,
+                    execution_width: unit.width,
                 },
                 capture: None,
             });
         }
+        if scheduler_cached != prompt_tokens {
+            return Err(format!(
+                "serving final prefill unit cache mismatch: expected={prompt_tokens} actual={scheduler_cached}"
+            ));
+        }
 
-        let (top1, capture) = self.run_m1_head_synchronized(stream, capture_oracle)?;
+        let source = match unit.width {
+            1 => Sq8ModelHeadServingSource::M1PagedDecode,
+            QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS => Sq8ModelHeadServingSource::M8CachedPrefixChunk,
+            _ => unreachable!("execution width was validated above"),
+        };
+        let (top1, capture) =
+            self.run_head_synchronized(source, scheduler_cached, stream, capture_oracle)?;
         let advance =
             self.commit_generated_token(top1, scheduler_cached, GeneratedTokenCommit::Prefill)?;
         Ok(Sq8ServingOracleAdvance {
@@ -914,7 +1083,12 @@ impl Qwen3Sq8ServingSession {
             self.state = Sq8ServingRuntimeStatus::Cancelling;
             return Ok(Sq8ServingAdvance::CancellationObserved);
         }
-        let (top1, capture) = self.run_m1_head_synchronized(stream, false)?;
+        let (top1, capture) = self.run_head_synchronized(
+            Sq8ModelHeadServingSource::M1PagedDecode,
+            expected_position + 1,
+            stream,
+            false,
+        )?;
         debug_assert!(capture.is_none());
         self.commit_generated_token(
             top1,
@@ -972,20 +1146,118 @@ impl Qwen3Sq8ServingSession {
         Ok(report)
     }
 
-    fn run_m1_head_synchronized(
+    fn execute_m8_stack_chunk(
         &mut self,
+        token_ids: &[usize],
+        prefix_position: usize,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ServingChunkExecutionReport, String> {
+        if token_ids.len() != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS {
+            return Err(format!(
+                "serving M=8 chunk requires {} tokens, got {}",
+                QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+                token_ids.len()
+            ));
+        }
+        let end = prefix_position
+            .checked_add(token_ids.len())
+            .ok_or_else(|| "serving M=8 chunk position overflows".to_string())?;
+        if end > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS {
+            return Err(format!(
+                "serving M=8 chunk exceeds context: range={prefix_position}..{end}"
+            ));
+        }
+        validate_cache_lengths(self.caches.as_ref(), prefix_position)?;
+        let hidden_row_bytes = QWEN3_14B_HIDDEN_SIZE
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| "serving M=8 embedding row byte size overflows".to_string())?;
+        let expected_chunk_bytes = qwen3_14b_sq8_serving_prompt_chunk_bytes()?;
+        if self.prompt_chunk_hidden.size()? != expected_chunk_bytes {
+            return Err(format!(
+                "serving M=8 prompt chunk buffer size mismatch: expected={expected_chunk_bytes} actual={}",
+                self.prompt_chunk_hidden.size()?
+            ));
+        }
+
+        for (row, token_id) in token_ids.iter().copied().enumerate() {
+            if token_id >= QWEN3_14B_VOCAB_SIZE {
+                return Err(format!(
+                    "serving M=8 input token at row {row} exceeds vocabulary: {token_id}"
+                ));
+            }
+            let embedding_report = self.embedding.enqueue_token_resident(token_id, stream)?;
+            validate_embedding_report(&embedding_report, token_id, &self.load_report)?;
+            let (embedding_output, resident_report) = self.embedding.resident_output()?;
+            if resident_report != &embedding_report {
+                return Err(format!(
+                    "serving embedding report changed before M=8 row {row} copy"
+                ));
+            }
+            let destination_offset = row
+                .checked_mul(hidden_row_bytes)
+                .ok_or_else(|| "serving M=8 embedding destination offset overflows".to_string())?;
+            self.prompt_chunk_hidden
+                .copy_from_buffer(
+                    destination_offset,
+                    embedding_output,
+                    0,
+                    hidden_row_bytes,
+                    Some(&mut *stream),
+                )
+                .map_err(|err| {
+                    format!("failed to copy serving M=8 embedding row {row} D2D: {err}")
+                })?;
+        }
+
+        let report = self
+            .stack
+            .run_paged_serving_m8_chunk_optimized_synchronized(
+                &self.prompt_chunk_hidden,
+                prefix_position,
+                &mut self.caches[..],
+                stream,
+            )?;
+        report.validate_contract()?;
+        if report.prefix_position != prefix_position
+            || report.chunk_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+            || report.stack.artifact_content_sha256 != self.load_report.artifact_content_sha256
+            || report.cache_lengths.iter().any(|length| *length != end)
+            || report.stack.fallback_used
+            || report.stack.host_staging_used
+        {
+            return Err(format!(
+                "serving M=8 stack report failed at prefix {prefix_position}: {report:?}"
+            ));
+        }
+        Ok(report)
+    }
+
+    fn run_head_synchronized(
+        &mut self,
+        source: Sq8ModelHeadServingSource,
+        expected_cache_len: usize,
         stream: &mut RuntimeStream,
         capture_oracle: bool,
     ) -> Result<(Sq8GenerationTopLogit, Option<Sq8ServingOracleCapture>), String> {
-        let result = if capture_oracle {
-            self.head
-                .run_m1_serving_oracle_synchronized(&self.decode, stream)?
-        } else {
-            self.head
-                .run_m1_serving_logits_synchronized(&self.decode, stream)?
+        let result = match (source, capture_oracle) {
+            (Sq8ModelHeadServingSource::M1PagedDecode, true) => self
+                .head
+                .run_m1_serving_oracle_synchronized(&self.decode, stream)?,
+            (Sq8ModelHeadServingSource::M1PagedDecode, false) => self
+                .head
+                .run_m1_serving_logits_synchronized(&self.decode, stream)?,
+            (Sq8ModelHeadServingSource::M8CachedPrefixChunk, true) => self
+                .head
+                .run_m8_serving_oracle_synchronized(&self.stack, stream)?,
+            (Sq8ModelHeadServingSource::M8CachedPrefixChunk, false) => self
+                .head
+                .run_m8_serving_logits_synchronized(&self.stack, stream)?,
         };
         result.validate_contract()?;
-        if result.report.binding.device != self.load_report.device
+        if result.report.source != source
+            || result.report.position + 1 != expected_cache_len
+            || result.report.cache_len != expected_cache_len
+            || result.report.binding.device != self.load_report.device
             || result.report.binding.package_manifest_sha256
                 != self.load_report.package_manifest_sha256
             || result.report.binding.artifact_content_sha256
@@ -995,7 +1267,7 @@ impl Qwen3Sq8ServingSession {
             || result.report.fallback_used
             || result.report.host_staging_used
         {
-            return Err("serving M=1 model-head identity/report mismatch".into());
+            return Err("serving model-head source/identity/report mismatch".into());
         }
         let top1 = greedy_top1_finite(&result.logits)?;
         let capture = if capture_oracle {
@@ -1027,8 +1299,11 @@ impl Qwen3Sq8ServingSession {
         Ok((top1, capture))
     }
 
-    fn commit_prompt_progress(&mut self, position: usize) -> Result<usize, String> {
-        validate_cache_lengths(self.caches.as_ref(), position + 1)?;
+    fn commit_prompt_progress(&mut self, position: usize, width: usize) -> Result<usize, String> {
+        let expected = position
+            .checked_add(width)
+            .ok_or_else(|| "serving prompt position overflows".to_string())?;
+        validate_cache_lengths(self.caches.as_ref(), expected)?;
         let active = self
             .active
             .as_ref()
@@ -1043,15 +1318,13 @@ impl Qwen3Sq8ServingSession {
             || scheduled.generated_tokens != 0
             || scheduled.request.prompt_tokens != active.request.prompt_token_ids.len()
             || scheduled.request.max_new_tokens != active.request.max_new_tokens
+            || expected > active.request.prompt_token_ids.len()
         {
             return Err("serving prompt commit metadata is stale".into());
         }
-        let expected = position
-            .checked_add(1)
-            .ok_or_else(|| "serving prompt position overflows".to_string())?;
         let actual = self
             .scheduler
-            .advance_prefill_token(SERVING_INTERNAL_REQUEST_ID)?;
+            .advance_prefill_tokens(SERVING_INTERNAL_REQUEST_ID, width)?;
         if actual != expected {
             return Err(format!(
                 "serving scheduler prompt progress mismatch: expected={expected} actual={actual}"
@@ -1223,6 +1496,13 @@ impl Qwen3Sq8ServingSession {
             }
             self.stack.enqueue_serving_reset(&mut self.decode, stream)?;
             self.embedding.enqueue_serving_reset(stream)?;
+            let prompt_chunk_bytes = qwen3_14b_sq8_serving_prompt_chunk_bytes()?;
+            if self.prompt_chunk_hidden.size()? != prompt_chunk_bytes {
+                return Err("serving prompt chunk buffer size changed before reset".into());
+            }
+            self.prompt_chunk_hidden
+                .zero(0, prompt_chunk_bytes, Some(&mut *stream))
+                .map_err(|err| format!("failed to enqueue serving prompt chunk reset: {err}"))?;
             self.head.enqueue_serving_reset(stream)?;
             stream
                 .synchronize()
@@ -1279,7 +1559,7 @@ impl Qwen3Sq8ServingSession {
         {
             return Err("serving Ready metadata is not at baseline".into());
         }
-        if self.stack.config().sequence_len != 1
+        if self.stack.config().sequence_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
             || self.stack.layer_count() != QWEN3_14B_SQ8_STACK_LAYERS
             || self.stack.artifact_content_sha256() != self.load_report.artifact_content_sha256
             || self.stack.poison_reason().is_some()
@@ -1287,6 +1567,9 @@ impl Qwen3Sq8ServingSession {
             || self.head.poison_reason().is_some()
         {
             return Err("serving resident model state is not reusable".into());
+        }
+        if self.prompt_chunk_hidden.size()? != qwen3_14b_sq8_serving_prompt_chunk_bytes()? {
+            return Err("serving resident prompt chunk buffer size mismatch".into());
         }
         self.stack.validate_serving_baseline(&self.decode)?;
         self.embedding.validate_serving_baseline()?;
@@ -1575,6 +1858,13 @@ pub fn qwen3_14b_sq8_serving_block_table() -> Result<Vec<u32>, Sq8ServingError> 
         .collect()
 }
 
+fn qwen3_14b_sq8_serving_prompt_chunk_bytes() -> Result<usize, String> {
+    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+        .checked_mul(QWEN3_14B_HIDDEN_SIZE)
+        .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "serving prompt chunk byte size overflows".to_string())
+}
+
 pub fn qwen3_14b_sq8_serving_kv_cache_bytes_per_layer() -> Result<usize, Sq8ServingError> {
     let shape = qwen3_14b_sq8_serving_cache_shape();
     shape.validate().map_err(|err| {
@@ -1768,6 +2058,55 @@ mod tests {
             qwen3_14b_sq8_serving_total_kv_cache_bytes(QWEN3_14B_SQ8_STACK_LAYERS).unwrap(),
             1_342_177_280
         );
+        assert_eq!(qwen3_14b_sq8_serving_prompt_chunk_bytes().unwrap(), 163_840);
+    }
+
+    #[test]
+    fn serving_prefill_planner_covers_prompt_once_with_m8_chunks_and_m1_tail() {
+        for prompt_tokens in [1, 7, 8, 9, 15, 16, 17, 32, 128, 512, 4095] {
+            let units =
+                plan_prefill_units(prompt_tokens, Sq8ServingPrefillMode::FixedM8Chunks).unwrap();
+            let expected_chunks = prompt_tokens / QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS;
+            let expected_tail = prompt_tokens % QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS;
+            assert_eq!(
+                units.iter().filter(|unit| unit.width == 8).count(),
+                expected_chunks,
+                "prompt={prompt_tokens}"
+            );
+            assert_eq!(
+                units.iter().filter(|unit| unit.width == 1).count(),
+                expected_tail,
+                "prompt={prompt_tokens}"
+            );
+            let mut expected_position = 0_usize;
+            for (index, unit) in units.iter().enumerate() {
+                assert_eq!(unit.start_position, expected_position);
+                assert!(matches!(unit.width, 1 | 8));
+                expected_position += unit.width;
+                assert_eq!(unit.is_final, index + 1 == units.len());
+            }
+            assert_eq!(expected_position, prompt_tokens);
+        }
+
+        let deepest = plan_prefill_units(4095, Sq8ServingPrefillMode::FixedM8Chunks).unwrap();
+        assert_eq!(deepest.len(), 518);
+        assert_eq!(deepest[510].start_position, 4080);
+        assert_eq!(deepest[510].width, 8);
+        assert_eq!(deepest[511].start_position, 4088);
+        assert_eq!(deepest.last().unwrap().start_position, 4094);
+        assert!(deepest.last().unwrap().is_final);
+    }
+
+    #[test]
+    fn serving_sequential_prefill_planner_keeps_every_execution_m1() {
+        for prompt_tokens in [1, 8, 17, 128] {
+            let units =
+                plan_prefill_units(prompt_tokens, Sq8ServingPrefillMode::SequentialM1).unwrap();
+            assert_eq!(units.len(), prompt_tokens);
+            assert!(units.iter().all(|unit| unit.width == 1));
+            assert_eq!(units.last().unwrap().start_position, prompt_tokens - 1);
+            assert!(units.last().unwrap().is_final);
+        }
     }
 
     #[test]

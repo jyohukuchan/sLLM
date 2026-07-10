@@ -10,12 +10,13 @@ use crate::loader::{
 use crate::sq_reference::sq8_f32_le_sha256;
 use crate::sq8_layer_oracle::{QWEN3_14B_HIDDEN_SIZE, QWEN3_14B_RMS_NORM_EPSILON};
 use crate::sq8_layer_runtime::{
-    QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
-    Sq8LayerExecutionProfile,
+    QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV,
+    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+    QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV, Sq8LayerExecutionProfile,
 };
 use crate::sq8_stack_runtime::{
     Qwen3Sq8PagedDecodeRuntime, Qwen3Sq8StackRuntime, Sq8PagedStackExecutionReport,
-    Sq8PagedStackPhase, Sq8StackExecutionReport,
+    Sq8PagedStackPhase, Sq8ServingChunkExecutionReport, Sq8StackExecutionReport,
 };
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -548,9 +549,16 @@ impl Sq8ModelHeadM1Result {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sq8ModelHeadServingSource {
+    M1PagedDecode,
+    M8CachedPrefixChunk,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Sq8ModelHeadServingExecutionReport {
     pub(crate) binding: Sq8ModelHeadM1ExecutionBinding,
+    pub(crate) source: Sq8ModelHeadServingSource,
     pub(crate) position: usize,
     pub(crate) cache_len: usize,
     pub(crate) final_norm: Sq8ModelHeadPayloadIdentity,
@@ -562,6 +570,7 @@ pub(crate) struct Sq8ModelHeadServingExecutionReport {
     pub(crate) head_kernel_guard_checks: usize,
     pub(crate) rmsnorm_call_count: usize,
     pub(crate) bf16_matvec_call_count: usize,
+    pub(crate) input_d2d_copy_count: usize,
     pub(crate) result_readback_count: usize,
     pub(crate) execution_synchronization_count: usize,
     pub(crate) fallback_used: bool,
@@ -596,13 +605,22 @@ impl Sq8ModelHeadServingExecutionReport {
         } else {
             1
         };
+        let (expected_paged_guards, expected_input_d2d) = match self.source {
+            Sq8ModelHeadServingSource::M1PagedDecode => {
+                (QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len(), 0)
+            }
+            Sq8ModelHeadServingSource::M8CachedPrefixChunk => {
+                (QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV.len(), 1)
+            }
+        };
         if self.cache_len != self.position + 1
             || self.stack_kernel_guard_checks != QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len()
-            || self.paged_kernel_guard_checks != QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len()
+            || self.paged_kernel_guard_checks != expected_paged_guards
             || self.head_kernel_guard_checks
                 != QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len()
             || self.rmsnorm_call_count != 1
             || self.bf16_matvec_call_count != 1
+            || self.input_d2d_copy_count != expected_input_d2d
             || self.result_readback_count != expected_readbacks
             || self.execution_synchronization_count != 1
             || self.fallback_used
@@ -669,7 +687,7 @@ pub struct Qwen3Sq8ModelHeadRuntime {
     selected_hidden: RuntimeBuffer,
     final_hidden: RuntimeBuffer,
     logits: RuntimeBuffer,
-    m1_artifact_content_sha256: Option<String>,
+    bound_artifact_content_sha256: Option<String>,
     state: Sq8ModelHeadRuntimeState,
 }
 
@@ -782,7 +800,7 @@ impl Qwen3Sq8ModelHeadRuntime {
                 selected_hidden,
                 final_hidden,
                 logits,
-                m1_artifact_content_sha256: None,
+                bound_artifact_content_sha256: None,
                 state: Sq8ModelHeadRuntimeState::Ready,
             })
         })();
@@ -1014,6 +1032,22 @@ impl Qwen3Sq8ModelHeadRuntime {
         self.run_m1_serving_synchronized(decode, true, stream)
     }
 
+    pub(crate) fn run_m8_serving_logits_synchronized(
+        &mut self,
+        stack: &Qwen3Sq8StackRuntime,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ModelHeadServingResult, String> {
+        self.run_m8_serving_synchronized(stack, false, stream)
+    }
+
+    pub(crate) fn run_m8_serving_oracle_synchronized(
+        &mut self,
+        stack: &Qwen3Sq8StackRuntime,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ModelHeadServingResult, String> {
+        self.run_m8_serving_synchronized(stack, true, stream)
+    }
+
     fn run_m1_serving_synchronized(
         &mut self,
         decode: &Qwen3Sq8PagedDecodeRuntime,
@@ -1036,6 +1070,66 @@ impl Qwen3Sq8ModelHeadRuntime {
         let resident_hidden = decode.resident_hidden_buffer()?;
         self.validate_serving_execution_preconditions(resident_hidden, &binding, paged_decode)?;
 
+        self.run_serving_resident_hidden_synchronized(
+            resident_hidden,
+            binding,
+            Sq8ModelHeadServingSource::M1PagedDecode,
+            paged_decode.position,
+            paged_decode.position + 1,
+            None,
+            capture_final_hidden,
+            stream,
+        )
+    }
+
+    fn run_m8_serving_synchronized(
+        &mut self,
+        stack: &Qwen3Sq8StackRuntime,
+        capture_final_hidden: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ModelHeadServingResult, String> {
+        let (resident_hidden, chunk) = stack.resident_serving_chunk_output()?;
+        let binding = Sq8ModelHeadM1ExecutionBinding {
+            profile: chunk.stack.profile,
+            device: self.device.clone(),
+            package_manifest_sha256: self.package_manifest_sha256.clone(),
+            artifact_content_sha256: chunk.stack.artifact_content_sha256.clone(),
+        };
+        self.validate_m8_serving_execution_preconditions(resident_hidden, &binding, chunk)?;
+        let cache_len = chunk
+            .prefix_position
+            .checked_add(chunk.chunk_len)
+            .ok_or_else(|| "Qwen3-14B SQ8 M=8 serving head cache length overflows".to_string())?;
+        let position = cache_len
+            .checked_sub(1)
+            .ok_or_else(|| "Qwen3-14B SQ8 M=8 serving head position underflows".to_string())?;
+
+        self.run_serving_resident_hidden_synchronized(
+            resident_hidden,
+            binding,
+            Sq8ModelHeadServingSource::M8CachedPrefixChunk,
+            position,
+            cache_len,
+            Some(selected_row_offset_bytes(
+                QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+            )?),
+            capture_final_hidden,
+            stream,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_serving_resident_hidden_synchronized(
+        &mut self,
+        resident_hidden: &RuntimeBuffer,
+        binding: Sq8ModelHeadM1ExecutionBinding,
+        source: Sq8ModelHeadServingSource,
+        position: usize,
+        cache_len: usize,
+        input_row_offset: Option<usize>,
+        capture_final_hidden: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ModelHeadServingResult, String> {
         let hidden_bytes = f32_bytes(QWEN3_14B_HIDDEN_SIZE)?;
         let logits_bytes = f32_bytes(QWEN3_14B_VOCAB_SIZE)?;
         let mut final_hidden_host = if capture_final_hidden {
@@ -1048,8 +1142,22 @@ impl Qwen3Sq8ModelHeadRuntime {
         };
         let mut logits_host = zeroed_host_bytes(logits_bytes, "serving logits readback")?;
         let operation_result = (|| {
+            if let Some(input_row_offset) = input_row_offset {
+                self.selected_hidden.copy_from_buffer(
+                    0,
+                    resident_hidden,
+                    input_row_offset,
+                    hidden_bytes,
+                    Some(&mut *stream),
+                )?;
+            }
+            let norm_input = if input_row_offset.is_some() {
+                &self.selected_hidden
+            } else {
+                resident_hidden
+            };
             segmented_rmsnorm_f32(
-                resident_hidden,
+                norm_input,
                 &self.final_norm_f32,
                 1,
                 QWEN3_14B_HIDDEN_SIZE,
@@ -1109,17 +1217,26 @@ impl Qwen3Sq8ModelHeadRuntime {
             logits,
             report: Sq8ModelHeadServingExecutionReport {
                 binding,
-                position: paged_decode.position,
-                cache_len: paged_decode.position + 1,
+                source,
+                position,
+                cache_len,
                 final_norm: self.final_norm_identity.clone(),
                 lm_head: self.lm_head_identity.clone(),
                 final_hidden_health,
                 logits_health,
                 stack_kernel_guard_checks: QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len(),
-                paged_kernel_guard_checks: QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len(),
+                paged_kernel_guard_checks: match source {
+                    Sq8ModelHeadServingSource::M1PagedDecode => {
+                        QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len()
+                    }
+                    Sq8ModelHeadServingSource::M8CachedPrefixChunk => {
+                        QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV.len()
+                    }
+                },
                 head_kernel_guard_checks: QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len(),
                 rmsnorm_call_count: 1,
                 bf16_matvec_call_count: 1,
+                input_d2d_copy_count: usize::from(input_row_offset.is_some()),
                 result_readback_count: if capture_final_hidden { 2 } else { 1 },
                 execution_synchronization_count: 1,
                 fallback_used: false,
@@ -1131,8 +1248,8 @@ impl Qwen3Sq8ModelHeadRuntime {
                 "Qwen3-14B SQ8 serving model-head result validation failed: {err}"
             )));
         }
-        if self.m1_artifact_content_sha256.is_none() {
-            self.m1_artifact_content_sha256 = Some(artifact_to_bind);
+        if self.bound_artifact_content_sha256.is_none() {
+            self.bound_artifact_content_sha256 = Some(artifact_to_bind);
         }
         self.state = Sq8ModelHeadRuntimeState::OutputReady;
         Ok(result)
@@ -1271,8 +1388,8 @@ impl Qwen3Sq8ModelHeadRuntime {
                 "Qwen3-14B SQ8 M=1 model-head result validation failed: {err}"
             )));
         }
-        if self.m1_artifact_content_sha256.is_none() {
-            self.m1_artifact_content_sha256 = Some(artifact_to_bind);
+        if self.bound_artifact_content_sha256.is_none() {
+            self.bound_artifact_content_sha256 = Some(artifact_to_bind);
         }
         self.state = Sq8ModelHeadRuntimeState::OutputReady;
         Ok(result)
@@ -1325,7 +1442,7 @@ impl Qwen3Sq8ModelHeadRuntime {
             "final hidden",
         )?;
         validate_buffer_size(&self.logits, f32_bytes(QWEN3_14B_VOCAB_SIZE)?, "logits")?;
-        if let Some(artifact_content_sha256) = &self.m1_artifact_content_sha256 {
+        if let Some(artifact_content_sha256) = &self.bound_artifact_content_sha256 {
             validate_sha256(artifact_content_sha256).map_err(|err| {
                 format!("Qwen3-14B SQ8 model-head bound artifact hash is invalid: {err}")
             })?;
@@ -1389,7 +1506,7 @@ impl Qwen3Sq8ModelHeadRuntime {
                 self.package_manifest_sha256, binding.package_manifest_sha256
             ));
         }
-        if let Some(bound_artifact) = &self.m1_artifact_content_sha256
+        if let Some(bound_artifact) = &self.bound_artifact_content_sha256
             && bound_artifact != &binding.artifact_content_sha256
         {
             return Err(format!(
@@ -1428,7 +1545,7 @@ impl Qwen3Sq8ModelHeadRuntime {
         {
             return Err("Qwen3-14B SQ8 serving model-head identity binding mismatch".into());
         }
-        if let Some(bound_artifact) = &self.m1_artifact_content_sha256
+        if let Some(bound_artifact) = &self.bound_artifact_content_sha256
             && bound_artifact != &binding.artifact_content_sha256
         {
             return Err(format!(
@@ -1442,6 +1559,49 @@ impl Qwen3Sq8ModelHeadRuntime {
             "serving resident hidden input",
         )?;
         validate_serving_hip_only_guards()
+    }
+
+    fn validate_m8_serving_execution_preconditions(
+        &self,
+        resident_hidden: &RuntimeBuffer,
+        binding: &Sq8ModelHeadM1ExecutionBinding,
+        chunk: &Sq8ServingChunkExecutionReport,
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        binding.validate_contract()?;
+        chunk.validate_contract()?;
+        if chunk.chunk_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+            || chunk.stack.profile != binding.profile
+            || chunk.stack.artifact_content_sha256 != binding.artifact_content_sha256
+        {
+            return Err(
+                "Qwen3-14B SQ8 M=8 serving model-head input is not bound to its cached-prefix chunk report"
+                    .into(),
+            );
+        }
+        if binding.device != self.device
+            || binding.package_manifest_sha256 != self.package_manifest_sha256
+        {
+            return Err("Qwen3-14B SQ8 M=8 serving model-head identity binding mismatch".into());
+        }
+        if let Some(bound_artifact) = &self.bound_artifact_content_sha256
+            && bound_artifact != &binding.artifact_content_sha256
+        {
+            return Err(format!(
+                "Qwen3-14B SQ8 serving model-head artifact binding mismatch: bound={bound_artifact} input={}",
+                binding.artifact_content_sha256
+            ));
+        }
+        validate_buffer_size(
+            resident_hidden,
+            f32_bytes(checked_elements(
+                QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+                QWEN3_14B_HIDDEN_SIZE,
+                "M=8 serving resident hidden",
+            )?)?,
+            "M=8 serving resident hidden input",
+        )?;
+        validate_m8_serving_hip_only_guards()
     }
 
     fn poison_after_stream_recovery(
@@ -1577,6 +1737,21 @@ fn validate_serving_hip_only_guards() -> Result<(), String> {
         if std::env::var(name).ok().as_deref() != Some("1") {
             return Err(format!(
                 "Qwen3-14B SQ8 serving model-head execution requires {name}=1 to forbid HIP host-staging fallback"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_m8_serving_hip_only_guards() -> Result<(), String> {
+    for name in QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV
+        .into_iter()
+        .chain(QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV)
+        .chain(QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV)
+    {
+        if std::env::var(name).ok().as_deref() != Some("1") {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=8 serving model-head execution requires {name}=1 to forbid HIP host-staging fallback"
             ));
         }
     }
@@ -1972,6 +2147,56 @@ mod tests {
         }
     }
 
+    fn valid_serving_report(
+        source: Sq8ModelHeadServingSource,
+    ) -> Sq8ModelHeadServingExecutionReport {
+        let lm_elements =
+            checked_elements(QWEN3_14B_VOCAB_SIZE, QWEN3_14B_HIDDEN_SIZE, "test").unwrap();
+        Sq8ModelHeadServingExecutionReport {
+            binding: Sq8ModelHeadM1ExecutionBinding {
+                profile: Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+                device: r9700_identity(),
+                package_manifest_sha256: "3".repeat(64),
+                artifact_content_sha256: "0".repeat(64),
+            },
+            source,
+            position: 15,
+            cache_len: 16,
+            final_norm: payload_identity(
+                QWEN3_14B_FINAL_NORM_TENSOR,
+                QWEN3_14B_FINAL_NORM_SHAPE.to_vec(),
+                QWEN3_14B_HIDDEN_SIZE as u64,
+            ),
+            lm_head: payload_identity(
+                QWEN3_14B_LM_HEAD_TENSOR,
+                QWEN3_14B_LM_HEAD_SHAPE.to_vec(),
+                lm_elements as u64,
+            ),
+            final_hidden_health: None,
+            logits_health: health(QWEN3_14B_VOCAB_SIZE),
+            stack_kernel_guard_checks: QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len(),
+            paged_kernel_guard_checks: match source {
+                Sq8ModelHeadServingSource::M1PagedDecode => {
+                    QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len()
+                }
+                Sq8ModelHeadServingSource::M8CachedPrefixChunk => {
+                    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV.len()
+                }
+            },
+            head_kernel_guard_checks: QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len(),
+            rmsnorm_call_count: 1,
+            bf16_matvec_call_count: 1,
+            input_d2d_copy_count: match source {
+                Sq8ModelHeadServingSource::M1PagedDecode => 0,
+                Sq8ModelHeadServingSource::M8CachedPrefixChunk => 1,
+            },
+            result_readback_count: 1,
+            execution_synchronization_count: 1,
+            fallback_used: false,
+            host_staging_used: false,
+        }
+    }
+
     #[test]
     fn tensor_health_validates_range_and_hash() {
         let values = [-2.0_f32, 0.0, 3.5];
@@ -2085,6 +2310,28 @@ mod tests {
 
         let mut bad = report;
         bad.fallback_used = true;
+        assert!(bad.validate_contract().is_err());
+    }
+
+    #[test]
+    fn serving_report_distinguishes_m1_and_m8_input_sources() {
+        for source in [
+            Sq8ModelHeadServingSource::M1PagedDecode,
+            Sq8ModelHeadServingSource::M8CachedPrefixChunk,
+        ] {
+            valid_serving_report(source).validate_contract().unwrap();
+        }
+
+        let mut bad = valid_serving_report(Sq8ModelHeadServingSource::M8CachedPrefixChunk);
+        bad.input_d2d_copy_count = 0;
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = valid_serving_report(Sq8ModelHeadServingSource::M1PagedDecode);
+        bad.input_d2d_copy_count = 1;
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = valid_serving_report(Sq8ModelHeadServingSource::M8CachedPrefixChunk);
+        bad.cache_len = bad.position;
         assert!(bad.validate_contract().is_err());
     }
 
