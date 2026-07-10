@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 is complete; P8-C deterministic CPU sampler and transactional session publication are implemented; strict JSONL worker protocol is next
+Status: in progress; P8-B2 is complete; P8-C sampler, transactional session publication, bounded JSONL codec, and active1 control are implemented; resident worker thread integration is next
 
 Date: 2026-07-10
 
@@ -950,11 +950,46 @@ unambiguous.
 
 ##### 次の行動
 
-1. Build the strict, bounded JSONL command/event codec and active-slot control as
-   CPU-testable components.
-2. Connect the codec to a resident inference thread that owns all HIP/session
+1. Connect the codec to a single ordered writer thread and a resident inference
+   thread that owns all HIP/session
    state and uses the prepared-token publication callback for flushed events.
+2. Add clean EOF, active EOF/shutdown, fatal framing, writer failure, and process
+   exit integration tests around the real thread/channel topology.
 3. Close the remaining real-GPU cancellation race cases before P8-C acceptance.
+
+#### P8-C bounded protocol checkpoint (2026-07-10)
+
+##### 前回の要点
+
+The transactional session boundary was complete, but no bounded stdin parser,
+exact event encoder, or generation-safe active1 control existed.
+
+##### 今回の変更点
+
+- Added a fixed `4,194,305`-byte input buffer, accepting the 4 MiB payload plus
+  optional CR without allowing an oversized line to grow memory. Oversized
+  terminated lines drain and recover; unterminated lines are fatal framing errors.
+- Added strict JSON validation with depth 16 and duplicate-key rejection at every
+  nesting level, followed by shallow command inspection and streaming typed
+  decode. This preserves `busy` priority without buffering a large token array.
+- Added exact command semantics, event serialization, per-line flush, permanent
+  writer poison, M=128 progress tracking, first-wins cancellation reasons, and a
+  generation-scoped active1 control slot with no waiting state.
+- Removed control/publication lock inversion. Ready and active-terminal slot
+  transitions now require private acknowledgements that only the ordered writer
+  can create after a successful flush.
+- Protocol tests cover 32 cases; the full engine suite passes 311 tests. The
+  gfx1201 serving example and 132 Python tests plus 14 subtests also pass. The
+  independent reviewer found no remaining P0/P1 issue in this module.
+
+##### 次の行動
+
+1. Add a capacity-1 synchronous event channel and one stdout owner, returning
+   flush results to reader and inference callers.
+2. Implement the stdin reader loop with `inspect -> busy -> typed decode`, clean
+   EOF shutdown, recoverable errors, and fatal framing behavior.
+3. Add the inference loop and then connect its sole HIP/session owner to the
+   prepared-token API.
 
 ### P8-D: Tokenizer and Non-Streaming OpenAI Gateway
 

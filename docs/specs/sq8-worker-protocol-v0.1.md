@@ -335,7 +335,8 @@ the single writer; nonzero exit or EOF is itself the fatal signal.
 The reader maintains one active control slot containing only:
 
 - accepted `request_id`;
-- the request's `Arc<AtomicBool>` cancellation flag;
+- the request's cancellation token containing the atomic flag and
+  token-publication mutex;
 - the first cancellation reason, if any; and
 - a monotonically increasing internal generation number.
 
@@ -400,8 +401,11 @@ EOF with nonzero exit
 ```
 
 `?` means the error is best effort only when the process is not able to use its
-ordered writer. In all sequences, event order is strict for a request. Events from
-different requests cannot interleave because `active = 1` and `waiting = 0`.
+ordered writer. Lifecycle event order is strict for the active request. A
+recoverable `busy`, `unknown_request`, or `invalid_command` error for a rejected
+command may appear between active-request events because the reader remains
+responsive during inference. Such an error never claims GPU ownership and never
+changes the active request's ordering or counters.
 
 ## 9. Cancellation race contract
 

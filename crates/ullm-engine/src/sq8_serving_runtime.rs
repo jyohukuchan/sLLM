@@ -293,6 +293,11 @@ impl Sq8CancellationToken {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn publication_guard_for_testing(&self) -> Result<MutexGuard<'_, ()>, String> {
+        self.publication_guard()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
