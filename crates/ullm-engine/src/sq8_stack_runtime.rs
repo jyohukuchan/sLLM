@@ -11,10 +11,10 @@ use crate::sq8_layer_oracle::{
 use crate::sq8_layer_runtime::{
     QWEN3_14B_SQ8_LAYER_ACTIVATION_QUANTIZATIONS, QWEN3_14B_SQ8_LAYER_PROJECTIONS,
     QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV,
-    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
-    QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV, Qwen3Sq8LayerConfig, Qwen3Sq8LayerNormValues,
-    Qwen3Sq8LayerWeights, Qwen3Sq8LayerWorkspace, Sq8LayerExecutionProfile,
-    Sq8LayerExecutionReport, Sq8LayerProjectionExecution, load_qwen3_14b_sq8_layer_weights,
+    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
+    Qwen3Sq8LayerConfig, Qwen3Sq8LayerNormValues, Qwen3Sq8LayerWeights, Qwen3Sq8LayerWorkspace,
+    Sq8LayerExecutionProfile, Sq8LayerExecutionReport, Sq8LayerProjectionExecution,
+    is_qwen3_14b_sq8_prefill_chunk_tokens, load_qwen3_14b_sq8_layer_weights,
     qwen3_sq8_layer_tensor_names, validate_norm_values,
 };
 use ullm_runtime_sys::{RuntimeBuffer, RuntimeContext, RuntimeStream, Sq8CkImplementation};
@@ -118,15 +118,14 @@ pub(crate) struct Sq8ServingChunkExecutionReport {
 impl Sq8ServingChunkExecutionReport {
     pub(crate) fn validate_contract(&self) -> Result<(), String> {
         self.stack.validate_optimized_promotion()?;
-        if !self
-            .prefix_position
-            .is_multiple_of(QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS)
-            || self.chunk_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
-            || self.stack.sequence_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+        if !is_qwen3_14b_sq8_prefill_chunk_tokens(self.chunk_len) {
+            return Err("SQ8 serving cached-prefix chunk width is not measured".into());
+        }
+        if !self.prefix_position.is_multiple_of(self.chunk_len)
+            || self.stack.sequence_len != self.chunk_len
             || self.stack.host_staging_used
             || self.stack.host_readback_count != 0
-            || self.kv_write_calls
-                != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS * QWEN3_14B_SQ8_STACK_LAYERS
+            || self.kv_write_calls != self.chunk_len * QWEN3_14B_SQ8_STACK_LAYERS
             || self.cached_prefix_attention_calls != QWEN3_14B_SQ8_STACK_LAYERS
             || self.input_d2d_copy_count != 1
         {
@@ -669,10 +668,10 @@ impl Qwen3Sq8StackRuntime {
         validate_paged_cache_layer_count(caches)?;
         validate_paged_hip_only_guards()?;
         if use_prefill_chunks {
-            if self.config.sequence_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS {
+            if !is_qwen3_14b_sq8_prefill_chunk_tokens(self.config.sequence_len) {
                 return Err(format!(
-                    "Qwen3-14B SQ8 serving chunks require stack M={}, got M={}",
-                    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS, self.config.sequence_len
+                    "Qwen3-14B SQ8 serving chunks require a measured stack width, got M={}",
+                    self.config.sequence_len
                 ));
             }
             validate_paged_prefill_chunk_hip_only_guards()?;
@@ -1101,7 +1100,7 @@ impl Qwen3Sq8StackRuntime {
         Ok(report)
     }
 
-    pub(crate) fn run_paged_serving_m8_chunk_optimized_synchronized(
+    pub(crate) fn run_paged_serving_chunk_optimized_synchronized(
         &mut self,
         input: &RuntimeBuffer,
         prefix_position: usize,
@@ -1113,16 +1112,16 @@ impl Qwen3Sq8StackRuntime {
         if !self.paged_m1_sequence_active {
             return Err("Qwen3-14B SQ8 serving paged sequence is not active".into());
         }
-        if self.config.sequence_len != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS {
+        let chunk_tokens = self.config.sequence_len;
+        if !is_qwen3_14b_sq8_prefill_chunk_tokens(chunk_tokens) {
             return Err(format!(
-                "Qwen3-14B SQ8 serving prefill chunk requires M={}, got M={}",
-                QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS, self.config.sequence_len
+                "Qwen3-14B SQ8 serving prefill chunk width is not measured: M={chunk_tokens}"
             ));
         }
-        if !prefix_position.is_multiple_of(QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS) {
+        if !prefix_position.is_multiple_of(chunk_tokens) {
             return Err(format!(
                 "Qwen3-14B SQ8 serving prefill chunk position must be a multiple of {}, got {prefix_position}",
-                QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+                chunk_tokens
             ));
         }
         validate_paged_cache_layer_count(caches)?;
@@ -1208,9 +1207,9 @@ impl Qwen3Sq8StackRuntime {
         })?;
         let report = Sq8ServingChunkExecutionReport {
             prefix_position,
-            chunk_len: QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+            chunk_len: chunk_tokens,
             cache_lengths: cache_lengths_array(caches)?,
-            kv_write_calls: QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS * QWEN3_14B_SQ8_STACK_LAYERS,
+            kv_write_calls: chunk_tokens * QWEN3_14B_SQ8_STACK_LAYERS,
             cached_prefix_attention_calls: QWEN3_14B_SQ8_STACK_LAYERS,
             input_d2d_copy_count: 1,
             stack: stack.clone(),
@@ -1220,13 +1219,9 @@ impl Qwen3Sq8StackRuntime {
                 "Qwen3-14B SQ8 serving prefill chunk contract failed: {err}"
             )));
         }
-        let next_position = prefix_position
-            .checked_add(QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS)
-            .ok_or_else(|| {
-                self.poison_with_error(
-                    "Qwen3-14B SQ8 serving prefill chunk cursor overflows".into(),
-                )
-            })?;
+        let next_position = prefix_position.checked_add(chunk_tokens).ok_or_else(|| {
+            self.poison_with_error("Qwen3-14B SQ8 serving prefill chunk cursor overflows".into())
+        })?;
         self.state.mark_output_ready()?;
         self.last_execution_report = Some(stack);
         self.last_serving_chunk_report = Some(report.clone());
@@ -2270,43 +2265,71 @@ mod tests {
     }
 
     #[test]
-    fn serving_chunk_report_binds_m8_prefix_and_cache_progress() {
+    fn serving_chunk_report_binds_measured_width_prefix_and_cache_progress() {
+        for chunk_len in [8, 32, 128] {
+            let prefix_position = chunk_len * 2;
+            let expected_cache_len = chunk_len * 3;
+            let stack = build_report(
+                Qwen3Sq8LayerConfig::qwen3_14b(chunk_len, 0).unwrap(),
+                &"b".repeat(64),
+                Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+                Sq8StackExecutionMode::SynchronizedResident,
+                Sq8StackInputOrigin::PreviouslyUploadedResident,
+                vec![ck_report(chunk_len); 40],
+                0,
+                1,
+                0,
+                false,
+            )
+            .unwrap();
+            let report = Sq8ServingChunkExecutionReport {
+                prefix_position,
+                chunk_len,
+                stack,
+                cache_lengths: [expected_cache_len; 40],
+                kv_write_calls: chunk_len * 40,
+                cached_prefix_attention_calls: 40,
+                input_d2d_copy_count: 1,
+            };
+            report.validate_contract().unwrap();
+
+            let mut bad = report.clone();
+            bad.prefix_position += 1;
+            assert!(bad.validate_contract().is_err());
+            let mut bad = report.clone();
+            bad.cache_lengths[17] -= 1;
+            assert!(bad.validate_contract().is_err());
+            let mut bad = report.clone();
+            bad.kv_write_calls -= 1;
+            assert!(bad.validate_contract().is_err());
+            let mut bad = report;
+            bad.cached_prefix_attention_calls = 39;
+            assert!(bad.validate_contract().is_err());
+        }
+
         let stack = build_report(
-            Qwen3Sq8LayerConfig::qwen3_14b(8, 0).unwrap(),
+            Qwen3Sq8LayerConfig::qwen3_14b(16, 0).unwrap(),
             &"b".repeat(64),
             Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
             Sq8StackExecutionMode::SynchronizedResident,
             Sq8StackInputOrigin::PreviouslyUploadedResident,
-            vec![ck_report(8); 40],
+            vec![ck_report(16); 40],
             0,
             1,
             0,
             false,
         )
         .unwrap();
-        let report = Sq8ServingChunkExecutionReport {
+        let unselected_width = Sq8ServingChunkExecutionReport {
             prefix_position: 16,
-            chunk_len: 8,
+            chunk_len: 16,
             stack,
-            cache_lengths: [24; 40],
-            kv_write_calls: 320,
+            cache_lengths: [32; 40],
+            kv_write_calls: 640,
             cached_prefix_attention_calls: 40,
             input_d2d_copy_count: 1,
         };
-        report.validate_contract().unwrap();
-
-        let mut bad = report.clone();
-        bad.prefix_position = 17;
-        assert!(bad.validate_contract().is_err());
-        let mut bad = report.clone();
-        bad.cache_lengths[17] = 23;
-        assert!(bad.validate_contract().is_err());
-        let mut bad = report.clone();
-        bad.kv_write_calls = 319;
-        assert!(bad.validate_contract().is_err());
-        let mut bad = report;
-        bad.cached_prefix_attention_calls = 39;
-        assert!(bad.validate_contract().is_err());
+        assert!(unselected_width.validate_contract().is_err());
     }
 
     #[test]

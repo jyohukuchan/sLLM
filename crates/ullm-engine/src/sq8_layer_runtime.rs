@@ -31,10 +31,15 @@ pub const QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV: [&str; 2] = [
     "ULLM_REQUIRE_HIP_PAGED_DECODE_ATTN_KERNEL",
 ];
 pub const QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS: usize = 8;
+pub const QWEN3_14B_SQ8_PREFILL_CHUNK_TOKEN_OPTIONS: [usize; 3] = [8, 32, 128];
 pub const QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV: [&str; 2] = [
     "ULLM_REQUIRE_HIP_PAGED_KV_WRITE_KERNEL",
     "ULLM_REQUIRE_HIP_CACHED_PREFIX_ATTN_F32_FLASH2_KERNEL",
 ];
+
+pub(crate) fn is_qwen3_14b_sq8_prefill_chunk_tokens(tokens: usize) -> bool {
+    QWEN3_14B_SQ8_PREFILL_CHUNK_TOKEN_OPTIONS.contains(&tokens)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sq8LayerExecutionProfile {
@@ -601,10 +606,10 @@ impl Qwen3Sq8LayerWorkspace {
                 prefix_position,
                 cache,
             } => {
-                if m != QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS {
+                if !is_qwen3_14b_sq8_prefill_chunk_tokens(m) {
                     return Err(format!(
-                        "Qwen3-14B SQ8 cached-prefix prefill requires M={}, got M={m}",
-                        QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+                        "Qwen3-14B SQ8 cached-prefix prefill requires measured M in {:?}, got M={m}",
+                        QWEN3_14B_SQ8_PREFILL_CHUNK_TOKEN_OPTIONS
                     ));
                 }
                 if *prefix_position != cache.written_len() {
@@ -1480,6 +1485,17 @@ mod tests {
         }
         for m in [0, 3, 64, 129] {
             assert!(Qwen3Sq8LayerConfig::qwen3_14b(m, 0).is_err());
+        }
+    }
+
+    #[test]
+    fn serving_cached_prefix_chunks_use_only_selected_measured_widths() {
+        for m in QWEN3_14B_SQ8_PREFILL_CHUNK_TOKEN_OPTIONS {
+            assert!(is_qwen3_14b_sq8_prefill_chunk_tokens(m));
+            assert!(Qwen3Sq8LayerConfig::qwen3_14b(m, 0).is_ok());
+        }
+        for m in [0, 1, 2, 4, 16, 64, 129] {
+            assert!(!is_qwen3_14b_sq8_prefill_chunk_tokens(m));
         }
     }
 

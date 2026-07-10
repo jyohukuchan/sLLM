@@ -285,11 +285,15 @@ fn main() -> Result<(), String> {
     let result = ServingSmokeResult {
         schema_version: match (options.test_only_ignore_eos, options.prefill_mode) {
             (true, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_deep_boundary.v1",
-            (true, Sq8ServingPrefillMode::SequentialM1) => {
+            (true, _) => {
                 return Err("deep-boundary evidence requires fixed M=8 chunks".into());
             }
             (false, Sq8ServingPrefillMode::SequentialM1) => "ullm.sq8.serving_smoke.v2",
             (false, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_chunks.v3",
+            (
+                false,
+                Sq8ServingPrefillMode::FixedM32Chunks | Sq8ServingPrefillMode::FixedM128Chunks,
+            ) => "ullm.sq8.serving_chunks.v4",
         },
         prefill_mode: prefill_mode_name(options.prefill_mode),
         prefill_chunk_tokens: load_report.prefill_chunk_tokens,
@@ -1232,8 +1236,10 @@ fn parse_prefill_mode(value: &str) -> Result<Sq8ServingPrefillMode, String> {
     match value {
         "all-m1" => Ok(Sq8ServingPrefillMode::SequentialM1),
         "m8-chunk8" => Ok(Sq8ServingPrefillMode::FixedM8Chunks),
+        "m32-chunk32" => Ok(Sq8ServingPrefillMode::FixedM32Chunks),
+        "m128-chunk128" => Ok(Sq8ServingPrefillMode::FixedM128Chunks),
         _ => Err(format!(
-            "prefill mode must be all-m1 or m8-chunk8, got {value:?}"
+            "prefill mode must be all-m1, m8-chunk8, m32-chunk32, or m128-chunk128, got {value:?}"
         )),
     }
 }
@@ -1242,6 +1248,17 @@ fn prefill_mode_name(mode: Sq8ServingPrefillMode) -> &'static str {
     match mode {
         Sq8ServingPrefillMode::SequentialM1 => "all-m1",
         Sq8ServingPrefillMode::FixedM8Chunks => "m8-chunk8",
+        Sq8ServingPrefillMode::FixedM32Chunks => "m32-chunk32",
+        Sq8ServingPrefillMode::FixedM128Chunks => "m128-chunk128",
+    }
+}
+
+fn prefill_chunk_tokens(mode: Sq8ServingPrefillMode) -> Option<usize> {
+    match mode {
+        Sq8ServingPrefillMode::SequentialM1 => None,
+        Sq8ServingPrefillMode::FixedM8Chunks => Some(8),
+        Sq8ServingPrefillMode::FixedM32Chunks => Some(32),
+        Sq8ServingPrefillMode::FixedM128Chunks => Some(128),
     }
 }
 
@@ -1252,12 +1269,9 @@ fn expected_prefill_execution_calls(
     if prompt_tokens == 0 {
         return Err("prefill execution call count requires a nonempty prompt".into());
     }
-    Ok(match mode {
-        Sq8ServingPrefillMode::SequentialM1 => prompt_tokens,
-        Sq8ServingPrefillMode::FixedM8Chunks => {
-            prompt_tokens / QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
-                + prompt_tokens % QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
-        }
+    Ok(match prefill_chunk_tokens(mode) {
+        None => prompt_tokens,
+        Some(chunk_tokens) => prompt_tokens / chunk_tokens + prompt_tokens % chunk_tokens,
     })
 }
 
@@ -1329,7 +1343,7 @@ fn require_hip_kernel_guards(mode: Sq8ServingPrefillMode) -> Result<(), String> 
         .chain(QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV)
         .chain(QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV)
         .collect::<Vec<_>>();
-    if mode == Sq8ServingPrefillMode::FixedM8Chunks {
+    if mode != Sq8ServingPrefillMode::SequentialM1 {
         names.extend(QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV);
     }
     names.sort_unstable();
