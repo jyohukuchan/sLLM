@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 use ullm_engine::loader::{
     PassthroughPayloadVerification, read_named_passthrough_f32, verify_named_passthrough_payload,
 };
@@ -20,7 +21,7 @@ use ullm_engine::sq8_generation_runtime::{
     QWEN3_14B_SQ8_GENERATION_EOS_TOKEN_ID, QWEN3_14B_SQ8_GENERATION_MAX_NEW_TOKENS,
     QWEN3_14B_SQ8_GENERATION_PROMPT_TOKEN_IDS, QWEN3_14B_SQ8_GENERATION_PROMPT_TOKENS,
     Qwen3Sq8GenerationRuntime, Sq8GenerationCompletionReason, Sq8GenerationRuntimeStatus,
-    Sq8GenerationStepPhase,
+    Sq8GenerationStepPhase, Sq8OfflineGenerationResult,
 };
 use ullm_engine::sq8_layer_oracle::{QWEN3_14B_HEAD_DIM, QWEN3_14B_HIDDEN_SIZE};
 use ullm_engine::sq8_layer_runtime::{
@@ -32,7 +33,7 @@ use ullm_engine::sq8_model_head_runtime::{
     Sq8ModelHeadDeviceIdentity, validate_qwen3_14b_sq8_r9700_device_info,
 };
 use ullm_engine::sq8_stack_runtime::{QWEN3_14B_SQ8_STACK_LAYERS, QWEN3_14B_SQ8_STACK_PROJECTIONS};
-use ullm_runtime_sys::{DeviceInfo, RuntimeContext, device_count, device_info};
+use ullm_runtime_sys::{DeviceInfo, RuntimeContext, RuntimeStream, device_count, device_info};
 
 const SCHEMA_VERSION: &str = "ullm.sq8.generation.v1";
 const ORACLE_SCHEMA_VERSION: &str = "ullm.qwen3_generation_oracle.v1";
@@ -43,6 +44,9 @@ const TOP_K: usize = 10;
 const MAX_RELATIVE_L2: f64 = 0.20;
 const MIN_COSINE_SIMILARITY: f64 = 0.98;
 const MIN_TOP_10_OVERLAP: usize = 3;
+const BENCHMARK_SCHEMA_VERSION: &str = "ullm.sq8.generation_benchmark.v1";
+const BENCHMARK_WARMUPS: usize = 3;
+const BENCHMARK_REPEATS: usize = 10;
 
 const EXPECTED_ARTIFACT_CONTENT_SHA256: &str =
     "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147";
@@ -63,6 +67,7 @@ struct Options {
     package: PathBuf,
     oracle: PathBuf,
     output: PathBuf,
+    benchmark_output: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -449,6 +454,138 @@ struct AllocatorStatsRecord {
     largest_free_run: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct OfflineBenchmarkResult {
+    schema_version: &'static str,
+    passed: bool,
+    benchmark_mode: &'static str,
+    source: BenchmarkSource,
+    workload: BenchmarkWorkload,
+    measurement_scope: BenchmarkMeasurementScope,
+    comparison: BenchmarkComparison,
+    warmups: usize,
+    repeats: usize,
+    promotion_run_counted_as_first_warmup: bool,
+    load_excluded_from_primary_throughput: bool,
+    reset_excluded_from_primary_throughput: bool,
+    samples: Vec<BenchmarkSample>,
+    aggregate: BenchmarkAggregate,
+    exact_tokens_all_samples: bool,
+    token_hash_stable: bool,
+    feedback_verified_all_samples: bool,
+    allocation_released_all_samples: bool,
+    fallback_used: bool,
+    host_staging_used: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkSource {
+    name: &'static str,
+    artifact_content_sha256: &'static str,
+    package_manifest_sha256: &'static str,
+    model_revision: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkWorkload {
+    prompt_token_ids: [usize; QWEN3_14B_SQ8_GENERATION_PROMPT_TOKENS],
+    prompt_position_ids: [usize; QWEN3_14B_SQ8_GENERATION_PROMPT_TOKENS],
+    expected_generated_token_ids: [usize; STEP_COUNT],
+    prompt_tokens: usize,
+    generated_tokens: usize,
+    context_tokens: usize,
+    batch_size: usize,
+    sampling: &'static str,
+    configured_min_new_tokens: usize,
+    max_new_tokens: usize,
+    ignore_eos: bool,
+    early_stop_on_eos: bool,
+    eos_token_id: usize,
+    finish_reason: &'static str,
+    attention: &'static str,
+    bos_inserted: bool,
+    chat_template_applied: bool,
+    detokenization: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkMeasurementScope {
+    timer_start: &'static str,
+    timer_end: &'static str,
+    model_load_included: bool,
+    cache_reset_included: bool,
+    runtime_contract_validation_included: bool,
+    full_logits_readback_included: bool,
+    final_hidden_readback_included: bool,
+    top10_host_scan_included: bool,
+    detokenization_included: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkComparison {
+    scope_caveat_metrics: [&'static str; 4],
+    unavailable_on_vllm: [&'static str; 3],
+    production_engine_comparison_eligible: bool,
+    interpretation: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkSample {
+    sample_index: usize,
+    generated_token_ids: Vec<usize>,
+    token_ids_sha256: String,
+    finish_reason: &'static str,
+    feedback_verified: bool,
+    allocation_released: bool,
+    fallback_used: bool,
+    host_staging_used: bool,
+    reset_latency_ns: u128,
+    request_call_wall_latency_ns: u128,
+    steady_state_cycle_wall_latency_ns: u128,
+    runtime_time_to_first_token_ns: u128,
+    runtime_request_latency_ns: u128,
+    runtime_decode_elapsed_ns: u128,
+    runtime_decode_tokens_per_second: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkAggregate {
+    percentile_method: &'static str,
+    throughput_denominator: &'static str,
+    aggregate_measured_cycle_wall_ns: u128,
+    aggregate_measured_seconds: f64,
+    requests_per_second: f64,
+    generated_tokens_per_second: f64,
+    total_tokens_per_second: f64,
+    steady_state_cycle_wall_latency_ns: U128Distribution,
+    reset_latency_ns: U128Distribution,
+    request_call_wall_latency_ns: U128Distribution,
+    runtime_time_to_first_token_ns: U128Distribution,
+    runtime_request_latency_ns: U128Distribution,
+    runtime_decode_elapsed_ns: U128Distribution,
+    runtime_decode_tokens_per_second: F64Distribution,
+}
+
+#[derive(Debug, Serialize)]
+struct U128Distribution {
+    count: usize,
+    min: u128,
+    mean: f64,
+    p50: f64,
+    p95: f64,
+    max: u128,
+}
+
+#[derive(Debug, Serialize)]
+struct F64Distribution {
+    count: usize,
+    min: f64,
+    mean: f64,
+    p50: f64,
+    p95: f64,
+    max: f64,
+}
+
 fn main() -> Result<(), String> {
     let options = parse_options()?;
     require_hip_kernel_guards()?;
@@ -643,6 +780,25 @@ fn main() -> Result<(), String> {
             options.output.display()
         ));
     }
+    if let Some(benchmark_output) = options.benchmark_output.as_deref() {
+        validate_benchmark_run(&generation, 0, "warmup")?;
+        drop(generation);
+        let benchmark = run_offline_benchmark(&mut runtime, &mut stream)?;
+        write_json_no_clobber(benchmark_output, &benchmark)?;
+        if !benchmark.passed {
+            return Err(format!(
+                "SQ8 generation benchmark failed; evidence was written to {}",
+                benchmark_output.display()
+            ));
+        }
+        println!(
+            "benchmark_passed=true output={} repeats={} steady_cycle_p50_ms={:.6} aggregate_generated_tps={:.3}",
+            benchmark_output.display(),
+            benchmark.repeats,
+            benchmark.aggregate.steady_state_cycle_wall_latency_ns.p50 / 1_000_000.0,
+            benchmark.aggregate.generated_tokens_per_second,
+        );
+    }
     println!(
         "passed=true output={} tokens={:?} request_latency_ms={:.6} generated_tokens_per_second={:.3}",
         options.output.display(),
@@ -653,11 +809,323 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
+fn run_offline_benchmark(
+    runtime: &mut Qwen3Sq8GenerationRuntime,
+    stream: &mut RuntimeStream,
+) -> Result<OfflineBenchmarkResult, String> {
+    // The promotion execution immediately before this function is warmup zero.
+    for warmup_index in 1..BENCHMARK_WARMUPS {
+        runtime.reset_synchronized(stream).map_err(|err| {
+            format!("SQ8 generation benchmark warmup {warmup_index} reset failed: {err}")
+        })?;
+        let warmup = runtime
+            .run_fixed_synchronized(QWEN3_14B_SQ8_GENERATION_MAX_NEW_TOKENS, stream)
+            .map_err(|err| {
+                format!("SQ8 generation benchmark warmup {warmup_index} failed: {err}")
+            })?;
+        validate_benchmark_run(&warmup, warmup_index, "warmup")?;
+        drop(warmup);
+    }
+
+    let mut samples = Vec::with_capacity(BENCHMARK_REPEATS);
+    for sample_index in 0..BENCHMARK_REPEATS {
+        let cycle_start = Instant::now();
+        let reset_start = Instant::now();
+        runtime.reset_synchronized(stream).map_err(|err| {
+            format!("SQ8 generation benchmark sample {sample_index} reset failed: {err}")
+        })?;
+        let reset_latency_ns = reset_start.elapsed().as_nanos();
+        let request_call_start = Instant::now();
+        let measured = runtime
+            .run_fixed_synchronized(QWEN3_14B_SQ8_GENERATION_MAX_NEW_TOKENS, stream)
+            .map_err(|err| {
+                format!("SQ8 generation benchmark sample {sample_index} failed: {err}")
+            })?;
+        let request_call_wall_latency_ns = request_call_start.elapsed().as_nanos();
+        let steady_state_cycle_wall_latency_ns = cycle_start.elapsed().as_nanos();
+        validate_benchmark_run(&measured, sample_index, "measured")?;
+        samples.push(benchmark_sample(
+            sample_index,
+            reset_latency_ns,
+            request_call_wall_latency_ns,
+            steady_state_cycle_wall_latency_ns,
+            &measured,
+        )?);
+        drop(measured);
+    }
+
+    let expected_hash = token_ids_sha256(&EXPECTED_GENERATED_TOKEN_IDS)?;
+    let exact_tokens_all_samples = samples
+        .iter()
+        .all(|sample| sample.generated_token_ids == EXPECTED_GENERATED_TOKEN_IDS);
+    let token_hash_stable = samples
+        .iter()
+        .all(|sample| sample.token_ids_sha256 == expected_hash);
+    let feedback_verified_all_samples = samples.iter().all(|sample| sample.feedback_verified);
+    let allocation_released_all_samples = samples.iter().all(|sample| sample.allocation_released);
+    let fallback_used = samples.iter().any(|sample| sample.fallback_used);
+    let host_staging_used = samples.iter().any(|sample| sample.host_staging_used);
+    let aggregate_measured_cycle_wall_ns = samples.iter().try_fold(0_u128, |total, sample| {
+        total
+            .checked_add(sample.steady_state_cycle_wall_latency_ns)
+            .ok_or_else(|| "SQ8 generation aggregate cycle timing overflows".to_string())
+    })?;
+    if aggregate_measured_cycle_wall_ns == 0 {
+        return Err("SQ8 generation aggregate cycle timing is zero".into());
+    }
+    let aggregate_seconds = aggregate_measured_cycle_wall_ns as f64 / 1_000_000_000.0;
+    let aggregate = BenchmarkAggregate {
+        percentile_method: "linear_interpolation_rank_(n-1)*p",
+        throughput_denominator: "sum_of_measured_reset_plus_run_fixed_cycle_wall_latencies",
+        aggregate_measured_cycle_wall_ns,
+        aggregate_measured_seconds: aggregate_seconds,
+        requests_per_second: BENCHMARK_REPEATS as f64 / aggregate_seconds,
+        generated_tokens_per_second: (BENCHMARK_REPEATS * STEP_COUNT) as f64 / aggregate_seconds,
+        total_tokens_per_second: (BENCHMARK_REPEATS
+            * (QWEN3_14B_SQ8_GENERATION_PROMPT_TOKENS + STEP_COUNT))
+            as f64
+            / aggregate_seconds,
+        steady_state_cycle_wall_latency_ns: u128_distribution(
+            &samples
+                .iter()
+                .map(|sample| sample.steady_state_cycle_wall_latency_ns)
+                .collect::<Vec<_>>(),
+        )?,
+        reset_latency_ns: u128_distribution(
+            &samples
+                .iter()
+                .map(|sample| sample.reset_latency_ns)
+                .collect::<Vec<_>>(),
+        )?,
+        request_call_wall_latency_ns: u128_distribution(
+            &samples
+                .iter()
+                .map(|sample| sample.request_call_wall_latency_ns)
+                .collect::<Vec<_>>(),
+        )?,
+        runtime_time_to_first_token_ns: u128_distribution(
+            &samples
+                .iter()
+                .map(|sample| sample.runtime_time_to_first_token_ns)
+                .collect::<Vec<_>>(),
+        )?,
+        runtime_request_latency_ns: u128_distribution(
+            &samples
+                .iter()
+                .map(|sample| sample.runtime_request_latency_ns)
+                .collect::<Vec<_>>(),
+        )?,
+        runtime_decode_elapsed_ns: u128_distribution(
+            &samples
+                .iter()
+                .map(|sample| sample.runtime_decode_elapsed_ns)
+                .collect::<Vec<_>>(),
+        )?,
+        runtime_decode_tokens_per_second: f64_distribution(
+            &samples
+                .iter()
+                .map(|sample| sample.runtime_decode_tokens_per_second)
+                .collect::<Vec<_>>(),
+        )?,
+    };
+    Ok(OfflineBenchmarkResult {
+        schema_version: BENCHMARK_SCHEMA_VERSION,
+        passed: exact_tokens_all_samples
+            && token_hash_stable
+            && feedback_verified_all_samples
+            && allocation_released_all_samples
+            && !fallback_used
+            && !host_staging_used,
+        benchmark_mode: "audited_generation_gate",
+        source: BenchmarkSource {
+            name: "Qwen/Qwen3-14B-FP8",
+            artifact_content_sha256: EXPECTED_ARTIFACT_CONTENT_SHA256,
+            package_manifest_sha256: EXPECTED_PACKAGE_MANIFEST_SHA256,
+            model_revision: EXPECTED_MODEL_REVISION,
+        },
+        workload: BenchmarkWorkload {
+            prompt_token_ids: QWEN3_14B_SQ8_GENERATION_PROMPT_TOKEN_IDS,
+            prompt_position_ids: [0, 1, 2, 3, 4, 5, 6, 7],
+            expected_generated_token_ids: EXPECTED_GENERATED_TOKEN_IDS,
+            prompt_tokens: QWEN3_14B_SQ8_GENERATION_PROMPT_TOKENS,
+            generated_tokens: STEP_COUNT,
+            context_tokens: QWEN3_14B_SQ8_GENERATION_PROMPT_TOKENS + STEP_COUNT,
+            batch_size: 1,
+            sampling: "greedy_temperature_zero",
+            configured_min_new_tokens: 0,
+            max_new_tokens: QWEN3_14B_SQ8_GENERATION_MAX_NEW_TOKENS,
+            ignore_eos: false,
+            early_stop_on_eos: true,
+            eos_token_id: QWEN3_14B_SQ8_GENERATION_EOS_TOKEN_ID,
+            finish_reason: "length",
+            attention: "causal",
+            bos_inserted: false,
+            chat_template_applied: false,
+            detokenization: false,
+        },
+        measurement_scope: BenchmarkMeasurementScope {
+            timer_start: "before_reset_synchronized",
+            timer_end: "after_run_fixed_synchronized_returns",
+            model_load_included: false,
+            cache_reset_included: true,
+            runtime_contract_validation_included: true,
+            full_logits_readback_included: true,
+            final_hidden_readback_included: true,
+            top10_host_scan_included: true,
+            detokenization_included: false,
+        },
+        comparison: BenchmarkComparison {
+            scope_caveat_metrics: [
+                "steady_state_cycle_wall_latency_ns",
+                "requests_per_second",
+                "generated_tokens_per_second",
+                "total_tokens_per_second",
+            ],
+            unavailable_on_vllm: [
+                "runtime_time_to_first_token_ns",
+                "runtime_decode_elapsed_ns",
+                "runtime_decode_tokens_per_second",
+            ],
+            production_engine_comparison_eligible: false,
+            interpretation: "same fixed workload runner-wall comparison; uLLM includes audited full-hidden/full-logits readback and is not lean serving throughput",
+        },
+        warmups: BENCHMARK_WARMUPS,
+        repeats: BENCHMARK_REPEATS,
+        promotion_run_counted_as_first_warmup: true,
+        load_excluded_from_primary_throughput: true,
+        reset_excluded_from_primary_throughput: false,
+        samples,
+        aggregate,
+        exact_tokens_all_samples,
+        token_hash_stable,
+        feedback_verified_all_samples,
+        allocation_released_all_samples,
+        fallback_used,
+        host_staging_used,
+    })
+}
+
+fn validate_benchmark_run(
+    result: &Sq8OfflineGenerationResult,
+    index: usize,
+    phase: &str,
+) -> Result<(), String> {
+    result.validate_contract()?;
+    if result.completion.generated_token_ids != EXPECTED_GENERATED_TOKEN_IDS
+        || result.completion.reason != Sq8GenerationCompletionReason::MaxNewTokens
+        || !result.completion.allocation_released
+        || !result.report.feedback_verified
+        || result.report.fallback_used
+        || result.report.host_staging_used
+    {
+        return Err(format!(
+            "SQ8 generation benchmark {phase} {index} execution contract failed"
+        ));
+    }
+    Ok(())
+}
+
+fn benchmark_sample(
+    sample_index: usize,
+    reset_latency_ns: u128,
+    request_call_wall_latency_ns: u128,
+    steady_state_cycle_wall_latency_ns: u128,
+    result: &Sq8OfflineGenerationResult,
+) -> Result<BenchmarkSample, String> {
+    if request_call_wall_latency_ns < result.metrics.request_latency_ns {
+        return Err(format!(
+            "SQ8 generation benchmark sample {sample_index} call wall latency is shorter than runtime latency"
+        ));
+    }
+    let measured_parts_ns = reset_latency_ns
+        .checked_add(request_call_wall_latency_ns)
+        .ok_or_else(|| {
+            format!("SQ8 generation benchmark sample {sample_index} timing overflows")
+        })?;
+    if reset_latency_ns == 0 || steady_state_cycle_wall_latency_ns < measured_parts_ns {
+        return Err(format!(
+            "SQ8 generation benchmark sample {sample_index} steady cycle timing is inconsistent"
+        ));
+    }
+    let decode_tokens_per_second = result.metrics.decode_tokens_per_second.ok_or_else(|| {
+        format!("SQ8 generation benchmark sample {sample_index} has no decode TPS")
+    })?;
+    Ok(BenchmarkSample {
+        sample_index,
+        generated_token_ids: result.completion.generated_token_ids.clone(),
+        token_ids_sha256: result.report.generated_token_ids_sha256.clone(),
+        finish_reason: "length",
+        feedback_verified: result.report.feedback_verified,
+        allocation_released: result.completion.allocation_released,
+        fallback_used: result.report.fallback_used,
+        host_staging_used: result.report.host_staging_used,
+        reset_latency_ns,
+        request_call_wall_latency_ns,
+        steady_state_cycle_wall_latency_ns,
+        runtime_time_to_first_token_ns: result.metrics.time_to_first_token_ns,
+        runtime_request_latency_ns: result.metrics.request_latency_ns,
+        runtime_decode_elapsed_ns: result.metrics.decode_elapsed_ns,
+        runtime_decode_tokens_per_second: decode_tokens_per_second,
+    })
+}
+
+fn u128_distribution(values: &[u128]) -> Result<U128Distribution, String> {
+    if values.len() != BENCHMARK_REPEATS || values.contains(&0) {
+        return Err("SQ8 generation benchmark U128 distribution input is invalid".into());
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let as_f64 = sorted.iter().map(|value| *value as f64).collect::<Vec<_>>();
+    Ok(U128Distribution {
+        count: sorted.len(),
+        min: sorted[0],
+        mean: as_f64.iter().sum::<f64>() / as_f64.len() as f64,
+        p50: percentile_sorted(&as_f64, 0.50)?,
+        p95: percentile_sorted(&as_f64, 0.95)?,
+        max: *sorted.last().expect("validated non-empty distribution"),
+    })
+}
+
+fn f64_distribution(values: &[f64]) -> Result<F64Distribution, String> {
+    if values.len() != BENCHMARK_REPEATS
+        || values
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err("SQ8 generation benchmark F64 distribution input is invalid".into());
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    Ok(F64Distribution {
+        count: sorted.len(),
+        min: sorted[0],
+        mean: sorted.iter().sum::<f64>() / sorted.len() as f64,
+        p50: percentile_sorted(&sorted, 0.50)?,
+        p95: percentile_sorted(&sorted, 0.95)?,
+        max: *sorted.last().expect("validated non-empty distribution"),
+    })
+}
+
+fn percentile_sorted(values: &[f64], quantile: f64) -> Result<f64, String> {
+    if values.is_empty()
+        || values.iter().any(|value| !value.is_finite())
+        || !(0.0..=1.0).contains(&quantile)
+    {
+        return Err("SQ8 generation benchmark percentile input is invalid".into());
+    }
+    let position = quantile * (values.len() - 1) as f64;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    let fraction = position - lower as f64;
+    Ok(values[lower] * (1.0 - fraction) + values[upper] * fraction)
+}
+
 fn parse_options() -> Result<Options, String> {
     let mut artifact = None;
     let mut package = None;
     let mut oracle = None;
     let mut output = None;
+    let mut benchmark_output = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or_else(usage)?;
@@ -666,6 +1134,9 @@ fn parse_options() -> Result<Options, String> {
             Some("--package") => set_once(&mut package, value, "--package")?,
             Some("--oracle") => set_once(&mut oracle, value, "--oracle")?,
             Some("--output") => set_once(&mut output, value, "--output")?,
+            Some("--benchmark-output") => {
+                set_once(&mut benchmark_output, value, "--benchmark-output")?
+            }
             _ => return Err(format!("unknown argument {:?}; {}", flag, usage())),
         }
     }
@@ -674,6 +1145,7 @@ fn parse_options() -> Result<Options, String> {
         package: PathBuf::from(package.ok_or_else(usage)?),
         oracle: PathBuf::from(oracle.ok_or_else(usage)?),
         output: PathBuf::from(output.ok_or_else(usage)?),
+        benchmark_output: benchmark_output.map(PathBuf::from),
     };
     for (label, path) in [
         ("artifact", &options.artifact),
@@ -706,6 +1178,33 @@ fn parse_options() -> Result<Options, String> {
             parent.display()
         ));
     }
+    if let Some(benchmark_output) = options.benchmark_output.as_deref() {
+        if benchmark_output == options.output {
+            return Err("promotion and benchmark outputs must be different paths".into());
+        }
+        match std::fs::symlink_metadata(benchmark_output) {
+            Ok(_) => {
+                return Err(format!(
+                    "benchmark output already exists: {}",
+                    benchmark_output.display()
+                ));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to inspect {}: {err}",
+                    benchmark_output.display()
+                ));
+            }
+        }
+        let benchmark_parent = output_parent(benchmark_output)?;
+        if !benchmark_parent.is_dir() {
+            return Err(format!(
+                "benchmark output parent is not a directory: {}",
+                benchmark_parent.display()
+            ));
+        }
+    }
     Ok(options)
 }
 
@@ -717,7 +1216,7 @@ fn set_once(slot: &mut Option<OsString>, value: OsString, flag: &str) -> Result<
 }
 
 fn usage() -> String {
-    "usage: sq8_ck_generate --artifact ARTIFACT_DIR --package THIN_PACKAGE --oracle VLLM_ORACLE_DIR --output OUTPUT_JSON".to_string()
+    "usage: sq8_ck_generate --artifact ARTIFACT_DIR --package THIN_PACKAGE --oracle VLLM_ORACLE_DIR --output OUTPUT_JSON [--benchmark-output BENCHMARK_JSON]".to_string()
 }
 
 fn validate_artifact_identity(artifact: &Sq8CanonicalArtifact) -> Result<(), String> {
@@ -1435,7 +1934,7 @@ fn output_parent(path: &Path) -> Result<&Path, String> {
     }
 }
 
-fn write_json_no_clobber(path: &Path, result: &GenerationGateResult) -> Result<(), String> {
+fn write_json_no_clobber<T: Serialize>(path: &Path, result: &T) -> Result<(), String> {
     let mut payload = serde_json::to_vec_pretty(result)
         .map_err(|err| format!("failed to serialize SQ8 generation result: {err}"))?;
     payload.push(b'\n');
