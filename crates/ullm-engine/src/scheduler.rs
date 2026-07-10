@@ -199,6 +199,36 @@ impl SchedulerState {
         Ok(())
     }
 
+    /// Records the first generated token from prefill logits without caching a decode input.
+    pub fn record_prefill_generated_token(&mut self, request_id: RequestId) -> Result<(), String> {
+        let state = self
+            .active
+            .get_mut(&request_id)
+            .ok_or_else(|| format!("request {:?} is not active", request_id))?;
+
+        if state.cached_tokens < state.request.prompt_tokens {
+            return Err(format!("request {:?} prefill not completed", request_id));
+        }
+        if state.cached_tokens > state.request.prompt_tokens {
+            return Err(format!(
+                "request {:?} decode already progressed after prefill",
+                request_id
+            ));
+        }
+        if state.request.max_new_tokens == 0 {
+            return Err(format!("request {:?} has max_new_tokens 0", request_id));
+        }
+        if state.generated_tokens != 0 {
+            return Err(format!(
+                "request {:?} already recorded a generated token",
+                request_id
+            ));
+        }
+
+        state.generated_tokens = 1;
+        Ok(())
+    }
+
     pub fn advance_decode(&mut self, request_id: RequestId) -> Result<(), String> {
         let state = self
             .active
@@ -920,6 +950,159 @@ mod tests {
             .expect("request 10 should be active");
         assert_eq!(active.cached_tokens, 6);
         assert_eq!(active.generated_tokens, 2);
+    }
+
+    #[test]
+    fn scheduler_state_records_prefill_generated_token_without_caching_it() {
+        let mut scheduler = SchedulerState::with_block_size(4, 8);
+        scheduler.enqueue(Request::new(1, 4, 3));
+        scheduler
+            .pop_prefill_batch_with_allocation(4)
+            .expect("allocation should succeed");
+        scheduler
+            .complete_prefill(RequestId(1))
+            .expect("prefill completion should succeed");
+
+        scheduler
+            .record_prefill_generated_token(RequestId(1))
+            .expect("the first generated token should be recorded");
+
+        let active = scheduler
+            .active_request(RequestId(1))
+            .expect("request 1 should be active");
+        assert_eq!(active.cached_tokens, 4);
+        assert_eq!(active.generated_tokens, 1);
+
+        let ready = scheduler
+            .ready_decode_batch(1)
+            .expect("request should be ready for its first decode input");
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].cached_tokens, 4);
+        assert_eq!(ready[0].generated_tokens, 1);
+        assert_eq!(ready[0].cache_position, 4);
+        assert_eq!(ready[0].next_cache_len, 5);
+        assert_eq!(ready[0].remaining_new_tokens, 2);
+
+        scheduler
+            .advance_decode(RequestId(1))
+            .expect("existing decode progression should remain valid");
+        let active = scheduler
+            .active_request(RequestId(1))
+            .expect("request 1 should remain active");
+        assert_eq!(active.cached_tokens, 5);
+        assert_eq!(active.generated_tokens, 2);
+    }
+
+    #[test]
+    fn scheduler_state_prefill_token_completes_single_token_request() {
+        let mut scheduler = SchedulerState::with_block_size(2, 8);
+        scheduler.enqueue(Request::new(1, 4, 1));
+        scheduler
+            .pop_prefill_batch_with_allocation(4)
+            .expect("allocation should succeed");
+        scheduler
+            .complete_prefill(RequestId(1))
+            .expect("prefill completion should succeed");
+
+        scheduler
+            .record_prefill_generated_token(RequestId(1))
+            .expect("the only generated token should be recorded");
+
+        let active = scheduler
+            .active_request(RequestId(1))
+            .expect("completed request should remain active until released");
+        assert_eq!(active.cached_tokens, 4);
+        assert_eq!(active.generated_tokens, 1);
+        assert!(
+            scheduler
+                .ready_decode_batch(1)
+                .expect("ready batch query should succeed")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn scheduler_state_prefill_token_rejections_leave_state_unchanged() {
+        let mut scheduler = SchedulerState::with_block_size(8, 8);
+        scheduler.enqueue(Request::new(1, 4, 2));
+        scheduler.enqueue(Request::new(2, 4, 0));
+        scheduler.enqueue(Request::new(3, 4, 3));
+        scheduler
+            .pop_prefill_batch_with_allocation(12)
+            .expect("allocations should succeed");
+
+        let unknown_active_len = scheduler.active_len();
+        let unknown_allocator_stats = scheduler.allocator_stats();
+        let err = scheduler
+            .record_prefill_generated_token(RequestId(99))
+            .expect_err("unknown request should be rejected");
+        assert!(err.contains("not active"), "{err}");
+        assert_eq!(scheduler.active_len(), unknown_active_len);
+        assert_eq!(scheduler.allocator_stats(), unknown_allocator_stats);
+
+        let before_prefill = scheduler
+            .active_request(RequestId(1))
+            .expect("request 1 should be active")
+            .clone();
+        let err = scheduler
+            .record_prefill_generated_token(RequestId(1))
+            .expect_err("recording before prefill should be rejected");
+        assert!(err.contains("prefill not completed"), "{err}");
+        assert_eq!(
+            scheduler.active_request(RequestId(1)),
+            Some(&before_prefill)
+        );
+
+        scheduler
+            .complete_prefill(RequestId(2))
+            .expect("request 2 prefill should complete");
+        let before_zero_limit = scheduler
+            .active_request(RequestId(2))
+            .expect("request 2 should be active")
+            .clone();
+        let err = scheduler
+            .record_prefill_generated_token(RequestId(2))
+            .expect_err("max_new_tokens zero should be rejected");
+        assert!(err.contains("max_new_tokens 0"), "{err}");
+        assert_eq!(
+            scheduler.active_request(RequestId(2)),
+            Some(&before_zero_limit)
+        );
+
+        scheduler
+            .complete_prefill(RequestId(1))
+            .expect("request 1 prefill should complete");
+        scheduler
+            .record_prefill_generated_token(RequestId(1))
+            .expect("request 1 should record its first generated token");
+        let before_duplicate = scheduler
+            .active_request(RequestId(1))
+            .expect("request 1 should be active")
+            .clone();
+        let err = scheduler
+            .record_prefill_generated_token(RequestId(1))
+            .expect_err("duplicate recording should be rejected");
+        assert!(err.contains("already recorded"), "{err}");
+        assert_eq!(
+            scheduler.active_request(RequestId(1)),
+            Some(&before_duplicate)
+        );
+
+        scheduler
+            .complete_prefill(RequestId(3))
+            .expect("request 3 prefill should complete");
+        scheduler
+            .advance_decode(RequestId(3))
+            .expect("request 3 decode should advance through the public API");
+        let after_decode = scheduler
+            .active_request(RequestId(3))
+            .expect("request 3 should be active")
+            .clone();
+        let err = scheduler
+            .record_prefill_generated_token(RequestId(3))
+            .expect_err("recording after decode progress should be rejected");
+        assert!(err.contains("decode already progressed"), "{err}");
+        assert_eq!(scheduler.active_request(RequestId(3)), Some(&after_decode));
     }
 
     #[test]
