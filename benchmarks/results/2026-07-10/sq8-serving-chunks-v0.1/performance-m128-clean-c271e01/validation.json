@@ -1,0 +1,279 @@
+{
+  "build_identity": {
+    "runner_binary_sha256": "2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204",
+    "runner_git_commit": "c271e010f18e6683dc53834188c45287434a34ef",
+    "runner_worktree_clean": true
+  },
+  "decode_case": {
+    "measured_inter_token_interval_count": 315,
+    "measured_tokens_per_second": [
+      27.750297812892523,
+      27.692140772603775,
+      27.778502664418735,
+      27.75773541996308,
+      27.765450260645387
+    ],
+    "metric_after": {
+      "command_end_ns": 350743055118,
+      "command_start_ns": 350484766598,
+      "fabric_clock_mhz": 582.0,
+      "gfx_clock_mhz": 2849.0,
+      "hotspot_temperature_c": 70.0,
+      "memory_clock_mhz": 96.0,
+      "raw_sha256": "8f73ec75e632ac486ff8854b58b9d61795af15b4510e78ed8fc73188ea799810",
+      "socket_power_w": 21.0,
+      "timestamp_ns": 350743055118
+    },
+    "metric_before": {
+      "command_end_ns": 326348297822,
+      "command_start_ns": 326125121906,
+      "fabric_clock_mhz": 582.0,
+      "gfx_clock_mhz": 81.0,
+      "hotspot_temperature_c": 74.0,
+      "memory_clock_mhz": 96.0,
+      "raw_sha256": "ce60acab3d567a64f6412e37627e62136e2887ed0a01ab62a2aff3c8145e6a82",
+      "socket_power_w": 24.0,
+      "timestamp_ns": 326348297822
+    },
+    "p50_tokens_per_second": 27.75773541996308,
+    "p50_tokens_per_second_minimum": 15.0,
+    "p95_inter_token_seconds": 0.0368816577,
+    "p95_inter_token_seconds_maximum": 0.1,
+    "passed": true
+  },
+  "environment": {
+    "amd_smi_list_raw_sha256": "a7fc353f0234d1bb86e01c847fd7a330518dbf6b4f5636d2a6824cef3fd02243",
+    "amd_smi_version_raw_sha256": "4355d3663367dd7017a63f3fe015697c9d240c742de999f3aca4e17c179488fa",
+    "hip_visible_devices": "1",
+    "target_gpu_bdf": "0000:47:00.0",
+    "target_gpu_index": 2,
+    "target_gpu_uuid": "a8ff7551-0000-1000-80e9-ddefa2d60f55",
+    "target_kfd_gpu_id": 51545
+  },
+  "evidence": {
+    "file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/performance-m128-clean-c271e01/result.json",
+    "sha256": "cb6119c9d6be9cbc8c7f55dcf2968be0b543c2e50bff602c046fb908201577e3"
+  },
+  "gate_errors": [],
+  "passed": true,
+  "schema_version": "ullm.sq8.serving_performance_validation.v1",
+  "thresholds": {
+    "decode_p50_tokens_per_second_minimum": 15.0,
+    "decode_p95_inter_token_seconds_maximum": 0.1,
+    "percentile_method": "linear_interpolation_rank_(n-1)*p",
+    "ttft_seconds": {
+      "128": {
+        "p50": 4.0,
+        "p95": 5.0
+      },
+      "2048": {
+        "p50": 30.0,
+        "p95": 35.0
+      },
+      "32": {
+        "p50": 2.5,
+        "p95": 3.0
+      },
+      "3584": {
+        "p50": 50.0,
+        "p95": 60.0
+      },
+      "512": {
+        "p50": 10.0,
+        "p95": 12.0
+      }
+    }
+  },
+  "ttft_cases": [
+    {
+      "measured_ttft_seconds": [
+        0.959047454,
+        0.958686776,
+        0.958606243,
+        0.957095155,
+        0.960849908
+      ],
+      "metric_after": {
+        "command_end_ns": 12532642229,
+        "command_start_ns": 11395627816,
+        "fabric_clock_mhz": 582.0,
+        "gfx_clock_mhz": 41.0,
+        "hotspot_temperature_c": 48.0,
+        "memory_clock_mhz": 96.0,
+        "raw_sha256": "62c4033549bfeb60873948969ecd1da157035fc2aae46168f127809fe84b5b0f",
+        "socket_power_w": 13.0,
+        "timestamp_ns": 12532642229
+      },
+      "metric_before": {
+        "command_end_ns": 977621520,
+        "command_start_ns": 724021596,
+        "fabric_clock_mhz": 582.0,
+        "gfx_clock_mhz": 2851.0,
+        "hotspot_temperature_c": 44.0,
+        "memory_clock_mhz": 96.0,
+        "raw_sha256": "d4cbfa870aeee92bf3c2131334aa014b218370c7a1e1d1951257ce2c2ceec817",
+        "socket_power_w": 16.0,
+        "timestamp_ns": 977621520
+      },
+      "p50_limit_seconds": 2.5,
+      "p50_seconds": 0.958686776,
+      "p95_limit_seconds": 3.0,
+      "p95_seconds": 0.9604894172,
+      "passed": true,
+      "prompt_tokens": 32
+    },
+    {
+      "measured_ttft_seconds": [
+        0.149629456,
+        0.150267467,
+        0.150408389,
+        0.150360749,
+        0.150367339
+      ],
+      "metric_after": {
+        "command_end_ns": 16965196757,
+        "command_start_ns": 16692644349,
+        "fabric_clock_mhz": 582.0,
+        "gfx_clock_mhz": 2526.0,
+        "hotspot_temperature_c": 50.0,
+        "memory_clock_mhz": 96.0,
+        "raw_sha256": "46eb541d35e8cc20ecdf93a10dacd06347a3f717e9f12c014a8331dc85236747",
+        "socket_power_w": 14.0,
+        "timestamp_ns": 16965196757
+      },
+      "metric_before": {
+        "command_end_ns": 13659184578,
+        "command_start_ns": 12532746671,
+        "fabric_clock_mhz": 582.0,
+        "gfx_clock_mhz": 45.0,
+        "hotspot_temperature_c": 48.0,
+        "memory_clock_mhz": 96.0,
+        "raw_sha256": "8f53876da97d083f510698c6a4b5219ecb61a9a18cca6ceceeb4749213a0b22b",
+        "socket_power_w": 13.0,
+        "timestamp_ns": 13659184578
+      },
+      "p50_limit_seconds": 4.0,
+      "p50_seconds": 0.150360749,
+      "p95_limit_seconds": 5.0,
+      "p95_seconds": 0.150400179,
+      "passed": true,
+      "prompt_tokens": 128
+    },
+    {
+      "measured_ttft_seconds": [
+        0.997719534,
+        0.99585456,
+        0.994055747,
+        0.991725576,
+        1.271559816
+      ],
+      "metric_after": {
+        "command_end_ns": 26469285857,
+        "command_start_ns": 26217474712,
+        "fabric_clock_mhz": 582.0,
+        "gfx_clock_mhz": 2053.0,
+        "hotspot_temperature_c": 57.0,
+        "memory_clock_mhz": 96.0,
+        "raw_sha256": "7e350e395789d6c106c299718a5d88353cf73461c2f8710ac35c2c3c0fd85915",
+        "socket_power_w": 76.0,
+        "timestamp_ns": 26469285857
+      },
+      "metric_before": {
+        "command_end_ns": 17240666326,
+        "command_start_ns": 16965355340,
+        "fabric_clock_mhz": 582.0,
+        "gfx_clock_mhz": 2636.0,
+        "hotspot_temperature_c": 49.0,
+        "memory_clock_mhz": 96.0,
+        "raw_sha256": "e8b60b1cd5783187bad1c2d66db2b202db3bbb49f59b0f21a4e57c84ef6b782f",
+        "socket_power_w": 28.0,
+        "timestamp_ns": 17240666326
+      },
+      "p50_limit_seconds": 10.0,
+      "p50_seconds": 0.99585456,
+      "p95_limit_seconds": 12.0,
+      "p95_seconds": 1.2167917596,
+      "passed": true,
+      "prompt_tokens": 512
+    },
+    {
+      "measured_ttft_seconds": [
+        10.826673953,
+        10.822145134,
+        10.81768876,
+        10.817542932,
+        10.813355059
+      ],
+      "metric_after": {
+        "command_end_ns": 105122394137,
+        "command_start_ns": 104894105400,
+        "fabric_clock_mhz": 1020.0,
+        "gfx_clock_mhz": 2172.0,
+        "hotspot_temperature_c": 76.0,
+        "memory_clock_mhz": 772.0,
+        "raw_sha256": "ccfa9bbf466137695a228cc0dcd386cf541ef7c853b0a0e41a1f7ac2bc4457da",
+        "socket_power_w": 166.0,
+        "timestamp_ns": 105122394137
+      },
+      "metric_before": {
+        "command_end_ns": 26714096171,
+        "command_start_ns": 26469405049,
+        "fabric_clock_mhz": 582.0,
+        "gfx_clock_mhz": 81.0,
+        "hotspot_temperature_c": 56.0,
+        "memory_clock_mhz": 96.0,
+        "raw_sha256": "4c2ad5c6ae68b8b9bb2859a761ea111f6e3f53e1c48b22d80f3d1ae4041097be",
+        "socket_power_w": 22.0,
+        "timestamp_ns": 26714096171
+      },
+      "p50_limit_seconds": 30.0,
+      "p50_seconds": 10.81768876,
+      "p95_limit_seconds": 35.0,
+      "p95_seconds": 10.8257681892,
+      "passed": true,
+      "prompt_tokens": 2048
+    },
+    {
+      "measured_ttft_seconds": [
+        31.284636748,
+        31.287437785,
+        31.291960063,
+        31.283910106,
+        31.286809012
+      ],
+      "metric_after": {
+        "command_end_ns": 326124883542,
+        "command_start_ns": 325882052302,
+        "fabric_clock_mhz": 1020.0,
+        "gfx_clock_mhz": 2838.0,
+        "hotspot_temperature_c": 76.0,
+        "memory_clock_mhz": 456.0,
+        "raw_sha256": "fd0c97094bda6be4d738a555dacbaa3d3fc664144bd85f1e87bab6809928a268",
+        "socket_power_w": 227.0,
+        "timestamp_ns": 326124883542
+      },
+      "metric_before": {
+        "command_end_ns": 105333836583,
+        "command_start_ns": 105122512959,
+        "fabric_clock_mhz": 582.0,
+        "gfx_clock_mhz": 56.0,
+        "hotspot_temperature_c": 73.0,
+        "memory_clock_mhz": 96.0,
+        "raw_sha256": "c3bf015adb9826c0c469e99bd9dd0bddee4b2001b3e1f734fe8a12972c9d79a0",
+        "socket_power_w": 21.0,
+        "timestamp_ns": 105333836583
+      },
+      "p50_limit_seconds": 50.0,
+      "p50_seconds": 31.286809012,
+      "p95_limit_seconds": 60.0,
+      "p95_seconds": 31.2910556074,
+      "passed": true,
+      "prompt_tokens": 3584
+    }
+  ],
+  "vram": {
+    "final_bytes": 18276048896,
+    "initial_bytes": 18275348480,
+    "worker_pid": 674755
+  }
+}

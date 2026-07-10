@@ -96,6 +96,21 @@ The selected M=128 exact 4096-token deep-boundary run is under
 - reset returned the session to Ready with active0/waiting0, zero allocated blocks, and all 40 cache lengths zero
 - the independent validator recomputed the full prefill/decode/terminal/reset structure and accepted the external clean commit and binary anchors
 
+The selected M=128 formal performance run is under
+`performance-m128-clean-c271e01/`:
+
+- runner commit: `c271e010f18e6683dc53834188c45287434a34ef`
+- binary SHA-256: `2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204`
+- raw result SHA-256: `cb6119c9d6be9cbc8c7f55dcf2968be0b543c2e50bff602c046fb908201577e3`; validation SHA-256: `388f97dbc3702d182eb0dfe739143a5c0c2fce973bf8b3f43ad85715830d0bd7`
+- one resident model load took `27.693288` seconds; every prompt used two warmups and five measured samples
+- TTFT p50/p95 at prompt 32, 128, 512, 2048, and 3584 was `0.958687/0.960489`, `0.150361/0.150400`, `0.995855/1.216792`, `10.817689/10.825768`, and `31.286809/31.291056` seconds; every fixed gate passed
+- prompt 32 remains an all-M1 tail in the selected fixed-M128 mode and is slower than the old M=8 result, but it stays below the unchanged `2.5/3.0` second product limits; no optional hybrid-tail optimization was added
+- prompt 32 / generation 64 passed at p50 `27.757735` token/s and p95 inter-token latency `0.036882` seconds
+- TTFT prompt call counts were `32/1/4/16/28`; the decode case used 32 prompt calls, 31 prompt progress events, and 95 total calls
+- all 42 requests completed their required cancellation or length terminal path and reset to active0/waiting0, zero allocator use, and all 40 cache lengths zero
+- all 44 AMD SMI/KFD VRAM captures agreed and found only the worker PID; initial/final resident VRAM was `18,275,348,480 / 18,276,048,896` bytes
+- the independent validator reported `passed=true` with no gate errors after validating raw v2 structure, timing, sampling, terminal/reset, isolation, VRAM, and clean build identity
+
 ## 次の行動
 
-M=8の正しさと初回性能run、および選択したM=128のclean correctness oracleと3584+512 deep boundaryは完了した。次はM=128で変更していないformal TTFT/decode gateを判定し、全gate合格後だけP8-Cへ進む。
+M=128のclean correctness、3584+512 deep boundary、formal TTFT/decodeはすべて固定gateに合格し、P8-B2は完了した。次はP8-Cでdeterministic sampling、cross-thread cancellation、resident worker protocolを実装する。request batchingとwaiting queueは対象外のままとする。

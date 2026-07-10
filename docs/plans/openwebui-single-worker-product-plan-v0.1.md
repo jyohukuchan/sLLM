@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 selected M=128 and passed clean correctness and deep-boundary validation; formal performance evidence remains
+Status: in progress; P8-B2 is complete with selected M=128 correctness, deep-boundary, and formal performance gates passed; P8-C is next
 
 Date: 2026-07-10
 
@@ -807,6 +807,44 @@ oracle. The remaining correctness condition was the exact 3584-token prompt plus
    identity without accepting producer self-reported pass state.
 3. Complete P8-B2 and begin P8-C only if every fixed threshold passes. On failure,
    collect the one bounded profiler run already allowed by this plan.
+
+#### P8-B2 M=128 formal performance result (2026-07-10)
+
+##### 前回の要点
+
+The selected M=128 path passed clean prompt correctness and the exact 3584+512
+deep boundary. P8-B2 had one remaining condition: repeat the unchanged formal
+resident TTFT/decode matrix with complete reset, isolation, and VRAM evidence.
+
+##### 今回の変更点
+
+- Clean evidence is frozen under
+  `benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/performance-m128-clean-c271e01/`.
+- The run used clean commit `c271e010f18e6683dc53834188c45287434a34ef`
+  and binary SHA-256
+  `2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204`.
+- Prompt 32/128/512/2048/3584 TTFT p50/p95 was
+  `0.958687/0.960489`, `0.150361/0.150400`, `0.995855/1.216792`,
+  `10.817689/10.825768`, and `31.286809/31.291056` seconds. Every unchanged
+  threshold passed.
+- Prompt 32 remains below M=128 and therefore uses 32 M=1 calls. Its TTFT is
+  slower than the old M=8 path but remains below the fixed `2.5/3.0` second gate;
+  hybrid-tail tuning is not required for the minimum product and stays deferred.
+- Prompt 32 / generation 64 decode passed at p50 `27.757735` token/s and p95
+  inter-token latency `0.036882` seconds.
+- All 42 requests reset completely, and all 44 AMD SMI/KFD VRAM captures agreed
+  with no unrelated process. The independent validator reported no gate errors.
+- P8-B2 is complete. M=128 is now the selected single-request prefill path for the
+  v0.1 resident worker; this does not add request batching or a waiting queue.
+
+##### 次の行動
+
+1. Begin P8-C with deterministic CPU sampling and its frozen RNG/ordering
+   contract, while preserving greedy behavior as a supported special case.
+2. Add cross-thread cancellation at the worker boundary and prove that no token is
+   emitted after cancellation acknowledgment.
+3. Implement the single resident worker protocol with one active request, reject
+   concurrent work as busy, and keep request batching/waiting0 unchanged.
 
 ### P8-C: Sampling, Cancellation, and Resident Worker
 
