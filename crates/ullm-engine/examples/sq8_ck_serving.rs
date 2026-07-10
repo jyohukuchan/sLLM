@@ -26,6 +26,9 @@ use ullm_engine::sq8_serving_runtime::{
 };
 use ullm_runtime_sys::{RuntimeContext, device_count, device_info};
 
+#[path = "sq8_ck_serving_performance.rs"]
+mod performance;
+
 const UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 const DEEP_BOUNDARY_PROMPT_TOKENS: usize = 3584;
 const DEEP_BOUNDARY_GENERATED_TOKENS: usize = 512;
@@ -41,6 +44,7 @@ struct Options {
     prompt_lengths: Option<Vec<usize>>,
     prefill_mode: Sq8ServingPrefillMode,
     test_only_ignore_eos: bool,
+    performance_gate: bool,
     cancel_after_first_token: bool,
     cancel_after_prompt_progress: Option<usize>,
     oracle_capture_dir: Option<PathBuf>,
@@ -198,6 +202,9 @@ struct ServingDeviceResult {
 
 fn main() -> Result<(), String> {
     let options = parse_options()?;
+    if options.performance_gate {
+        performance::validate_output_path(&options)?;
+    }
     let runner_identity = runner_identity()?;
     if let Some(directory) = &options.oracle_capture_dir {
         std::fs::create_dir(directory).map_err(|err| {
@@ -227,6 +234,16 @@ fn main() -> Result<(), String> {
     )
     .map_err(|err| err.to_string())?;
     let load_seconds = load_start.elapsed().as_secs_f64();
+
+    if options.performance_gate {
+        return performance::run(
+            &mut session,
+            &mut stream,
+            &options,
+            runner_identity,
+            load_seconds,
+        );
+    }
 
     let cases = serving_cases(&options)?;
     let cancellation_prompt = cases
@@ -1032,7 +1049,10 @@ fn parse_options() -> Result<Options, String> {
     let mut prompt_lengths = None;
     let mut prefill_mode = Sq8ServingPrefillMode::SequentialM1;
     let mut test_only_ignore_eos = false;
+    let mut performance_gate = false;
     let mut prompt_token_ids_explicit = false;
+    let mut max_new_tokens_explicit = false;
+    let mut second_max_new_tokens_explicit = false;
     let mut cancel_after_first_token = false;
     let mut cancel_after_prompt_progress = None;
     let mut oracle_capture_dir = None;
@@ -1072,6 +1092,7 @@ fn parse_options() -> Result<Options, String> {
                     .ok_or_else(|| "max-new-tokens must be UTF-8".to_string())?
                     .parse::<usize>()
                     .map_err(|err| format!("invalid max-new-tokens: {err}"))?;
+                max_new_tokens_explicit = true;
             }
             Some("--second-prompt-token-ids") => {
                 let value = args
@@ -1091,6 +1112,7 @@ fn parse_options() -> Result<Options, String> {
                     .ok_or_else(|| "second max-new-tokens must be UTF-8".to_string())?
                     .parse::<usize>()
                     .map_err(|err| format!("invalid second max-new-tokens: {err}"))?;
+                second_max_new_tokens_explicit = true;
             }
             Some("--prompt-lengths") => {
                 let value = args
@@ -1112,6 +1134,7 @@ fn parse_options() -> Result<Options, String> {
                 )?;
             }
             Some("--test-only-ignore-eos") => test_only_ignore_eos = true,
+            Some("--performance-gate") => performance_gate = true,
             Some("--cancel-after-first-token") => cancel_after_first_token = true,
             Some("--cancel-after-prompt-progress") => {
                 let value = args
@@ -1167,6 +1190,26 @@ fn parse_options() -> Result<Options, String> {
                 .into(),
         );
     }
+    if performance_gate
+        && (test_only_ignore_eos
+            || prefill_mode != Sq8ServingPrefillMode::FixedM8Chunks
+            || prompt_token_ids_explicit
+            || max_new_tokens_explicit
+            || second_max_new_tokens_explicit
+            || prompt_lengths.is_some()
+            || second_prompt_token_ids.is_some()
+            || cancel_after_first_token
+            || cancel_after_prompt_progress.is_some()
+            || oracle_capture_dir.is_some()
+            || result_json.is_none())
+    {
+        return Err(
+            "--performance-gate requires exactly --prefill-mode m8-chunk8 \
+             --result-json PATH without prompt, generation, oracle, cancellation, \
+             or deep-boundary options"
+                .into(),
+        );
+    }
     Ok(Options {
         artifact: artifact.ok_or_else(|| "--artifact is required".to_string())?,
         package: package.ok_or_else(|| "--package is required".to_string())?,
@@ -1177,6 +1220,7 @@ fn parse_options() -> Result<Options, String> {
         prompt_lengths,
         prefill_mode,
         test_only_ignore_eos,
+        performance_gate,
         cancel_after_first_token,
         cancel_after_prompt_progress,
         oracle_capture_dir,
