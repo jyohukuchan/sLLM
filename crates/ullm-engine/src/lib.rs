@@ -19,6 +19,7 @@ pub mod sq8_generation_runtime;
 pub mod sq8_layer_oracle;
 pub mod sq8_layer_runtime;
 pub mod sq8_model_head_runtime;
+pub mod sq8_serving_runtime;
 pub mod sq8_stack_runtime;
 pub mod sq_canonical;
 pub mod sq_optimized_reference;
