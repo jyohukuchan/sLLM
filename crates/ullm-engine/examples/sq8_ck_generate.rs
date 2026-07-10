@@ -461,6 +461,7 @@ struct OfflineBenchmarkResult {
     benchmark_mode: &'static str,
     source: BenchmarkSource,
     workload: BenchmarkWorkload,
+    execution: BenchmarkExecution,
     measurement_scope: BenchmarkMeasurementScope,
     comparison: BenchmarkComparison,
     warmups: usize,
@@ -484,6 +485,15 @@ struct BenchmarkSource {
     artifact_content_sha256: &'static str,
     package_manifest_sha256: &'static str,
     model_revision: &'static str,
+    promotion_result_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkExecution {
+    device: DeviceRecord,
+    profile: &'static str,
+    required_hip_kernel_env: Vec<String>,
+    hip_visible_devices: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -696,9 +706,9 @@ fn main() -> Result<(), String> {
         device: DeviceRecord {
             runtime_index,
             backend_device_id: device.device_id,
-            backend: device.backend,
-            name: device.name,
-            gcn_arch_name: device.gcn_arch_name,
+            backend: device.backend.clone(),
+            name: device.name.clone(),
+            gcn_arch_name: device.gcn_arch_name.clone(),
             compute_major: device.compute_major,
             compute_minor: device.compute_minor,
             total_global_mem: device.total_global_mem,
@@ -782,8 +792,37 @@ fn main() -> Result<(), String> {
     }
     if let Some(benchmark_output) = options.benchmark_output.as_deref() {
         validate_benchmark_run(&generation, 0, "warmup")?;
+        let benchmark_source = BenchmarkSource {
+            name: "Qwen/Qwen3-14B-FP8",
+            artifact_content_sha256: EXPECTED_ARTIFACT_CONTENT_SHA256,
+            package_manifest_sha256: EXPECTED_PACKAGE_MANIFEST_SHA256,
+            model_revision: EXPECTED_MODEL_REVISION,
+            promotion_result_sha256: sha256_regular_file(&options.output)?,
+        };
+        let benchmark_execution = BenchmarkExecution {
+            device: DeviceRecord {
+                runtime_index,
+                backend_device_id: device.device_id,
+                backend: device.backend.clone(),
+                name: device.name.clone(),
+                gcn_arch_name: device.gcn_arch_name.clone(),
+                compute_major: device.compute_major,
+                compute_minor: device.compute_minor,
+                total_global_mem: device.total_global_mem,
+            },
+            profile: profile_name(generation.report.profile)?,
+            required_hip_kernel_env: required_guard_names(),
+            hip_visible_devices: std::env::var("HIP_VISIBLE_DEVICES").map_err(|_| {
+                "HIP_VISIBLE_DEVICES is required for benchmark evidence".to_string()
+            })?,
+        };
         drop(generation);
-        let benchmark = run_offline_benchmark(&mut runtime, &mut stream)?;
+        let benchmark = run_offline_benchmark(
+            &mut runtime,
+            &mut stream,
+            benchmark_source,
+            benchmark_execution,
+        )?;
         write_json_no_clobber(benchmark_output, &benchmark)?;
         if !benchmark.passed {
             return Err(format!(
@@ -812,6 +851,8 @@ fn main() -> Result<(), String> {
 fn run_offline_benchmark(
     runtime: &mut Qwen3Sq8GenerationRuntime,
     stream: &mut RuntimeStream,
+    source: BenchmarkSource,
+    execution: BenchmarkExecution,
 ) -> Result<OfflineBenchmarkResult, String> {
     // The promotion execution immediately before this function is warmup zero.
     for warmup_index in 1..BENCHMARK_WARMUPS {
@@ -937,12 +978,7 @@ fn run_offline_benchmark(
             && !fallback_used
             && !host_staging_used,
         benchmark_mode: "audited_generation_gate",
-        source: BenchmarkSource {
-            name: "Qwen/Qwen3-14B-FP8",
-            artifact_content_sha256: EXPECTED_ARTIFACT_CONTENT_SHA256,
-            package_manifest_sha256: EXPECTED_PACKAGE_MANIFEST_SHA256,
-            model_revision: EXPECTED_MODEL_REVISION,
-        },
+        source,
         workload: BenchmarkWorkload {
             prompt_token_ids: QWEN3_14B_SQ8_GENERATION_PROMPT_TOKEN_IDS,
             prompt_position_ids: [0, 1, 2, 3, 4, 5, 6, 7],
@@ -963,6 +999,7 @@ fn run_offline_benchmark(
             chat_template_applied: false,
             detokenization: false,
         },
+        execution,
         measurement_scope: BenchmarkMeasurementScope {
             timer_start: "before_reset_synchronized",
             timer_end: "after_run_fixed_synchronized_returns",
@@ -987,7 +1024,7 @@ fn run_offline_benchmark(
                 "runtime_decode_tokens_per_second",
             ],
             production_engine_comparison_eligible: false,
-            interpretation: "same fixed workload runner-wall comparison; uLLM includes audited full-hidden/full-logits readback and is not lean serving throughput",
+            interpretation: "same fixed token workload with different timer scopes; uLLM includes reset and audited full-hidden/full-logits readback, so rates are diagnostic rather than production-equivalent",
         },
         warmups: BENCHMARK_WARMUPS,
         repeats: BENCHMARK_REPEATS,
