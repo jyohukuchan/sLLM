@@ -525,3 +525,322 @@ The protocol implementation MUST include tests for:
 The end-to-end worker test must send a valid request, drain it through release,
 then send a second valid request in the same process and prove that the second
 request begins from zero cache and allocator baseline.
+
+## 14. Release measurement contract
+
+### 14.1 Scope and primary series
+
+This section freezes the resource-release measurement used by the P8 release
+validator. A measurement point is taken only after a flushed matching
+`released(reset_complete=true)` event. The 5-second idle settle described below
+starts after that event, so it neither weakens nor extends the 180-second request,
+30-second progress, or 5000-ms cancel-to-release deadlines in section 11.
+
+The two primary byte series are:
+
+- host bytes: systemd service cgroup v2 `memory.current`; and
+- VRAM bytes: the target worker's `mem_usage.value` from the frozen AMD SMI
+  process command, with `mem_usage.unit` exactly `B`.
+
+Gateway and worker RSS, thread count, FD count, and child PIDs are required
+diagnostics. KFD VRAM is a required cross-check. Neither the sum of process RSS nor
+KFD VRAM may replace a missing primary value.
+
+### 14.2 Frozen percentile and median
+
+For percentile input `x` and probability `p`:
+
+1. Reject an empty input, a non-finite input value, a non-finite `p`, or `p`
+   outside `[0, 1]`.
+2. Sort `x` in ascending order as `x[0]..x[n-1]`.
+3. Compute `r = (n - 1) * p`, `lo = floor(r)`, and `hi = ceil(r)`.
+4. If `lo == hi`, return `x[lo]`.
+5. Otherwise return
+   `x[lo] + (r - lo) * (x[hi] - x[lo])`.
+6. Reject a non-finite result.
+
+This calculation is used for every frozen p50 and p95 value. It is not a nearest
+rank percentile.
+
+Median input must also be nonempty and finite. Its sorted middle value is the
+median for odd cardinality. For even cardinality it is the arithmetic mean of the
+two middle values. The five resource samples at a measurement point therefore
+select the third sorted value. Integer inputs may yield a fractional median in
+other uses and MUST NOT be rounded before later calculations.
+
+### 14.3 Frozen Theil-Sen slope
+
+Let `value[0]..value[n-1]` be ordered post-release point medians in bytes. Reject
+`n < 2` or any non-finite value. Construct every pairwise slope for all `i < j`:
+
+```text
+(value[j] - value[i]) / (j - i)
+```
+
+Sort all `n * (n - 1) / 2` finite slopes and take their median using section 14.2,
+including the average of the two central slopes when the slope count is even. No
+pair may be sampled or omitted. The request ordinal, not elapsed time, is the
+independent variable, so the result unit is bytes/request (`B/request`).
+
+The normal-operation acceptance slope uses exactly the 100 ordered post-release
+medians, excluding warmups and baseline samples. It is computed independently for
+primary host bytes and primary VRAM bytes. Each slope MUST be at most 262144
+bytes/request. A negative slope is valid.
+
+The post-restart segment uses only its own ordered post-release medians and the
+same formula and threshold. It MUST NOT replace, extend, or be concatenated with
+the required 100-value normal-operation series.
+
+### 14.4 Segment schedule and baselines
+
+The normal-operation segment is collected in this order:
+
+1. Complete 10 warmup chats and observe release for each.
+2. Wait at least 5 seconds after the tenth warmup's release and perform no request
+   during that settle.
+3. Capture the first sample, then capture four more resource samples with at least
+   1 second between successive sample starts.
+4. Take each field's five-sample median as the normal baseline.
+5. Run exactly 100 sequential measured chats.
+6. After each matching release, perform no request for at least 5 seconds, then
+   capture the first sample and four more samples at intervals of at least 1
+   second and compute that request's post-release median.
+
+After the intentional fatal worker/service restart, wait for a newly validated
+`ready`, complete 10 new warmup chats, and repeat the same baseline procedure. The
+post-restart segment then contains exactly 20 sequential measured chats and the
+same per-release settle and sample procedure.
+
+Normal and post-restart raw samples, baselines, medians, deltas, and slopes are
+separate populations. No value from one segment may be used to fill or compute a
+value in the other. The planned restart must change the recorded process identity;
+an unplanned identity change invalidates its segment.
+
+For each segment and each primary byte series:
+
+```text
+final_delta = final_post_release_median - segment_baseline_median
+```
+
+`final_delta` MUST be at most 67108864 bytes. It is a signed delta; negative values
+are not converted to absolute values. The normal final is request 100 and the
+post-restart final is request 20.
+
+For gateway and worker diagnostics, the median thread, FD, and child counts after
+each release MUST equal their own segment baseline medians. Individual RSS values
+and their derived deltas/slopes are recorded but remain diagnostic because cgroup
+`memory.current` is the primary host-memory series.
+
+### 14.5 systemd and cgroup host bytes
+
+The frozen service unit is `ullm-openai.service`. The collector runs on systemd
+255 with unified cgroup v2. It obtains `ControlGroup` and `MainPID` together from
+`systemctl show`, requires a nonempty absolute `ControlGroup` without `..`, and
+requires `MainPID > 0`.
+
+The primary host byte path is exactly:
+
+```text
+/sys/fs/cgroup${ControlGroup}/memory.current
+```
+
+`stat -fc %T /sys/fs/cgroup` MUST return `cgroup2fs`. `memory.current` MUST contain
+one non-negative base-10 integer, interpreted directly as bytes. The resolved path
+must remain beneath `/sys/fs/cgroup`. A missing controller value, `max`, a unit
+conversion, or a sum of per-process RSS is invalid.
+
+`MainPID` is the gateway PID. Its `/proc/PID/stat` starttime and the returned
+`ControlGroup` MUST remain stable throughout one segment. They are expected to
+change only across the intentional fatal restart, after which a new baseline is
+mandatory.
+
+### 14.6 Process diagnostics and identity
+
+For both the gateway and worker PID, the collector records:
+
+- PID and `/proc/PID/stat` field 22 (`starttime`, in clock ticks);
+- resolved `/proc/PID/exe` path;
+- `/proc/PID/status` `VmRSS` and `Threads`;
+- the number of directory entries in `/proc/PID/fd`; and
+- the whitespace-separated direct child PIDs from
+  `/proc/PID/task/PID/children`.
+
+`VmRSS` MUST have the literal `kB` suffix. Convert it to bytes using checked
+`VmRSS_kB * 1024`. `Threads` and every count are non-negative base-10 integers.
+FD collection counts directory entries only. It MUST NOT `stat`, `readlink`, open,
+or otherwise follow any FD symlink.
+
+The worker is the unique direct gateway child whose resolved executable is the
+frozen `ullm-sq8-worker` binary. Other child PIDs remain diagnostics and their
+count is baseline-gated. The normal segment uses one unchanged gateway
+PID/starttime pair and one unchanged worker PID/starttime pair, proving that no
+normal request reloaded the worker.
+
+For each resource sample, read `/proc/PID/stat` before the other `/proc` files and
+again afterward. The before and after PID/starttime pairs MUST match. Re-read
+systemd `MainPID` after the sample and require it to match the gateway identity.
+A disappeared PID, PID reuse, changed starttime, changed parent relationship, or
+identity change during sampling is a race failure, not a zero sample.
+
+The `/proc/PID/stat` parser identifies the rightmost valid `) <state> ` delimiter
+and validates the remaining field count before reading field 22. It MUST NOT split
+the full line on whitespace or assume that `comm` contains no spaces or `)`
+characters.
+
+### 14.7 Physical R9700 and primary VRAM
+
+The release target is the physical Radeon AI PRO R9700 with all identities fixed:
+
+| Identity | Required value |
+| --- | --- |
+| AMD SMI GPU index | `2` |
+| PCI BDF | `0000:47:00.0` |
+| UUID | `a8ff7551-0000-1000-80e9-ddefa2d60f55` |
+| KFD GPU ID | `51545` |
+
+Before measurement, `amd-smi list --json` MUST contain exactly one entry matching
+all four values. An index-only match is insufficient.
+
+For every resource sample, run:
+
+```text
+amd-smi process --gpu 2 --general --json
+```
+
+The GPU 2 `process_list` MUST contain exactly one real process record. Its PID MUST
+equal the identity-checked worker PID; no sentinel such as `No running processes
+detected` is accepted. No unrelated process may appear. The target record MUST
+contain non-negative integer `mem_usage.value` with `mem_usage.unit` exactly `B`.
+That value is the primary VRAM byte sample.
+
+Read the worker's KFD counter from:
+
+```text
+/sys/class/kfd/kfd/proc/${PID}/vram_51545
+```
+
+It MUST be a non-negative base-10 byte value equal to the AMD SMI primary value.
+Enumerate the other KFD process directories and require that no other PID has a
+positive `vram_51545` value. A missing KFD path, unit mismatch, value mismatch, or
+unrelated R9700 process fails the measurement.
+
+Run `amd-smi metric --gpu 2 --json` immediately before and after each segment. Its
+GPU 2 temperature, socket power, and gfx/memory/fabric clocks are workload
+diagnostics only. Metric-level `used_vram` is not process-isolated and MUST NOT be
+used as the primary or KFD cross-check value.
+
+### 14.8 Frozen commands, versions, and probe facts
+
+Commands are executed without a shell, with placeholders replaced by validated
+decimal PIDs or the validated `ControlGroup`. Their logical command strings are
+frozen as follows:
+
+| Key | Command string |
+| --- | --- |
+| `systemd_version` | `systemctl --version` |
+| `service_identity` | `systemctl show ullm-openai.service --property=ControlGroup --property=MainPID --no-pager` |
+| `cgroup_type` | `stat -fc %T /sys/fs/cgroup` |
+| `host_memory` | `cat /sys/fs/cgroup${ControlGroup}/memory.current` |
+| `proc_stat` | `cat /proc/${PID}/stat` |
+| `proc_status` | `cat /proc/${PID}/status` |
+| `proc_exe` | `readlink /proc/${PID}/exe` |
+| `proc_fds` | `find -P /proc/${PID}/fd -mindepth 1 -maxdepth 1 -printf '%f\n'` |
+| `proc_children` | `cat /proc/${PID}/task/${PID}/children` |
+| `amd_smi_version` | `amd-smi version` |
+| `amd_smi_list` | `amd-smi list --json` |
+| `amd_smi_process` | `amd-smi process --gpu 2 --general --json` |
+| `amd_smi_metric` | `amd-smi metric --gpu 2 --json` |
+| `kfd_proc_probe` | `test -d /sys/class/kfd/kfd/proc` |
+| `kfd_processes` | `find -P /sys/class/kfd/kfd/proc -mindepth 1 -maxdepth 1 -printf '%f\n'` |
+| `kfd_vram` | `cat /sys/class/kfd/kfd/proc/${PID}/vram_51545` |
+
+The probed release environment is:
+
+- systemd major version 255 (`255.4-1ubuntu8.16` at contract freeze);
+- cgroup filesystem type `cgroup2fs`;
+- `/sys/class/kfd/kfd/proc` present;
+- AMD SMI tool `26.2.2+e1a6bc5663` and library `26.2.2`; and
+- ROCm `7.2.1`.
+
+Every evidence run records the complete first line from `systemctl --version` and
+the complete `amd-smi version` output in addition to the parsed values. A required
+major/tool/ROCm mismatch is contract drift and fails before warmup.
+
+### 14.9 Raw JSONL evidence schema
+
+The raw evidence file is UTF-8 JSONL. Unknown fields, duplicate keys, non-finite
+numbers, invalid UTF-8, and schema versions other than
+`ullm.sq8.release_measurement.raw.v1` are rejected. It contains one `header`, 610
+`resource_sample` records, and four `gpu_metric` records. Record order is header,
+normal metric-before, normal baseline and request samples, normal metric-after,
+restart metric-before, restart baseline and request samples, then restart
+metric-after.
+
+This is an offline evidence artifact, not worker stdin or stdout. It therefore
+does not alter the `ullm.worker.v1` protocol discriminator from section 3.
+
+The exact `header` record fields are `schema_version`, `record_type`,
+`service_unit`, `commands`, `tools`, `probes`, and `schedule`. The nested field
+sets are exactly those shown here:
+
+```json
+{"schema_version":"ullm.sq8.release_measurement.raw.v1","record_type":"header","service_unit":"ullm-openai.service","commands":{"systemd_version":"systemctl --version","service_identity":"systemctl show ullm-openai.service --property=ControlGroup --property=MainPID --no-pager","cgroup_type":"stat -fc %T /sys/fs/cgroup","host_memory":"cat /sys/fs/cgroup${ControlGroup}/memory.current","proc_stat":"cat /proc/${PID}/stat","proc_status":"cat /proc/${PID}/status","proc_exe":"readlink /proc/${PID}/exe","proc_fds":"find -P /proc/${PID}/fd -mindepth 1 -maxdepth 1 -printf '%f\\n'","proc_children":"cat /proc/${PID}/task/${PID}/children","amd_smi_version":"amd-smi version","amd_smi_list":"amd-smi list --json","amd_smi_process":"amd-smi process --gpu 2 --general --json","amd_smi_metric":"amd-smi metric --gpu 2 --json","kfd_proc_probe":"test -d /sys/class/kfd/kfd/proc","kfd_processes":"find -P /sys/class/kfd/kfd/proc -mindepth 1 -maxdepth 1 -printf '%f\\n'","kfd_vram":"cat /sys/class/kfd/kfd/proc/${PID}/vram_51545"},"tools":{"systemd_major":255,"systemd_version_line":"systemd 255 (255.4-1ubuntu8.16)","amd_smi_tool":"26.2.2+e1a6bc5663","amd_smi_library":"26.2.2","rocm":"7.2.1","amd_smi_version_output":"AMDSMI Tool: 26.2.2+e1a6bc5663 | AMDSMI Library version: 26.2.2 | ROCm version: 7.2.1 | amdgpu version: 6.16.13 | hsmp version: N/A"},"probes":{"cgroup_fs_type":"cgroup2fs","kfd_proc_present":true,"gpu_index":2,"gpu_bdf":"0000:47:00.0","gpu_uuid":"a8ff7551-0000-1000-80e9-ddefa2d60f55","kfd_gpu_id":51545},"schedule":{"normal_warmups":10,"normal_requests":100,"restart_warmups":10,"restart_requests":20,"idle_settle_ms":5000,"samples_per_point":5,"sample_interval_ms":1000}}
+```
+
+Each `resource_sample` has the exact top-level fields shown below. `segment` is
+`normal` or `restart`; `phase` is `baseline` or `post_release`; and `sample_index`
+is `0..4`. Baseline records set `request_index`, `request_id`, `release_outcome`,
+`release_observed_monotonic_ns`, and `reset_complete` to `null`.
+Post-release records require request index `1..100` for normal or `1..20` for
+restart, a matching request ID, `release_outcome` equal to `stop`, `length`, or
+`cancelled`, a release timestamp, and `reset_complete=true`.
+
+```json
+{"schema_version":"ullm.sq8.release_measurement.raw.v1","record_type":"resource_sample","segment":"normal","phase":"post_release","request_index":1,"request_id":"req-1","release_outcome":"stop","release_observed_monotonic_ns":1000000000,"reset_complete":true,"idle_settle_started_monotonic_ns":1000000000,"sample_index":0,"sample_monotonic_ns":6000000000,"systemd":{"control_group_before":"/system.slice/ullm-openai.service","control_group_after":"/system.slice/ullm-openai.service","main_pid_before":1200,"main_pid_after":1200},"host":{"memory_current_bytes":1000000000},"gateway":{"pid":1200,"ppid":1,"exe":"/usr/bin/python3.12","starttime_ticks_before":10000,"starttime_ticks_after":10000,"vmrss_kb":100000,"vmrss_bytes":102400000,"threads":8,"fd_count":32,"children":[1201]},"worker":{"pid":1201,"ppid":1200,"exe":"/opt/ullm/bin/ullm-sq8-worker","starttime_ticks_before":10001,"starttime_ticks_after":10001,"vmrss_kb":200000,"vmrss_bytes":204800000,"threads":12,"fd_count":24,"children":[]},"gpu":{"index":2,"bdf":"0000:47:00.0","uuid":"a8ff7551-0000-1000-80e9-ddefa2d60f55","kfd_gpu_id":51545,"process_record_count":1,"worker_pid":1201,"mem_usage":{"value":20000000000,"unit":"B"},"kfd_vram_bytes":20000000000,"unrelated_process_pids":[]}}
+```
+
+All timestamps are non-negative monotonic-clock nanoseconds from one boot. All byte
+and count fields are non-negative integers. `children` and
+`unrelated_process_pids` are ascending unique PID arrays. The validator checks
+`vmrss_bytes == vmrss_kb * 1024`, both starttime pairs, gateway/worker parentage,
+systemd identity, GPU identity, exactly one process record, empty unrelated PID
+list, and AMD SMI/KFD byte equality for every sample.
+
+Within each baseline or post-release point, records appear in `sample_index` order
+`0,1,2,3,4`. Sample 0 requires
+`sample_monotonic_ns - idle_settle_started_monotonic_ns >= 5000000000`. Each later
+sample requires its start timestamp to be at least 1000000000 ns after the prior
+sample's start timestamp. Actual scheduler delay is recorded; no exact equality or
+upper timing bound is required.
+
+Each `gpu_metric` record has exactly `schema_version`, `record_type`, `segment`,
+`boundary`, `captured_monotonic_ns`, `gpu_index`, `raw_output_file`, and
+`raw_output_sha256`. `boundary` is `before` or `after`. The referenced file is the
+unmodified stdout JSON from the frozen metric command and is part of the
+checksummed evidence bundle. Its basename is exactly
+`amd-smi-metric-${segment}-${boundary}.json`, and its SHA is 64 lowercase
+hexadecimal characters.
+
+```json
+{"schema_version":"ullm.sq8.release_measurement.raw.v1","record_type":"gpu_metric","segment":"normal","boundary":"before","captured_monotonic_ns":500000000,"gpu_index":2,"raw_output_file":"amd-smi-metric-normal-before.json","raw_output_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+```
+
+The independent validator derives all five-sample medians, final deltas,
+percentiles, and Theil-Sen slopes from these raw records. A producer `passed`
+field is not part of the schema and is rejected. It cross-checks the 10 warmup
+releases, 100 normal releases, intentional restart, 10 restart warmup releases,
+and 20 restart releases against the machine-readable request/release matrix.
+
+### 14.10 Failure behavior
+
+The measurement fails closed on any required command failure, timeout, parse
+error, missing/extra record, sample-count or ordering error, invalid unit,
+non-finite value, integer overflow, identity race, unplanned restart, segment
+mixing, hardware/probe/version mismatch, unrelated R9700 process, KFD mismatch, or
+missing successful release. It MUST NOT drop a sample, impute a value, retry only
+the failed point, substitute RSS/KFD/metric VRAM for a primary value, or reuse the
+other segment's baseline. A new result requires a fresh complete segment run.
+
+A worker deadline breach, fatal `error`, EOF, or `released` with an invalid schema
+remains a product failure under sections 8 and 11. Resource collection does not
+turn it into a measurement-only failure and does not extend the fatal ordering.
