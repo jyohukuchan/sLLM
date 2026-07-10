@@ -128,6 +128,7 @@ pub struct Sq8ServingRequest {
     pub max_new_tokens: usize,
     pub eos_token_ids: Vec<usize>,
     pub sampling: Sq8SamplingParams,
+    test_only_ignore_eos: bool,
 }
 
 impl Sq8ServingRequest {
@@ -142,7 +143,24 @@ impl Sq8ServingRequest {
             max_new_tokens,
             eos_token_ids: QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS.to_vec(),
             sampling: Sq8SamplingParams::greedy(0),
+            test_only_ignore_eos: false,
         }
+    }
+
+    /// Constructs the fixed deep-boundary diagnostic request. Product callers must use `greedy`.
+    #[doc(hidden)]
+    pub fn greedy_ignore_eos_for_testing(
+        request_id: impl Into<String>,
+        prompt_token_ids: Vec<usize>,
+        max_new_tokens: usize,
+    ) -> Self {
+        let mut request = Self::greedy(request_id, prompt_token_ids, max_new_tokens);
+        request.test_only_ignore_eos = true;
+        request
+    }
+
+    pub fn test_only_ignores_eos(&self) -> bool {
+        self.test_only_ignore_eos
     }
 
     pub fn validate(&self) -> Result<(), Sq8ServingError> {
@@ -433,7 +451,7 @@ impl ActiveServingRequest {
     }
 
     fn terminal_reason(&self, token_id: usize) -> Option<Sq8FinishReason> {
-        if self.request.eos_token_ids.contains(&token_id) {
+        if !self.request.test_only_ignore_eos && self.request.eos_token_ids.contains(&token_id) {
             Some(Sq8FinishReason::Stop)
         } else if self.generated_tokens + 1 == self.request.max_new_tokens {
             Some(Sq8FinishReason::Length)
@@ -2158,6 +2176,29 @@ mod tests {
         assert_eq!(
             active.terminal_reason(QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS[0]),
             Some(Sq8FinishReason::Stop)
+        );
+    }
+
+    #[test]
+    fn serving_test_only_ignore_eos_runs_until_the_length_cap() {
+        let request =
+            Sq8ServingRequest::greedy_ignore_eos_for_testing("deep-boundary", vec![1, 2, 3], 4);
+        request.validate().unwrap();
+        assert!(request.test_only_ignores_eos());
+        let mut active = ActiveServingRequest::new(request, Sq8CancellationToken::new());
+        active.prompt_tokens_processed = active.request.prompt_token_ids.len();
+
+        for generated_tokens in 0..3 {
+            active.generated_tokens = generated_tokens;
+            assert_eq!(
+                active.terminal_reason(QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS[0]),
+                None
+            );
+        }
+        active.generated_tokens = 3;
+        assert_eq!(
+            active.terminal_reason(QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS[1]),
+            Some(Sq8FinishReason::Length)
         );
     }
 

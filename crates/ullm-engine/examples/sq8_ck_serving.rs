@@ -27,6 +27,8 @@ use ullm_engine::sq8_serving_runtime::{
 use ullm_runtime_sys::{RuntimeContext, device_count, device_info};
 
 const UPLOAD_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+const DEEP_BOUNDARY_PROMPT_TOKENS: usize = 3584;
+const DEEP_BOUNDARY_GENERATED_TOKENS: usize = 512;
 
 #[derive(Debug)]
 struct Options {
@@ -38,6 +40,7 @@ struct Options {
     second_max_new_tokens: usize,
     prompt_lengths: Option<Vec<usize>>,
     prefill_mode: Sq8ServingPrefillMode,
+    test_only_ignore_eos: bool,
     cancel_after_first_token: bool,
     cancel_after_prompt_progress: Option<usize>,
     oracle_capture_dir: Option<PathBuf>,
@@ -56,7 +59,11 @@ struct ServingCaseResult {
     request_id: String,
     prompt_token_ids: Vec<usize>,
     max_new_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_only_ignore_eos: Option<bool>,
     generated_token_ids: Vec<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generated_steps: Option<Vec<GeneratedStepResult>>,
     prompt_progress_events: usize,
     execution_units: usize,
     processed_prompt_tokens: usize,
@@ -90,6 +97,21 @@ struct PrefillExecutionUnitResult {
     cache_lengths_all_expected: bool,
     last_cache_position: usize,
     last_logical_block: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct GeneratedStepResult {
+    generated_index: usize,
+    token_id: usize,
+    cache_len: usize,
+    cache_write_position: Option<usize>,
+    status: &'static str,
+    cache_lengths: Vec<usize>,
+    cache_lengths_all_expected: bool,
+    scheduler_active: usize,
+    scheduler_waiting: usize,
+    allocated_blocks: usize,
+    terminal_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +159,8 @@ struct ServingSmokeResult {
     runner_worktree_clean: bool,
     runner_binary_sha256: String,
     passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_only_ignore_eos: Option<bool>,
     requests: Vec<ServingCaseResult>,
     cancelled_request: Option<CancelledCaseResult>,
     load_seconds: f64,
@@ -211,16 +235,12 @@ fn main() -> Result<(), String> {
         .prompt_token_ids
         .clone();
     let mut requests = Vec::with_capacity(cases.len());
-    let evidence_root = options.result_json.as_deref().and_then(Path::parent);
     for case in cases {
         requests.push(run_completed_request(
             &mut session,
             &mut stream,
-            &case.request_id,
-            case.prompt_token_ids,
-            case.max_new_tokens,
-            options.oracle_capture_dir.as_deref(),
-            evidence_root,
+            case,
+            &options,
         )?);
     }
     let cancelled_request = match (
@@ -246,9 +266,13 @@ fn main() -> Result<(), String> {
     let snapshot = reusable_snapshot(&session)?;
     let load_report = session.load_report();
     let result = ServingSmokeResult {
-        schema_version: match options.prefill_mode {
-            Sq8ServingPrefillMode::SequentialM1 => "ullm.sq8.serving_smoke.v2",
-            Sq8ServingPrefillMode::FixedM8Chunks => "ullm.sq8.serving_chunks.v3",
+        schema_version: match (options.test_only_ignore_eos, options.prefill_mode) {
+            (true, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_deep_boundary.v1",
+            (true, Sq8ServingPrefillMode::SequentialM1) => {
+                return Err("deep-boundary evidence requires fixed M=8 chunks".into());
+            }
+            (false, Sq8ServingPrefillMode::SequentialM1) => "ullm.sq8.serving_smoke.v2",
+            (false, Sq8ServingPrefillMode::FixedM8Chunks) => "ullm.sq8.serving_chunks.v3",
         },
         prefill_mode: prefill_mode_name(options.prefill_mode),
         prefill_chunk_tokens: load_report.prefill_chunk_tokens,
@@ -257,6 +281,7 @@ fn main() -> Result<(), String> {
         runner_worktree_clean: runner_identity.worktree_clean,
         runner_binary_sha256: runner_identity.binary_sha256,
         passed: true,
+        test_only_ignore_eos: options.test_only_ignore_eos.then_some(true),
         requests,
         cancelled_request,
         load_seconds,
@@ -293,19 +318,36 @@ fn main() -> Result<(), String> {
 fn run_completed_request(
     session: &mut Qwen3Sq8ServingSession,
     stream: &mut ullm_runtime_sys::RuntimeStream,
-    request_id: &str,
-    prompt_token_ids: Vec<usize>,
-    max_new_tokens: usize,
-    oracle_capture_dir: Option<&Path>,
-    evidence_root: Option<&Path>,
+    case: ServingCase,
+    options: &Options,
 ) -> Result<ServingCaseResult, String> {
-    let request = Sq8ServingRequest::greedy(request_id, prompt_token_ids.clone(), max_new_tokens);
+    let ServingCase {
+        request_id,
+        prompt_token_ids,
+        max_new_tokens,
+    } = case;
+    let test_only_ignore_eos = options.test_only_ignore_eos;
+    let oracle_capture_dir = options.oracle_capture_dir.as_deref();
+    let evidence_root = options.result_json.as_deref().and_then(Path::parent);
+    let request = if test_only_ignore_eos {
+        Sq8ServingRequest::greedy_ignore_eos_for_testing(
+            &request_id,
+            prompt_token_ids.clone(),
+            max_new_tokens,
+        )
+    } else {
+        Sq8ServingRequest::greedy(&request_id, prompt_token_ids.clone(), max_new_tokens)
+    };
+    if request.test_only_ignores_eos() != test_only_ignore_eos {
+        return Err("serving smoke test-only EOS policy mismatch".into());
+    }
     session
         .start(request, Sq8CancellationToken::new(), stream)
         .map_err(|err| err.to_string())?;
     let request_start = Instant::now();
     let prefill_mode = session.prefill_mode();
     let mut generated_token_ids = Vec::new();
+    let mut generated_steps = test_only_ignore_eos.then(Vec::new);
     let mut prompt_progress_events = 0_usize;
     let mut execution_units = 0_usize;
     let mut prefill_execution_units = Vec::new();
@@ -329,7 +371,7 @@ fn run_completed_request(
             if let Some(capture) = oracle.capture {
                 oracle_capture = Some(persist_oracle_capture(
                     capture_directory,
-                    request_id,
+                    &request_id,
                     capture,
                     evidence_root,
                 )?);
@@ -379,9 +421,60 @@ fn run_completed_request(
             Sq8ServingAdvance::PromptProgress { .. } => prompt_progress_events += 1,
             Sq8ServingAdvance::Token {
                 token_id,
+                generated_index,
+                cache_len,
                 terminal_reason,
-                ..
             } => {
+                if let Some(steps) = generated_steps.as_mut() {
+                    let expected_cache_len = prompt_token_ids
+                        .len()
+                        .checked_add(generated_index)
+                        .ok_or_else(|| "deep-boundary cache length overflows".to_string())?;
+                    let snapshot = session.snapshot();
+                    let expected_status = if terminal_reason.is_some() {
+                        Sq8ServingRuntimeStatus::Finishing
+                    } else {
+                        Sq8ServingRuntimeStatus::Decoding
+                    };
+                    let cache_lengths_all_expected = snapshot
+                        .cache_lengths
+                        .iter()
+                        .all(|length| *length == expected_cache_len);
+                    if generated_index != steps.len()
+                        || generated_index != generated_token_ids.len()
+                        || cache_len != expected_cache_len
+                        || snapshot.status != expected_status
+                        || snapshot.prompt_tokens != prompt_token_ids.len()
+                        || snapshot.prompt_tokens_processed != prompt_token_ids.len()
+                        || snapshot.generated_tokens != generated_index + 1
+                        || snapshot.scheduler_active != 1
+                        || snapshot.scheduler_waiting != 0
+                        || snapshot.allocator.allocated_blocks != QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS
+                        || !cache_lengths_all_expected
+                    {
+                        return Err(format!(
+                            "deep-boundary generated step mismatch at index {generated_index}: \
+                             cache_len={cache_len} snapshot={snapshot:?}"
+                        ));
+                    }
+                    steps.push(GeneratedStepResult {
+                        generated_index,
+                        token_id,
+                        cache_len,
+                        cache_write_position: if generated_index == 0 {
+                            None
+                        } else {
+                            Some(cache_len - 1)
+                        },
+                        status: serving_status_name(snapshot.status),
+                        cache_lengths: snapshot.cache_lengths,
+                        cache_lengths_all_expected,
+                        scheduler_active: snapshot.scheduler_active,
+                        scheduler_waiting: snapshot.scheduler_waiting,
+                        allocated_blocks: snapshot.allocator.allocated_blocks,
+                        terminal_reason: terminal_reason.map(finish_reason_name),
+                    });
+                }
                 generated_token_ids.push(token_id);
                 if let Some(reason) = terminal_reason {
                     break reason;
@@ -419,7 +512,7 @@ fn run_completed_request(
         .checked_add(expected_decode_calls)
         .ok_or_else(|| "serving smoke execution call count overflows".to_string())?;
     if terminal_snapshot.status != Sq8ServingRuntimeStatus::Finishing
-        || terminal_snapshot.active_request_id.as_deref() != Some(request_id)
+        || terminal_snapshot.active_request_id.as_deref() != Some(request_id.as_str())
         || terminal_snapshot.prompt_tokens != prompt_token_ids.len()
         || terminal_snapshot.prompt_tokens_processed != prompt_token_ids.len()
         || terminal_snapshot.generated_tokens != generated_token_ids.len()
@@ -436,6 +529,10 @@ fn run_completed_request(
             != prompt_token_ids.len()
         || execution_units != expected_execution_calls
         || reserved_context_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
+        || (test_only_ignore_eos
+            && (generated_token_ids.len() != max_new_tokens
+                || generated_steps.as_ref().map(Vec::len) != Some(max_new_tokens)
+                || terminal_reason != Sq8FinishReason::Length))
     {
         return Err(format!(
             "serving smoke terminal snapshot mismatch: snapshot={terminal_snapshot:?} "
@@ -465,10 +562,12 @@ fn run_completed_request(
         return Err("serving smoke terminal/reset contract failed".into());
     }
     Ok(ServingCaseResult {
-        request_id: request_id.to_string(),
+        request_id,
         prompt_token_ids,
         max_new_tokens,
+        test_only_ignore_eos: test_only_ignore_eos.then_some(true),
         generated_token_ids,
+        generated_steps,
         prompt_progress_events,
         execution_units,
         processed_prompt_tokens: terminal_snapshot.prompt_tokens_processed,
@@ -888,6 +987,13 @@ fn reusable_snapshot(
 }
 
 fn serving_cases(options: &Options) -> Result<Vec<ServingCase>, String> {
+    if options.test_only_ignore_eos {
+        return Ok(vec![ServingCase {
+            request_id: "deep-boundary-p3584-g512".to_string(),
+            prompt_token_ids: (1..=DEEP_BOUNDARY_PROMPT_TOKENS).collect(),
+            max_new_tokens: DEEP_BOUNDARY_GENERATED_TOKENS,
+        }]);
+    }
     if let Some(lengths) = &options.prompt_lengths {
         return lengths
             .iter()
@@ -925,6 +1031,7 @@ fn parse_options() -> Result<Options, String> {
     let mut second_max_new_tokens = 1_usize;
     let mut prompt_lengths = None;
     let mut prefill_mode = Sq8ServingPrefillMode::SequentialM1;
+    let mut test_only_ignore_eos = false;
     let mut prompt_token_ids_explicit = false;
     let mut cancel_after_first_token = false;
     let mut cancel_after_prompt_progress = None;
@@ -1004,6 +1111,7 @@ fn parse_options() -> Result<Options, String> {
                         .ok_or_else(|| "prefill mode must be UTF-8".to_string())?,
                 )?;
             }
+            Some("--test-only-ignore-eos") => test_only_ignore_eos = true,
             Some("--cancel-after-first-token") => cancel_after_first_token = true,
             Some("--cancel-after-prompt-progress") => {
                 let value = args
@@ -1042,6 +1150,23 @@ fn parse_options() -> Result<Options, String> {
     if cancel_after_first_token && cancel_after_prompt_progress.is_some() {
         return Err("cancellation modes must be mutually exclusive".into());
     }
+    if test_only_ignore_eos
+        && (prefill_mode != Sq8ServingPrefillMode::FixedM8Chunks
+            || prompt_lengths.as_deref() != Some(&[DEEP_BOUNDARY_PROMPT_TOKENS])
+            || max_new_tokens != DEEP_BOUNDARY_GENERATED_TOKENS
+            || second_prompt_token_ids.is_some()
+            || cancel_after_first_token
+            || cancel_after_prompt_progress.is_some()
+            || oracle_capture_dir.is_some()
+            || result_json.is_none())
+    {
+        return Err(
+            "--test-only-ignore-eos requires exactly --prefill-mode m8-chunk8 \
+             --prompt-lengths 3584 --max-new-tokens 512 --result-json PATH, \
+             without second request, cancellation, or oracle capture"
+                .into(),
+        );
+    }
     Ok(Options {
         artifact: artifact.ok_or_else(|| "--artifact is required".to_string())?,
         package: package.ok_or_else(|| "--package is required".to_string())?,
@@ -1051,6 +1176,7 @@ fn parse_options() -> Result<Options, String> {
         second_max_new_tokens,
         prompt_lengths,
         prefill_mode,
+        test_only_ignore_eos,
         cancel_after_first_token,
         cancel_after_prompt_progress,
         oracle_capture_dir,
