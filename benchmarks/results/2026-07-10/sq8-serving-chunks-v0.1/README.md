@@ -1,0 +1,29 @@
+# SQ8 serving chunks initial evidence
+
+## 前回の要点
+
+P8-Bのall-M1 sessionは4096 contextで正しく動作したが、prompt 4095 / G=1に369.55秒かかり、製品TTFT用のM=8 prefill chunkが必要だった。
+
+## 今回の変更点
+
+- 実行runner commit: `e76c33118e60200b1e26892b060fa0eb251b97f9`
+- release binary SHA-256: `4c80ce814053a210298877b2d18ea5a1ada4771d84a9b1c0eaae6548b32ab1bd`
+- artifact SHA-256: `2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147`
+- package manifest SHA-256: `c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb`
+- GPU: isolated Radeon AI PRO R9700 / `gfx1201`、driver `6.16.13`
+- workload: ascending raw-token prompt 8/9/16/17、G=1、active1/waiting0、batchなし
+- M=8 chunkとall-M1は別processで同じbinary/artifact/packageを使用し、それぞれ同一model load内で4 promptを連続実行した。
+- 独立validatorはproducerの`passed`を使わず、raw payload、hash、unit trace、40層cache、数値gateを再計算した。
+- chunk対all-M1は4 promptでtop-1全一致、最悪relL2 `0.047343390`、最低cosine `0.998961757`、top-10 overlap最低9で合格した。
+- prompt 8のchunk対vLLM sourceはhidden relL2 `0.046073592` / cosine `0.998980942`、logits relL2 `0.042203942` / cosine `0.999110258`、top-1一致、top-10 overlap 9で合格した。
+
+Files:
+
+- `runtime-chunk-p8-p17.json`: M=8 chunk producer result and per-unit cache trace
+- `runtime-all-m1-p8-p17.json`: all-M1 comparison result
+- `runtime-*-captures/`: final prompt hidden/logits raw F32 payloads
+- `runtime-p8-p17-validation.json`: independent validation result
+
+## 次の行動
+
+これは接続確認の初期evidenceであり、P8-B2の最終acceptanceではない。prompt 32/128/512/4095、3584+512 deep boundary、TTFT/decode性能gateを別evidenceで追加する。
