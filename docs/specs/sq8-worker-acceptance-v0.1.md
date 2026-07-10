@@ -26,7 +26,8 @@ The raw schema version is `ullm.sq8.worker_acceptance.raw.v1`. The independent
 validation result schema is `ullm.sq8.worker_acceptance.validation.v1`.
 
 The run MUST use a tracked-clean source tree and one release worker built from
-the recorded commit. Untracked profiler output does not affect `tracked_clean`.
+the recorded commit. The only permitted untracked path is `.rocprofv3/` and its
+descendants. Any other untracked path invalidates the run.
 The validator receives the expected commit and worker binary SHA-256 separately
 from the raw producer and requires exact matches.
 
@@ -55,7 +56,10 @@ the header MUST equal `1`:
 - `ULLM_REQUIRE_HIP_ROPE_KERNEL`;
 - `ULLM_REQUIRE_HIP_SILU_MUL_KERNEL`.
 
-No other process may have positive VRAM on KFD GPU `51545` during the run.
+GPU isolation is an explicit sampled claim rather than an unobservable continuous
+claim. No other process may have positive VRAM on KFD GPU `51545` at preflight,
+after Ready, immediately after every release including latency recovery, or in
+any resource sample. Every one of those observations is retained as raw evidence.
 
 ## 3. Clock and Cancellation Bound
 
@@ -95,6 +99,11 @@ latency cancellation begins. Recovery requests are not p95 samples.
 Every cancellation upper bound MUST be at most 5,000,000,000 ns. The ten measured
 upper bounds use the percentile algorithm in section 7 and p95 MUST be at most
 2,000,000,000 ns.
+
+Every request MUST release within 180,000,000,000 ns of generate write start.
+Before cancellation, the gap from generate write start or the prior observed
+worker event to the next observed worker event MUST be at most 30,000,000,000 ns.
+After cancel write start, the five-second cancellation bound takes precedence.
 
 ## 4. Request Schedule
 
@@ -176,12 +185,12 @@ producer `passed` field.
 Record order is:
 
 1. one `header`;
-2. one validated `ready` `worker_event`;
-3. latency commands and events;
+2. one validated `ready` `worker_event` and its `isolation_check`;
+3. latency commands, events, and one `isolation_check` after every release;
 4. resource `before` `gpu_metric`;
-5. resource warmup commands and events;
+5. resource warmup commands, events, and release isolation checks;
 6. five baseline `resource_sample` records;
-7. 100 measured request commands, events, and their 500 samples;
+7. 100 measured request commands, events, release isolation checks, and their 500 samples;
 8. resource `after` `gpu_metric`;
 9. one shutdown `command`;
 10. one `process_exit`, which is the final record.
@@ -192,31 +201,40 @@ The exact top-level fields are `schema_version`, `record_type`, `clock`, `build`
 `worker`, `device`, `environment`, `schedule`, and `thresholds`.
 
 - `clock` is exactly `python.time.monotonic_ns`.
-- `build` contains exactly `git_commit`, `tracked_clean`, `binary_sha256`,
-  `artifact_manifest_sha256`, `artifact_content_sha256`, and
-  `package_manifest_sha256`.
+- `build` contains exactly `git_commit`, `tracked_clean`, `git_status_raw`,
+  `git_status_raw_sha256`, `binary_sha256`, `artifact_manifest_sha256`,
+  `artifact_content_sha256`, and `package_manifest_sha256`. The validator reparses
+  porcelain v1 status and permits only untracked `.rocprofv3/` descendants.
 - `worker` contains exactly `pid`, `ppid`, `starttime_ticks`, and `exe`.
 - `device` contains exactly `gpu_index`, `bdf`, `uuid`, `kfd_gpu_id`,
   `amd_smi_list_raw_json`, and `amd_smi_list_raw_sha256`. The validator reparses
-  the raw list and requires exactly one entry matching all four identities.
+  the raw list, requires exactly one entry whose GPU index is `2`, and requires
+  that entry to match all four identities.
 - `environment` contains exactly `hip_visible_devices`,
   `required_hip_guards`, `amd_smi_version_raw`, and
-  `amd_smi_version_raw_sha256`; the guard object contains exactly the ten names
+  `amd_smi_version_raw_sha256`, and `preflight_kfd_processes`; the guard object contains exactly the ten names
   from section 2 with string value `1`. The AMD SMI raw version MUST contain tool
   `26.2.2+e1a6bc5663`, library `26.2.2`, and ROCm `7.2.1`.
+  `preflight_kfd_processes` uses the raw KFD entry format from section 6.5 and
+  MUST contain no positive `vram_bytes`.
 - `schedule` contains exactly `latency_warmups=2`, `latency_measured=10`,
   `resource_warmups=10`, `resource_requests=100`, `cancel_block_size=5`,
   `cancel_block_offset=4`, `idle_settle_ms=5000`, `samples_per_point=5`, and
   `sample_interval_ms=1000`.
 - `thresholds` contains exactly `cancel_sample_max_ns=5000000000`,
   `cancel_p95_max_ns=2000000000`, `theil_sen_max_bytes_per_request=262144`, and
-  `final_delta_max_bytes=67108864`.
+  `final_delta_max_bytes=67108864`, `request_max_ns=180000000000`,
+  `progress_max_ns=30000000000`, and `shutdown_max_ns=30000000000`.
 
 ### 6.2 Command
 
 Every `command` contains `schema_version`, `record_type`, `phase`,
 `request_index`, `request_id`, `command_type`, `write_started_monotonic_ns`, and
-`write_completed_monotonic_ns`. Timestamps are strictly increasing.
+`write_completed_monotonic_ns`, `raw_json`, and `raw_sha256`. `raw_json` is the
+exact UTF-8 object written before its terminating LF. The validator checks its
+hash, reparses it with duplicate-key rejection, and derives all command fields,
+including the complete prompt token array, from it. Timestamps are strictly
+increasing.
 
 `phase` is `latency_warmup`, `latency_measured`, `resource_warmup`,
 `resource_measured`, or `shutdown`. Generate records additionally contain exactly
@@ -231,8 +249,10 @@ each scheduled cancellation and no repeated cancel.
 ### 6.3 Worker Event
 
 A `worker_event` contains exactly `schema_version`, `record_type`,
-`observed_monotonic_ns`, and `event`. `event` is the unmodified decoded
-`ullm.worker.v1` object. The validator independently checks its exact field set,
+`observed_monotonic_ns`, `raw_json`, `raw_sha256`, and `event`. `raw_json` is the
+exact worker stdout JSON before LF and `event` is its decoded object. The validator
+checks the hash, reparses the raw value, requires equality with `event`, and then
+independently checks its exact field set,
 request identity, event ordering, progress, contiguous token indices, terminal
 counts, outcome, cancel reason, and `reset_complete=true`.
 
@@ -251,24 +271,43 @@ are at least 1,000,000,000 ns apart.
 
 The nested `worker` object contains exactly `pid`, `ppid`, `exe`,
 `starttime_ticks_before`, `starttime_ticks_after`, `vmrss_kb`, `vmrss_bytes`,
-`threads`, `fd_count`, and `children`. `children` is an ascending unique PID list.
+`threads`, `fd_count`, `children`, `stat_before_raw`, `stat_before_raw_sha256`,
+`status_raw`, `status_raw_sha256`, `exe_target`, `fd_names`, `children_raw`,
+`children_raw_sha256`, `stat_after_raw`, and `stat_after_raw_sha256`. The validator
+checks every raw hash and reparses PID, parent, start time, RSS, thread count, FD
+names, and children instead of trusting the derived fields. `children` is an
+ascending unique PID list. The header executable is hashed at validation time and
+MUST match the independently supplied worker binary SHA-256.
 
 The nested `gpu` object contains exactly `index`, `bdf`, `uuid`, `kfd_gpu_id`,
 `process_raw_json`, `process_raw_sha256`, `worker_pid`, `mem_usage_value`,
-`mem_usage_unit`, `kfd_vram_bytes`, `kfd_positive_processes`, and
+`mem_usage_unit`, `kfd_vram_bytes`, `kfd_processes`, `kfd_positive_processes`, and
 `unrelated_positive_kfd_pids`. `kfd_positive_processes` is an ascending unique
 array of objects containing exactly `pid` and `vram_bytes`. The validator reparses
 `process_raw_json`, checks its SHA-256 and exact worker record, derives the
-unrelated list from the KFD array, and requires that list to be empty.
+positive and unrelated lists from `kfd_processes`, and requires the unrelated list
+to be empty. `kfd_processes` is an ascending unique array of objects containing
+exactly `pid`, `vram_raw`, and `vram_bytes`; `vram_raw` is the exact stripped ASCII
+content of that PID's `vram_51545` file and MUST parse back to `vram_bytes`.
 
-### 6.5 GPU Metric
+### 6.5 Isolation Check
+
+An `isolation_check` contains exactly `schema_version`, `record_type`, `phase`,
+`request_index`, `request_id`, `release_observed_monotonic_ns`,
+`captured_monotonic_ns`, and `kfd_processes`. One Ready check uses phase `ready`
+and null request/release fields. Every request release is immediately followed by
+one check with matching phase, index, ID, and release timestamp. The KFD array uses
+the raw format from section 6.4. At Ready and after each release, the only positive
+entry MUST be the unchanged worker PID.
+
+### 6.6 GPU Metric
 
 A `gpu_metric` contains exactly `schema_version`, `record_type`, `boundary`,
 `captured_monotonic_ns`, `raw_json`, and `raw_sha256`. Boundary is `before` or
 `after`. The raw value is the unmodified output from
 `amd-smi metric --gpu 2 --json` and its SHA-256 MUST match.
 
-### 6.6 Process Exit
+### 6.7 Process Exit
 
 The final `process_exit` contains exactly `schema_version`, `record_type`,
 `stdout_eof_monotonic_ns`, `exit_observed_monotonic_ns`, `exit_code`,
@@ -277,6 +316,10 @@ regular sibling named `worker-stderr.jsonl` containing the complete worker stder
 byte stream and its SHA-256 MUST match. The successful raw evidence basename is
 `raw.jsonl`; the producer writes `raw.jsonl.incomplete` and renames it only after
 the complete successful run.
+
+Idle shutdown starts at shutdown command write start. Stdout EOF may race before
+write completion, but process exit observation MUST follow write completion and
+MUST occur within 30,000,000,000 ns of write start.
 
 ## 7. Frozen Statistics
 
@@ -298,6 +341,9 @@ schema, ordering, identity, hash, resource, schedule, or threshold error. They d
 not drop or replace a sample, retry only a failed point, continue after worker
 fatal/EOF, or convert an incomplete run into a result. A new result requires a
 fresh complete worker process and complete run.
+
+External commands and worker cleanup use bounded waits. On failure, the producer
+terminates the complete child process group rather than only its direct PID.
 
 An upper-bound p95 above two seconds does not prove the internal exact latency is
 above two seconds, but it does fail this evidence contract. A narrower result then
