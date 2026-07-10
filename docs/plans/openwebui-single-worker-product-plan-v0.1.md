@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 is complete; P8-C deterministic CPU sampler is implemented and awaiting transactional session/publication integration
+Status: in progress; P8-B2 is complete; P8-C deterministic CPU sampler and transactional session publication are implemented; strict JSONL worker protocol is next
 
 Date: 2026-07-10
 
@@ -918,12 +918,43 @@ while the protocol defines publication at stdout flush.
 
 ##### 次の行動
 
-1. Integrate the committed deterministic sampler into a prepared-token session
-   state and add cancellation race tests around prepare/commit/discard.
-2. Implement the strict bounded JSONL reader, active-slot publication mutex, and
+1. Implement the strict bounded JSONL reader, active-slot ownership, and
    ordered flushed writer over that session surface.
+2. Add real-GPU session tests for cancel after prepare, during flush, and around a
+   terminal token, including exact RNG/scheduler/generated-count assertions.
 3. Run CPU protocol conformance before the R9700 cancellation and 100-request
    acceptance workloads.
+
+#### P8-C transactional session checkpoint (2026-07-10)
+
+##### 前回の要点
+
+The deterministic sampler was complete, but the serving session still needed a
+two-phase token boundary that could make stdout flush and cancellation ordering
+unambiguous.
+
+##### 今回の変更点
+
+- Added `TokenPrepared` and split each generated step into prepare and publish.
+- Preparing a stochastic token leaves the RNG draw count, scheduler generated
+  count, request generated count, feedback token, and terminal state unchanged.
+- The cancel flag store and publish/flush/commit now use the same mutex. The
+  transaction tests jointly inspect pending state, RNG draws, active generated
+  count, and scheduler generated count for cancel-before-publication, publisher
+  failure, post-flush commit failure, terminal-token races, and cancellation
+  blocked across publish plus commit.
+- Updated the formal session state machine and retained the immediate-commit
+  compatibility wrapper used by prior P8-B diagnostics.
+- The full engine suite passes 279 tests; the gfx1201 serving example check and
+  132 Python tests plus 14 subtests also pass.
+
+##### 次の行動
+
+1. Build the strict, bounded JSONL command/event codec and active-slot control as
+   CPU-testable components.
+2. Connect the codec to a resident inference thread that owns all HIP/session
+   state and uses the prepared-token publication callback for flushed events.
+3. Close the remaining real-GPU cancellation race cases before P8-C acceptance.
 
 ### P8-D: Tokenizer and Non-Streaming OpenAI Gateway
 

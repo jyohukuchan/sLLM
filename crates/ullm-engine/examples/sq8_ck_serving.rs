@@ -1387,6 +1387,7 @@ fn serving_status_name(status: Sq8ServingRuntimeStatus) -> &'static str {
         Sq8ServingRuntimeStatus::Ready => "ready",
         Sq8ServingRuntimeStatus::Prefilling => "prefilling",
         Sq8ServingRuntimeStatus::Decoding => "decoding",
+        Sq8ServingRuntimeStatus::TokenPrepared => "token_prepared",
         Sq8ServingRuntimeStatus::Finishing => "finishing",
         Sq8ServingRuntimeStatus::Cancelling => "cancelling",
         Sq8ServingRuntimeStatus::Resetting => "resetting",

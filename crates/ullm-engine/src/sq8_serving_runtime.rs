@@ -27,6 +27,7 @@ use crate::sq8_model_head_runtime::{
     QWEN3_14B_VOCAB_SIZE, Qwen3Sq8ModelHeadRuntime, Sq8ModelHeadDeviceIdentity,
     Sq8ModelHeadServingSource, validate_qwen3_14b_sq8_r9700_device_info,
 };
+use crate::sq8_sampling::{Sq8CpuSampler, Sq8SamplingProposal};
 use crate::sq8_stack_runtime::{
     QWEN3_14B_SQ8_STACK_LAYERS, Qwen3Sq8PagedDecodeRuntime, Qwen3Sq8StackRuntime,
     Sq8PagedStackExecutionReport, Sq8PagedStackPhase, Sq8ServingChunkExecutionReport,
@@ -34,8 +35,8 @@ use crate::sq8_stack_runtime::{
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use ullm_runtime_sys::{DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream};
 
 pub const QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS: usize = 4096;
@@ -115,7 +116,7 @@ impl Sq8SamplingParams {
         }
     }
 
-    fn validate(&self) -> Result<(), Sq8ServingError> {
+    pub fn validate(&self) -> Result<(), Sq8ServingError> {
         if !self.temperature.is_finite() || !(0.0..=2.0).contains(&self.temperature) {
             return Err(Sq8ServingError::invalid_request(format!(
                 "temperature must be finite and in 0..=2, got {}",
@@ -149,22 +150,36 @@ pub struct Sq8ServingRequest {
 }
 
 impl Sq8ServingRequest {
-    pub fn greedy(
+    pub fn new(
         request_id: impl Into<String>,
         prompt_token_ids: Vec<usize>,
         max_new_tokens: usize,
+        sampling: Sq8SamplingParams,
     ) -> Self {
         Self {
             request_id: request_id.into(),
             prompt_token_ids,
             max_new_tokens,
             eos_token_ids: QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS.to_vec(),
-            sampling: Sq8SamplingParams::greedy(0),
+            sampling,
             test_only_ignore_eos: false,
         }
     }
 
-    /// Constructs the fixed deep-boundary diagnostic request. Product callers must use `greedy`.
+    pub fn greedy(
+        request_id: impl Into<String>,
+        prompt_token_ids: Vec<usize>,
+        max_new_tokens: usize,
+    ) -> Self {
+        Self::new(
+            request_id,
+            prompt_token_ids,
+            max_new_tokens,
+            Sq8SamplingParams::greedy(0),
+        )
+    }
+
+    /// Constructs the fixed deep-boundary diagnostic request.
     #[doc(hidden)]
     pub fn greedy_ignore_eos_for_testing(
         request_id: impl Into<String>,
@@ -228,9 +243,15 @@ impl Sq8ServingRequest {
     }
 }
 
+#[derive(Debug, Default)]
+struct Sq8CancellationState {
+    flag: AtomicBool,
+    publication: Mutex<()>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Sq8CancellationToken {
-    flag: Arc<AtomicBool>,
+    inner: Arc<Sq8CancellationState>,
 }
 
 impl Sq8CancellationToken {
@@ -239,12 +260,62 @@ impl Sq8CancellationToken {
     }
 
     pub fn cancel(&self) {
-        self.flag.store(true, Ordering::Release);
+        match self.cancel_checked() {
+            Ok(()) => {}
+            Err(_) => self.inner.flag.store(true, Ordering::Release),
+        }
+    }
+
+    pub fn cancel_checked(&self) -> Result<(), String> {
+        let _publication = self.publication_guard()?;
+        self.inner.flag.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.flag.load(Ordering::Acquire)
+        self.inner.flag.load(Ordering::Acquire)
     }
+
+    fn publication_guard(&self) -> Result<MutexGuard<'_, ()>, String> {
+        self.inner
+            .publication
+            .lock()
+            .map_err(|_| "SQ8 cancellation publication mutex is poisoned".to_string())
+    }
+
+    #[cfg(test)]
+    fn publication_is_locked(&self) -> Result<bool, String> {
+        match self.inner.publication.try_lock() {
+            Ok(_publication) => Ok(false),
+            Err(std::sync::TryLockError::WouldBlock) => Ok(true),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err("SQ8 cancellation publication mutex is poisoned".to_string())
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TokenPublication<T> {
+    Published(T),
+    Cancelled,
+}
+
+fn linearize_token_publication<T, P, C>(
+    cancel: &Sq8CancellationToken,
+    publish: P,
+    commit: C,
+) -> Result<TokenPublication<T>, String>
+where
+    P: FnOnce() -> Result<(), String>,
+    C: FnOnce() -> Result<T, String>,
+{
+    let _publication = cancel.publication_guard()?;
+    if cancel.is_cancelled() {
+        return Ok(TokenPublication::Cancelled);
+    }
+    publish().map_err(|err| format!("serving token publisher failed before commit: {err}"))?;
+    commit().map(TokenPublication::Published)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +356,26 @@ pub enum Sq8ServingAdvance {
     CancellationObserved,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sq8PreparedToken {
+    pub token_id: usize,
+    pub generated_index: usize,
+    pub cache_len: usize,
+    pub terminal_reason: Option<Sq8FinishReason>,
+    nonce: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sq8PreparedAdvance {
+    PromptProgress {
+        prompt_tokens_processed: usize,
+        cache_len: usize,
+        execution_width: usize,
+    },
+    Token(Sq8PreparedToken),
+    CancellationObserved,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sq8ServingOracleCapture {
     pub position: usize,
@@ -306,6 +397,7 @@ pub enum Sq8ServingRuntimeStatus {
     Ready,
     Prefilling,
     Decoding,
+    TokenPrepared,
     Finishing,
     Cancelling,
     Resetting,
@@ -428,6 +520,8 @@ pub struct Sq8ServingSnapshot {
     pub prompt_tokens: usize,
     pub prompt_tokens_processed: usize,
     pub generated_tokens: usize,
+    pub sampling_draws: u64,
+    pub token_prepared: bool,
     pub cache_lengths: Vec<usize>,
     pub scheduler_active: usize,
     pub scheduler_waiting: usize,
@@ -442,10 +536,12 @@ struct ActiveServingRequest {
     generated_tokens: usize,
     last_generated_token: Option<usize>,
     finish_reason: Option<Sq8FinishReason>,
+    sampler: Sq8CpuSampler,
 }
 
 impl ActiveServingRequest {
     fn new(request: Sq8ServingRequest, cancel: Sq8CancellationToken) -> Self {
+        let sampler = Sq8CpuSampler::new(request.sampling.seed);
         Self {
             request,
             cancel,
@@ -453,6 +549,7 @@ impl ActiveServingRequest {
             generated_tokens: 0,
             last_generated_token: None,
             finish_reason: None,
+            sampler,
         }
     }
 
@@ -478,9 +575,116 @@ impl ActiveServingRequest {
     }
 }
 
-enum GeneratedTokenCommit<'a> {
+#[derive(Debug)]
+enum GeneratedTokenCommit {
     Prefill,
-    Decode(&'a [SchedulerDecodeRequest]),
+    Decode(Vec<SchedulerDecodeRequest>),
+}
+
+#[derive(Debug)]
+struct PendingServingToken {
+    prepared: Sq8PreparedToken,
+    proposal: Sq8SamplingProposal,
+    commit: GeneratedTokenCommit,
+}
+
+#[derive(Debug)]
+struct PreparedOracleAdvance {
+    advance: Sq8PreparedAdvance,
+    capture: Option<Sq8ServingOracleCapture>,
+}
+
+#[derive(Debug)]
+enum HeadPreparation {
+    Prepared {
+        proposal: Sq8SamplingProposal,
+        capture: Option<Sq8ServingOracleCapture>,
+    },
+    CancellationObserved,
+}
+
+fn publish_prepared_token_transaction<F>(
+    state: &mut Sq8ServingRuntimeStatus,
+    pending_token: &mut Option<PendingServingToken>,
+    active: &mut Option<ActiveServingRequest>,
+    scheduler: &mut SchedulerState,
+    cancel: &Sq8CancellationToken,
+    prepared: &Sq8PreparedToken,
+    publish: F,
+) -> Result<Sq8ServingAdvance, String>
+where
+    F: FnOnce(&Sq8PreparedToken) -> Result<(), String>,
+{
+    let publication = linearize_token_publication(
+        cancel,
+        || publish(prepared),
+        || commit_pending_token_state(pending_token, active, scheduler, state, prepared),
+    );
+    match publication {
+        Ok(TokenPublication::Published(committed)) => Ok(committed),
+        Ok(TokenPublication::Cancelled) => {
+            *pending_token = None;
+            *state = Sq8ServingRuntimeStatus::Cancelling;
+            Ok(Sq8ServingAdvance::CancellationObserved)
+        }
+        Err(err) => {
+            *state = Sq8ServingRuntimeStatus::Failed;
+            Err(err)
+        }
+    }
+}
+
+fn commit_pending_token_state(
+    pending_token: &mut Option<PendingServingToken>,
+    active: &mut Option<ActiveServingRequest>,
+    scheduler: &mut SchedulerState,
+    state: &mut Sq8ServingRuntimeStatus,
+    prepared: &Sq8PreparedToken,
+) -> Result<Sq8ServingAdvance, String> {
+    let pending = pending_token
+        .take()
+        .ok_or_else(|| "serving token commit has no pending token".to_string())?;
+    if &pending.prepared != prepared {
+        return Err("serving token commit handle changed after publication".into());
+    }
+    let sampled = pending.proposal.sampled();
+    if sampled.token_id != prepared.token_id {
+        return Err("serving sampling proposal changed before commit".into());
+    }
+    let next_generated_tokens = prepared
+        .generated_index
+        .checked_add(1)
+        .ok_or_else(|| "serving generated token counter overflows".to_string())?;
+    match pending.commit {
+        GeneratedTokenCommit::Prefill => {
+            scheduler.record_prefill_generated_token(SERVING_INTERNAL_REQUEST_ID)?
+        }
+        GeneratedTokenCommit::Decode(ready) => scheduler.advance_decode_batch(&ready)?,
+    }
+    let active = active
+        .as_mut()
+        .ok_or_else(|| "serving token commit has no active request".to_string())?;
+    let committed = active.sampler.commit(pending.proposal)?;
+    if committed.token_id != prepared.token_id
+        || committed.logit.to_bits() != sampled.logit.to_bits()
+    {
+        return Err("serving sampler commit did not match prepared token".into());
+    }
+    active.generated_tokens = next_generated_tokens;
+    active.last_generated_token = Some(prepared.token_id);
+    active.finish_reason = prepared.terminal_reason;
+    validate_active_sampling_progress(active)?;
+    *state = if prepared.terminal_reason.is_some() {
+        Sq8ServingRuntimeStatus::Finishing
+    } else {
+        Sq8ServingRuntimeStatus::Decoding
+    };
+    Ok(Sq8ServingAdvance::Token {
+        token_id: prepared.token_id,
+        generated_index: prepared.generated_index,
+        cache_len: prepared.cache_len,
+        terminal_reason: prepared.terminal_reason,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -554,6 +758,8 @@ pub struct Qwen3Sq8ServingSession {
     head: Qwen3Sq8ModelHeadRuntime,
     scheduler: SchedulerState,
     active: Option<ActiveServingRequest>,
+    pending_token: Option<PendingServingToken>,
+    next_prepared_nonce: u64,
     state: Sq8ServingRuntimeStatus,
     failure_reason: Option<String>,
 }
@@ -717,6 +923,8 @@ impl Qwen3Sq8ServingSession {
                         .map_err(|_| "serving block size does not fit u32".to_string())?,
                 ),
                 active: None,
+                pending_token: None,
+                next_prepared_nonce: 0,
                 state: Sq8ServingRuntimeStatus::Ready,
                 failure_reason: None,
             };
@@ -748,7 +956,13 @@ impl Qwen3Sq8ServingSession {
     }
 
     pub fn snapshot(&self) -> Sq8ServingSnapshot {
-        let (active_request_id, prompt_tokens, prompt_tokens_processed, generated_tokens) = self
+        let (
+            active_request_id,
+            prompt_tokens,
+            prompt_tokens_processed,
+            generated_tokens,
+            sampling_draws,
+        ) = self
             .active
             .as_ref()
             .map(|active| {
@@ -757,15 +971,18 @@ impl Qwen3Sq8ServingSession {
                     active.request.prompt_token_ids.len(),
                     active.prompt_tokens_processed,
                     active.generated_tokens,
+                    active.sampler.draws(),
                 )
             })
-            .unwrap_or((None, 0, 0, 0));
+            .unwrap_or((None, 0, 0, 0, 0));
         Sq8ServingSnapshot {
             status: self.state,
             active_request_id,
             prompt_tokens,
             prompt_tokens_processed,
             generated_tokens,
+            sampling_draws,
+            token_prepared: self.pending_token.is_some(),
             cache_lengths: self
                 .caches
                 .iter()
@@ -794,7 +1011,6 @@ impl Qwen3Sq8ServingSession {
             }
         }
         request.validate()?;
-        validate_p8b_greedy_execution(request.sampling)?;
         if let Err(err) = self.validate_ready_baseline() {
             return Err(
                 self.fail_runtime(stream, format!("serving baseline validation failed: {err}"))
@@ -854,6 +1070,27 @@ impl Qwen3Sq8ServingSession {
         &mut self,
         stream: &mut RuntimeStream,
     ) -> Result<Sq8ServingAdvance, Sq8ServingError> {
+        match self.prepare_advance_synchronized(stream)? {
+            Sq8PreparedAdvance::PromptProgress {
+                prompt_tokens_processed,
+                cache_len,
+                execution_width,
+            } => Ok(Sq8ServingAdvance::PromptProgress {
+                prompt_tokens_processed,
+                cache_len,
+                execution_width,
+            }),
+            Sq8PreparedAdvance::Token(prepared) => {
+                self.publish_prepared_token(prepared, stream, |_| Ok(()))
+            }
+            Sq8PreparedAdvance::CancellationObserved => Ok(Sq8ServingAdvance::CancellationObserved),
+        }
+    }
+
+    pub fn prepare_advance_synchronized(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8PreparedAdvance, Sq8ServingError> {
         match self.state {
             Sq8ServingRuntimeStatus::Prefilling | Sq8ServingRuntimeStatus::Decoding => {}
             Sq8ServingRuntimeStatus::Ready => {
@@ -875,17 +1112,66 @@ impl Qwen3Sq8ServingSession {
         };
         if cancelled {
             self.state = Sq8ServingRuntimeStatus::Cancelling;
-            return Ok(Sq8ServingAdvance::CancellationObserved);
+            return Ok(Sq8PreparedAdvance::CancellationObserved);
         }
 
         let result = match self.state {
             Sq8ServingRuntimeStatus::Prefilling => self
-                .advance_prefill_synchronized(stream, false)
+                .prepare_prefill_synchronized(stream, false)
                 .map(|result| result.advance),
-            Sq8ServingRuntimeStatus::Decoding => self.advance_decode_synchronized(stream),
+            Sq8ServingRuntimeStatus::Decoding => self.prepare_decode_synchronized(stream),
             _ => unreachable!("state checked above"),
         };
         result.map_err(|err| self.fail_runtime(stream, err))
+    }
+
+    pub fn publish_prepared_token<F>(
+        &mut self,
+        prepared: Sq8PreparedToken,
+        stream: &mut RuntimeStream,
+        publish: F,
+    ) -> Result<Sq8ServingAdvance, Sq8ServingError>
+    where
+        F: FnOnce(&Sq8PreparedToken) -> Result<(), String>,
+    {
+        if self.state == Sq8ServingRuntimeStatus::Failed {
+            return Err(self.failed_error());
+        }
+        if self.state != Sq8ServingRuntimeStatus::TokenPrepared {
+            return Err(self.fail_runtime(
+                stream,
+                format!(
+                    "serving token publication requires TokenPrepared, got {:?}",
+                    self.state
+                ),
+            ));
+        }
+        if self.pending_token.as_ref().map(|pending| &pending.prepared) != Some(&prepared) {
+            return Err(self.fail_runtime(
+                stream,
+                "serving token publication handle does not match pending token",
+            ));
+        }
+        let cancel = match self.active.as_ref() {
+            Some(active) => active.cancel.clone(),
+            None => {
+                return Err(
+                    self.fail_runtime(stream, "serving token publication has no active request")
+                );
+            }
+        };
+        match publish_prepared_token_transaction(
+            &mut self.state,
+            &mut self.pending_token,
+            &mut self.active,
+            &mut self.scheduler,
+            &cancel,
+            &prepared,
+            publish,
+        ) {
+            Ok(committed) => Ok(committed),
+            Err(err) => Err(self.fail_runtime(stream, err)),
+        }
     }
 
     /// Captures final hidden/logits only for the first token oracle gate.
@@ -919,8 +1205,32 @@ impl Qwen3Sq8ServingSession {
                 capture: None,
             });
         }
-        self.advance_prefill_synchronized(stream, true)
-            .map_err(|err| self.fail_runtime(stream, err))
+        let prepared = self
+            .prepare_prefill_synchronized(stream, true)
+            .map_err(|err| self.fail_runtime(stream, err))?;
+        let advance = match prepared.advance {
+            Sq8PreparedAdvance::PromptProgress {
+                prompt_tokens_processed,
+                cache_len,
+                execution_width,
+            } => Sq8ServingAdvance::PromptProgress {
+                prompt_tokens_processed,
+                cache_len,
+                execution_width,
+            },
+            Sq8PreparedAdvance::Token(token) => {
+                self.publish_prepared_token(token, stream, |_| Ok(()))?
+            }
+            Sq8PreparedAdvance::CancellationObserved => Sq8ServingAdvance::CancellationObserved,
+        };
+        Ok(Sq8ServingOracleAdvance {
+            capture: if matches!(advance, Sq8ServingAdvance::Token { .. }) {
+                prepared.capture
+            } else {
+                None
+            },
+            advance,
+        })
     }
 
     pub fn finish_and_reset_synchronized(
@@ -976,11 +1286,11 @@ impl Qwen3Sq8ServingSession {
 }
 
 impl Qwen3Sq8ServingSession {
-    fn advance_prefill_synchronized(
+    fn prepare_prefill_synchronized(
         &mut self,
         stream: &mut RuntimeStream,
         capture_oracle: bool,
-    ) -> Result<Sq8ServingOracleAdvance, String> {
+    ) -> Result<PreparedOracleAdvance, String> {
         let (unit, prompt_tokens, token_ids) = {
             let active = self
                 .active
@@ -1020,8 +1330,8 @@ impl Qwen3Sq8ServingSession {
         let scheduler_cached = self.commit_prompt_progress(unit.start_position, unit.width)?;
         if self.active_cancelled()? {
             self.state = Sq8ServingRuntimeStatus::Cancelling;
-            return Ok(Sq8ServingOracleAdvance {
-                advance: Sq8ServingAdvance::CancellationObserved,
+            return Ok(PreparedOracleAdvance {
+                advance: Sq8PreparedAdvance::CancellationObserved,
                 capture: None,
             });
         }
@@ -1029,8 +1339,8 @@ impl Qwen3Sq8ServingSession {
             if scheduler_cached >= prompt_tokens {
                 return Err("serving non-final prefill unit reached prompt boundary".into());
             }
-            return Ok(Sq8ServingOracleAdvance {
-                advance: Sq8ServingAdvance::PromptProgress {
+            return Ok(PreparedOracleAdvance {
+                advance: Sq8PreparedAdvance::PromptProgress {
                     prompt_tokens_processed: scheduler_cached,
                     cache_len: scheduler_cached,
                     execution_width: unit.width,
@@ -1048,24 +1358,29 @@ impl Qwen3Sq8ServingSession {
             1 => Sq8ModelHeadServingSource::M1PagedDecode,
             _ => Sq8ModelHeadServingSource::CachedPrefixChunk,
         };
-        let (top1, capture) =
-            self.run_head_synchronized(source, scheduler_cached, stream, capture_oracle)?;
-        let advance =
-            self.commit_generated_token(top1, scheduler_cached, GeneratedTokenCommit::Prefill)?;
-        Ok(Sq8ServingOracleAdvance {
-            capture: if matches!(advance, Sq8ServingAdvance::Token { .. }) {
-                capture
-            } else {
-                None
-            },
-            advance,
-        })
+        match self.run_head_synchronized(source, scheduler_cached, stream, capture_oracle)? {
+            HeadPreparation::Prepared { proposal, capture } => {
+                let prepared = self.prepare_generated_token(
+                    proposal,
+                    scheduler_cached,
+                    GeneratedTokenCommit::Prefill,
+                )?;
+                Ok(PreparedOracleAdvance {
+                    advance: Sq8PreparedAdvance::Token(prepared),
+                    capture,
+                })
+            }
+            HeadPreparation::CancellationObserved => Ok(PreparedOracleAdvance {
+                advance: Sq8PreparedAdvance::CancellationObserved,
+                capture: None,
+            }),
+        }
     }
 
-    fn advance_decode_synchronized(
+    fn prepare_decode_synchronized(
         &mut self,
         stream: &mut RuntimeStream,
-    ) -> Result<Sq8ServingAdvance, String> {
+    ) -> Result<Sq8PreparedAdvance, String> {
         let (prompt_tokens, generated_tokens, input_token_id, expected_position) = {
             let active = self
                 .active
@@ -1113,20 +1428,26 @@ impl Qwen3Sq8ServingSession {
         validate_cache_lengths(self.caches.as_ref(), expected_position + 1)?;
         if self.active_cancelled()? {
             self.state = Sq8ServingRuntimeStatus::Cancelling;
-            return Ok(Sq8ServingAdvance::CancellationObserved);
+            return Ok(Sq8PreparedAdvance::CancellationObserved);
         }
-        let (top1, capture) = self.run_head_synchronized(
+        let head = self.run_head_synchronized(
             Sq8ModelHeadServingSource::M1PagedDecode,
             expected_position + 1,
             stream,
             false,
         )?;
-        debug_assert!(capture.is_none());
-        self.commit_generated_token(
-            top1,
-            expected_position + 1,
-            GeneratedTokenCommit::Decode(&ready),
-        )
+        match head {
+            HeadPreparation::Prepared { proposal, capture } => {
+                debug_assert!(capture.is_none());
+                self.prepare_generated_token(
+                    proposal,
+                    expected_position + 1,
+                    GeneratedTokenCommit::Decode(ready),
+                )
+                .map(Sq8PreparedAdvance::Token)
+            }
+            HeadPreparation::CancellationObserved => Ok(Sq8PreparedAdvance::CancellationObserved),
+        }
     }
 
     fn execute_m1_stack_token(
@@ -1272,7 +1593,7 @@ impl Qwen3Sq8ServingSession {
         expected_cache_len: usize,
         stream: &mut RuntimeStream,
         capture_oracle: bool,
-    ) -> Result<(Sq8GenerationTopLogit, Option<Sq8ServingOracleCapture>), String> {
+    ) -> Result<HeadPreparation, String> {
         let result = match (source, capture_oracle) {
             (Sq8ModelHeadServingSource::M1PagedDecode, true) => self
                 .head
@@ -1303,8 +1624,31 @@ impl Qwen3Sq8ServingSession {
         {
             return Err("serving model-head source/identity/report mismatch".into());
         }
-        let top1 = greedy_top1_finite(&result.logits)?;
+        if self.active_cancelled()? {
+            self.state = Sq8ServingRuntimeStatus::Cancelling;
+            return Ok(HeadPreparation::CancellationObserved);
+        }
+        let proposal = {
+            let active = self
+                .active
+                .as_ref()
+                .ok_or_else(|| "serving model head has no active sampler".to_string())?;
+            validate_active_sampling_progress(active)?;
+            active.sampler.propose(
+                &result.logits,
+                active.request.sampling.temperature,
+                active.request.sampling.top_k,
+                active.request.sampling.top_p,
+            )?
+        };
+        let sampled = proposal.sampled();
+        if sampled.token_id >= QWEN3_14B_VOCAB_SIZE || !sampled.logit.is_finite() {
+            return Err(format!(
+                "serving sampler proposed invalid token: {sampled:?}"
+            ));
+        }
         let capture = if capture_oracle {
+            let top1 = greedy_top1_finite(&result.logits)?;
             let final_hidden = result.final_hidden.ok_or_else(|| {
                 "serving oracle head did not return final-hidden capture".to_string()
             })?;
@@ -1330,7 +1674,7 @@ impl Qwen3Sq8ServingSession {
             }
             None
         };
-        Ok((top1, capture))
+        Ok(HeadPreparation::Prepared { proposal, capture })
     }
 
     fn commit_prompt_progress(&mut self, position: usize, width: usize) -> Result<usize, String> {
@@ -1371,16 +1715,20 @@ impl Qwen3Sq8ServingSession {
         Ok(actual)
     }
 
-    fn commit_generated_token(
+    fn prepare_generated_token(
         &mut self,
-        top1: Sq8GenerationTopLogit,
+        proposal: Sq8SamplingProposal,
         cache_len: usize,
-        commit: GeneratedTokenCommit<'_>,
-    ) -> Result<Sq8ServingAdvance, String> {
-        if top1.token_id >= QWEN3_14B_VOCAB_SIZE || !top1.logit.is_finite() {
-            return Err(format!("serving sampled invalid top1: {top1:?}"));
+        commit: GeneratedTokenCommit,
+    ) -> Result<Sq8PreparedToken, String> {
+        if self.pending_token.is_some() {
+            return Err("serving already has a pending token".into());
         }
-        let (generated_index, next_generated_tokens, terminal_reason, cancelled) = {
+        let sampled = proposal.sampled();
+        if sampled.token_id >= QWEN3_14B_VOCAB_SIZE || !sampled.logit.is_finite() {
+            return Err(format!("serving sampled invalid token: {sampled:?}"));
+        }
+        let (generated_index, terminal_reason) = {
             let active = self
                 .active
                 .as_ref()
@@ -1436,43 +1784,27 @@ impl Qwen3Sq8ServingSession {
                     }
                 }
             }
-            (
-                generated_index,
-                next_generated_tokens,
-                active.terminal_reason(top1.token_id),
-                active.cancel.is_cancelled(),
-            )
+            (generated_index, active.terminal_reason(sampled.token_id))
         };
 
-        // This is the final cancellation observation before scheduler/token publication.
-        if cancelled {
-            self.state = Sq8ServingRuntimeStatus::Cancelling;
-            return Ok(Sq8ServingAdvance::CancellationObserved);
-        }
-        match commit {
-            GeneratedTokenCommit::Prefill => self
-                .scheduler
-                .record_prefill_generated_token(SERVING_INTERNAL_REQUEST_ID)?,
-            GeneratedTokenCommit::Decode(ready) => self.scheduler.advance_decode_batch(ready)?,
-        }
-        let active = self
-            .active
-            .as_mut()
-            .expect("active request was validated before scheduler token commit");
-        active.generated_tokens = next_generated_tokens;
-        active.last_generated_token = Some(top1.token_id);
-        active.finish_reason = terminal_reason;
-        self.state = if terminal_reason.is_some() {
-            Sq8ServingRuntimeStatus::Finishing
-        } else {
-            Sq8ServingRuntimeStatus::Decoding
-        };
-        Ok(Sq8ServingAdvance::Token {
-            token_id: top1.token_id,
+        let nonce = self.next_prepared_nonce;
+        self.next_prepared_nonce = nonce
+            .checked_add(1)
+            .ok_or_else(|| "serving prepared-token nonce overflows".to_string())?;
+        let prepared = Sq8PreparedToken {
+            token_id: sampled.token_id,
             generated_index,
             cache_len,
             terminal_reason,
-        })
+            nonce,
+        };
+        self.pending_token = Some(PendingServingToken {
+            prepared: prepared.clone(),
+            proposal,
+            commit,
+        });
+        self.state = Sq8ServingRuntimeStatus::TokenPrepared;
+        Ok(prepared)
     }
 
     fn reset_active_synchronized(
@@ -1495,6 +1827,14 @@ impl Qwen3Sq8ServingSession {
             Err(err) => return Err(self.fail_runtime(stream, err.to_string())),
         };
         let reset_preflight = (|| {
+            if self.pending_token.is_some() {
+                return Err("serving reset cannot discard a pending token".into());
+            }
+            let active = self
+                .active
+                .as_ref()
+                .ok_or_else(|| "serving reset has no active metadata".to_string())?;
+            validate_active_sampling_progress(active)?;
             let scheduled = self
                 .scheduler
                 .active_request(SERVING_INTERNAL_REQUEST_ID)
@@ -1557,6 +1897,7 @@ impl Qwen3Sq8ServingSession {
         validate_scheduler_baseline(&self.scheduler)
             .map_err(|err| self.fail_runtime(stream, err))?;
         self.active = None;
+        self.pending_token = None;
         self.state = Sq8ServingRuntimeStatus::Ready;
         if let Err(err) = self.validate_ready_baseline() {
             return Err(
@@ -1591,6 +1932,7 @@ impl Qwen3Sq8ServingSession {
         if self.state != Sq8ServingRuntimeStatus::Ready
             || self.failure_reason.is_some()
             || self.active.is_some()
+            || self.pending_token.is_some()
         {
             return Err("serving Ready metadata is not at baseline".into());
         }
@@ -1945,6 +2287,24 @@ pub fn validate_p8b_greedy_execution(sampling: Sq8SamplingParams) -> Result<(), 
     Ok(())
 }
 
+fn validate_active_sampling_progress(active: &ActiveServingRequest) -> Result<(), String> {
+    let expected_draws = if active.request.sampling.temperature == 0.0 {
+        0
+    } else {
+        u64::try_from(active.generated_tokens).map_err(|_| {
+            "serving generated-token count does not fit RNG draw counter".to_string()
+        })?
+    };
+    if active.sampler.draws() != expected_draws {
+        return Err(format!(
+            "serving sampling progress mismatch: generated_tokens={} expected_draws={expected_draws} actual_draws={}",
+            active.generated_tokens,
+            active.sampler.draws()
+        ));
+    }
+    Ok(())
+}
+
 fn validate_request_id(value: &str) -> Result<(), Sq8ServingError> {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > 128 {
@@ -1969,6 +2329,90 @@ fn validate_request_id(value: &str) -> Result<(), Sq8ServingError> {
 mod tests {
     use super::*;
     use crate::sq8_stack_runtime::QWEN3_14B_SQ8_STACK_LAYERS;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct ServingTokenTransactionFixture {
+        state: Sq8ServingRuntimeStatus,
+        pending_token: Option<PendingServingToken>,
+        active: Option<ActiveServingRequest>,
+        scheduler: SchedulerState,
+        prepared: Sq8PreparedToken,
+        cancel: Sq8CancellationToken,
+    }
+
+    fn serving_token_transaction_fixture() -> ServingTokenTransactionFixture {
+        let cancel = Sq8CancellationToken::new();
+        let request = Sq8ServingRequest::new(
+            "req-transaction",
+            vec![1, 2, 3],
+            2,
+            Sq8SamplingParams {
+                temperature: 1.0,
+                top_p: 1.0,
+                top_k: QWEN3_14B_SQ8_SERVING_TOP_K,
+                seed: 9,
+            },
+        );
+        let mut active = ActiveServingRequest::new(request, cancel.clone());
+        active.prompt_tokens_processed = 3;
+        let logits = (0..QWEN3_14B_SQ8_SERVING_TOP_K)
+            .map(|token_id| token_id as f32 / 10.0)
+            .collect::<Vec<_>>();
+        let proposal = active
+            .sampler
+            .propose(
+                &logits,
+                active.request.sampling.temperature,
+                active.request.sampling.top_k,
+                active.request.sampling.top_p,
+            )
+            .unwrap();
+        let sampled = proposal.sampled();
+        let prepared = Sq8PreparedToken {
+            token_id: sampled.token_id,
+            generated_index: 0,
+            cache_len: 3,
+            terminal_reason: None,
+            nonce: 7,
+        };
+        let pending_token = Some(PendingServingToken {
+            prepared: prepared.clone(),
+            proposal,
+            commit: GeneratedTokenCommit::Prefill,
+        });
+        let mut scheduler = SchedulerState::with_block_size(4, 16);
+        scheduler
+            .activate_single_request_with_all_blocks(Request::new(1, 3, 2))
+            .unwrap();
+        scheduler
+            .advance_prefill_tokens(SERVING_INTERNAL_REQUEST_ID, 3)
+            .unwrap();
+        ServingTokenTransactionFixture {
+            state: Sq8ServingRuntimeStatus::TokenPrepared,
+            pending_token,
+            active: Some(active),
+            scheduler,
+            prepared,
+            cancel,
+        }
+    }
+
+    fn assert_uncommitted_transaction(fixture: &ServingTokenTransactionFixture) {
+        let active = fixture.active.as_ref().unwrap();
+        assert_eq!(active.generated_tokens, 0);
+        assert_eq!(active.sampler.draws(), 0);
+        assert_eq!(active.last_generated_token, None);
+        assert_eq!(active.finish_reason, None);
+        assert_eq!(
+            fixture
+                .scheduler
+                .active_request(SERVING_INTERNAL_REQUEST_ID)
+                .unwrap()
+                .generated_tokens,
+            0
+        );
+    }
 
     #[test]
     fn serving_request_accepts_exact_context_boundary() {
@@ -2052,6 +2496,20 @@ mod tests {
     }
 
     #[test]
+    fn serving_request_accepts_product_stochastic_sampling() {
+        let sampling = Sq8SamplingParams {
+            temperature: 0.6,
+            top_p: 0.95,
+            top_k: QWEN3_14B_SQ8_SERVING_TOP_K,
+            seed: -17,
+        };
+        let request = Sq8ServingRequest::new("req-sample", vec![1, 2, 3], 4, sampling);
+        request.validate().unwrap();
+        let active = ActiveServingRequest::new(request, Sq8CancellationToken::new());
+        validate_active_sampling_progress(&active).unwrap();
+    }
+
+    #[test]
     fn p8b_execution_gate_rejects_stochastic_sampling_without_changing_request_contract() {
         let mut request = Sq8ServingRequest::greedy("req-1", vec![1], 1);
         request.sampling.temperature = 0.6;
@@ -2070,6 +2528,302 @@ mod tests {
         assert!(first.is_cancelled());
         first.cancel();
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn serving_publication_discards_cancelled_token_without_side_effects() {
+        let token = Sq8CancellationToken::new();
+        token.cancel_checked().unwrap();
+        let mut published = false;
+        let mut committed = false;
+
+        let result = linearize_token_publication(
+            &token,
+            || {
+                published = true;
+                Ok(())
+            },
+            || {
+                committed = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, TokenPublication::Cancelled);
+        assert!(!published);
+        assert!(!committed);
+    }
+
+    #[test]
+    fn serving_publication_failure_does_not_commit_token() {
+        let token = Sq8CancellationToken::new();
+        let mut committed = false;
+
+        let err = linearize_token_publication(
+            &token,
+            || Err("flush failed".into()),
+            || {
+                committed = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.contains("publisher failed before commit"), "{err}");
+        assert!(!committed);
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn serving_transaction_discards_cancelled_pending_token_without_progress() {
+        let mut fixture = serving_token_transaction_fixture();
+        fixture.cancel.cancel_checked().unwrap();
+        let mut published = false;
+
+        let result = publish_prepared_token_transaction(
+            &mut fixture.state,
+            &mut fixture.pending_token,
+            &mut fixture.active,
+            &mut fixture.scheduler,
+            &fixture.cancel,
+            &fixture.prepared,
+            |_| {
+                published = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, Sq8ServingAdvance::CancellationObserved);
+        assert_eq!(fixture.state, Sq8ServingRuntimeStatus::Cancelling);
+        assert!(fixture.pending_token.is_none());
+        assert!(!published);
+        assert_uncommitted_transaction(&fixture);
+    }
+
+    #[test]
+    fn serving_transaction_publisher_failure_is_fatal_and_uncommitted() {
+        let mut fixture = serving_token_transaction_fixture();
+
+        let err = publish_prepared_token_transaction(
+            &mut fixture.state,
+            &mut fixture.pending_token,
+            &mut fixture.active,
+            &mut fixture.scheduler,
+            &fixture.cancel,
+            &fixture.prepared,
+            |_| Err("flush failed".into()),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("publisher failed before commit"), "{err}");
+        assert_eq!(fixture.state, Sq8ServingRuntimeStatus::Failed);
+        assert!(fixture.pending_token.is_some());
+        assert_uncommitted_transaction(&fixture);
+    }
+
+    #[test]
+    fn serving_transaction_commit_failure_after_publish_is_fatal() {
+        let mut fixture = serving_token_transaction_fixture();
+        let mut stale_scheduler = SchedulerState::with_block_size(4, 16);
+        stale_scheduler
+            .activate_single_request_with_all_blocks(Request::new(1, 3, 2))
+            .unwrap();
+        fixture.scheduler = stale_scheduler;
+        let mut published = false;
+
+        let err = publish_prepared_token_transaction(
+            &mut fixture.state,
+            &mut fixture.pending_token,
+            &mut fixture.active,
+            &mut fixture.scheduler,
+            &fixture.cancel,
+            &fixture.prepared,
+            |_| {
+                published = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(published);
+        assert!(err.contains("prefill"), "{err}");
+        assert_eq!(fixture.state, Sq8ServingRuntimeStatus::Failed);
+        assert!(fixture.pending_token.is_none());
+        assert_uncommitted_transaction(&fixture);
+    }
+
+    #[test]
+    fn serving_transaction_terminal_cancel_split_is_unambiguous() {
+        let mut cancelled = serving_token_transaction_fixture();
+        cancelled.prepared.terminal_reason = Some(Sq8FinishReason::Length);
+        cancelled
+            .pending_token
+            .as_mut()
+            .unwrap()
+            .prepared
+            .terminal_reason = Some(Sq8FinishReason::Length);
+        cancelled.cancel.cancel_checked().unwrap();
+        let result = publish_prepared_token_transaction(
+            &mut cancelled.state,
+            &mut cancelled.pending_token,
+            &mut cancelled.active,
+            &mut cancelled.scheduler,
+            &cancelled.cancel,
+            &cancelled.prepared,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(result, Sq8ServingAdvance::CancellationObserved);
+        assert_eq!(cancelled.state, Sq8ServingRuntimeStatus::Cancelling);
+        assert_uncommitted_transaction(&cancelled);
+
+        let mut published = serving_token_transaction_fixture();
+        published.prepared.terminal_reason = Some(Sq8FinishReason::Length);
+        published
+            .pending_token
+            .as_mut()
+            .unwrap()
+            .prepared
+            .terminal_reason = Some(Sq8FinishReason::Length);
+        let result = publish_prepared_token_transaction(
+            &mut published.state,
+            &mut published.pending_token,
+            &mut published.active,
+            &mut published.scheduler,
+            &published.cancel,
+            &published.prepared,
+            |_| Ok(()),
+        )
+        .unwrap();
+        published.cancel.cancel_checked().unwrap();
+        assert!(matches!(
+            result,
+            Sq8ServingAdvance::Token {
+                terminal_reason: Some(Sq8FinishReason::Length),
+                ..
+            }
+        ));
+        assert_eq!(published.state, Sq8ServingRuntimeStatus::Finishing);
+        assert_eq!(published.active.as_ref().unwrap().generated_tokens, 1);
+        assert_eq!(published.active.as_ref().unwrap().sampler.draws(), 1);
+        assert_eq!(
+            published
+                .scheduler
+                .active_request(SERVING_INTERNAL_REQUEST_ID)
+                .unwrap()
+                .generated_tokens,
+            1
+        );
+    }
+
+    #[test]
+    fn serving_cancel_waits_for_transaction_publish_and_commit() {
+        let fixture = serving_token_transaction_fixture();
+        let token = fixture.cancel.clone();
+        let publication_token = token.clone();
+        let (publish_entered_tx, publish_entered_rx) = mpsc::channel();
+        let (publish_release_tx, publish_release_rx) = mpsc::channel();
+        let (publication_done_tx, publication_done_rx) = mpsc::channel();
+        let publication_thread = std::thread::spawn(move || {
+            let mut fixture = fixture;
+            let result = publish_prepared_token_transaction(
+                &mut fixture.state,
+                &mut fixture.pending_token,
+                &mut fixture.active,
+                &mut fixture.scheduler,
+                &publication_token,
+                &fixture.prepared,
+                |_| {
+                    publish_entered_tx.send(()).unwrap();
+                    publish_release_rx.recv().unwrap();
+                    Ok(())
+                },
+            );
+            publication_done_tx.send((result, fixture)).unwrap();
+        });
+        publish_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(token.publication_is_locked().unwrap());
+
+        let cancel = token.clone();
+        let (cancel_attempted_tx, cancel_attempted_rx) = mpsc::channel();
+        let (cancel_done_tx, cancel_done_rx) = mpsc::channel();
+        let cancel_thread = std::thread::spawn(move || {
+            cancel_attempted_tx.send(()).unwrap();
+            cancel.cancel_checked().unwrap();
+            cancel_done_tx.send(()).unwrap();
+        });
+        cancel_attempted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        assert!(token.publication_is_locked().unwrap());
+        assert!(!token.is_cancelled());
+        publish_release_tx.send(()).unwrap();
+        let (result, fixture) = publication_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let result = result.unwrap();
+        assert_eq!(
+            result,
+            Sq8ServingAdvance::Token {
+                token_id: fixture.prepared.token_id,
+                generated_index: 0,
+                cache_len: 3,
+                terminal_reason: None,
+            }
+        );
+        assert_eq!(fixture.state, Sq8ServingRuntimeStatus::Decoding);
+        assert!(fixture.pending_token.is_none());
+        let active = fixture.active.as_ref().unwrap();
+        assert_eq!(active.generated_tokens, 1);
+        assert_eq!(active.sampler.draws(), 1);
+        assert_eq!(active.last_generated_token, Some(fixture.prepared.token_id));
+        assert_eq!(
+            fixture
+                .scheduler
+                .active_request(SERVING_INTERNAL_REQUEST_ID)
+                .unwrap()
+                .generated_tokens,
+            1
+        );
+        cancel_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        publication_thread.join().unwrap();
+        cancel_thread.join().unwrap();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn serving_sampling_progress_tracks_only_committed_stochastic_tokens() {
+        let request = Sq8ServingRequest::new(
+            "req-sample",
+            vec![1, 2, 3],
+            2,
+            Sq8SamplingParams {
+                temperature: 1.0,
+                top_p: 1.0,
+                top_k: QWEN3_14B_SQ8_SERVING_TOP_K,
+                seed: 9,
+            },
+        );
+        let mut active = ActiveServingRequest::new(request, Sq8CancellationToken::new());
+        let logits = vec![0.0; QWEN3_14B_SQ8_SERVING_TOP_K];
+        let proposal = active
+            .sampler
+            .propose(
+                &logits,
+                active.request.sampling.temperature,
+                active.request.sampling.top_k,
+                active.request.sampling.top_p,
+            )
+            .unwrap();
+        active.sampler.commit(proposal).unwrap();
+        assert!(validate_active_sampling_progress(&active).is_err());
+        active.generated_tokens = 1;
+        validate_active_sampling_progress(&active).unwrap();
     }
 
     #[test]

@@ -252,9 +252,11 @@ Loading -> Ready
 
 Ready -> Prefilling -> Decoding -> Finishing -> Resetting -> Ready
 Ready -> Prefilling -> Finishing -> Resetting -> Ready
+Ready -> Prefilling/Decoding -> TokenPrepared -> Decoding/Finishing -> Resetting -> Ready
+Ready -> Prefilling/Decoding -> TokenPrepared -> Cancelling -> Resetting -> Ready
 Ready -> Prefilling/Decoding -> Cancelling -> Resetting -> Ready
 
-Loading/Prefilling/Decoding/Finishing/Cancelling/Resetting -> Failed
+Loading/Prefilling/Decoding/TokenPrepared/Finishing/Cancelling/Resetting -> Failed
 ```
 
 `Loading` belongs to construction. A successfully constructed serving session is
@@ -267,10 +269,11 @@ model.
 | `Ready` | `start(valid_request, token)` | `Prefilling` |
 | `Ready` | rejected `start` | `Ready`, baseline unchanged |
 | `Prefilling` | prompt execution unit, prompt remains | `Prefilling` |
-| `Prefilling` | final prompt unit, nonterminal first token | `Decoding` |
-| `Prefilling` | final prompt unit, terminal first token | `Finishing` |
-| `Decoding` | decode unit, nonterminal token | `Decoding` |
-| `Decoding` | decode unit, terminal token | `Finishing` |
+| `Prefilling` | final prompt unit prepares first token | `TokenPrepared` |
+| `Decoding` | decode unit prepares next token | `TokenPrepared` |
+| `TokenPrepared` | publish and flush nonterminal token, then commit | `Decoding` |
+| `TokenPrepared` | publish and flush terminal token, then commit | `Finishing` |
+| `TokenPrepared` | cancellation wins before publication | `Cancelling` |
 | `Prefilling`/`Decoding` | cancellation observed | `Cancelling` |
 | `Finishing` | `finish_and_reset_synchronized` begins | `Resetting` |
 | `Cancelling` | `abort_and_reset_synchronized` begins | `Resetting` |
