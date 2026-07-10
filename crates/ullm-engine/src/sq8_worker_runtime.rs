@@ -18,9 +18,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SQ8_INFERENCE_POISON_POLL: Duration = Duration::from_millis(50);
+pub const SQ8_TERMINAL_CLEANUP_DEADLINE: Duration = Duration::from_secs(5);
 
 enum Sq8WriterPublication {
     Regular,
@@ -443,6 +444,104 @@ impl<'a> Sq8RequestEventPublisher<'a> {
         Ok(())
     }
 
+    pub fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
+    where
+        F: FnOnce() -> Result<T, String>,
+    {
+        self.run_terminal_cleanup_with(
+            SQ8_TERMINAL_CLEANUP_DEADLINE,
+            || std::process::exit(1),
+            cleanup,
+        )
+    }
+
+    fn run_terminal_cleanup_with<T, F, X>(
+        &mut self,
+        deadline: Duration,
+        terminate: X,
+        cleanup: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce() -> Result<T, String>,
+        X: FnOnce() + Send,
+    {
+        self.run_terminal_cleanup_with_arm_hook(deadline, terminate, || {}, cleanup)
+    }
+
+    fn run_terminal_cleanup_with_arm_hook<T, F, X, A>(
+        &mut self,
+        deadline: Duration,
+        terminate: X,
+        before_arm: A,
+        cleanup: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce() -> Result<T, String>,
+        X: FnOnce() + Send,
+        A: FnOnce() + Send,
+    {
+        let request_id = self.request_id.clone();
+        let control = self.control;
+        let events = self.events;
+        let expires_at = Instant::now()
+            .checked_add(deadline)
+            .ok_or_else(|| "SQ8 terminal cleanup deadline overflowed".to_string())?;
+        let (completed, completion) = std::sync::mpsc::channel();
+        let (armed_sender, armed_receiver) = sync_channel(1);
+        let (cleanup_result, timed_out) = thread::scope(|scope| {
+            let watchdog = thread::Builder::new()
+                .name("ullm-sq8-cleanup-watchdog".into())
+                .spawn_scoped(scope, move || {
+                    before_arm();
+                    if armed_sender.send(()).is_err() {
+                        return false;
+                    }
+                    let completion_result = expires_at
+                        .checked_duration_since(Instant::now())
+                        .filter(|remaining| !remaining.is_zero())
+                        .map_or(Err(RecvTimeoutError::Timeout), |remaining| {
+                            completion.recv_timeout(remaining)
+                        });
+                    if terminal_cleanup_completed_before_deadline(&completion_result, expires_at) {
+                        false
+                    } else {
+                        publish_fatal_best_effort(
+                            events,
+                            Some(request_id),
+                            Sq8WorkerErrorCode::CleanupDeadlineExceeded,
+                            "SQ8 terminal cleanup exceeded the 5 second deadline",
+                        );
+                        control.try_mark_failed_best_effort();
+                        terminate();
+                        true
+                    }
+                })
+                .map_err(|_| "failed to spawn SQ8 terminal cleanup watchdog".to_string())?;
+            armed_receiver
+                .recv()
+                .map_err(|_| "SQ8 terminal cleanup watchdog failed before arming".to_string())?;
+            let cleanup_result = if Instant::now() < expires_at {
+                Some(cleanup())
+            } else {
+                None
+            };
+            if cleanup_result.is_some() {
+                let _ = completed.send(Instant::now());
+            }
+            let timed_out = watchdog
+                .join()
+                .map_err(|_| "SQ8 terminal cleanup watchdog panicked".to_string())?;
+            Ok::<_, String>((cleanup_result, timed_out))
+        })?;
+        if timed_out {
+            Err("SQ8 terminal cleanup deadline exceeded".into())
+        } else {
+            cleanup_result.ok_or_else(|| {
+                "SQ8 terminal cleanup watchdog expired before cleanup started".to_string()
+            })?
+        }
+    }
+
     pub fn completion_tokens(&self) -> usize {
         self.completion_tokens
     }
@@ -453,6 +552,13 @@ impl<'a> Sq8RequestEventPublisher<'a> {
         }
         Ok(())
     }
+}
+
+fn terminal_cleanup_completed_before_deadline(
+    completion: &Result<Instant, RecvTimeoutError>,
+    expires_at: Instant,
+) -> bool {
+    matches!(completion, Ok(completed_at) if *completed_at < expires_at)
 }
 
 pub trait Sq8InferenceBackend {
@@ -1302,6 +1408,217 @@ mod tests {
             }
             publications.publish_released(Sq8ReleaseOutcomeEvent::Cancelled)
         }
+    }
+
+    #[test]
+    fn terminal_cleanup_watchdog_allows_fast_cleanup() {
+        assert_eq!(SQ8_TERMINAL_CLEANUP_DEADLINE, Duration::from_secs(5));
+        let (control, events, writer) = start_ready_writer();
+        let request = Sq8ServingRequest::greedy("req-cleanup-fast", vec![1], 1);
+        let admission = control.admit("req-cleanup-fast").unwrap();
+        let mut publications =
+            Sq8RequestEventPublisher::new(control.as_ref(), &events, &request, &admission).unwrap();
+        publications.publish_started().unwrap();
+        let armed = Arc::new(AtomicBool::new(false));
+        let watchdog_armed = Arc::clone(&armed);
+
+        let value = publications
+            .run_terminal_cleanup_with_arm_hook(
+                Duration::from_secs(1),
+                || panic!("fast cleanup must not invoke the terminator"),
+                move || watchdog_armed.store(true, Ordering::Release),
+                || {
+                    assert!(armed.load(Ordering::Acquire));
+                    Ok(42)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(value, 42);
+        drop(publications);
+        assert!(writer.close_and_join().is_ok());
+        drop(events);
+    }
+
+    #[test]
+    fn terminal_cleanup_completion_timestamp_must_precede_deadline() {
+        let expires_at = Instant::now() + Duration::from_secs(1);
+        let before = expires_at.checked_sub(Duration::from_nanos(1)).unwrap();
+        let after = expires_at.checked_add(Duration::from_nanos(1)).unwrap();
+
+        assert!(terminal_cleanup_completed_before_deadline(
+            &Ok(before),
+            expires_at
+        ));
+        assert!(!terminal_cleanup_completed_before_deadline(
+            &Ok(expires_at),
+            expires_at
+        ));
+        assert!(!terminal_cleanup_completed_before_deadline(
+            &Ok(after),
+            expires_at
+        ));
+        assert!(!terminal_cleanup_completed_before_deadline(
+            &Err(RecvTimeoutError::Timeout),
+            expires_at
+        ));
+    }
+
+    #[test]
+    fn terminal_cleanup_watchdog_poison_prevents_release_after_timeout() {
+        let output = Arc::new(SharedProcessOutput::default());
+        let control = Arc::new(Sq8WorkerControl::new());
+        let (events, writer) =
+            spawn_sq8_ordered_writer(SharedProcessWriter::new(Arc::clone(&output))).unwrap();
+        let ready = events.publish_ready(Sq8WorkerEvent::ready()).unwrap();
+        control.mark_ready_after_flush(ready).unwrap();
+        let request = Sq8ServingRequest::greedy("req-cleanup-timeout", vec![1], 1);
+        let admission = control.admit("req-cleanup-timeout").unwrap();
+        let mut publications =
+            Sq8RequestEventPublisher::new(control.as_ref(), &events, &request, &admission).unwrap();
+        publications.publish_started().unwrap();
+        control
+            .cancel("req-cleanup-timeout", Sq8CancelReason::Operator)
+            .unwrap();
+        let holder_control = Arc::clone(&control);
+        let (locked_sender, locked_receiver) = sync_channel(0);
+        let (release_sender, release_receiver) = sync_channel::<()>(0);
+        let holder = thread::spawn(move || {
+            holder_control.with_state_lock_for_test(|| {
+                locked_sender.send(()).unwrap();
+                let _ = release_receiver.recv();
+            });
+        });
+        locked_receiver.recv().unwrap();
+        let terminated = Arc::new(AtomicBool::new(false));
+        let watchdog_terminated = Arc::clone(&terminated);
+
+        let error = publications
+            .run_terminal_cleanup_with(
+                Duration::from_millis(10),
+                move || watchdog_terminated.store(true, Ordering::SeqCst),
+                || {
+                    thread::sleep(Duration::from_millis(30));
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        release_sender.send(()).unwrap();
+        holder.join().unwrap();
+
+        assert!(error.contains("deadline exceeded"), "{error}");
+        assert!(terminated.load(Ordering::SeqCst));
+        assert_eq!(
+            control.snapshot().unwrap().lifecycle,
+            Sq8WorkerLifecycle::Ready
+        );
+        assert!(
+            publications
+                .publish_released(Sq8ReleaseOutcomeEvent::Cancelled)
+                .is_err()
+        );
+        drop(publications);
+        assert!(writer.close_and_join().is_err());
+        drop(events);
+        let lines = output.lines();
+        assert!(lines.iter().all(|line| line["type"] != "released"));
+        assert!(lines.iter().any(|line| {
+            line["type"] == "error" && line["code"] == "cleanup_deadline_exceeded"
+        }));
+    }
+
+    #[test]
+    fn terminal_cleanup_watchdog_counts_delayed_arming_against_deadline() {
+        let (control, events, writer) = start_ready_writer();
+        let request = Sq8ServingRequest::greedy("req-cleanup-delayed-arm", vec![1], 1);
+        let admission = control.admit("req-cleanup-delayed-arm").unwrap();
+        let mut publications =
+            Sq8RequestEventPublisher::new(control.as_ref(), &events, &request, &admission).unwrap();
+        publications.publish_started().unwrap();
+        let terminated = Arc::new(AtomicBool::new(false));
+        let watchdog_terminated = Arc::clone(&terminated);
+        let cleanup_called = Arc::new(AtomicBool::new(false));
+        let watchdog_cleanup_called = Arc::clone(&cleanup_called);
+
+        let error = publications
+            .run_terminal_cleanup_with_arm_hook(
+                Duration::from_millis(10),
+                move || watchdog_terminated.store(true, Ordering::Release),
+                || thread::sleep(Duration::from_millis(30)),
+                move || {
+                    watchdog_cleanup_called.store(true, Ordering::Release);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.contains("deadline exceeded"), "{error}");
+        assert!(terminated.load(Ordering::Acquire));
+        assert!(!cleanup_called.load(Ordering::Acquire));
+        drop(publications);
+        assert!(writer.close_and_join().is_err());
+        drop(events);
+    }
+
+    #[test]
+    fn terminal_cleanup_watchdog_exits_child_process_nonzero() {
+        const CHILD_ENV: &str = "ULLM_TEST_CLEANUP_WATCHDOG_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let (control, events, _writer) = start_ready_writer();
+            let request = Sq8ServingRequest::greedy("req-cleanup-child", vec![1], 1);
+            let admission = control.admit("req-cleanup-child").unwrap();
+            let mut publications =
+                Sq8RequestEventPublisher::new(control.as_ref(), &events, &request, &admission)
+                    .unwrap();
+            publications.publish_started().unwrap();
+            let holder_control = Arc::clone(&control);
+            let (locked_sender, locked_receiver) = sync_channel(0);
+            let (release_sender, release_receiver) = sync_channel::<()>(0);
+            let _holder = thread::spawn(move || {
+                holder_control.with_state_lock_for_test(|| {
+                    locked_sender.send(()).unwrap();
+                    let _ = release_receiver.recv();
+                });
+            });
+            locked_receiver.recv().unwrap();
+            let _lock_release = release_sender;
+            let _ = publications.run_terminal_cleanup_with(
+                Duration::from_millis(20),
+                || std::process::exit(1),
+                || {
+                    thread::sleep(Duration::from_secs(10));
+                    Ok(())
+                },
+            );
+            std::process::exit(99);
+        }
+
+        let started = Instant::now();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sq8_worker_runtime::tests::terminal_cleanup_watchdog_exits_child_process_nonzero",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if started.elapsed() >= Duration::from_secs(2) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("SQ8 cleanup watchdog child did not exit within two seconds");
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(1));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

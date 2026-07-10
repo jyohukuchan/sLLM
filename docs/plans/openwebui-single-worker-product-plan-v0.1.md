@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 is complete; P8-C sampler, transactional publication, bounded JSONL codec, active1 control, resident CPU topology, real HIP/session backend, and worker process composition are implemented; the R9700 worker gate is next
+Status: in progress; P8-B2 is complete; P8-C implementation and the R9700 functional smoke are complete; the formal cancel-latency and 100-request resource gates are next
 
 Date: 2026-07-10
 
@@ -1095,6 +1095,39 @@ and stdout ownership into one bounded-lifetime process.
 2. Capture two-token, prepared-token cancellation, and sequential-request JSONL
    evidence, including reset completion and process exit.
 3. Check VRAM and host RSS return to the resident baseline, then begin P8-D.
+
+#### P8-C terminal cleanup watchdog checkpoint (2026-07-10)
+
+##### 前回の要点
+
+The real worker completed normal and cancelled reset paths, but a HIP reset that
+blocked indefinitely could also block the complete worker indefinitely.
+
+##### 今回の変更点
+
+- Added the fixed five-second terminal-cleanup watchdog around both finish/reset
+  and abort/reset. The watchdog owns no HIP value and observes only a completion
+  channel while cleanup remains on the inference thread.
+- The absolute deadline is fixed before the watchdog thread starts, and cleanup
+  begins only after the watchdog arm handshake. Deadline expiry atomically
+  poisons ordered output, attempts a nonblocking Failed control transition and
+  fatal event, forbids later release, and terminates the complete process with
+  exit code 1 even if the HIP or control thread remains blocked.
+- Fast cleanup, delayed watchdog scheduling, injected timeout with fatal/no-release
+  assertions, and an actual child-process exit while the control mutex is held
+  all pass. All 363 engine library tests and the gfx1201 worker build pass with no
+  new clippy warning.
+- The R9700 functional smoke at `ad6f2b6` passed resident A/B reuse, completion-0
+  and completion-1 cancellation, immediate recovery, clean exit, and eventual
+  VRAM return. This does not replace the formal 2+10 latency or 100-request gate.
+
+##### 次の行動
+
+1. Commit and rebuild the watchdog-enabled release worker.
+2. Measure cancel store to flushed release for two warmups and ten samples, then
+   recompute the frozen linear-interpolation p95 against the two-second limit.
+3. Run 100 sequential requests with deterministic mixed cancellation and the
+   frozen post-release RSS/VRAM sampling rules before advancing to P8-D.
 
 ### P8-D: Tokenizer and Non-Streaming OpenAI Gateway
 

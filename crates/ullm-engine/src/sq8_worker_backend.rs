@@ -295,6 +295,10 @@ trait Sq8WorkerRequestPublications {
 
     fn publish_released(&mut self, outcome: Sq8ReleaseOutcomeEvent) -> Result<(), String>;
 
+    fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
+    where
+        F: FnOnce() -> Result<T, String>;
+
     fn completion_tokens(&self) -> usize;
 }
 
@@ -325,6 +329,13 @@ impl Sq8WorkerRequestPublications for Sq8RequestEventPublisher<'_> {
 
     fn publish_released(&mut self, outcome: Sq8ReleaseOutcomeEvent) -> Result<(), String> {
         Sq8RequestEventPublisher::publish_released(self, outcome)
+    }
+
+    fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
+    where
+        F: FnOnce() -> Result<T, String>,
+    {
+        Sq8RequestEventPublisher::run_terminal_cleanup(self, cleanup)
     }
 
     fn completion_tokens(&self) -> usize {
@@ -576,7 +587,7 @@ fn finish_completed_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublic
     reason: Sq8FinishReason,
     publications: &mut P,
 ) -> Result<Sq8ReleaseOutcomeEvent, String> {
-    let summary = driver.finish_and_reset()?;
+    let summary = publications.run_terminal_cleanup(|| driver.finish_and_reset())?;
     let (expected_outcome, event_outcome) = match reason {
         Sq8FinishReason::Stop => (Sq8ReleaseOutcome::Stop, Sq8ReleaseOutcomeEvent::Stop),
         Sq8FinishReason::Length => (Sq8ReleaseOutcome::Length, Sq8ReleaseOutcomeEvent::Length),
@@ -598,7 +609,7 @@ fn finish_cancelled_request<D: Sq8WorkerSessionDriver, P: Sq8WorkerRequestPublic
     prompt_tokens: usize,
     publications: &mut P,
 ) -> Result<Sq8ReleaseOutcomeEvent, String> {
-    let summary = driver.abort_and_reset()?;
+    let summary = publications.run_terminal_cleanup(|| driver.abort_and_reset())?;
     validate_release_summary(
         &summary,
         request_id,
@@ -947,6 +958,13 @@ mod tests {
         fn publish_released(&mut self, _outcome: Sq8ReleaseOutcomeEvent) -> Result<(), String> {
             self.record("released");
             Ok(())
+        }
+
+        fn run_terminal_cleanup<T, F>(&mut self, cleanup: F) -> Result<T, String>
+        where
+            F: FnOnce() -> Result<T, String>,
+        {
+            cleanup()
         }
 
         fn completion_tokens(&self) -> usize {

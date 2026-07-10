@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{BufRead, Write};
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 
 use crate::sq8_serving_runtime::Sq8CancellationToken;
 
@@ -616,6 +616,29 @@ impl Sq8WorkerControl {
         let mut state = self.lock_state()?;
         state.lifecycle = Sq8WorkerLifecycle::Failed;
         Ok(())
+    }
+
+    pub(crate) fn try_mark_failed_best_effort(&self) -> bool {
+        match self.state.try_lock() {
+            Ok(mut state) => {
+                state.lifecycle = Sq8WorkerLifecycle::Failed;
+                true
+            }
+            Err(TryLockError::Poisoned(poisoned)) => {
+                poisoned.into_inner().lifecycle = Sq8WorkerLifecycle::Failed;
+                true
+            }
+            Err(TryLockError::WouldBlock) => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_state_lock_for_test<F>(&self, action: F)
+    where
+        F: FnOnce(),
+    {
+        let _state = self.state.lock().unwrap();
+        action();
     }
 
     pub fn snapshot(&self) -> Result<Sq8WorkerControlSnapshot, Sq8WorkerControlError> {
