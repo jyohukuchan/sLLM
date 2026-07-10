@@ -13,7 +13,10 @@ use crate::sq8_layer_runtime::{
     QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
     Sq8LayerExecutionProfile,
 };
-use crate::sq8_stack_runtime::{Qwen3Sq8StackRuntime, Sq8StackExecutionReport};
+use crate::sq8_stack_runtime::{
+    Qwen3Sq8PagedDecodeRuntime, Qwen3Sq8StackRuntime, Sq8PagedStackExecutionReport,
+    Sq8PagedStackPhase, Sq8StackExecutionReport,
+};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
@@ -401,6 +404,7 @@ pub(crate) struct Sq8ModelHeadTop1 {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Sq8ModelHeadM1ExecutionReport {
     pub(crate) binding: Sq8ModelHeadM1ExecutionBinding,
+    pub(crate) paged_decode: Sq8PagedStackExecutionReport,
     pub(crate) final_norm: Sq8ModelHeadPayloadIdentity,
     pub(crate) lm_head: Sq8ModelHeadPayloadIdentity,
     pub(crate) input_elements: usize,
@@ -424,6 +428,17 @@ pub(crate) struct Sq8ModelHeadM1ExecutionReport {
 impl Sq8ModelHeadM1ExecutionReport {
     pub(crate) fn validate_contract(&self) -> Result<(), String> {
         self.binding.validate_contract()?;
+        self.paged_decode.validate_contract()?;
+        if self.paged_decode.phase != Sq8PagedStackPhase::Decode
+            || self.paged_decode.stack.profile != self.binding.profile
+            || self.paged_decode.stack.artifact_content_sha256
+                != self.binding.artifact_content_sha256
+        {
+            return Err(
+                "Qwen3-14B SQ8 M=1 model-head binding does not match its paged decode report"
+                    .into(),
+            );
+        }
         self.final_norm.validate(
             QWEN3_14B_FINAL_NORM_TENSOR,
             &QWEN3_14B_FINAL_NORM_SHAPE,
@@ -822,17 +837,47 @@ impl Qwen3Sq8ModelHeadRuntime {
         Ok(result)
     }
 
-    /// Executes the decode head from one validated resident hidden row.
+    pub(crate) fn run_m1_paged_decode_top1_synchronized(
+        &mut self,
+        decode: &Qwen3Sq8PagedDecodeRuntime,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ModelHeadM1Result, String> {
+        let paged_decode = decode
+            .last_execution_report()
+            .ok_or_else(|| {
+                "Qwen3-14B SQ8 model head requires a completed paged decode".to_string()
+            })?
+            .clone();
+        paged_decode.validate_contract()?;
+        if paged_decode.phase != Sq8PagedStackPhase::Decode {
+            return Err("Qwen3-14B SQ8 M=1 model head requires a decode-phase report".into());
+        }
+        let binding = Sq8ModelHeadM1ExecutionBinding {
+            profile: paged_decode.stack.profile,
+            device: self.device.clone(),
+            package_manifest_sha256: self.package_manifest_sha256.clone(),
+            artifact_content_sha256: paged_decode.stack.artifact_content_sha256.clone(),
+        };
+        self.run_m1_resident_hidden_top1_synchronized(
+            decode.resident_hidden_buffer()?,
+            binding,
+            paged_decode,
+            stream,
+        )
+    }
+
+    /// Executes the decode head from one report-bound resident hidden row.
     ///
     /// The input remains device resident. The only host transfers are explicit result readbacks
     /// for validation and token selection; guarded runtime kernels may not stage their inputs.
-    pub(crate) fn run_m1_resident_hidden_top1_synchronized(
+    fn run_m1_resident_hidden_top1_synchronized(
         &mut self,
         resident_hidden: &RuntimeBuffer,
         binding: Sq8ModelHeadM1ExecutionBinding,
+        paged_decode: Sq8PagedStackExecutionReport,
         stream: &mut RuntimeStream,
     ) -> Result<Sq8ModelHeadM1Result, String> {
-        self.validate_m1_execution_preconditions(resident_hidden, &binding)?;
+        self.validate_m1_execution_preconditions(resident_hidden, &binding, &paged_decode)?;
 
         let hidden_bytes = f32_bytes(QWEN3_14B_HIDDEN_SIZE)?;
         let logits_bytes = f32_bytes(QWEN3_14B_VOCAB_SIZE)?;
@@ -928,6 +973,7 @@ impl Qwen3Sq8ModelHeadRuntime {
             top1,
             report: Sq8ModelHeadM1ExecutionReport {
                 binding,
+                paged_decode,
                 final_norm: self.final_norm_identity.clone(),
                 lm_head: self.lm_head_identity.clone(),
                 input_elements: QWEN3_14B_HIDDEN_SIZE,
@@ -1046,9 +1092,19 @@ impl Qwen3Sq8ModelHeadRuntime {
         &self,
         resident_hidden: &RuntimeBuffer,
         binding: &Sq8ModelHeadM1ExecutionBinding,
+        paged_decode: &Sq8PagedStackExecutionReport,
     ) -> Result<(), String> {
         self.validate_runtime_contract()?;
         binding.validate_contract()?;
+        paged_decode.validate_contract()?;
+        if paged_decode.phase != Sq8PagedStackPhase::Decode
+            || paged_decode.stack.profile != binding.profile
+            || paged_decode.stack.artifact_content_sha256 != binding.artifact_content_sha256
+        {
+            return Err(
+                "Qwen3-14B SQ8 M=1 model-head input is not bound to the paged decode report".into(),
+            );
+        }
         if binding.device != self.device {
             return Err(format!(
                 "Qwen3-14B SQ8 M=1 model-head device binding mismatch: runtime={:?} input={:?}",
@@ -1540,12 +1596,23 @@ mod tests {
     fn valid_m1_report() -> Sq8ModelHeadM1ExecutionReport {
         let lm_elements =
             checked_elements(QWEN3_14B_VOCAB_SIZE, QWEN3_14B_HIDDEN_SIZE, "test").unwrap();
+        let mut decode_stack = optimized_stack_execution();
+        decode_stack.sequence_len = 1;
         Sq8ModelHeadM1ExecutionReport {
             binding: Sq8ModelHeadM1ExecutionBinding {
                 profile: Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
                 device: r9700_identity(),
                 package_manifest_sha256: "3".repeat(64),
                 artifact_content_sha256: "0".repeat(64),
+            },
+            paged_decode: Sq8PagedStackExecutionReport {
+                phase: Sq8PagedStackPhase::Decode,
+                position: 8,
+                stack: decode_stack,
+                cache_lengths: [9; 40],
+                kv_write_calls: 40,
+                paged_attention_calls: 40,
+                input_d2d_copy_count: 1,
             },
             final_norm: payload_identity(
                 QWEN3_14B_FINAL_NORM_TENSOR,
@@ -1660,6 +1727,14 @@ mod tests {
 
         let mut bad = report.clone();
         bad.binding.artifact_content_sha256 = "0".repeat(63);
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.paged_decode.stack.artifact_content_sha256 = "4".repeat(64);
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.paged_decode.cache_lengths[11] = 8;
         assert!(bad.validate_contract().is_err());
 
         let mut bad = report.clone();

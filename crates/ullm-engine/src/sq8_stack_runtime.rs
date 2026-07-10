@@ -412,6 +412,7 @@ pub struct Qwen3Sq8StackRuntime {
     resident_hidden: RuntimeBuffer,
     state: Sq8StackResidentState,
     last_execution_report: Option<Sq8StackExecutionReport>,
+    next_paged_decode_position: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -536,6 +537,7 @@ impl Qwen3Sq8StackRuntime {
             resident_hidden,
             state: Sq8StackResidentState::NeedsInput,
             last_execution_report: None,
+            next_paged_decode_position: None,
         })
     }
 
@@ -634,6 +636,7 @@ impl Qwen3Sq8StackRuntime {
         let bytes = encode_f32_to_bytes(input);
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
+        self.next_paged_decode_position = None;
         let copy_result = self
             .resident_hidden
             .copy_from_host(0, &bytes, Some(&mut *stream))
@@ -676,6 +679,7 @@ impl Qwen3Sq8StackRuntime {
         }
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
+        self.next_paged_decode_position = None;
         let copy_result = self
             .resident_hidden
             .copy_from_buffer(0, input, 0, expected_bytes, Some(&mut *stream))
@@ -744,6 +748,7 @@ impl Qwen3Sq8StackRuntime {
         self.validate_execution_preconditions()?;
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
+        self.next_paged_decode_position = None;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
 
         for layer_index in 0..QWEN3_14B_SQ8_STACK_LAYERS {
@@ -865,6 +870,7 @@ impl Qwen3Sq8StackRuntime {
         }
         self.state.mark_output_ready()?;
         self.last_execution_report = Some(stack);
+        self.next_paged_decode_position = Some(self.config.sequence_len);
         Ok(report)
     }
 
@@ -881,6 +887,14 @@ impl Qwen3Sq8StackRuntime {
         decode.ensure_usable()?;
         validate_paged_cache_layer_count(caches)?;
         validate_paged_hip_only_guards()?;
+        let expected_position = self.next_paged_decode_position.ok_or_else(|| {
+            "Qwen3-14B SQ8 paged decode requires a successful paged prefill".to_string()
+        })?;
+        if position != expected_position {
+            return Err(format!(
+                "Qwen3-14B SQ8 paged decode position is not monotonic: expected={expected_position} actual={position}"
+            ));
+        }
         if input.size()? != hidden_bytes(decode.config)? {
             return Err(format!(
                 "Qwen3-14B SQ8 paged decode input byte size mismatch: expected={} actual={}",
@@ -980,6 +994,7 @@ impl Qwen3Sq8StackRuntime {
         }
         decode.output_ready = true;
         decode.last_execution_report = Some(report.clone());
+        self.next_paged_decode_position = Some(position + 1);
         Ok(report)
     }
 
@@ -998,6 +1013,7 @@ impl Qwen3Sq8StackRuntime {
         let output_bytes = hidden_bytes(self.config)?;
         self.state.mark_needs_input()?;
         self.last_execution_report = None;
+        self.next_paged_decode_position = None;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
         let mut layer_audits = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
 
@@ -1241,6 +1257,7 @@ impl Qwen3Sq8StackRuntime {
 
     fn poison_with_error(&mut self, error: String) -> String {
         self.last_execution_report = None;
+        self.next_paged_decode_position = None;
         self.state.poison(error.clone());
         error
     }
