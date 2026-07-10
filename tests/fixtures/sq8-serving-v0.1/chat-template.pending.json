@@ -1,0 +1,22 @@
+{
+  "add_generation_prompt": true,
+  "cases": [],
+  "chat_template_sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
+  "enable_thinking": false,
+  "required_exact_prompt_lengths": [
+    32,
+    128,
+    512,
+    2048,
+    3584
+  ],
+  "schema_version": "ullm.sq8.serving_chat_placeholder.v1",
+  "status": "pending_root_owned_exact_length_export",
+  "transformers_version": "5.12.1",
+  "trust": {
+    "exporter_source_commit": null,
+    "manifest_sha256_anchor": null,
+    "real_export_required": true,
+    "synthetic_chat_template_values_forbidden": true
+  }
+}

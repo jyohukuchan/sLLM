@@ -1,0 +1,20 @@
+{
+  "frequency_penalty": 0,
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": "You are the fixed P8-A interoperability fixture.",
+      "role": "system"
+    },
+    {
+      "content": "Reply with the word fixture.",
+      "role": "user"
+    }
+  ],
+  "model": "ullm-qwen3-14b-sq8",
+  "presence_penalty": 0,
+  "seed": 12345,
+  "stream": true,
+  "temperature": 0.6,
+  "top_p": 0.95
+}

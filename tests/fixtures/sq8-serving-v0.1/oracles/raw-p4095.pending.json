@@ -1,0 +1,50 @@
+{
+  "oracle_id": "vllm-raw-p4095",
+  "prompt": {
+    "prompt_id": "raw-p4095",
+    "prompt_tokens": 4095,
+    "token_file": "raw/prompt-4095.u32le",
+    "token_ids_u32_le_sha256": "06e0e09cf3e6e53e104945292875ba644ae885315061d7e0f15b8dafbfdf8ad1"
+  },
+  "requested_outputs": {
+    "greedy_generation": [
+      {
+        "case_id": "greedy-g1",
+        "generated_tokens": null,
+        "status": "pending",
+        "token_file": null,
+        "token_file_bytes": null,
+        "token_ids_u32_le_sha256": null
+      }
+    ],
+    "prefill_final_hidden": {
+      "bytes": null,
+      "dtype": "f32_le",
+      "file": null,
+      "sha256": null,
+      "shape": [
+        5120
+      ],
+      "status": "pending"
+    },
+    "prefill_logits": {
+      "bytes": null,
+      "dtype": "f32_le",
+      "file": null,
+      "sha256": null,
+      "shape": [
+        151936
+      ],
+      "status": "pending"
+    }
+  },
+  "schema_version": "ullm.sq8.serving_oracle_placeholder.v1",
+  "status": "pending_real_vllm_export",
+  "trust": {
+    "metadata_sha256_anchor": null,
+    "payload_manifest_sha256_anchor": null,
+    "real_export_required": true,
+    "real_exporter_source_commit": null,
+    "synthetic_oracle_values_forbidden": true
+  }
+}

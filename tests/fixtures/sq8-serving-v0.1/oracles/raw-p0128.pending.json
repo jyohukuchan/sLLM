@@ -1,0 +1,74 @@
+{
+  "oracle_id": "vllm-raw-p0128",
+  "prompt": {
+    "prompt_id": "raw-p0128",
+    "prompt_tokens": 128,
+    "token_file": "raw/prompt-0128.u32le",
+    "token_ids_u32_le_sha256": "24f9ac547baae524ba0ea5220692d48f7526cdb1df5e99edcbb1f32239a8d5f5"
+  },
+  "requested_outputs": {
+    "greedy_generation": [
+      {
+        "case_id": "greedy-g1",
+        "generated_tokens": null,
+        "status": "pending",
+        "token_file": null,
+        "token_file_bytes": null,
+        "token_ids_u32_le_sha256": null
+      },
+      {
+        "case_id": "greedy-g8",
+        "generated_tokens": null,
+        "status": "pending",
+        "token_file": null,
+        "token_file_bytes": null,
+        "token_ids_u32_le_sha256": null
+      },
+      {
+        "case_id": "greedy-g64",
+        "generated_tokens": null,
+        "status": "pending",
+        "token_file": null,
+        "token_file_bytes": null,
+        "token_ids_u32_le_sha256": null
+      },
+      {
+        "case_id": "greedy-g512-ignore-eos-boundary",
+        "generated_tokens": null,
+        "status": "pending",
+        "token_file": null,
+        "token_file_bytes": null,
+        "token_ids_u32_le_sha256": null
+      }
+    ],
+    "prefill_final_hidden": {
+      "bytes": null,
+      "dtype": "f32_le",
+      "file": null,
+      "sha256": null,
+      "shape": [
+        5120
+      ],
+      "status": "pending"
+    },
+    "prefill_logits": {
+      "bytes": null,
+      "dtype": "f32_le",
+      "file": null,
+      "sha256": null,
+      "shape": [
+        151936
+      ],
+      "status": "pending"
+    }
+  },
+  "schema_version": "ullm.sq8.serving_oracle_placeholder.v1",
+  "status": "pending_real_vllm_export",
+  "trust": {
+    "metadata_sha256_anchor": null,
+    "payload_manifest_sha256_anchor": null,
+    "real_export_required": true,
+    "real_exporter_source_commit": null,
+    "synthetic_oracle_values_forbidden": true
+  }
+}
