@@ -27,6 +27,9 @@ pub const QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV: [&str; 2] = [
 ];
 
 const BF16_DTYPE: &str = "BF16";
+const R9700_RUNTIME_NAME: &str = "AMD Radeon Graphics";
+const R9700_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
+const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
 const QWEN3_14B_FINAL_NORM_SHAPE: [u64; 1] = [QWEN3_14B_HIDDEN_SIZE as u64];
 const QWEN3_14B_LM_HEAD_SHAPE: [u64; 2] =
     [QWEN3_14B_VOCAB_SIZE as u64, QWEN3_14B_HIDDEN_SIZE as u64];
@@ -70,15 +73,18 @@ impl Sq8ModelHeadDeviceIdentity {
     }
 
     fn validate_r9700(&self) -> Result<(), String> {
+        let arch = self.gcn_arch_name.split(':').next().unwrap_or_default();
         if self.backend != "hip"
-            || self.gcn_arch_name != "gfx1201"
+            || self.name != R9700_RUNTIME_NAME
+            || (!arch.is_empty() && arch != "gfx1201")
             || self.compute_major != 12
             || self.compute_minor != 0
-            || self.total_global_mem == 0
+            || !(R9700_MEMORY_BYTES_MIN..=R9700_MEMORY_BYTES_MAX).contains(&self.total_global_mem)
         {
             return Err(format!(
-                "Qwen3-14B SQ8 model head requires R9700/gfx1201 HIP compute 12.0, got backend={} arch={} compute={}.{} memory={}",
+                "Qwen3-14B SQ8 model head requires the canonical R9700/gfx1201 HIP identity, got backend={} name={} arch={} compute={}.{} memory={}",
                 self.backend,
+                self.name,
                 self.gcn_arch_name,
                 self.compute_major,
                 self.compute_minor,
@@ -87,6 +93,10 @@ impl Sq8ModelHeadDeviceIdentity {
         }
         Ok(())
     }
+}
+
+pub fn validate_qwen3_14b_sq8_r9700_device_info(info: &DeviceInfo) -> Result<(), String> {
+    Sq8ModelHeadDeviceIdentity::from_runtime(info.clone()).validate_r9700()
 }
 
 impl Sq8ModelHeadRuntimeState {
@@ -1006,6 +1016,10 @@ mod tests {
         let report = valid_report();
         report.validate_contract().unwrap();
 
+        let mut runtime_api_identity = report.clone();
+        runtime_api_identity.device.gcn_arch_name.clear();
+        runtime_api_identity.validate_contract().unwrap();
+
         let mut bad = report.clone();
         bad.selected_row = 6;
         assert!(bad.validate_contract().is_err());
@@ -1020,6 +1034,16 @@ mod tests {
 
         let mut bad = report.clone();
         bad.device.gcn_arch_name = "gfx1030".to_string();
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.device.gcn_arch_name.clear();
+        bad.device.name = "HIP device 0".to_string();
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.device.gcn_arch_name.clear();
+        bad.device.total_global_mem = R9700_MEMORY_BYTES_MIN - 1;
         assert!(bad.validate_contract().is_err());
 
         let mut bad = report.clone();

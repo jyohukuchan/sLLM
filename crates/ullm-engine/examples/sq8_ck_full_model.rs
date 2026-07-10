@@ -30,6 +30,7 @@ use ullm_engine::sq8_model_head_runtime::{
     QWEN3_14B_FINAL_NORM_TENSOR, QWEN3_14B_LM_HEAD_TENSOR,
     QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_VOCAB_SIZE,
     Qwen3Sq8ModelHeadRuntime, Sq8ModelHeadExecutionReport, Sq8ModelHeadRuntimeStatus,
+    validate_qwen3_14b_sq8_r9700_device_info,
 };
 use ullm_engine::sq8_stack_runtime::{
     QWEN3_14B_SQ8_STACK_ACTIVATION_QUANTIZATIONS, QWEN3_14B_SQ8_STACK_LAYERS,
@@ -1001,13 +1002,7 @@ fn isolated_gfx1201_device() -> Result<(u32, DeviceInfo), String> {
         ));
     }
     let (runtime_index, device) = devices.into_iter().next().expect("one HIP device");
-    let arch = device.gcn_arch_name.split(':').next().unwrap_or_default();
-    if device.compute_major != 12 || device.compute_minor != 0 || arch != "gfx1201" {
-        return Err(format!(
-            "SQ8 full-model validation requires isolated R9700/gfx1201, got compute={}.{} arch={}",
-            device.compute_major, device.compute_minor, device.gcn_arch_name
-        ));
-    }
+    validate_qwen3_14b_sq8_r9700_device_info(&device)?;
     Ok((runtime_index, device))
 }
 
