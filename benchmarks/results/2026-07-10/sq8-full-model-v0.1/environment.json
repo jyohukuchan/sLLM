@@ -1,0 +1,96 @@
+{
+  "schema_version": "ullm.sq8.full_model_environment.v1",
+  "git": {
+    "promotion_commit": "27e3bd242f15334f7f8af6d61af68942cd24de84",
+    "promotion_subject": "Unify fail-closed R9700 identity checks",
+    "validator_commit": "11cc5b531b0dfd8398e770609559d46533fb539e",
+    "validator_subject": "Add trusted SQ8 full-model result validation"
+  },
+  "host": {
+    "os": "Ubuntu 24.04.4 LTS",
+    "linux_kernel": "6.17.0-35-generic",
+    "cpu": "AMD Ryzen Threadripper PRO 3995WX 64-Cores",
+    "logical_cpus": 128,
+    "ram_bytes": 117933965312
+  },
+  "software": {
+    "rocm": "7.2.53211-e1a6bc5663",
+    "rocm_release": "7.2.1",
+    "amdgpu_module": "6.16.13",
+    "rustc": "1.96.0 (ac68faa20 2026-05-25)",
+    "cargo": "1.96.0 (30a34c682 2026-05-25)"
+  },
+  "physical_device": {
+    "expected_board": "Radeon AI PRO R9700",
+    "rocm_smi_index": 2,
+    "reported_name": "AMD Radeon Graphics",
+    "card_model": "0x7551",
+    "card_sku": "1E4990U",
+    "unique_id": "0xa8e9ddefa2d60f55",
+    "arch": "gfx1201"
+  },
+  "runtime_device": {
+    "hip_visible_devices": "1",
+    "runtime_index": 1,
+    "backend_device_id": 0,
+    "backend": "hip",
+    "name": "AMD Radeon Graphics",
+    "reported_gcn_arch_name": "",
+    "compute": "12.0",
+    "total_global_mem": 34208743424
+  },
+  "required_hip_kernel_env": [
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1",
+    "ULLM_REQUIRE_HIP_ROPE_KERNEL=1",
+    "ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1",
+    "ULLM_REQUIRE_HIP_ADD_KERNEL=1",
+    "ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1"
+  ],
+  "source": {
+    "model": "Qwen3-14B-FP8",
+    "model_revision": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+    "canonical_artifact": "/tmp/ullm-qwen3-14b-fp8-sq8-canonical-full-v0.2",
+    "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+    "artifact_config_sha256": "c5d7d0e8ee42088bd535101d13c71d38c20b5c2afd46ee8fdfba351956233793",
+    "artifact_index_sha256": "6a9c8e17744118347080916d8f673b881941cf42989ee77266b14dc2062a7151",
+    "thin_package": "/tmp/ullm-qwen3-14b-fp8-bf16-thin.ullm.d",
+    "thin_package_manifest_sha256": "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+    "vllm_oracle": "/tmp/ullm-qwen3-14b-fp8-vllm-oracle-m8-v0.1",
+    "vllm_oracle_metadata_sha256": "5caafcd2c976482dd01e51b537593d8924d381a8a9ab076b2082325e22fea39e",
+    "vllm_final_hidden_sha256": "a6772963cee66d8429eaa7b4e72e2594345b1a6613a06a1bf67660b4f02aa9a7",
+    "vllm_logits_sha256": "24c93f3fbe0fc3d2a101c782f0e181be1206cabd56e900814a608d2a09fd268e"
+  },
+  "workload": {
+    "sequence_len": 8,
+    "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+    "position_ids": [0, 1, 2, 3, 4, 5, 6, 7],
+    "warmups": 3,
+    "repeats": 10
+  },
+  "evidence": {
+    "promotion_result": {
+      "file": "full-model-m8-final.json",
+      "sha256": "bcc7355ed9deed102ae620bf237466d2aebd78b897dd776fcb088377d4241647"
+    },
+    "promotion_log": {
+      "file": "run-02-final.log",
+      "sha256": "23b3947aca23a501a05ab76b96758b94ec74eab570e13c373e2f3029ca9f3547"
+    },
+    "first_success_result": {
+      "file": "full-model-m8.json",
+      "sha256": "f5656dfd85fbc6fafa7cf9790e7d5d60bde7e326a1bf14e9f73b80fec712725b"
+    },
+    "first_success_log": {
+      "file": "run.log",
+      "sha256": "1193b25d9dbcd8162fb1a45803e6700f87f8c538c47e3a6433dc39ac6731a2ff"
+    },
+    "identity_failure_log": {
+      "file": "run-01-device-identity-failure.log",
+      "sha256": "a56ccb47e5a80f360d2ace9cc608fa164be7edac1b63fda7b1386e7a8e6a43cd"
+    },
+    "two_success_results_equal_excluding_timing_and_cpu_elapsed": true,
+    "normalized_success_result_sha256": "cb88838d4a698ca75ba1aeec2668c957491248a5048758b61edb5df326607210"
+  },
+  "command": "env HIP_VISIBLE_DEVICES=1 ULLM_REQUIRE_HIP_RMSNORM_KERNEL=1 ULLM_REQUIRE_HIP_ROPE_KERNEL=1 ULLM_REQUIRE_HIP_CAUSAL_ATTN_KERNEL=1 ULLM_REQUIRE_HIP_ADD_KERNEL=1 ULLM_REQUIRE_HIP_SILU_MUL_KERNEL=1 ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL=1 target/release/examples/sq8_ck_full_model /tmp/ullm-qwen3-14b-fp8-sq8-canonical-full-v0.2 /tmp/ullm-qwen3-14b-fp8-bf16-thin.ullm.d /tmp/ullm-qwen3-14b-fp8-vllm-oracle-m8-v0.1 benchmarks/results/2026-07-10/sq8-full-model-v0.1/full-model-m8-final.json"
+}
