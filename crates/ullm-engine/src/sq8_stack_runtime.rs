@@ -660,6 +660,39 @@ impl Qwen3Sq8StackRuntime {
         }
     }
 
+    /// Copies one complete device-resident input into the stack and synchronizes before execution.
+    pub(crate) fn upload_device_input_synchronized(
+        &mut self,
+        input: &RuntimeBuffer,
+        stream: &mut RuntimeStream,
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        let expected_bytes = hidden_bytes(self.config)?;
+        let actual_bytes = input.size()?;
+        if actual_bytes != expected_bytes {
+            return Err(format!(
+                "Qwen3-14B SQ8 stack device input byte size mismatch: expected={expected_bytes} actual={actual_bytes}"
+            ));
+        }
+        self.state.mark_needs_input()?;
+        self.last_execution_report = None;
+        let copy_result = self
+            .resident_hidden
+            .copy_from_buffer(0, input, 0, expected_bytes, Some(&mut *stream))
+            .map_err(|err| format!("failed to copy Qwen3-14B SQ8 stack device input: {err}"));
+        let sync_result = stream.synchronize().map_err(|err| {
+            format!("failed to synchronize Qwen3-14B SQ8 stack device input: {err}")
+        });
+        match (copy_result, sync_result) {
+            (Ok(()), Ok(())) => self.state.mark_input_ready(),
+            (Err(operation_error), Ok(())) => Err(self.poison_with_error(operation_error)),
+            (Ok(()), Err(sync_error)) => Err(self.poison_with_error(sync_error)),
+            (Err(operation_error), Err(sync_error)) => Err(self.poison_with_error(format!(
+                "{operation_error}; subsequent stream synchronization also failed: {sync_error}"
+            ))),
+        }
+    }
+
     /// Runs all 40 resident layers after a synchronized host upload.
     ///
     /// The upload and its synchronization are outside the layer execution interval. The layer
