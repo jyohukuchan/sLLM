@@ -259,9 +259,14 @@ pub enum Sq8WorkerCommandKind {
 pub struct Sq8WorkerCommandInspection<'a> {
     payload: &'a [u8],
     pub kind: Sq8WorkerCommandKind,
+    request_id: Option<String>,
 }
 
 impl Sq8WorkerCommandInspection<'_> {
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
     pub fn decode(self) -> Result<Sq8WorkerCommand, Sq8WorkerProtocolError> {
         decode_inspected_sq8_worker_command(self.payload, self.kind)
     }
@@ -289,6 +294,13 @@ pub struct Sq8WorkerControlSnapshot {
     pub active_request_id: Option<String>,
     pub first_cancel_reason: Option<Sq8CancelReason>,
     pub cancelled: bool,
+    pub terminal_in_flight: bool,
+}
+
+#[derive(Debug)]
+pub struct Sq8ActiveTerminalPermit {
+    generation: u64,
+    request_id: String,
 }
 
 #[derive(Debug)]
@@ -346,6 +358,7 @@ struct Sq8ActiveControl {
     request_id: String,
     cancel: Sq8CancellationToken,
     first_cancel_reason: Option<Sq8CancelReason>,
+    terminal_in_flight: bool,
 }
 
 #[derive(Debug)]
@@ -427,6 +440,7 @@ impl Sq8WorkerControl {
             request_id: request_id.to_string(),
             cancel: cancel.clone(),
             first_cancel_reason: None,
+            terminal_in_flight: false,
         });
         Ok(Sq8WorkerAdmission {
             generation,
@@ -522,6 +536,51 @@ impl Sq8WorkerControl {
         Ok(active.first_cancel_reason)
     }
 
+    /// Reserves the sole terminal publication for this active generation.
+    pub fn begin_terminal_publication(
+        &self,
+        generation: u64,
+        request_id: &str,
+    ) -> Result<Sq8ActiveTerminalPermit, Sq8WorkerControlError> {
+        let mut state = self.lock_state()?;
+        match state.lifecycle {
+            Sq8WorkerLifecycle::Ready | Sq8WorkerLifecycle::Closing => {}
+            Sq8WorkerLifecycle::Loading => {
+                return Err(control_error(
+                    Sq8WorkerControlErrorKind::NotReady,
+                    "worker is not ready for terminal publication",
+                ));
+            }
+            Sq8WorkerLifecycle::Failed => {
+                return Err(control_error(
+                    Sq8WorkerControlErrorKind::Failed,
+                    "failed worker cannot publish a terminal release",
+                ));
+            }
+        }
+        let active = state
+            .active
+            .as_mut()
+            .filter(|active| active.generation == generation && active.request_id == request_id)
+            .ok_or_else(|| {
+                control_error(
+                    Sq8WorkerControlErrorKind::StaleGeneration,
+                    "terminal publication has stale active ownership",
+                )
+            })?;
+        if active.terminal_in_flight {
+            return Err(control_error(
+                Sq8WorkerControlErrorKind::Internal,
+                "terminal publication is already in flight",
+            ));
+        }
+        active.terminal_in_flight = true;
+        Ok(Sq8ActiveTerminalPermit {
+            generation,
+            request_id: request_id.to_string(),
+        })
+    }
+
     /// Clears ownership only after the ordered writer has flushed rejection or release.
     pub fn acknowledge_terminal_flush(
         &self,
@@ -535,7 +594,21 @@ impl Sq8WorkerControl {
                 "terminal flush acknowledgement has a stale request ID",
             ));
         }
+        if !active.terminal_in_flight {
+            return Err(control_error(
+                Sq8WorkerControlErrorKind::Internal,
+                "terminal flush has no matching in-flight publication",
+            ));
+        }
         state.active = None;
+        Ok(())
+    }
+
+    pub fn fail_admission_transfer(&self, generation: u64) -> Result<(), Sq8WorkerControlError> {
+        let mut state = self.lock_state()?;
+        matching_active(&state, generation)?;
+        state.active = None;
+        state.lifecycle = Sq8WorkerLifecycle::Failed;
         Ok(())
     }
 
@@ -562,6 +635,10 @@ impl Sq8WorkerControl {
                 .active
                 .as_ref()
                 .is_some_and(|active| active.cancel.is_cancelled()),
+            terminal_in_flight: state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.terminal_in_flight),
         })
     }
 
@@ -853,7 +930,14 @@ pub fn inspect_sq8_worker_command(
             ));
         }
     };
-    Ok(Sq8WorkerCommandInspection { payload, kind })
+    let request_id = discriminators
+        .request_id
+        .filter(|request_id| validate_worker_request_id(request_id).is_ok());
+    Ok(Sq8WorkerCommandInspection {
+        payload,
+        kind,
+        request_id,
+    })
 }
 
 fn decode_inspected_sq8_worker_command(
@@ -934,6 +1018,7 @@ fn decode_inspected_sq8_worker_command(
 struct RawWorkerDiscriminators {
     schema_version: String,
     command_type: String,
+    request_id: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for RawWorkerDiscriminators {
@@ -960,6 +1045,7 @@ impl<'de> Visitor<'de> for RawWorkerDiscriminatorVisitor {
     {
         let mut schema_version = None;
         let mut command_type = None;
+        let mut request_id = None;
         while let Some(key) = object.next_key::<String>()? {
             match key.as_str() {
                 "schema_version" => {
@@ -967,6 +1053,9 @@ impl<'de> Visitor<'de> for RawWorkerDiscriminatorVisitor {
                 }
                 "type" => {
                     set_once(&mut command_type, object.next_value::<String>()?)?;
+                }
+                "request_id" => {
+                    set_once(&mut request_id, object.next_value::<LenientString>()?.0)?;
                 }
                 _ => {
                     object.next_value::<IgnoredAny>()?;
@@ -976,7 +1065,77 @@ impl<'de> Visitor<'de> for RawWorkerDiscriminatorVisitor {
         Ok(RawWorkerDiscriminators {
             schema_version: require_field(schema_version, "schema_version")?,
             command_type: require_field(command_type, "type")?,
+            request_id: request_id.flatten(),
         })
+    }
+}
+
+struct LenientString(Option<String>);
+
+impl<'de> Deserialize<'de> for LenientString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(LenientStringVisitor)
+    }
+}
+
+struct LenientStringVisitor;
+
+impl<'de> Visitor<'de> for LenientStringVisitor {
+    type Value = LenientString;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("any JSON value")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(LenientString(Some(value.to_string())))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(LenientString(Some(value)))
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(LenientString(None))
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(LenientString(None))
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(LenientString(None))
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(LenientString(None))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(LenientString(None))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(LenientString(None))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(LenientString(None))
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while object.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(LenientString(None))
     }
 }
 
@@ -1503,8 +1662,7 @@ impl<W: Write> Sq8OrderedJsonlWriter<W> {
 
     pub fn write_active_terminal_event(
         &mut self,
-        generation: u64,
-        request_id: &str,
+        permit: Sq8ActiveTerminalPermit,
         event: &Sq8WorkerEvent,
     ) -> Result<Sq8ActiveTerminalFlushAck, String> {
         let event_request_id = match event {
@@ -1523,14 +1681,14 @@ impl<W: Write> Sq8OrderedJsonlWriter<W> {
                 return Err("SQ8 active terminal writer received a nonterminal event".into());
             }
         };
-        if event_request_id != request_id {
+        if event_request_id != &permit.request_id {
             self.failed = true;
             return Err("SQ8 active terminal event request ID does not match ownership".into());
         }
         self.write_event(event)?;
         Ok(Sq8ActiveTerminalFlushAck {
-            generation,
-            request_id: request_id.to_string(),
+            generation: permit.generation,
+            request_id: permit.request_id,
         })
     }
 
@@ -1581,7 +1739,9 @@ impl Sq8PromptProgressTracker {
         processed_prompt_tokens: usize,
         execution_width: usize,
     ) -> Result<Option<usize>, String> {
-        if !matches!(execution_width, 1 | 128)
+        let remaining = self.prompt_tokens.saturating_sub(self.last_observed);
+        let expected_width = if remaining >= 128 { 128 } else { 1 };
+        if execution_width != expected_width
             || processed_prompt_tokens <= self.last_observed
             || processed_prompt_tokens > self.prompt_tokens
             || processed_prompt_tokens - self.last_observed != execution_width
@@ -1630,12 +1790,19 @@ mod tests {
         br#"{"schema_version":"ullm.worker.v1","type":"generate","request_id":"req-1","prompt_token_ids":[1,2,3],"max_new_tokens":2,"sampling":{"temperature":0.6,"top_p":0.95,"top_k":20,"seed":-7},"eos_token_ids":[151645,151643]}"#.to_vec()
     }
 
-    fn flushed_terminal_ack(generation: u64, request_id: &str) -> Sq8ActiveTerminalFlushAck {
+    fn flushed_terminal_ack(
+        control: &Sq8WorkerControl,
+        generation: u64,
+        request_id: &str,
+    ) -> Sq8ActiveTerminalFlushAck {
         let event =
             Sq8WorkerEvent::released(request_id, Sq8ReleaseOutcomeEvent::Length, None, 1, 1)
                 .unwrap();
+        let permit = control
+            .begin_terminal_publication(generation, request_id)
+            .unwrap();
         Sq8OrderedJsonlWriter::new(FlushCountingWriter::default())
-            .write_active_terminal_event(generation, request_id, &event)
+            .write_active_terminal_event(permit, &event)
             .unwrap()
     }
 
@@ -1963,7 +2130,7 @@ mod tests {
         assert_eq!(before_ack.active_request_id.as_deref(), Some("req-1"));
         assert_eq!(
             control
-                .acknowledge_terminal_flush(flushed_terminal_ack(2, "req-1"))
+                .begin_terminal_publication(2, "req-1")
                 .unwrap_err()
                 .kind,
             Sq8WorkerControlErrorKind::StaleGeneration
@@ -1971,7 +2138,7 @@ mod tests {
         assert_eq!(control.snapshot().unwrap(), before_ack);
 
         control
-            .acknowledge_terminal_flush(flushed_terminal_ack(first.generation, "req-1"))
+            .acknowledge_terminal_flush(flushed_terminal_ack(&control, first.generation, "req-1"))
             .unwrap();
         assert!(control.snapshot().unwrap().active_request_id.is_none());
         let reused = control.admit("req-1").unwrap();
@@ -2149,7 +2316,11 @@ mod tests {
             Sq8WorkerControlErrorKind::Closing
         );
         active
-            .acknowledge_terminal_flush(flushed_terminal_ack(admission.generation, "req-1"))
+            .acknowledge_terminal_flush(flushed_terminal_ack(
+                &active,
+                admission.generation,
+                "req-1",
+            ))
             .unwrap();
         assert_eq!(
             active.begin_shutdown().unwrap_err().kind,
@@ -2159,6 +2330,13 @@ mod tests {
 
     #[test]
     fn worker_control_failure_retains_active_ownership() {
+        assert_eq!(
+            Sq8WorkerControl::new()
+                .begin_terminal_publication(1, "req-1")
+                .unwrap_err()
+                .kind,
+            Sq8WorkerControlErrorKind::NotReady
+        );
         let control = Sq8WorkerControl::new();
         mark_control_ready(&control);
         let admission = control.admit("req-1").unwrap();
@@ -2168,6 +2346,13 @@ mod tests {
         assert_eq!(snapshot.active_generation, Some(admission.generation));
         assert_eq!(
             control.precheck_generate().unwrap_err().kind,
+            Sq8WorkerControlErrorKind::Failed
+        );
+        assert_eq!(
+            control
+                .begin_terminal_publication(admission.generation, &admission.request_id)
+                .unwrap_err()
+                .kind,
             Sq8WorkerControlErrorKind::Failed
         );
     }
@@ -2185,8 +2370,19 @@ mod tests {
             Sq8WorkerControlErrorKind::Busy
         );
         let mut writer = Sq8OrderedJsonlWriter::new(FlushCountingWriter::default());
+        let permit = control
+            .begin_terminal_publication(admission.generation, "req-1")
+            .unwrap();
+        assert_eq!(
+            control
+                .begin_terminal_publication(admission.generation, "req-1")
+                .unwrap_err()
+                .kind,
+            Sq8WorkerControlErrorKind::Internal
+        );
+        assert!(control.snapshot().unwrap().terminal_in_flight);
         let acknowledgement = writer
-            .write_active_terminal_event(admission.generation, "req-1", &released)
+            .write_active_terminal_event(permit, &released)
             .unwrap();
         assert_eq!(
             control.precheck_generate().unwrap_err().kind,
@@ -2355,8 +2551,9 @@ mod tests {
         assert!(
             writer
                 .write_active_terminal_event(
-                    admission.generation,
-                    &admission.request_id,
+                    control
+                        .begin_terminal_publication(admission.generation, &admission.request_id,)
+                        .unwrap(),
                     &released,
                 )
                 .is_err()

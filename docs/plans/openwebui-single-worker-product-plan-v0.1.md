@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 is complete; P8-C sampler, transactional session publication, bounded JSONL codec, and active1 control are implemented; resident worker thread integration is next
+Status: in progress; P8-B2 is complete; P8-C sampler, transactional session publication, bounded JSONL codec, active1 control, and resident CPU thread topology are implemented; real HIP/session worker integration is next
 
 Date: 2026-07-10
 
@@ -990,6 +990,44 @@ exact event encoder, or generation-safe active1 control existed.
    EOF shutdown, recoverable errors, and fatal framing behavior.
 3. Add the inference loop and then connect its sole HIP/session owner to the
    prepared-token API.
+
+#### P8-C resident CPU topology checkpoint (2026-07-10)
+
+##### 前回の要点
+
+The bounded codec and active1 control existed, but stdin, inference, and stdout
+were not connected through the production thread/channel topology.
+
+##### 今回の変更点
+
+- Added the capacity-1 inference handoff and capacity-1 event channel, with one
+  writer thread as the sole stdout owner. Every nonfatal event waits for the real
+  write/flush result; ready and released retain private flush acknowledgements.
+- The inference backend is constructed and destroyed on its own thread, so the
+  HIP/runtime/session owner does not need to implement `Send`.
+- Bound backend publication to an active generation through a request-scoped
+  publisher. It fixes request identity, M=128-plus-M=1-tail progress, contiguous
+  token indices, EOS precedence, terminal outcome, and release-after-reset order.
+- Added permanent process poison and nonblocking best-effort fatal publication.
+  Fatal reader/writer/backend paths stop later token/release output, wake an idle
+  inference thread within 50 ms, and make all joins return nonzero failure.
+- Fixed released-to-next-request and queued-next-request-plus-EOF races by
+  distinguishing the completed generation from a newly admitted generation.
+- CPU tests cover normal sequential requests, cancel-before-start, first cancel
+  reason, terminal-flush EOF, active/idle EOF, malformed and oversized records,
+  load/runtime/shutdown failures, writer backpressure/failure, startup and close
+  races, and EOS-then-cancel precedence. The worker protocol/runtime selection
+  passes 61 tests with no new clippy warning.
+
+##### 次の行動
+
+1. Implement the real Qwen3 SQ8 backend that owns the HIP context, stream, and
+   `Qwen3Sq8ServingSession` on the inference thread and uses transactional token
+   publication through the request-scoped publisher.
+2. Add the resident worker binary and bind stdin/stdout process exit ordering to
+   the tested reader, inference, and writer ownership sequence.
+3. Run R9700 cancellation races, reset recovery, sequential-request, latency,
+   and host/VRAM growth acceptance before exposing the HTTP gateway.
 
 ### P8-D: Tokenizer and Non-Streaming OpenAI Gateway
 
