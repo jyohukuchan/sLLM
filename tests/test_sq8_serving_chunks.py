@@ -4,6 +4,7 @@ import importlib.util
 import json
 import shutil
 import struct
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,24 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = ROOT / "tests/fixtures/sq8-serving-v0.1/oracles/vllm-source-v0.1"
 TOOL_PATH = ROOT / "tools/validate-sq8-serving-chunks.py"
+DEFAULT_CHUNK_MODE = "m8-chunk8"
+CHUNK_MODES = {
+    DEFAULT_CHUNK_MODE: {
+        "schema_version": "ullm.sq8.serving_chunks.v3",
+        "prefill_chunk_tokens": 8,
+        "prefill_implementation": "sq8.fixed-m8-cached-prefix.v1",
+    },
+    "m32-chunk32": {
+        "schema_version": "ullm.sq8.serving_chunks.v4",
+        "prefill_chunk_tokens": 32,
+        "prefill_implementation": "sq8.fixed-m32-cached-prefix.v1",
+    },
+    "m128-chunk128": {
+        "schema_version": "ullm.sq8.serving_chunks.v4",
+        "prefill_chunk_tokens": 128,
+        "prefill_implementation": "sq8.fixed-m128-cached-prefix.v1",
+    },
+}
 
 
 def load_tool():
@@ -26,8 +45,8 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def source_top1() -> tuple[int, float]:
-    prompt = FIXTURE_ROOT / "prompts/raw-p0008"
+def source_top1(prompt_tokens: int = 8) -> tuple[int, float]:
+    prompt = FIXTURE_ROOT / f"prompts/raw-p{prompt_tokens:04d}"
     token_id = struct.unpack("<I", (prompt / "greedy-g1.u32le").read_bytes())[0]
     logits = struct.iter_unpack("<f", (prompt / "prefill-logits.f32le").read_bytes())
     top_token, top_logit = max(
@@ -58,23 +77,38 @@ def unit_trace(widths: list[int]) -> list[dict]:
     return result
 
 
-def result_document(mode: str, capture_prefix: str, token_id: int, top1_logit: float) -> dict:
-    widths = [8] if mode == "m8-chunk8" else [1] * 8
+def result_document(
+    mode: str,
+    capture_prefix: str,
+    token_id: int,
+    top1_logit: float,
+    *,
+    prompt_tokens: int = 8,
+    chunk_mode: str = DEFAULT_CHUNK_MODE,
+) -> dict:
+    chunk_config = CHUNK_MODES[chunk_mode]
+    chunk_tokens = chunk_config["prefill_chunk_tokens"]
+    widths = (
+        [1] * prompt_tokens
+        if mode == "all-m1"
+        else [chunk_tokens] * (prompt_tokens // chunk_tokens)
+        + [1] * (prompt_tokens % chunk_tokens)
+    )
     schema = (
-        "ullm.sq8.serving_chunks.v3"
-        if mode == "m8-chunk8"
-        else "ullm.sq8.serving_smoke.v2"
+        "ullm.sq8.serving_smoke.v2"
+        if mode == "all-m1"
+        else chunk_config["schema_version"]
     )
     implementation = (
-        "sq8.fixed-m8-cached-prefix.v1"
-        if mode == "m8-chunk8"
-        else "sq8.sequential-m1.v1"
+        "sq8.sequential-m1.v1"
+        if mode == "all-m1"
+        else chunk_config["prefill_implementation"]
     )
     return {
         "schema_version": schema,
         "passed": False,
         "prefill_mode": mode,
-        "prefill_chunk_tokens": 8,
+        "prefill_chunk_tokens": 8 if mode == "all-m1" else chunk_tokens,
         "prefill_implementation": implementation,
         "artifact_content_sha256": (
             "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147"
@@ -103,26 +137,26 @@ def result_document(mode: str, capture_prefix: str, token_id: int, top1_logit: f
         "requests": [
             {
                 "request_id": f"synthetic-{mode}",
-                "prompt_token_ids": list(range(1, 9)),
+                "prompt_token_ids": list(range(1, prompt_tokens + 1)),
                 "max_new_tokens": 1,
                 "generated_token_ids": [token_id],
                 "prompt_progress_events": len(widths) - 1,
                 "execution_units": len(widths),
-                "processed_prompt_tokens": 8,
+                "processed_prompt_tokens": prompt_tokens,
                 "execution_calls": len(widths),
                 "prefill_execution_units": unit_trace(widths),
-                "terminal_expected_cache_len": 8,
-                "terminal_cache_lengths": [8] * 40,
+                "terminal_expected_cache_len": prompt_tokens,
+                "terminal_cache_lengths": [prompt_tokens] * 40,
                 "terminal_cache_lengths_all_expected": True,
-                "terminal_last_cache_position": 7,
-                "terminal_last_logical_block": 0,
+                "terminal_last_cache_position": prompt_tokens - 1,
+                "terminal_last_logical_block": (prompt_tokens - 1) // 16,
                 "terminal_scheduler_active": 1,
                 "terminal_scheduler_waiting": 0,
                 "terminal_allocated_blocks": 256,
                 "terminal_reason": "length",
                 "release_outcome": "length",
                 "oracle_capture": {
-                    "position": 7,
+                    "position": prompt_tokens - 1,
                     "top1_token_id": token_id,
                     "top1_logit": top1_logit,
                     "final_hidden_file": f"{capture_prefix}-hidden.f32le",
@@ -135,16 +169,28 @@ def result_document(mode: str, capture_prefix: str, token_id: int, top1_logit: f
     }
 
 
-def write_fixture(tmp_path: Path) -> tuple[Path, Path]:
-    token_id, top1_logit = source_top1()
-    source = FIXTURE_ROOT / "prompts/raw-p0008"
+def write_fixture(
+    tmp_path: Path,
+    *,
+    chunk_mode: str = DEFAULT_CHUNK_MODE,
+    prompt_tokens: int = 8,
+) -> tuple[Path, Path]:
+    token_id, top1_logit = source_top1(prompt_tokens)
+    source = FIXTURE_ROOT / f"prompts/raw-p{prompt_tokens:04d}"
     documents = []
-    for mode, prefix in [("m8-chunk8", "chunk"), ("all-m1", "m1")]:
+    for mode, prefix in [(chunk_mode, "chunk"), ("all-m1", "m1")]:
         hidden = tmp_path / f"{prefix}-hidden.f32le"
         logits = tmp_path / f"{prefix}-logits.f32le"
         shutil.copyfile(source / "final-hidden.f32le", hidden)
         shutil.copyfile(source / "prefill-logits.f32le", logits)
-        document = result_document(mode, prefix, token_id, top1_logit)
+        document = result_document(
+            mode,
+            prefix,
+            token_id,
+            top1_logit,
+            prompt_tokens=prompt_tokens,
+            chunk_mode=chunk_mode,
+        )
         capture = document["requests"][0]["oracle_capture"]
         capture["final_hidden_f32_le_sha256"] = sha256_file(hidden)
         capture["logits_f32_le_sha256"] = sha256_file(logits)
@@ -154,8 +200,22 @@ def write_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return documents[0], documents[1]
 
 
-def validate(tool, chunk: Path, m1: Path):
-    return tool.validate_results(chunk, m1, FIXTURE_ROOT, (8,), (8,))
+def validate(
+    tool,
+    chunk: Path,
+    m1: Path,
+    *,
+    chunk_mode: str = DEFAULT_CHUNK_MODE,
+    prompt_tokens: int = 8,
+):
+    return tool.validate_results(
+        chunk,
+        m1,
+        FIXTURE_ROOT,
+        (prompt_tokens,),
+        (prompt_tokens,),
+        chunk_mode=chunk_mode,
+    )
 
 
 def test_chunk_validator_recomputes_all_gates(tmp_path):
@@ -165,6 +225,79 @@ def test_chunk_validator_recomputes_all_gates(tmp_path):
     assert result["passed"] is True
     assert result["prompts"][0]["chunk_vs_all_m1"]["logits"]["top_1_exact"] is True
     assert result["prompts"][0]["chunk_vs_source"]["logits"]["top_10_overlap"] == 10
+    assert result["evidence"][0]["schema_version"] == "ullm.sq8.serving_chunks.v3"
+    assert result["evidence"][0]["prefill_mode"] == "m8-chunk8"
+
+
+@pytest.mark.parametrize(
+    ("chunk_mode", "prompt_tokens", "chunk_tokens", "implementation"),
+    [
+        ("m32-chunk32", 32, 32, "sq8.fixed-m32-cached-prefix.v1"),
+        ("m128-chunk128", 128, 128, "sq8.fixed-m128-cached-prefix.v1"),
+    ],
+)
+def test_chunk_validator_accepts_candidate_modes_and_source_gates(
+    tmp_path, chunk_mode, prompt_tokens, chunk_tokens, implementation
+):
+    tool = load_tool()
+    chunk, m1 = write_fixture(
+        tmp_path,
+        chunk_mode=chunk_mode,
+        prompt_tokens=prompt_tokens,
+    )
+
+    result = validate(
+        tool,
+        chunk,
+        m1,
+        chunk_mode=chunk_mode,
+        prompt_tokens=prompt_tokens,
+    )
+
+    assert result["passed"] is True
+    assert result["prompts"][0]["chunk_vs_source"]["logits"]["top_1_exact"] is True
+    assert result["evidence"][0]["schema_version"] == "ullm.sq8.serving_chunks.v4"
+    assert result["evidence"][0]["prefill_mode"] == chunk_mode
+    assert result["evidence"][0]["prefill_implementation"] == implementation
+    chunk_document = json.loads(chunk.read_text(encoding="utf-8"))
+    m1_document = json.loads(m1.read_text(encoding="utf-8"))
+    assert chunk_document["prefill_chunk_tokens"] == chunk_tokens
+    assert m1_document["prefill_chunk_tokens"] == 8
+    assert chunk_document["requests"][0]["prefill_execution_units"][0]["width"] == chunk_tokens
+
+
+def test_candidate_widths_use_selected_chunk_and_m1_tail():
+    tool = load_tool()
+    assert tool.expected_widths(35, "m32-chunk32") == [32, 1, 1, 1]
+    assert tool.expected_widths(131, "m128-chunk128") == [128, 1, 1, 1]
+    assert tool.expected_widths(4, "all-m1") == [1, 1, 1, 1]
+
+
+def test_chunk_validator_rejects_candidate_schema_downgrade(tmp_path):
+    tool = load_tool()
+    chunk, m1 = write_fixture(tmp_path, chunk_mode="m32-chunk32", prompt_tokens=32)
+    document = json.loads(chunk.read_text(encoding="utf-8"))
+    document["schema_version"] = "ullm.sq8.serving_chunks.v3"
+    chunk.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(tool.ValidationError):
+        validate(tool, chunk, m1, chunk_mode="m32-chunk32", prompt_tokens=32)
+
+
+def test_chunk_validator_cli_preserves_m8_default_and_selects_candidate(monkeypatch):
+    tool = load_tool()
+    base_args = [
+        str(TOOL_PATH),
+        "--chunk-result",
+        "chunk.json",
+        "--all-m1-result",
+        "m1.json",
+    ]
+    monkeypatch.setattr(sys, "argv", base_args)
+    assert tool.parse_args().chunk_mode == "m8-chunk8"
+
+    monkeypatch.setattr(sys, "argv", [*base_args, "--chunk-mode", "m128-chunk128"])
+    assert tool.parse_args().chunk_mode == "m128-chunk128"
 
 
 def test_chunk_validator_rejects_cache_trace_tampering(tmp_path):

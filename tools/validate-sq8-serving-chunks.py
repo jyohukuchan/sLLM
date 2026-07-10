@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate SQ8 fixed-M8 serving chunks against all-M1 and source oracles."""
+"""Validate SQ8 fixed-width serving chunks against all-M1 and source oracles."""
 
 from __future__ import annotations
 
@@ -19,6 +19,23 @@ M1_SCHEMA_VERSION = "ullm.sq8.serving_smoke.v2"
 CHUNK_MODE = "m8-chunk8"
 M1_MODE = "all-m1"
 CHUNK_TOKENS = 8
+CHUNK_MODE_CONFIGS = {
+    CHUNK_MODE: {
+        "schema_version": CHUNK_SCHEMA_VERSION,
+        "prefill_chunk_tokens": CHUNK_TOKENS,
+        "prefill_implementation": "sq8.fixed-m8-cached-prefix.v1",
+    },
+    "m32-chunk32": {
+        "schema_version": "ullm.sq8.serving_chunks.v4",
+        "prefill_chunk_tokens": 32,
+        "prefill_implementation": "sq8.fixed-m32-cached-prefix.v1",
+    },
+    "m128-chunk128": {
+        "schema_version": "ullm.sq8.serving_chunks.v4",
+        "prefill_chunk_tokens": 128,
+        "prefill_implementation": "sq8.fixed-m128-cached-prefix.v1",
+    },
+}
 STACK_LAYERS = 40
 BLOCK_TOKENS = 16
 DEFAULT_REQUIRED_PROMPTS = (1, 7, 8, 9, 15, 16, 17, 32, 128, 512, 4095)
@@ -56,16 +73,22 @@ def parse_prompt_lengths(value: str, label: str) -> tuple[int, ...]:
     return values
 
 
+def chunk_mode_config(mode: str) -> dict[str, Any]:
+    config = CHUNK_MODE_CONFIGS.get(mode)
+    if config is None:
+        fail(f"unknown chunk mode: {mode}")
+    return config
+
+
 def expected_widths(prompt_tokens: int, mode: str) -> list[int]:
     if prompt_tokens <= 0:
         fail("prompt length must be positive")
     if mode == M1_MODE:
         return [1] * prompt_tokens
-    if mode == CHUNK_MODE:
-        return [CHUNK_TOKENS] * (prompt_tokens // CHUNK_TOKENS) + [1] * (
-            prompt_tokens % CHUNK_TOKENS
-        )
-    fail(f"unknown prefill mode: {mode}")
+    chunk_tokens = chunk_mode_config(mode)["prefill_chunk_tokens"]
+    return [chunk_tokens] * (prompt_tokens // chunk_tokens) + [1] * (
+        prompt_tokens % chunk_tokens
+    )
 
 
 def resolve_capture(
@@ -147,6 +170,8 @@ def validate_result(
     required_prompts: tuple[int, ...],
     source_root: Path,
     require_build_identity: bool,
+    prefill_chunk_tokens: int,
+    prefill_implementation: str,
 ) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
     common.regular_file(result_path, None, f"{mode} result")
     result_path = result_path.resolve(strict=True)
@@ -154,17 +179,13 @@ def validate_result(
     if (
         result.get("schema_version") != schema
         or result.get("prefill_mode") != mode
-        or result.get("prefill_chunk_tokens") != CHUNK_TOKENS
+        or result.get("prefill_chunk_tokens") != prefill_chunk_tokens
         or result.get("artifact_content_sha256") != common.EXPECTED_ARTIFACT_SHA256
         or result.get("package_manifest_sha256") != common.EXPECTED_PACKAGE_SHA256
     ):
         fail(f"{result_path} has the wrong schema/mode/model identity")
     implementation = result.get("prefill_implementation")
-    expected_implementation = {
-        M1_MODE: "sq8.sequential-m1.v1",
-        CHUNK_MODE: "sq8.fixed-m8-cached-prefix.v1",
-    }[mode]
-    if implementation != expected_implementation:
+    if implementation != prefill_implementation:
         fail(f"{result_path} has the wrong prefill implementation")
     git_commit = result.get("runner_git_commit")
     binary_sha256 = result.get("runner_binary_sha256")
@@ -317,17 +338,22 @@ def validate_results(
     required_prompts: tuple[int, ...],
     source_prompts: tuple[int, ...],
     require_build_identity: bool = False,
+    chunk_mode: str = CHUNK_MODE,
 ) -> dict[str, Any]:
     if not set(source_prompts).issubset(required_prompts):
         fail("source prompts must be a subset of required prompts")
+    config = chunk_mode_config(chunk_mode)
+    chunk_tokens = config["prefill_chunk_tokens"]
     source = common.validate_source_oracle(fixture_root)
     chunk, chunk_evidence = validate_result(
         chunk_result,
-        schema=CHUNK_SCHEMA_VERSION,
-        mode=CHUNK_MODE,
+        schema=config["schema_version"],
+        mode=chunk_mode,
         required_prompts=required_prompts,
         source_root=source["root"],
         require_build_identity=require_build_identity,
+        prefill_chunk_tokens=chunk_tokens,
+        prefill_implementation=config["prefill_implementation"],
     )
     m1, m1_evidence = validate_result(
         m1_result,
@@ -336,6 +362,8 @@ def validate_results(
         required_prompts=required_prompts,
         source_root=source["root"],
         require_build_identity=require_build_identity,
+        prefill_chunk_tokens=CHUNK_TOKENS,
+        prefill_implementation="sq8.sequential-m1.v1",
     )
     try:
         if os.path.samefile(chunk_result, m1_result):
@@ -493,6 +521,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--require-build-identity", action="store_true")
+    parser.add_argument(
+        "--chunk-mode",
+        choices=tuple(CHUNK_MODE_CONFIGS),
+        default=CHUNK_MODE,
+        help="fixed-width chunk result mode (default: %(default)s)",
+    )
     return parser.parse_args()
 
 
@@ -508,6 +542,7 @@ def main() -> int:
             required_prompts,
             source_prompts,
             args.require_build_identity,
+            args.chunk_mode,
         )
         if args.output is not None:
             common.write_json_create_new(args.output, validation)
