@@ -2,6 +2,9 @@ a47c46e9c8a14febcd2041638b96f5b3347bcfb495086bad884ec5991fbdcfaf  p7-current-hea
 7f72aa665cfb552b25bdac559ede8332b685b86217bc9e29da433e397a70a080  p7-m8-first-step/first-step-final-hidden.f32le
 b40bd6c0e3feb11e16e058ad7668e87210a6b746daadd70fc3f725bd4c74cb74  p7-m8-first-step/first-step-logits.f32le
 87dcb97f308fa70dea6bc45fca621b71f81330c360abc8a4bedab8c4b170a877  p7-m8-first-step/manifest.json
+1d9bc905efd274e9cd50372d54cf5b9299740efad3d54c9448a6c3ae8e34ab55  runtime-boundary-cancel.json
+e94b3947fbe6a86e8f9ad23bd81021387ac1a05c7cd5cf1d215973233348012b  runtime-context4096.json
+3643e8ce091034b09466ffd331723ccf5aefbe5ef397606e3b314e2f9857f55d  runtime-decode-cancel.json
 bab24d87e22a40b4e4da935df40b1f1aecb429aa62037574e8387cd236d1df08  runtime-oracle-p1-p8-captures/serving-smoke-1-final-hidden.f32le
 8a3edd12054c30781de32654cbaf64d38b08973e453a58bfce90912ce32ac0e3  runtime-oracle-p1-p8-captures/serving-smoke-1-logits.f32le
 ea3a2901d80225ab4c157bdbb148b13d07a67ed4a70dc1e92815b0cb2c1d313b  runtime-oracle-p1-p8-captures/serving-smoke-2-final-hidden.f32le
@@ -13,3 +16,4 @@ efce42c0a57730a37913c49a5cabfb411a0186ed37f214d27b6b13369f7c33e7  runtime-oracle
 adc263ab56924a91cee81c8deb59075800da36753a5e48fd36e201d945e53a4e  runtime-oracle-p32-p128-captures/serving-smoke-2-logits.f32le
 8418187ebd67e82be5ae639a261ec679b8e073bdc65000b6ef3ed9403206dd08  runtime-oracle-p32-p128.json
 2612a4b434b6f5a15ab0c94d4465ee232a999a854a56a374b88904bdc54524aa  runtime-oracle-validation.json
+463415451d1b35d6e1827d964cca0f58a506d46d8a42f572dcb9911369c09674  runtime-session-matrix-validation.json

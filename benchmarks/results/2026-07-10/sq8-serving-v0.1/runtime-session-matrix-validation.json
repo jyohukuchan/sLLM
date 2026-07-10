@@ -1,0 +1,157 @@
+{
+  "boundary": {
+    "cancellation": {
+      "cache_length_before_cancel": 8,
+      "generated_before_cancel": 0,
+      "phase": "prefill",
+      "prompt_progress_before_cancel": 8,
+      "prompt_tokens": 15,
+      "reset_seconds": 0.003168313
+    },
+    "requests": [
+      {
+        "cache_length": 15,
+        "generated_token_ids": [
+          16
+        ],
+        "last_cache_position": 14,
+        "last_logical_block": 0,
+        "prompt_tokens": 15,
+        "request_id": "serving-smoke-p0015",
+        "request_seconds": 0.616040777,
+        "reset_seconds": 0.003236504,
+        "terminal_sequence_tokens": 16
+      },
+      {
+        "cache_length": 16,
+        "generated_token_ids": [
+          17
+        ],
+        "last_cache_position": 15,
+        "last_logical_block": 0,
+        "prompt_tokens": 16,
+        "request_id": "serving-smoke-p0016",
+        "request_seconds": 0.477433532,
+        "reset_seconds": 0.003226344,
+        "terminal_sequence_tokens": 17
+      },
+      {
+        "cache_length": 17,
+        "generated_token_ids": [
+          18
+        ],
+        "last_cache_position": 16,
+        "last_logical_block": 1,
+        "prompt_tokens": 17,
+        "request_id": "serving-smoke-p0017",
+        "request_seconds": 0.50596244,
+        "reset_seconds": 0.003169853,
+        "terminal_sequence_tokens": 18
+      },
+      {
+        "cache_length": 255,
+        "generated_token_ids": [
+          37021
+        ],
+        "last_cache_position": 254,
+        "last_logical_block": 15,
+        "prompt_tokens": 255,
+        "request_id": "serving-smoke-p0255",
+        "request_seconds": 8.358578464,
+        "reset_seconds": 0.003189674,
+        "terminal_sequence_tokens": 256
+      },
+      {
+        "cache_length": 256,
+        "generated_token_ids": [
+          220
+        ],
+        "last_cache_position": 255,
+        "last_logical_block": 15,
+        "prompt_tokens": 256,
+        "request_id": "serving-smoke-p0256",
+        "request_seconds": 8.393871145,
+        "reset_seconds": 0.003167923,
+        "terminal_sequence_tokens": 257
+      },
+      {
+        "cache_length": 257,
+        "generated_token_ids": [
+          220
+        ],
+        "last_cache_position": 256,
+        "last_logical_block": 16,
+        "prompt_tokens": 257,
+        "request_id": "serving-smoke-p0257",
+        "request_seconds": 8.432953859,
+        "reset_seconds": 0.003169723,
+        "terminal_sequence_tokens": 258
+      }
+    ]
+  },
+  "decode_cancel": {
+    "cancellation": {
+      "cache_length_after_observation": 8,
+      "cache_length_before_cancel": 8,
+      "generated_before_cancel": [
+        353
+      ],
+      "phase": "decode",
+      "prompt_progress_before_cancel": 7,
+      "prompt_tokens": 8,
+      "reset_seconds": 0.003176244
+    },
+    "completed_reference": {
+      "cache_length": 15,
+      "generated_token_ids": [
+        353,
+        10,
+        4999,
+        1725,
+        15,
+        16,
+        17,
+        18
+      ],
+      "last_cache_position": 14,
+      "last_logical_block": 0,
+      "prompt_tokens": 8,
+      "request_id": "serving-smoke-p0008",
+      "request_seconds": 0.649351583,
+      "reset_seconds": 0.003192794,
+      "terminal_sequence_tokens": 16
+    }
+  },
+  "evidence": [
+    {
+      "file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-boundary-cancel.json",
+      "kind": "block_boundary_and_prefill_cancel",
+      "sha256": "1d9bc905efd274e9cd50372d54cf5b9299740efad3d54c9448a6c3ae8e34ab55"
+    },
+    {
+      "file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-context4096.json",
+      "kind": "exact_context_4096",
+      "sha256": "e94b3947fbe6a86e8f9ad23bd81021387ac1a05c7cd5cf1d215973233348012b"
+    },
+    {
+      "file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-decode-cancel.json",
+      "kind": "decode_cancel",
+      "sha256": "3643e8ce091034b09466ffd331723ccf5aefbe5ef397606e3b314e2f9857f55d"
+    }
+  ],
+  "exact_context": {
+    "cache_length": 4095,
+    "generated_token_ids": [
+      291
+    ],
+    "last_cache_position": 4094,
+    "last_logical_block": 255,
+    "prompt_tokens": 4095,
+    "request_id": "serving-smoke-p4095",
+    "request_seconds": 369.549615726,
+    "reset_seconds": 0.00325089,
+    "terminal_sequence_tokens": 4096
+  },
+  "passed": true,
+  "schema_version": "ullm.sq8.serving_session_matrix_validation.v1"
+}

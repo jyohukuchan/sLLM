@@ -1786,6 +1786,40 @@ mod tests {
     }
 
     #[test]
+    fn serving_terminal_policy_stops_on_first_eos_output() {
+        let request = Sq8ServingRequest::greedy("req-1", vec![1, 2, 3], 8);
+        let mut active = ActiveServingRequest::new(request, Sq8CancellationToken::new());
+        active.prompt_tokens_processed = active.request.prompt_token_ids.len();
+
+        assert_eq!(
+            active.terminal_reason(QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS[0]),
+            Some(Sq8FinishReason::Stop)
+        );
+        assert_eq!(active.terminal_reason(42), None);
+    }
+
+    #[test]
+    fn serving_terminal_policy_stops_during_decode_and_caps_non_eos() {
+        let request = Sq8ServingRequest::greedy("req-1", vec![1, 2, 3], 8);
+        let mut active = ActiveServingRequest::new(request, Sq8CancellationToken::new());
+        active.prompt_tokens_processed = active.request.prompt_token_ids.len();
+        active.generated_tokens = 3;
+
+        assert_eq!(
+            active.terminal_reason(QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS[1]),
+            Some(Sq8FinishReason::Stop)
+        );
+        assert_eq!(active.terminal_reason(42), None);
+
+        active.generated_tokens = active.request.max_new_tokens - 1;
+        assert_eq!(active.terminal_reason(42), Some(Sq8FinishReason::Length));
+        assert_eq!(
+            active.terminal_reason(QWEN3_14B_SQ8_SERVING_EOS_TOKEN_IDS[0]),
+            Some(Sq8FinishReason::Stop)
+        );
+    }
+
+    #[test]
     fn serving_scheduler_and_active_metadata_share_contiguous_positions() {
         let request = Sq8ServingRequest::greedy("req-1", vec![1, 2, 3], 2);
         let mut active = ActiveServingRequest::new(request.clone(), Sq8CancellationToken::new());

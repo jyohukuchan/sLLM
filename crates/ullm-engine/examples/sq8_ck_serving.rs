@@ -15,10 +15,10 @@ use ullm_engine::sq8_model_head_runtime::{
     QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV, validate_qwen3_14b_sq8_r9700_device_info,
 };
 use ullm_engine::sq8_serving_runtime::{
-    QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS, QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
-    Qwen3Sq8ServingSession, Sq8CancellationToken, Sq8FinishReason, Sq8ReleaseOutcome,
-    Sq8ServingAdvance, Sq8ServingRequest, Sq8ServingRuntimeStatus,
-    load_qwen3_14b_sq8_serving_norms,
+    QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS, QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS,
+    QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS, Qwen3Sq8ServingSession, Sq8CancellationToken,
+    Sq8FinishReason, Sq8ReleaseOutcome, Sq8ServingAdvance, Sq8ServingRequest,
+    Sq8ServingRuntimeStatus, load_qwen3_14b_sq8_serving_norms,
 };
 use ullm_runtime_sys::{RuntimeContext, device_count, device_info};
 
@@ -32,8 +32,18 @@ struct Options {
     max_new_tokens: usize,
     second_prompt_token_ids: Option<Vec<usize>>,
     second_max_new_tokens: usize,
+    prompt_lengths: Option<Vec<usize>>,
     cancel_after_first_token: bool,
+    cancel_after_prompt_progress: Option<usize>,
     oracle_capture_dir: Option<PathBuf>,
+    result_json: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct ServingCase {
+    request_id: String,
+    prompt_token_ids: Vec<usize>,
+    max_new_tokens: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,6 +54,17 @@ struct ServingCaseResult {
     generated_token_ids: Vec<usize>,
     prompt_progress_events: usize,
     execution_units: usize,
+    reserved_context_tokens: usize,
+    terminal_sequence_tokens: usize,
+    terminal_status: &'static str,
+    terminal_expected_cache_len: usize,
+    terminal_cache_lengths: Vec<usize>,
+    terminal_cache_lengths_all_expected: bool,
+    terminal_last_cache_position: usize,
+    terminal_last_logical_block: usize,
+    terminal_scheduler_active: usize,
+    terminal_scheduler_waiting: usize,
+    terminal_allocated_blocks: usize,
     terminal_reason: &'static str,
     release_outcome: &'static str,
     request_seconds: f64,
@@ -65,7 +86,23 @@ struct OracleCaptureResult {
 #[derive(Debug, Serialize)]
 struct CancelledCaseResult {
     request_id: String,
+    cancellation_phase: &'static str,
+    prompt_tokens: usize,
+    prompt_progress_before_cancel: usize,
     generated_before_cancel: Vec<usize>,
+    execution_units_before_cancel: usize,
+    status_before_cancel: &'static str,
+    cache_lengths_before_cancel: Vec<usize>,
+    scheduler_active_before_cancel: usize,
+    scheduler_waiting_before_cancel: usize,
+    allocated_blocks_before_cancel: usize,
+    status_after_observation: &'static str,
+    prompt_progress_after_observation: usize,
+    generated_tokens_after_observation: usize,
+    cache_lengths_after_observation: Vec<usize>,
+    scheduler_active_after_observation: usize,
+    scheduler_waiting_after_observation: usize,
+    allocated_blocks_after_observation: usize,
     release_outcome: &'static str,
     reset_seconds: f64,
 }
@@ -87,6 +124,7 @@ struct ServingSmokeResult {
     post_reset_active: usize,
     post_reset_waiting: usize,
     post_reset_allocated_blocks: usize,
+    post_reset_cache_lengths: Vec<usize>,
     post_reset_cache_lengths_all_zero: bool,
 }
 
@@ -131,33 +169,42 @@ fn main() -> Result<(), String> {
     .map_err(|err| err.to_string())?;
     let load_seconds = load_start.elapsed().as_secs_f64();
 
-    let mut requests = vec![run_completed_request(
-        &mut session,
-        &mut stream,
-        "serving-smoke-1",
-        options.prompt_token_ids.clone(),
-        options.max_new_tokens,
-        options.oracle_capture_dir.as_deref(),
-    )?];
-    if let Some(prompt_token_ids) = options.second_prompt_token_ids.clone() {
+    let cases = serving_cases(&options)?;
+    let cancellation_prompt = cases
+        .first()
+        .expect("serving cases are nonempty")
+        .prompt_token_ids
+        .clone();
+    let mut requests = Vec::with_capacity(cases.len());
+    for case in cases {
         requests.push(run_completed_request(
             &mut session,
             &mut stream,
-            "serving-smoke-2",
-            prompt_token_ids,
-            options.second_max_new_tokens,
+            &case.request_id,
+            case.prompt_token_ids,
+            case.max_new_tokens,
             options.oracle_capture_dir.as_deref(),
         )?);
     }
-    let cancelled_request = if options.cancel_after_first_token {
-        Some(run_cancel_after_first_token(
+    let cancelled_request = match (
+        options.cancel_after_first_token,
+        options.cancel_after_prompt_progress,
+    ) {
+        (true, None) => Some(run_cancel_after_first_token(
             &mut session,
             &mut stream,
             "serving-smoke-cancel",
-            options.prompt_token_ids.clone(),
-        )?)
-    } else {
-        None
+            cancellation_prompt,
+        )?),
+        (false, Some(prompt_progress)) => Some(run_cancel_during_prefill(
+            &mut session,
+            &mut stream,
+            "serving-smoke-prefill-cancel",
+            cancellation_prompt,
+            prompt_progress,
+        )?),
+        (false, None) => None,
+        (true, Some(_)) => return Err("cancellation modes must be mutually exclusive".into()),
     };
     let snapshot = reusable_snapshot(&session)?;
     let load_report = session.load_report();
@@ -185,13 +232,15 @@ fn main() -> Result<(), String> {
         post_reset_active: snapshot.scheduler_active,
         post_reset_waiting: snapshot.scheduler_waiting,
         post_reset_allocated_blocks: snapshot.allocator.allocated_blocks,
+        post_reset_cache_lengths: snapshot.cache_lengths.clone(),
         post_reset_cache_lengths_all_zero: snapshot.cache_lengths.iter().all(|value| *value == 0),
     };
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result)
-            .map_err(|err| format!("failed to serialize serving smoke result: {err}"))?
-    );
+    let serialized = serde_json::to_string_pretty(&result)
+        .map_err(|err| format!("failed to serialize serving smoke result: {err}"))?;
+    if let Some(path) = &options.result_json {
+        write_bytes_create_new(path, serialized.as_bytes())?;
+    }
+    println!("{serialized}");
     Ok(())
 }
 
@@ -213,16 +262,22 @@ fn run_completed_request(
     let mut execution_units = 0_usize;
     let mut oracle_capture = None;
     let terminal_reason = loop {
-        let advance = if oracle_capture_dir.is_some()
-            && oracle_capture.is_none()
-            && session.status() == Sq8ServingRuntimeStatus::Prefilling
-        {
+        let capture_directory = match oracle_capture_dir {
+            Some(directory)
+                if oracle_capture.is_none()
+                    && session.status() == Sq8ServingRuntimeStatus::Prefilling =>
+            {
+                Some(directory)
+            }
+            _ => None,
+        };
+        let advance = if let Some(capture_directory) = capture_directory {
             let oracle = session
                 .advance_prefill_oracle_synchronized(stream)
                 .map_err(|err| err.to_string())?;
             if let Some(capture) = oracle.capture {
                 oracle_capture = Some(persist_oracle_capture(
-                    oracle_capture_dir.expect("checked above"),
+                    capture_directory,
                     request_id,
                     capture,
                 )?);
@@ -252,6 +307,42 @@ fn run_completed_request(
         }
     };
     let request_seconds = request_start.elapsed().as_secs_f64();
+    let terminal_snapshot = session.snapshot();
+    let reserved_context_tokens = prompt_token_ids
+        .len()
+        .checked_add(max_new_tokens)
+        .ok_or_else(|| "serving smoke reserved context overflows".to_string())?;
+    let terminal_sequence_tokens = prompt_token_ids
+        .len()
+        .checked_add(generated_token_ids.len())
+        .ok_or_else(|| "serving smoke terminal sequence length overflows".to_string())?;
+    let terminal_expected_cache_len = terminal_sequence_tokens
+        .checked_sub(1)
+        .ok_or_else(|| "serving smoke terminal cache length underflows".to_string())?;
+    let terminal_cache_lengths_all_expected = terminal_snapshot
+        .cache_lengths
+        .iter()
+        .all(|length| *length == terminal_expected_cache_len);
+    if terminal_snapshot.status != Sq8ServingRuntimeStatus::Finishing
+        || terminal_snapshot.active_request_id.as_deref() != Some(request_id)
+        || terminal_snapshot.prompt_tokens != prompt_token_ids.len()
+        || terminal_snapshot.prompt_tokens_processed != prompt_token_ids.len()
+        || terminal_snapshot.generated_tokens != generated_token_ids.len()
+        || terminal_snapshot.scheduler_active != 1
+        || terminal_snapshot.scheduler_waiting != 0
+        || terminal_snapshot.allocator.allocated_blocks != QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS
+        || !terminal_cache_lengths_all_expected
+        || prompt_progress_events != prompt_token_ids.len() - 1
+        || execution_units != terminal_expected_cache_len
+        || reserved_context_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
+    {
+        return Err(format!(
+            "serving smoke terminal snapshot mismatch: snapshot={terminal_snapshot:?} "
+        ));
+    }
+    let terminal_last_cache_position = terminal_expected_cache_len - 1;
+    let terminal_last_logical_block =
+        terminal_last_cache_position / QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS;
     let reset_start = Instant::now();
     let release = session
         .finish_and_reset_synchronized(stream)
@@ -261,6 +352,14 @@ fn run_completed_request(
     if !release.reset_complete
         || generated_token_ids.len() > max_new_tokens
         || generated_token_ids.is_empty()
+        || release.request_id != request_id
+        || release.prompt_tokens != prompt_token_ids.len()
+        || release.generated_tokens != generated_token_ids.len()
+        || release.outcome
+            != match terminal_reason {
+                Sq8FinishReason::Stop => Sq8ReleaseOutcome::Stop,
+                Sq8FinishReason::Length => Sq8ReleaseOutcome::Length,
+            }
     {
         return Err("serving smoke terminal/reset contract failed".into());
     }
@@ -271,6 +370,17 @@ fn run_completed_request(
         generated_token_ids,
         prompt_progress_events,
         execution_units,
+        reserved_context_tokens,
+        terminal_sequence_tokens,
+        terminal_status: serving_status_name(terminal_snapshot.status),
+        terminal_expected_cache_len,
+        terminal_cache_lengths: terminal_snapshot.cache_lengths,
+        terminal_cache_lengths_all_expected,
+        terminal_last_cache_position,
+        terminal_last_logical_block,
+        terminal_scheduler_active: terminal_snapshot.scheduler_active,
+        terminal_scheduler_waiting: terminal_snapshot.scheduler_waiting,
+        terminal_allocated_blocks: terminal_snapshot.allocator.allocated_blocks,
         terminal_reason: finish_reason_name(terminal_reason),
         release_outcome: release_outcome_name(release.outcome),
         request_seconds,
@@ -321,12 +431,32 @@ fn write_f32_le_create_new(path: &Path, values: &[f32]) -> Result<(), String> {
         .map_err(|err| format!("failed to sync {}: {err}", path.display()))
 }
 
+fn write_bytes_create_new(path: &Path, payload: &[u8]) -> Result<(), String> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    writer
+        .write_all(payload)
+        .and_then(|_| writer.write_all(b"\n"))
+        .and_then(|_| writer.flush())
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    let file = writer
+        .into_inner()
+        .map_err(|err| format!("failed to finish {}: {err}", path.display()))?;
+    file.sync_all()
+        .map_err(|err| format!("failed to sync {}: {err}", path.display()))
+}
+
 fn run_cancel_after_first_token(
     session: &mut Qwen3Sq8ServingSession,
     stream: &mut ullm_runtime_sys::RuntimeStream,
     request_id: &str,
     prompt_token_ids: Vec<usize>,
 ) -> Result<CancelledCaseResult, String> {
+    let prompt_tokens = prompt_token_ids.len();
     let cancel = Sq8CancellationToken::new();
     session
         .start(
@@ -335,12 +465,15 @@ fn run_cancel_after_first_token(
             stream,
         )
         .map_err(|err| err.to_string())?;
+    let mut prompt_progress_before_cancel = 0_usize;
+    let mut execution_units_before_cancel = 0_usize;
     let first_token = loop {
-        match session
+        let advance = session
             .advance_synchronized(stream)
-            .map_err(|err| err.to_string())?
-        {
-            Sq8ServingAdvance::PromptProgress { .. } => {}
+            .map_err(|err| err.to_string())?;
+        execution_units_before_cancel += 1;
+        match advance {
+            Sq8ServingAdvance::PromptProgress { .. } => prompt_progress_before_cancel += 1,
             Sq8ServingAdvance::Token {
                 token_id,
                 terminal_reason: None,
@@ -354,6 +487,25 @@ fn run_cancel_after_first_token(
             }
         }
     };
+    let before_cancel = session.snapshot();
+    if before_cancel.status != Sq8ServingRuntimeStatus::Decoding
+        || before_cancel.prompt_tokens != prompt_tokens
+        || before_cancel.prompt_tokens_processed != prompt_tokens
+        || before_cancel.generated_tokens != 1
+        || before_cancel.scheduler_active != 1
+        || before_cancel.scheduler_waiting != 0
+        || before_cancel.allocator.allocated_blocks != QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS
+        || before_cancel
+            .cache_lengths
+            .iter()
+            .any(|length| *length != prompt_tokens)
+        || prompt_progress_before_cancel != prompt_tokens - 1
+        || execution_units_before_cancel != prompt_tokens
+    {
+        return Err(format!(
+            "decode cancel precondition snapshot mismatch: {before_cancel:?}"
+        ));
+    }
     cancel.cancel();
     if session
         .advance_synchronized(stream)
@@ -362,18 +514,172 @@ fn run_cancel_after_first_token(
     {
         return Err("cancel smoke published a token after cancellation observation".into());
     }
+    let after_observation = session.snapshot();
+    if after_observation.status != Sq8ServingRuntimeStatus::Cancelling
+        || after_observation.active_request_id != before_cancel.active_request_id
+        || after_observation.prompt_tokens != before_cancel.prompt_tokens
+        || after_observation.prompt_tokens_processed != before_cancel.prompt_tokens_processed
+        || after_observation.generated_tokens != before_cancel.generated_tokens
+        || after_observation.cache_lengths != before_cancel.cache_lengths
+        || after_observation.scheduler_active != before_cancel.scheduler_active
+        || after_observation.scheduler_waiting != before_cancel.scheduler_waiting
+        || after_observation.allocator != before_cancel.allocator
+    {
+        return Err(format!(
+            "decode cancellation observation mutated request state: before={before_cancel:?} after={after_observation:?}"
+        ));
+    }
     let reset_start = Instant::now();
     let release = session
         .abort_and_reset_synchronized(stream)
         .map_err(|err| err.to_string())?;
     let reset_seconds = reset_start.elapsed().as_secs_f64();
     reusable_snapshot(session)?;
-    if release.outcome != Sq8ReleaseOutcome::Cancelled || !release.reset_complete {
+    if release.outcome != Sq8ReleaseOutcome::Cancelled
+        || !release.reset_complete
+        || release.request_id != request_id
+        || release.prompt_tokens != prompt_tokens
+        || release.generated_tokens != 1
+    {
         return Err("cancel smoke release/reset contract failed".into());
     }
     Ok(CancelledCaseResult {
         request_id: request_id.to_string(),
+        cancellation_phase: "decode",
+        prompt_tokens,
+        prompt_progress_before_cancel,
         generated_before_cancel: vec![first_token],
+        execution_units_before_cancel,
+        status_before_cancel: serving_status_name(before_cancel.status),
+        cache_lengths_before_cancel: before_cancel.cache_lengths,
+        scheduler_active_before_cancel: before_cancel.scheduler_active,
+        scheduler_waiting_before_cancel: before_cancel.scheduler_waiting,
+        allocated_blocks_before_cancel: before_cancel.allocator.allocated_blocks,
+        status_after_observation: serving_status_name(after_observation.status),
+        prompt_progress_after_observation: after_observation.prompt_tokens_processed,
+        generated_tokens_after_observation: after_observation.generated_tokens,
+        cache_lengths_after_observation: after_observation.cache_lengths,
+        scheduler_active_after_observation: after_observation.scheduler_active,
+        scheduler_waiting_after_observation: after_observation.scheduler_waiting,
+        allocated_blocks_after_observation: after_observation.allocator.allocated_blocks,
+        release_outcome: release_outcome_name(release.outcome),
+        reset_seconds,
+    })
+}
+
+fn run_cancel_during_prefill(
+    session: &mut Qwen3Sq8ServingSession,
+    stream: &mut ullm_runtime_sys::RuntimeStream,
+    request_id: &str,
+    prompt_token_ids: Vec<usize>,
+    cancel_after_prompt_progress: usize,
+) -> Result<CancelledCaseResult, String> {
+    let prompt_tokens = prompt_token_ids.len();
+    if cancel_after_prompt_progress == 0 || cancel_after_prompt_progress >= prompt_tokens {
+        return Err(format!(
+            "prefill cancellation progress must be in 1..{prompt_tokens}, got {cancel_after_prompt_progress}"
+        ));
+    }
+    let cancel = Sq8CancellationToken::new();
+    session
+        .start(
+            Sq8ServingRequest::greedy(request_id, prompt_token_ids, 1),
+            cancel.clone(),
+            stream,
+        )
+        .map_err(|err| err.to_string())?;
+    for expected_progress in 1..=cancel_after_prompt_progress {
+        match session
+            .advance_synchronized(stream)
+            .map_err(|err| err.to_string())?
+        {
+            Sq8ServingAdvance::PromptProgress {
+                prompt_tokens_processed,
+                cache_len,
+                execution_width,
+            } if prompt_tokens_processed == expected_progress
+                && cache_len == expected_progress
+                && execution_width == 1 => {}
+            advance => {
+                return Err(format!(
+                    "prefill cancel expected progress {expected_progress}, got {advance:?}"
+                ));
+            }
+        }
+    }
+    let before_cancel = session.snapshot();
+    if before_cancel.status != Sq8ServingRuntimeStatus::Prefilling
+        || before_cancel.prompt_tokens != prompt_tokens
+        || before_cancel.prompt_tokens_processed != cancel_after_prompt_progress
+        || before_cancel.generated_tokens != 0
+        || before_cancel.scheduler_active != 1
+        || before_cancel.scheduler_waiting != 0
+        || before_cancel.allocator.allocated_blocks != QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS
+        || before_cancel
+            .cache_lengths
+            .iter()
+            .any(|length| *length != cancel_after_prompt_progress)
+    {
+        return Err(format!(
+            "prefill cancel precondition snapshot mismatch: {before_cancel:?}"
+        ));
+    }
+    cancel.cancel();
+    if session
+        .advance_synchronized(stream)
+        .map_err(|err| err.to_string())?
+        != Sq8ServingAdvance::CancellationObserved
+    {
+        return Err("prefill cancel published progress or a token after cancellation".into());
+    }
+    let cancelling = session.snapshot();
+    if cancelling.status != Sq8ServingRuntimeStatus::Cancelling
+        || cancelling.active_request_id != before_cancel.active_request_id
+        || cancelling.prompt_tokens != before_cancel.prompt_tokens
+        || cancelling.prompt_tokens_processed != cancel_after_prompt_progress
+        || cancelling.generated_tokens != 0
+        || cancelling.cache_lengths != before_cancel.cache_lengths
+        || cancelling.scheduler_active != before_cancel.scheduler_active
+        || cancelling.scheduler_waiting != before_cancel.scheduler_waiting
+        || cancelling.allocator != before_cancel.allocator
+    {
+        return Err(format!(
+            "prefill cancellation observation mutated progress: {cancelling:?}"
+        ));
+    }
+    let reset_start = Instant::now();
+    let release = session
+        .abort_and_reset_synchronized(stream)
+        .map_err(|err| err.to_string())?;
+    let reset_seconds = reset_start.elapsed().as_secs_f64();
+    reusable_snapshot(session)?;
+    if release.outcome != Sq8ReleaseOutcome::Cancelled
+        || !release.reset_complete
+        || release.request_id != request_id
+        || release.prompt_tokens != prompt_tokens
+        || release.generated_tokens != 0
+    {
+        return Err("prefill cancel release/reset contract failed".into());
+    }
+    Ok(CancelledCaseResult {
+        request_id: request_id.to_string(),
+        cancellation_phase: "prefill",
+        prompt_tokens,
+        prompt_progress_before_cancel: cancel_after_prompt_progress,
+        generated_before_cancel: Vec::new(),
+        execution_units_before_cancel: cancel_after_prompt_progress,
+        status_before_cancel: serving_status_name(before_cancel.status),
+        cache_lengths_before_cancel: before_cancel.cache_lengths,
+        scheduler_active_before_cancel: before_cancel.scheduler_active,
+        scheduler_waiting_before_cancel: before_cancel.scheduler_waiting,
+        allocated_blocks_before_cancel: before_cancel.allocator.allocated_blocks,
+        status_after_observation: serving_status_name(cancelling.status),
+        prompt_progress_after_observation: cancelling.prompt_tokens_processed,
+        generated_tokens_after_observation: cancelling.generated_tokens,
+        cache_lengths_after_observation: cancelling.cache_lengths,
+        scheduler_active_after_observation: cancelling.scheduler_active,
+        scheduler_waiting_after_observation: cancelling.scheduler_waiting,
+        allocated_blocks_after_observation: cancelling.allocator.allocated_blocks,
         release_outcome: release_outcome_name(release.outcome),
         reset_seconds,
     })
@@ -394,6 +700,35 @@ fn reusable_snapshot(
     Ok(snapshot)
 }
 
+fn serving_cases(options: &Options) -> Result<Vec<ServingCase>, String> {
+    if let Some(lengths) = &options.prompt_lengths {
+        return lengths
+            .iter()
+            .copied()
+            .map(|prompt_tokens| {
+                Ok(ServingCase {
+                    request_id: format!("serving-smoke-p{prompt_tokens:04}"),
+                    prompt_token_ids: (1..=prompt_tokens).collect(),
+                    max_new_tokens: options.max_new_tokens,
+                })
+            })
+            .collect();
+    }
+    let mut cases = vec![ServingCase {
+        request_id: "serving-smoke-1".to_string(),
+        prompt_token_ids: options.prompt_token_ids.clone(),
+        max_new_tokens: options.max_new_tokens,
+    }];
+    if let Some(prompt_token_ids) = &options.second_prompt_token_ids {
+        cases.push(ServingCase {
+            request_id: "serving-smoke-2".to_string(),
+            prompt_token_ids: prompt_token_ids.clone(),
+            max_new_tokens: options.second_max_new_tokens,
+        });
+    }
+    Ok(cases)
+}
+
 fn parse_options() -> Result<Options, String> {
     let mut artifact = None;
     let mut package = None;
@@ -401,8 +736,12 @@ fn parse_options() -> Result<Options, String> {
     let mut max_new_tokens = 1_usize;
     let mut second_prompt_token_ids = None;
     let mut second_max_new_tokens = 1_usize;
+    let mut prompt_lengths = None;
+    let mut prompt_token_ids_explicit = false;
     let mut cancel_after_first_token = false;
+    let mut cancel_after_prompt_progress = None;
     let mut oracle_capture_dir = None;
+    let mut result_json = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
         match argument.to_str() {
@@ -427,6 +766,7 @@ fn parse_options() -> Result<Options, String> {
                         .to_str()
                         .ok_or_else(|| "prompt token IDs must be UTF-8".to_string())?,
                 )?;
+                prompt_token_ids_explicit = true;
             }
             Some("--max-new-tokens") => {
                 let value = args
@@ -457,16 +797,52 @@ fn parse_options() -> Result<Options, String> {
                     .parse::<usize>()
                     .map_err(|err| format!("invalid second max-new-tokens: {err}"))?;
             }
+            Some("--prompt-lengths") => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--prompt-lengths requires a value".to_string())?;
+                prompt_lengths =
+                    Some(parse_prompt_lengths(value.to_str().ok_or_else(|| {
+                        "prompt lengths must be UTF-8".to_string()
+                    })?)?);
+            }
             Some("--cancel-after-first-token") => cancel_after_first_token = true,
+            Some("--cancel-after-prompt-progress") => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--cancel-after-prompt-progress requires a value".to_string())?;
+                cancel_after_prompt_progress = Some(
+                    value
+                        .to_str()
+                        .ok_or_else(|| "cancel progress must be UTF-8".to_string())?
+                        .parse::<usize>()
+                        .map_err(|err| format!("invalid cancel progress: {err}"))?,
+                );
+            }
             Some("--oracle-capture-dir") => {
                 oracle_capture_dir =
                     Some(PathBuf::from(args.next().ok_or_else(|| {
                         "--oracle-capture-dir requires a path".to_string()
                     })?));
             }
+            Some("--result-json") => {
+                result_json =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--result-json requires a path".to_string()
+                    })?));
+            }
             Some(value) => return Err(format!("unknown argument: {value}")),
             None => return Err("arguments must be UTF-8".into()),
         }
+    }
+    if prompt_lengths.is_some() && (prompt_token_ids_explicit || second_prompt_token_ids.is_some())
+    {
+        return Err(
+            "--prompt-lengths cannot be combined with explicit prompt token ID arguments".into(),
+        );
+    }
+    if cancel_after_first_token && cancel_after_prompt_progress.is_some() {
+        return Err("cancellation modes must be mutually exclusive".into());
     }
     Ok(Options {
         artifact: artifact.ok_or_else(|| "--artifact is required".to_string())?,
@@ -475,8 +851,11 @@ fn parse_options() -> Result<Options, String> {
         max_new_tokens,
         second_prompt_token_ids,
         second_max_new_tokens,
+        prompt_lengths,
         cancel_after_first_token,
+        cancel_after_prompt_progress,
         oracle_capture_dir,
+        result_json,
     })
 }
 
@@ -491,6 +870,28 @@ fn parse_token_ids(value: &str) -> Result<Vec<usize>, String> {
                 .map_err(|err| format!("invalid prompt token ID {part:?}: {err}"))
         })
         .collect()
+}
+
+fn parse_prompt_lengths(value: &str) -> Result<Vec<usize>, String> {
+    if value.is_empty() {
+        return Err("prompt lengths must not be empty".into());
+    }
+    let mut lengths = Vec::new();
+    for part in value.split(',') {
+        let length = part
+            .parse::<usize>()
+            .map_err(|err| format!("invalid prompt length {part:?}: {err}"))?;
+        if length == 0 || length > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS {
+            return Err(format!(
+                "prompt length must be in 1..={QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS}, got {length}"
+            ));
+        }
+        if lengths.contains(&length) {
+            return Err(format!("duplicate prompt length: {length}"));
+        }
+        lengths.push(length);
+    }
+    Ok(lengths)
 }
 
 fn isolated_gfx1201_device() -> Result<u32, String> {
