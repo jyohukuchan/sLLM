@@ -331,6 +331,7 @@ pub struct Qwen3Sq8StackRuntime {
     workspace: Qwen3Sq8LayerWorkspace,
     resident_hidden: RuntimeBuffer,
     state: Sq8StackResidentState,
+    last_execution_report: Option<Sq8StackExecutionReport>,
 }
 
 impl Qwen3Sq8StackRuntime {
@@ -396,6 +397,7 @@ impl Qwen3Sq8StackRuntime {
             workspace,
             resident_hidden,
             state: Sq8StackResidentState::NeedsInput,
+            last_execution_report: None,
         })
     }
 
@@ -419,10 +421,25 @@ impl Qwen3Sq8StackRuntime {
         self.state.poison_reason()
     }
 
+    pub fn last_execution_report(&self) -> Option<&Sq8StackExecutionReport> {
+        self.last_execution_report.as_ref()
+    }
+
     /// Returns the completed hidden state for crate-internal same-stream composition.
     pub(crate) fn resident_hidden_buffer(&self) -> Result<&RuntimeBuffer, String> {
         self.state.require_output_ready()?;
         Ok(&self.resident_hidden)
+    }
+
+    pub(crate) fn resident_optimized_output(
+        &self,
+    ) -> Result<(&RuntimeBuffer, &Sq8StackExecutionReport), String> {
+        self.state.require_output_ready()?;
+        let report = self.last_execution_report.as_ref().ok_or_else(|| {
+            "Qwen3-14B SQ8 stack completed output has no bound execution report".to_string()
+        })?;
+        report.validate_optimized_promotion()?;
+        Ok((&self.resident_hidden, report))
     }
 
     /// Reads the completed output and synchronizes before returning host ownership.
@@ -478,6 +495,7 @@ impl Qwen3Sq8StackRuntime {
         validate_host_input(input, self.config)?;
         let bytes = encode_f32_to_bytes(input);
         self.state.mark_needs_input()?;
+        self.last_execution_report = None;
         let copy_result = self
             .resident_hidden
             .copy_from_host(0, &bytes, Some(&mut *stream))
@@ -523,6 +541,7 @@ impl Qwen3Sq8StackRuntime {
                 "Qwen3-14B SQ8 stack host-input report validation failed: {err}"
             )));
         }
+        self.last_execution_report = Some(report.clone());
         Ok(report)
     }
 
@@ -553,6 +572,7 @@ impl Qwen3Sq8StackRuntime {
     ) -> Result<Sq8StackExecutionReport, String> {
         self.validate_execution_preconditions()?;
         self.state.mark_needs_input()?;
+        self.last_execution_report = None;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
 
         for layer_index in 0..QWEN3_14B_SQ8_STACK_LAYERS {
@@ -588,6 +608,7 @@ impl Qwen3Sq8StackRuntime {
             }
         };
         self.state.mark_output_ready()?;
+        self.last_execution_report = Some(report.clone());
         Ok(report)
     }
 
@@ -620,6 +641,7 @@ impl Qwen3Sq8StackRuntime {
         self.validate_execution_preconditions()?;
         let output_bytes = hidden_bytes(self.config)?;
         self.state.mark_needs_input()?;
+        self.last_execution_report = None;
         let mut layer_reports = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
         let mut layer_audits = Vec::with_capacity(QWEN3_14B_SQ8_STACK_LAYERS);
 
@@ -697,6 +719,7 @@ impl Qwen3Sq8StackRuntime {
             }
         };
         self.state.mark_output_ready()?;
+        self.last_execution_report = Some(report.clone());
         Ok(Sq8StackLayerwiseAudit { report, layers })
     }
 
@@ -775,6 +798,7 @@ impl Qwen3Sq8StackRuntime {
     }
 
     fn poison_with_error(&mut self, error: String) -> String {
+        self.last_execution_report = None;
         self.state.poison(error.clone());
         error
     }
