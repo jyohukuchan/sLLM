@@ -1,0 +1,51 @@
+{
+  "construction": {
+    "category": "english",
+    "type": "representative"
+  },
+  "expected": {
+    "prompt_tokens": 22,
+    "rendered_text": "<|im_start|>user\nExplain why deterministic fixtures matter in one sentence.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "rendered_text_sha256": "ced4e543cbbfa943252bee522ba764e7e82eea2deb283f5cf9e296f30775d07e",
+    "rendered_text_utf8_bytes": 127,
+    "token_ids": [
+      151644,
+      872,
+      198,
+      840,
+      20772,
+      3170,
+      72349,
+      37664,
+      4925,
+      304,
+      825,
+      11652,
+      13,
+      151645,
+      198,
+      151644,
+      77091,
+      198,
+      151667,
+      271,
+      151668,
+      271
+    ],
+    "token_ids_u32le_bytes": 88,
+    "token_ids_u32le_sha256": "6aa04a95cc1a8b1e093ae849ad58d95a9939913dc08171f625deeb29d2e55c9f"
+  },
+  "fixture_id": "english-user",
+  "kind": "representative",
+  "messages": [
+    {
+      "content": "Explain why deterministic fixtures matter in one sentence.",
+      "role": "user"
+    }
+  ],
+  "schema_version": "ullm.sq8.chat_template_fixture.v1",
+  "template_options": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  }
+}

@@ -30,14 +30,7 @@ PAYLOAD_MANIFEST_SCHEMA_VERSION = "ullm.sq8.serving_oracle_payload_manifest.v1"
 INPUT_MANIFEST_SHA256 = (
     "c5b502fe54a5f1563eaf48b8308d7f1d479d11afcbf4cb4a7567bb31b65b61af"
 )
-SERVING_FIXTURE_ROOT = (
-    Path(__file__).resolve().parents[1] / "tests/fixtures/sq8-serving-v0.1"
-)
-DEFAULT_FIXTURE = (
-    SERVING_FIXTURE_ROOT / "provenance/bootstrap-input-v0.1"
-    if (SERVING_FIXTURE_ROOT / "provenance/bootstrap-input-v0.1").is_dir()
-    else SERVING_FIXTURE_ROOT
-)
+DEFAULT_FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/sq8-serving-v0.1"
 DEFAULT_MODEL = Path(
     "/home/homelab1/datapool/ai_models/safetensors/Qwen/Qwen3-14B-FP8"
 )

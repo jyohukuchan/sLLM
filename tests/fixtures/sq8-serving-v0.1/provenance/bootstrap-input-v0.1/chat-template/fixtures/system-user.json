@@ -1,0 +1,63 @@
+{
+  "construction": {
+    "category": "system_user",
+    "type": "representative"
+  },
+  "expected": {
+    "prompt_tokens": 30,
+    "rendered_text": "<|im_start|>system\nAnswer concisely and accurately.<|im_end|>\n<|im_start|>user\nName the capital of Japan.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "rendered_text_sha256": "5834a80cda5bee6402bd43471455f6635a0c200a97ccf144f2c408f56adfdb8d",
+    "rendered_text_utf8_bytes": 157,
+    "token_ids": [
+      151644,
+      8948,
+      198,
+      16141,
+      3529,
+      285,
+      974,
+      323,
+      29257,
+      13,
+      151645,
+      198,
+      151644,
+      872,
+      198,
+      675,
+      279,
+      6722,
+      315,
+      6323,
+      13,
+      151645,
+      198,
+      151644,
+      77091,
+      198,
+      151667,
+      271,
+      151668,
+      271
+    ],
+    "token_ids_u32le_bytes": 120,
+    "token_ids_u32le_sha256": "053f9d8418b616ae2d707bf39b1fd69efbd24854aabb70b1b033925744336381"
+  },
+  "fixture_id": "system-user",
+  "kind": "representative",
+  "messages": [
+    {
+      "content": "Answer concisely and accurately.",
+      "role": "system"
+    },
+    {
+      "content": "Name the capital of Japan.",
+      "role": "user"
+    }
+  ],
+  "schema_version": "ullm.sq8.chat_template_fixture.v1",
+  "template_options": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  }
+}

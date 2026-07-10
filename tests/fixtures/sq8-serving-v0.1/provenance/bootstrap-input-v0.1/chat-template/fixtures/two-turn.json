@@ -1,0 +1,73 @@
+{
+  "construction": {
+    "category": "two_turn",
+    "type": "representative"
+  },
+  "expected": {
+    "prompt_tokens": 36,
+    "rendered_text": "<|im_start|>user\nWhat is two plus two?<|im_end|>\n<|im_start|>assistant\nFour.<|im_end|>\n<|im_start|>user\nMultiply that result by three.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "rendered_text_sha256": "8b718ab38b94b81e877edce0f194fdfc83e608f7f759f8d59bd83e14caa86d63",
+    "rendered_text_utf8_bytes": 186,
+    "token_ids": [
+      151644,
+      872,
+      198,
+      3838,
+      374,
+      1378,
+      5519,
+      1378,
+      30,
+      151645,
+      198,
+      151644,
+      77091,
+      198,
+      26972,
+      13,
+      151645,
+      198,
+      151644,
+      872,
+      198,
+      95155,
+      429,
+      1102,
+      553,
+      2326,
+      13,
+      151645,
+      198,
+      151644,
+      77091,
+      198,
+      151667,
+      271,
+      151668,
+      271
+    ],
+    "token_ids_u32le_bytes": 144,
+    "token_ids_u32le_sha256": "06f30d31ffa4c12941b600c2d7e5de06b92bf96d9c2d77ca11cae22b0744e3a5"
+  },
+  "fixture_id": "two-turn",
+  "kind": "representative",
+  "messages": [
+    {
+      "content": "What is two plus two?",
+      "role": "user"
+    },
+    {
+      "content": "Four.",
+      "role": "assistant"
+    },
+    {
+      "content": "Multiply that result by three.",
+      "role": "user"
+    }
+  ],
+  "schema_version": "ullm.sq8.chat_template_fixture.v1",
+  "template_options": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  }
+}

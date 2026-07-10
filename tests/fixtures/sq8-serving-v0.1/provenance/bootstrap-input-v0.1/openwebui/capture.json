@@ -1,0 +1,30 @@
+{
+  "endpoint": "/api/chat/completions",
+  "evidence_scope": "forwarded_request_bodies_only",
+  "identity": {
+    "image_digest": "sha256:a6da0c292081d810a396ce786a10536d0b1b9ba2925dcca20ebb03f9fa90dbff",
+    "product": "OpenWebUI",
+    "source_revision": "f51d2b026f1b0e7283b15f093412be8b67d24770",
+    "version": "v0.9.4"
+  },
+  "observed_transformations": {
+    "max_completion_tokens_forwarded_as": "max_tokens",
+    "metadata_stripped_before_upstream": true
+  },
+  "request_files": {
+    "nonstream": "openwebui/nonstream-request.json",
+    "stream": "openwebui/stream-request.json"
+  },
+  "sanitization": {
+    "authorization_included": false,
+    "cookies_included": false,
+    "secrets_included": false
+  },
+  "schema_version": "ullm.openwebui.interop_capture.v1",
+  "status": "captured_sanitized",
+  "trust": {
+    "captured_via_actual_proxy": true,
+    "response_payload_captured": false,
+    "sq8_numeric_oracle": false
+  }
+}

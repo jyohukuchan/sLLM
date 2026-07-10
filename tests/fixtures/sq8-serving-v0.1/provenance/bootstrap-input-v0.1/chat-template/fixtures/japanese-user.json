@@ -1,0 +1,58 @@
+{
+  "construction": {
+    "category": "japanese",
+    "type": "representative"
+  },
+  "expected": {
+    "prompt_tokens": 29,
+    "rendered_text": "<|im_start|>user\n\u6c7a\u5b9a\u7684\u306a\u30c6\u30b9\u30c8\u7528\u30c7\u30fc\u30bf\u304c\u5fc5\u8981\u306a\u7406\u7531\u3092\u4e00\u6587\u3067\u8aac\u660e\u3057\u3066\u304f\u3060\u3055\u3044\u3002<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "rendered_text_sha256": "4fb1fe5046897d4f16e9f592f56d2cdddfc5c55db8497919551700d01cbe8c21",
+    "rendered_text_utf8_bytes": 159,
+    "token_ids": [
+      151644,
+      872,
+      198,
+      109350,
+      128545,
+      140592,
+      11622,
+      131552,
+      131128,
+      25770,
+      102401,
+      29412,
+      14777,
+      16744,
+      16161,
+      44818,
+      105,
+      30858,
+      134093,
+      1773,
+      151645,
+      198,
+      151644,
+      77091,
+      198,
+      151667,
+      271,
+      151668,
+      271
+    ],
+    "token_ids_u32le_bytes": 116,
+    "token_ids_u32le_sha256": "1adc2c7f4dc97a0da1228be2a58228d2c27d71e43ad68f07a431cfed2bffd406"
+  },
+  "fixture_id": "japanese-user",
+  "kind": "representative",
+  "messages": [
+    {
+      "content": "\u6c7a\u5b9a\u7684\u306a\u30c6\u30b9\u30c8\u7528\u30c7\u30fc\u30bf\u304c\u5fc5\u8981\u306a\u7406\u7531\u3092\u4e00\u6587\u3067\u8aac\u660e\u3057\u3066\u304f\u3060\u3055\u3044\u3002",
+      "role": "user"
+    }
+  ],
+  "schema_version": "ullm.sq8.chat_template_fixture.v1",
+  "template_options": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  }
+}

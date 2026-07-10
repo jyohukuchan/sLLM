@@ -1,0 +1,160 @@
+{
+  "exact_length_contract": {
+    "base_prompt_tokens": 12,
+    "content_rule": "' x' * repeat",
+    "message_shape": "single user",
+    "target_prompt_tokens": [
+      32,
+      128,
+      512,
+      2048,
+      3584
+    ]
+  },
+  "fixture_files": [
+    {
+      "bytes": 1333,
+      "file": "fixtures/exact-p0032.json",
+      "fixture_id": "exact-p0032",
+      "kind": "exact_length",
+      "prompt_tokens": 32,
+      "sha256": "c660c7fb3c25d2a3e25693e2beb2abc10295a06935772d17d23cedab04f24c07"
+    },
+    {
+      "bytes": 2776,
+      "file": "fixtures/exact-p0128.json",
+      "fixture_id": "exact-p0128",
+      "kind": "exact_length",
+      "prompt_tokens": 128,
+      "sha256": "f8fe81bacb8761f3aa10cce1c333a51f9a85d65b5bfc7b02499886fb9f550a37"
+    },
+    {
+      "bytes": 8538,
+      "file": "fixtures/exact-p0512.json",
+      "fixture_id": "exact-p0512",
+      "kind": "exact_length",
+      "prompt_tokens": 512,
+      "sha256": "e2f53c514a228e9e10871fc0df1867394aae12416215c9716770d2b420a3480f"
+    },
+    {
+      "bytes": 31581,
+      "file": "fixtures/exact-p2048.json",
+      "fixture_id": "exact-p2048",
+      "kind": "exact_length",
+      "prompt_tokens": 2048,
+      "sha256": "cd04c3339542f07731074ac0e00740a83061e620f6caff9c2a7e5316df1ccdcf"
+    },
+    {
+      "bytes": 54622,
+      "file": "fixtures/exact-p3584.json",
+      "fixture_id": "exact-p3584",
+      "kind": "exact_length",
+      "prompt_tokens": 3584,
+      "sha256": "e3cd6c722302f73d688492b73a182298f34cc0a1498def209c262e5e9aa92912"
+    },
+    {
+      "bytes": 1188,
+      "file": "fixtures/english-user.json",
+      "fixture_id": "english-user",
+      "kind": "representative",
+      "prompt_tokens": 22,
+      "sha256": "5284fec176ef1654b9d386468107fca6ae042b42fc613ba4c1fc221048a6129e"
+    },
+    {
+      "bytes": 1541,
+      "file": "fixtures/japanese-user.json",
+      "fixture_id": "japanese-user",
+      "kind": "representative",
+      "prompt_tokens": 29,
+      "sha256": "d6cb16ec18ff653ee43f044d8348026e658b2c83da2958687d7f9daf738225e8"
+    },
+    {
+      "bytes": 1372,
+      "file": "fixtures/system-user.json",
+      "fixture_id": "system-user",
+      "kind": "representative",
+      "prompt_tokens": 30,
+      "sha256": "bc03d37cdf15dfe5446857c9e722222eff8142f69b439ce6fdc15f830aa61639"
+    },
+    {
+      "bytes": 1528,
+      "file": "fixtures/two-turn.json",
+      "fixture_id": "two-turn",
+      "kind": "representative",
+      "prompt_tokens": 36,
+      "sha256": "70a98ac22388f9d5a208e406dbc63ec50122a8c886df2a13666cfad6d4bf537e"
+    },
+    {
+      "bytes": 1303,
+      "file": "fixtures/code-block.json",
+      "fixture_id": "code-block",
+      "kind": "representative",
+      "prompt_tokens": 30,
+      "sha256": "721ae5e98daa1d6d65a772aabf205b71d55ca7f76dd08933d5dccfe14320b61f"
+    }
+  ],
+  "fixture_set_id": "qwen3-14b-fp8-sq8-chat-template-v0.1",
+  "model": {
+    "config": {
+      "bytes": 896,
+      "file": "config.json",
+      "sha256": "c5d7d0e8ee42088bd535101d13c71d38c20b5c2afd46ee8fdfba351956233793"
+    },
+    "id": "Qwen/Qwen3-14B-FP8",
+    "model_type": "qwen3",
+    "revision": "9a283b4a5efbc09ce247e0ae5b02b744739e525a"
+  },
+  "schema_version": "ullm.sq8.chat_template_fixtures.v1",
+  "template_options": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  },
+  "tokenizer": {
+    "chat_template": {
+      "sha256": "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
+      "utf8_bytes": 4168
+    },
+    "class": "Qwen2Tokenizer",
+    "files": [
+      {
+        "bytes": 11422654,
+        "file": "tokenizer.json",
+        "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+      },
+      {
+        "bytes": 9732,
+        "file": "tokenizer_config.json",
+        "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+      },
+      {
+        "bytes": 2776833,
+        "file": "vocab.json",
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      },
+      {
+        "bytes": 1671853,
+        "file": "merges.txt",
+        "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+      },
+      {
+        "bytes": 240,
+        "file": "generation_config.json",
+        "sha256": "231c22c0b89ffbbb785d0e68b2f3f922244f263487af79f6542fc82dbee37dbf"
+      }
+    ],
+    "loader": {
+      "local_files_only": true,
+      "trust_remote_code": false
+    },
+    "revision": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+    "revision_evidence": {
+      "config.json": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+      "generation_config.json": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+      "merges.txt": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+      "tokenizer.json": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+      "tokenizer_config.json": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+      "vocab.json": "9a283b4a5efbc09ce247e0ae5b02b744739e525a"
+    },
+    "transformers_version": "5.12.1"
+  }
+}

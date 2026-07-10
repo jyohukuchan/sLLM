@@ -1,0 +1,64 @@
+{
+  "construction": {
+    "base_prompt_tokens": 12,
+    "repeat": 20,
+    "target_prompt_tokens": 32,
+    "type": "single_user_repeated_unit",
+    "unit": " x"
+  },
+  "expected": {
+    "prompt_tokens": 32,
+    "rendered_text": "<|im_start|>user\n x x x x x x x x x x x x x x x x x x x x<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "rendered_text_sha256": "e59aa4513272d7bbf954994d5c812f27ec26853bee333e2001741ac1789546a2",
+    "rendered_text_utf8_bytes": 109,
+    "token_ids": [
+      151644,
+      872,
+      198,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      856,
+      151645,
+      198,
+      151644,
+      77091,
+      198,
+      151667,
+      271,
+      151668,
+      271
+    ],
+    "token_ids_u32le_bytes": 128,
+    "token_ids_u32le_sha256": "a15cca246ca30d80d5f8f4fa7af05bea4ab9f0dfeff22ec14067cd38ebb1d199"
+  },
+  "fixture_id": "exact-p0032",
+  "kind": "exact_length",
+  "messages": [
+    {
+      "content": " x x x x x x x x x x x x x x x x x x x x",
+      "role": "user"
+    }
+  ],
+  "schema_version": "ullm.sq8.chat_template_fixture.v1",
+  "template_options": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  }
+}

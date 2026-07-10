@@ -18,7 +18,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPORTER = REPO_ROOT / "tools" / "export-sq8-serving-vllm-oracles.py"
 VALIDATOR = REPO_ROOT / "tools" / "validate-sq8-serving-vllm-oracles.py"
 SERVING_FIXTURE_VALIDATOR = REPO_ROOT / "tools" / "validate-sq8-serving-fixtures.py"
-INPUT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "sq8-serving-v0.1"
+SERVING_FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "sq8-serving-v0.1"
+INPUT_FIXTURE = (
+    SERVING_FIXTURE_ROOT / "provenance/bootstrap-input-v0.1"
+    if (SERVING_FIXTURE_ROOT / "provenance/bootstrap-input-v0.1").is_dir()
+    else SERVING_FIXTURE_ROOT
+)
 
 
 def load_module(name: str, path: Path):

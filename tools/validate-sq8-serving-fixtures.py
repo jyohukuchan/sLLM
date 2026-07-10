@@ -10,6 +10,7 @@ import math
 import re
 import stat
 import struct
+import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -19,7 +20,23 @@ SCHEMA_VERSION = "ullm.sq8.serving_fixtures.v1"
 ORACLE_PLACEHOLDER_SCHEMA_VERSION = "ullm.sq8.serving_oracle_placeholder.v1"
 REAL_ORACLE_SCHEMA_VERSION = "ullm.sq8.serving_oracle.v1"
 OPENWEBUI_CAPTURE_SCHEMA_VERSION = "ullm.openwebui.interop_capture.v1"
-TRUSTED_MANIFEST_SHA256 = "c5b502fe54a5f1563eaf48b8308d7f1d479d11afcbf4cb4a7567bb31b65b61af"
+TRUSTED_PENDING_MANIFEST_SHA256 = (
+    "c5b502fe54a5f1563eaf48b8308d7f1d479d11afcbf4cb4a7567bb31b65b61af"
+)
+# Historical pending manifests name this location; retain the alias byte-for-byte.
+TRUSTED_MANIFEST_SHA256 = TRUSTED_PENDING_MANIFEST_SHA256
+TRUSTED_COMPLETED_MANIFEST_SHA256 = (
+    "3b6362fd472debbbfb30fb5616325703dd52e90e82319280490a0d84fcd6bf83"
+)
+TRUSTED_BOOTSTRAP_MANIFEST_SHA256 = TRUSTED_PENDING_MANIFEST_SHA256
+TRUSTED_REAL_ORACLE_METADATA_SHA256 = (
+    "1710ebf504c3cf84616f265f57575d48b91804635a0c0151875eadc91fbc122b"
+)
+TRUSTED_REAL_ORACLE_PAYLOAD_MANIFEST_SHA256 = (
+    "5972a024c91509b432e68ee39a3dd1cf7a0f0ba2ba48fe7ef5c0bfb02957405c"
+)
+BOOTSTRAP_PROVENANCE_DIR = "provenance/bootstrap-input-v0.1"
+REAL_ORACLE_DIR = "oracles/vllm-source-v0.1"
 PROMPT_LENGTHS = (1, 8, 32, 128, 512, 4095)
 CHAT_PROMPT_LENGTHS = (32, 128, 512, 2048, 3584)
 CHAT_TEMPLATE_MANIFEST_SHA256 = (
@@ -416,6 +433,43 @@ def safe_file(root: Path, raw: Any, label: str) -> Path:
     return path
 
 
+def safe_directory(root: Path, raw: Any, label: str) -> Path:
+    if not isinstance(raw, str) or not raw:
+        fail(f"{label} must be a non-empty relative path")
+    pure = PurePosixPath(raw)
+    if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts):
+        fail(f"{label} is unsafe: {raw!r}")
+    path = root.joinpath(*pure.parts)
+    try:
+        info = path.lstat()
+    except OSError as error:
+        fail(f"missing fixture directory {raw}: {error}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        fail(f"fixture directory must be a regular non-symlink directory: {raw}")
+    try:
+        path.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError):
+        fail(f"fixture directory escapes root: {raw}")
+    return path
+
+
+def tree_members(root: Path) -> tuple[set[str], set[str]]:
+    files: set[str] = set()
+    directories: set[str] = set()
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            fail(f"fixture tree contains a symlink: {relative}")
+        if stat.S_ISDIR(info.st_mode):
+            directories.add(relative)
+        elif stat.S_ISREG(info.st_mode):
+            files.add(relative)
+        else:
+            fail(f"fixture tree contains a non-regular entry: {relative}")
+    return files, directories
+
+
 def feasible_generation_case_ids(prompt_length: int) -> list[str]:
     return [
         case["case_id"]
@@ -577,6 +631,34 @@ def validate_chat_template_manifest(root: Path) -> None:
     fixture_files = manifest["fixture_files"]
     if not isinstance(fixture_files, list) or len(fixture_files) != 10:
         fail("chat_template_manifest.fixture_files must contain exactly 10 fixtures")
+    actual_paths: set[str] = set()
+    for index, raw_record in enumerate(fixture_files):
+        label = f"chat_template_manifest.fixture_files[{index}]"
+        record = exact_keys(
+            raw_record,
+            {"fixture_id", "kind", "file", "prompt_tokens", "bytes", "sha256"},
+            label,
+        )
+        relative = record["file"]
+        if not isinstance(relative, str):
+            fail(f"{label}.file must be a string")
+        fixture_path = safe_file(root, f"chat-template/{relative}", f"{label}.file")
+        if relative in actual_paths:
+            fail(f"{label}.file is duplicated")
+        actual_paths.add(relative)
+        if integer(record["bytes"], f"{label}.bytes") != fixture_path.stat().st_size:
+            fail(f"{label}.bytes differs from the fixture")
+        if sha256_value(record["sha256"], f"{label}.sha256") != sha256_file(
+            fixture_path
+        ):
+            fail(f"{label}.sha256 differs from the fixture")
+    expected_paths = {
+        path.removeprefix("chat-template/")
+        for path in CHAT_TEMPLATE_FILES
+        if path != "chat-template/manifest.json"
+    }
+    if actual_paths != expected_paths:
+        fail("chat_template_manifest fixture paths differ from the fixed set")
 
 
 def validate_prompt_payload(path: Path, prompt: dict[str, Any], label: str) -> None:
@@ -599,18 +681,16 @@ def validate_prompt_payload(path: Path, prompt: dict[str, Any], label: str) -> N
         fail(f"{label} SHA-256 does not match payload")
 
 
-def validate_artifacts(root: Path, manifest: dict[str, Any]) -> set[str]:
+def validate_artifacts(
+    root: Path,
+    manifest: dict[str, Any],
+    expected_paths: set[str],
+    *,
+    completed: bool,
+) -> set[str]:
     records = manifest["artifact_files_excluding_manifest_and_sums"]
     if not isinstance(records, list):
         fail("artifact file manifest must be a list")
-    expected_paths = {
-        *(f"raw/prompt-{length:04d}.u32le" for length in PROMPT_LENGTHS),
-        *(f"oracles/raw-p{length:04d}.pending.json" for length in PROMPT_LENGTHS),
-        *CHAT_TEMPLATE_FILES,
-        "openwebui/capture.json",
-        "openwebui/nonstream-request.json",
-        "openwebui/stream-request.json",
-    }
     actual_paths = []
     for index, raw_record in enumerate(records):
         label = f"artifact_files_excluding_manifest_and_sums[{index}]"
@@ -625,6 +705,11 @@ def validate_artifacts(root: Path, manifest: dict[str, Any]) -> set[str]:
         expected_kind = (
             "raw_prompt"
             if record["file"].startswith("raw/")
+            else "bootstrap_provenance"
+            if completed
+            and record["file"].startswith(f"{BOOTSTRAP_PROVENANCE_DIR}/")
+            else "real_vllm_oracle"
+            if completed and record["file"].startswith(f"{REAL_ORACLE_DIR}/")
             else "oracle_placeholder"
             if record["file"].startswith("oracles/")
             else "openwebui_capture_metadata"
@@ -643,28 +728,13 @@ def validate_artifacts(root: Path, manifest: dict[str, Any]) -> set[str]:
     return expected_paths
 
 
-def validate_tree(root: Path, artifact_paths: set[str]) -> None:
+def validate_tree(
+    root: Path,
+    artifact_paths: set[str],
+    expected_directories: set[str],
+) -> None:
     expected_files = artifact_paths | {"manifest.json", "SHA256SUMS"}
-    actual_files: set[str] = set()
-    expected_directories = {
-        "raw",
-        "oracles",
-        "openwebui",
-        "chat-template",
-        "chat-template/fixtures",
-    }
-    actual_directories: set[str] = set()
-    for path in root.rglob("*"):
-        relative = path.relative_to(root).as_posix()
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode):
-            fail(f"fixture tree contains a symlink: {relative}")
-        if stat.S_ISDIR(info.st_mode):
-            actual_directories.add(relative)
-        elif stat.S_ISREG(info.st_mode):
-            actual_files.add(relative)
-        else:
-            fail(f"fixture tree contains a non-regular entry: {relative}")
+    actual_files, actual_directories = tree_members(root)
     if actual_directories != expected_directories:
         fail("fixture directory set differs from the frozen serving fixture tree")
     if actual_files != expected_files:
@@ -697,17 +767,88 @@ def validate_sums(root: Path, expected_files: set[str]) -> None:
         fail("SHA256SUMS paths are not the exact sorted fixture file set")
 
 
-def validate(root: Path, contract_only: bool = False) -> dict[str, Any]:
-    root = validate_root(root)
-    manifest_path = safe_file(root, "manifest.json", "manifest")
-    manifest_sha256 = sha256_file(manifest_path)
-    trusted = not contract_only
-    if trusted and manifest_sha256 != TRUSTED_MANIFEST_SHA256:
-        fail(
-            "manifest SHA-256 does not match the promotion trust anchor; "
-            "use --contract-only only for an untrusted structural check"
-        )
-    manifest = load_json(manifest_path, "manifest.json")
+def validate_common_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    exact_value(manifest["source_identity"], EXPECTED_SOURCE_IDENTITY, "source_identity")
+    exact_value(
+        manifest["tokenizer_identity"],
+        EXPECTED_TOKENIZER_IDENTITY,
+        "tokenizer_identity",
+    )
+    exact_value(manifest["vllm_identity"], EXPECTED_VLLM_IDENTITY, "vllm_identity")
+    exact_value(
+        manifest["product_contract"],
+        EXPECTED_PRODUCT_CONTRACT,
+        "product_contract",
+    )
+    exact_value(
+        manifest["comparison_contract"],
+        EXPECTED_COMPARISON_CONTRACT,
+        "comparison_contract",
+    )
+    exact_value(
+        manifest["generation_cases"],
+        EXPECTED_GENERATION_CASES,
+        "generation_cases",
+    )
+    expected_prompts = [expected_prompt(length) for length in PROMPT_LENGTHS]
+    exact_value(manifest["raw_prompts"], expected_prompts, "raw_prompts")
+    exact_value(
+        manifest["chat_template_fixture"],
+        expected_chat_template_record(),
+        "chat_template_fixture",
+    )
+    exact_value(
+        manifest["openwebui_interop_capture"],
+        {
+            "status": "captured_sanitized",
+            "capture_file": "openwebui/capture.json",
+            "stream_request_file": "openwebui/stream-request.json",
+            "nonstream_request_file": "openwebui/nonstream-request.json",
+        },
+        "openwebui_interop_capture",
+    )
+    return expected_prompts
+
+
+def validate_active_contract_files(
+    root: Path,
+    expected_prompts: list[dict[str, Any]],
+) -> None:
+    for prompt in expected_prompts:
+        prompt_path = safe_file(root, prompt["token_file"], prompt["prompt_id"])
+        validate_prompt_payload(prompt_path, prompt, prompt["prompt_id"])
+    validate_chat_template_manifest(root)
+    exact_value(
+        load_json(
+            safe_file(root, "openwebui/capture.json", "OpenWebUI capture"),
+            "openwebui/capture.json",
+        ),
+        EXPECTED_OPENWEBUI_CAPTURE,
+        "openwebui_capture_payload",
+    )
+    exact_value(
+        load_json(
+            safe_file(root, "openwebui/stream-request.json", "OpenWebUI stream request"),
+            "openwebui/stream-request.json",
+        ),
+        EXPECTED_OPENWEBUI_STREAM_REQUEST,
+        "openwebui_stream_request",
+    )
+    exact_value(
+        load_json(
+            safe_file(
+                root,
+                "openwebui/nonstream-request.json",
+                "OpenWebUI non-stream request",
+            ),
+            "openwebui/nonstream-request.json",
+        ),
+        EXPECTED_OPENWEBUI_NONSTREAM_REQUEST,
+        "openwebui_nonstream_request",
+    )
+
+
+def validate_pending_manifest(root: Path, manifest: dict[str, Any]) -> None:
     exact_keys(
         manifest,
         {
@@ -740,30 +881,7 @@ def validate(root: Path, contract_only: bool = False) -> dict[str, Any]:
         "input_contract_ready_oracles_pending",
         "status",
     )
-    exact_value(manifest["source_identity"], EXPECTED_SOURCE_IDENTITY, "source_identity")
-    exact_value(
-        manifest["tokenizer_identity"],
-        EXPECTED_TOKENIZER_IDENTITY,
-        "tokenizer_identity",
-    )
-    exact_value(manifest["vllm_identity"], EXPECTED_VLLM_IDENTITY, "vllm_identity")
-    exact_value(
-        manifest["product_contract"],
-        EXPECTED_PRODUCT_CONTRACT,
-        "product_contract",
-    )
-    exact_value(
-        manifest["comparison_contract"],
-        EXPECTED_COMPARISON_CONTRACT,
-        "comparison_contract",
-    )
-    exact_value(
-        manifest["generation_cases"],
-        EXPECTED_GENERATION_CASES,
-        "generation_cases",
-    )
-    expected_prompts = [expected_prompt(length) for length in PROMPT_LENGTHS]
-    exact_value(manifest["raw_prompts"], expected_prompts, "raw_prompts")
+    expected_prompts = validate_common_manifest(manifest)
     expected_oracle_records = [
         {
             "oracle_id": f"vllm-{prompt['prompt_id']}",
@@ -779,21 +897,6 @@ def validate(root: Path, contract_only: bool = False) -> dict[str, Any]:
         "oracle_placeholders",
     )
     exact_value(
-        manifest["chat_template_fixture"],
-        expected_chat_template_record(),
-        "chat_template_fixture",
-    )
-    exact_value(
-        manifest["openwebui_interop_capture"],
-        {
-            "status": "captured_sanitized",
-            "capture_file": "openwebui/capture.json",
-            "stream_request_file": "openwebui/stream-request.json",
-            "nonstream_request_file": "openwebui/nonstream-request.json",
-        },
-        "openwebui_interop_capture",
-    )
-    exact_value(
         manifest["trust"],
         {
             "fixture_kind": "contract_and_pending_oracle_manifest",
@@ -807,13 +910,25 @@ def validate(root: Path, contract_only: bool = False) -> dict[str, Any]:
         "trust",
     )
 
-    artifact_paths = validate_artifacts(root, manifest)
-    validate_tree(root, artifact_paths)
+    expected_paths = {
+        *(f"raw/prompt-{length:04d}.u32le" for length in PROMPT_LENGTHS),
+        *(f"oracles/raw-p{length:04d}.pending.json" for length in PROMPT_LENGTHS),
+        *CHAT_TEMPLATE_FILES,
+        "openwebui/capture.json",
+        "openwebui/nonstream-request.json",
+        "openwebui/stream-request.json",
+    }
+    artifact_paths = validate_artifacts(
+        root, manifest, expected_paths, completed=False
+    )
+    validate_tree(
+        root,
+        artifact_paths,
+        {"raw", "oracles", "openwebui", "chat-template", "chat-template/fixtures"},
+    )
     for prompt, oracle_record in zip(
         expected_prompts, expected_oracle_records, strict=True
     ):
-        prompt_path = safe_file(root, prompt["token_file"], prompt["prompt_id"])
-        validate_prompt_payload(prompt_path, prompt, prompt["prompt_id"])
         placeholder_path = safe_file(
             root, oracle_record["placeholder_file"], oracle_record["oracle_id"]
         )
@@ -823,44 +938,230 @@ def validate(root: Path, contract_only: bool = False) -> dict[str, Any]:
             expected_oracle_placeholder(prompt),
             oracle_record["oracle_id"],
         )
-    validate_chat_template_manifest(root)
-    exact_value(
-        load_json(
-            safe_file(root, "openwebui/capture.json", "OpenWebUI capture"),
-            "openwebui/capture.json",
-        ),
-        EXPECTED_OPENWEBUI_CAPTURE,
-        "openwebui_capture_payload",
-    )
-    exact_value(
-        load_json(
-            safe_file(
-                root,
-                "openwebui/stream-request.json",
-                "OpenWebUI stream request",
-            ),
-            "openwebui/stream-request.json",
-        ),
-        EXPECTED_OPENWEBUI_STREAM_REQUEST,
-        "openwebui_stream_request",
-    )
-    exact_value(
-        load_json(
-            safe_file(
-                root,
-                "openwebui/nonstream-request.json",
-                "OpenWebUI non-stream request",
-            ),
-            "openwebui/nonstream-request.json",
-        ),
-        EXPECTED_OPENWEBUI_NONSTREAM_REQUEST,
-        "openwebui_nonstream_request",
-    )
+    validate_active_contract_files(root, expected_prompts)
     validate_sums(root, artifact_paths)
+
+
+def prefixed_members(root: Path, prefix: str) -> tuple[set[str], set[str]]:
+    files, directories = tree_members(root)
+    return (
+        {f"{prefix}/{relative}" for relative in files},
+        {f"{prefix}/{relative}" for relative in directories},
+    )
+
+
+def validate_real_oracle(root: Path) -> tuple[set[str], set[str]]:
+    metadata = safe_file(root, "metadata.json", "real oracle metadata")
+    payload = safe_file(root, "payload-manifest.json", "real oracle payload manifest")
+    if sha256_file(metadata) != TRUSTED_REAL_ORACLE_METADATA_SHA256:
+        fail("real oracle metadata differs from its external trust anchor")
+    if sha256_file(payload) != TRUSTED_REAL_ORACLE_PAYLOAD_MANIFEST_SHA256:
+        fail("real oracle payload manifest differs from its external trust anchor")
+    validator = Path(__file__).resolve().with_name(
+        "validate-sq8-serving-vllm-oracles.py"
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(validator),
+            "--anchor-sha256",
+            TRUSTED_REAL_ORACLE_METADATA_SHA256,
+            str(root),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        fail(f"independent real oracle validation failed: {detail}")
+    return tree_members(root)
+
+
+def validate_completed_manifest(root: Path, manifest: dict[str, Any]) -> None:
+    exact_keys(
+        manifest,
+        {
+            "schema_version",
+            "fixture_set_id",
+            "status",
+            "source_identity",
+            "tokenizer_identity",
+            "vllm_identity",
+            "product_contract",
+            "comparison_contract",
+            "generation_cases",
+            "raw_prompts",
+            "bootstrap_input",
+            "real_oracle_capture",
+            "chat_template_fixture",
+            "openwebui_interop_capture",
+            "artifact_files_excluding_manifest_and_sums",
+            "trust",
+        },
+        "manifest",
+    )
+    exact_value(manifest["schema_version"], SCHEMA_VERSION, "schema_version")
+    exact_value(
+        manifest["fixture_set_id"],
+        "qwen3-14b-fp8-sq8-serving-v0.1",
+        "fixture_set_id",
+    )
+    exact_value(
+        manifest["status"],
+        "input_contract_ready_real_oracles_complete",
+        "status",
+    )
+    expected_prompts = validate_common_manifest(manifest)
+    exact_value(
+        manifest["bootstrap_input"],
+        {
+            "status": "preserved_pending_source_contract",
+            "directory": BOOTSTRAP_PROVENANCE_DIR,
+            "manifest_file": f"{BOOTSTRAP_PROVENANCE_DIR}/manifest.json",
+            "manifest_sha256": TRUSTED_BOOTSTRAP_MANIFEST_SHA256,
+            "validator": "tools/validate-sq8-serving-fixtures.py",
+        },
+        "bootstrap_input",
+    )
+    exact_value(
+        manifest["real_oracle_capture"],
+        {
+            "status": "captured_real_vllm",
+            "schema_version": REAL_ORACLE_SCHEMA_VERSION,
+            "directory": REAL_ORACLE_DIR,
+            "metadata_file": f"{REAL_ORACLE_DIR}/metadata.json",
+            "metadata_sha256": TRUSTED_REAL_ORACLE_METADATA_SHA256,
+            "payload_manifest_file": f"{REAL_ORACLE_DIR}/payload-manifest.json",
+            "payload_manifest_sha256": (
+                TRUSTED_REAL_ORACLE_PAYLOAD_MANIFEST_SHA256
+            ),
+            "source_bootstrap_manifest_sha256": (
+                TRUSTED_BOOTSTRAP_MANIFEST_SHA256
+            ),
+            "prompt_count": len(PROMPT_LENGTHS),
+            "run_count": 21,
+            "validator": "tools/validate-sq8-serving-vllm-oracles.py",
+        },
+        "real_oracle_capture",
+    )
+    exact_value(
+        manifest["trust"],
+        {
+            "fixture_kind": "contract_and_real_oracle_manifest",
+            "promotion_eligible": True,
+            "synthetic_oracle_values_forbidden": True,
+            "required_real_oracle_schema_version": REAL_ORACLE_SCHEMA_VERSION,
+            "trusted_pending_manifest_anchor_location": (
+                "tools/validate-sq8-serving-fixtures.py:"
+                "TRUSTED_PENDING_MANIFEST_SHA256"
+            ),
+            "trusted_real_oracle_anchor_location": (
+                "tools/validate-sq8-serving-fixtures.py:"
+                "TRUSTED_REAL_ORACLE_METADATA_SHA256,"
+                "TRUSTED_REAL_ORACLE_PAYLOAD_MANIFEST_SHA256"
+            ),
+            "trusted_completed_manifest_anchor_location": (
+                "tools/validate-sq8-serving-fixtures.py:"
+                "TRUSTED_COMPLETED_MANIFEST_SHA256"
+            ),
+        },
+        "trust",
+    )
+
+    bootstrap_root = safe_directory(
+        root, BOOTSTRAP_PROVENANCE_DIR, "bootstrap_input.directory"
+    )
+    bootstrap_summary = validate(bootstrap_root, contract_only=False)
+    if (
+        bootstrap_summary["oracle_status"] != "pending"
+        or bootstrap_summary["trusted"] is not True
+        or bootstrap_summary["manifest_sha256"]
+        != TRUSTED_BOOTSTRAP_MANIFEST_SHA256
+    ):
+        fail("nested bootstrap fixture did not pass trusted pending validation")
+    oracle_root = safe_directory(root, REAL_ORACLE_DIR, "real_oracle_capture.directory")
+    oracle_files, oracle_directories = validate_real_oracle(oracle_root)
+    bootstrap_files, bootstrap_directories = prefixed_members(
+        bootstrap_root, BOOTSTRAP_PROVENANCE_DIR
+    )
+    prefixed_oracle_files = {
+        f"{REAL_ORACLE_DIR}/{relative}" for relative in oracle_files
+    }
+    prefixed_oracle_directories = {
+        f"{REAL_ORACLE_DIR}/{relative}" for relative in oracle_directories
+    }
+    active_paths = {
+        *(f"raw/prompt-{length:04d}.u32le" for length in PROMPT_LENGTHS),
+        *CHAT_TEMPLATE_FILES,
+        "openwebui/capture.json",
+        "openwebui/nonstream-request.json",
+        "openwebui/stream-request.json",
+    }
+    expected_paths = active_paths | bootstrap_files | prefixed_oracle_files
+    expected_directories = {
+        "raw",
+        "openwebui",
+        "chat-template",
+        "chat-template/fixtures",
+        "provenance",
+        BOOTSTRAP_PROVENANCE_DIR,
+        "oracles",
+        REAL_ORACLE_DIR,
+        *bootstrap_directories,
+        *prefixed_oracle_directories,
+    }
+    artifact_paths = validate_artifacts(
+        root, manifest, expected_paths, completed=True
+    )
+    validate_tree(root, artifact_paths, expected_directories)
+    validate_active_contract_files(root, expected_prompts)
+    validate_sums(root, artifact_paths)
+
+
+def validate(root: Path, contract_only: bool = False) -> dict[str, Any]:
+    root = validate_root(root)
+    manifest_path = safe_file(root, "manifest.json", "manifest")
+    manifest_sha256 = sha256_file(manifest_path)
+    completed_anchor_configured = TRUSTED_COMPLETED_MANIFEST_SHA256 != "0" * 64
+    if manifest_sha256 == TRUSTED_PENDING_MANIFEST_SHA256:
+        oracle_status = "pending"
+        anchor_matches = True
+    elif (
+        completed_anchor_configured
+        and manifest_sha256 == TRUSTED_COMPLETED_MANIFEST_SHA256
+    ):
+        oracle_status = "complete"
+        anchor_matches = True
+    else:
+        anchor_matches = False
+        if not contract_only:
+            fail(
+                "manifest SHA-256 does not match a promotion trust anchor; "
+                "use --contract-only only for an untrusted structural check"
+            )
+        manifest_probe = load_json(manifest_path, "manifest.json")
+        status = manifest_probe.get("status")
+        if status == "input_contract_ready_oracles_pending":
+            oracle_status = "pending"
+        elif status == "input_contract_ready_real_oracles_complete":
+            oracle_status = "complete"
+        else:
+            fail("manifest status does not identify a supported fixture schema")
+
+    manifest = load_json(manifest_path, "manifest.json")
+    if oracle_status == "pending":
+        validate_pending_manifest(root, manifest)
+    else:
+        validate_completed_manifest(root, manifest)
+    trusted = not contract_only and anchor_matches
+    promotion_eligible = oracle_status == "complete" and trusted
     return {
         "trusted": trusted,
         "mode": "promotion" if trusted else "contract-only",
         "manifest_sha256": manifest_sha256,
+        "oracle_status": oracle_status,
+        "promotion_eligible": promotion_eligible,
     }
 
 
@@ -881,7 +1182,8 @@ def main() -> int:
         args.fixture_dir.expanduser(), contract_only=args.contract_only
     )
     print(
-        "valid=true oracle_status=pending promotion_eligible=false "
+        f"valid=true oracle_status={summary['oracle_status']} "
+        f"promotion_eligible={str(summary['promotion_eligible']).lower()} "
         f"mode={summary['mode']} trusted={str(summary['trusted']).lower()} "
         f"prompts={len(PROMPT_LENGTHS)} manifest_sha256={summary['manifest_sha256']}"
     )

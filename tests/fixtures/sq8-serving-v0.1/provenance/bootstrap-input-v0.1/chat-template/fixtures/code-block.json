@@ -1,0 +1,59 @@
+{
+  "construction": {
+    "category": "code_block",
+    "type": "representative"
+  },
+  "expected": {
+    "prompt_tokens": 30,
+    "rendered_text": "<|im_start|>user\nReview this code:\n\n```python\ndef square(x):\n    return x * x\n```<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "rendered_text_sha256": "d88fb415778ed26973297b01cc8bdda3dd6f4473c10f32d5790b7a34ba690ac3",
+    "rendered_text_utf8_bytes": 133,
+    "token_ids": [
+      151644,
+      872,
+      198,
+      19432,
+      419,
+      2038,
+      1447,
+      73594,
+      12669,
+      198,
+      750,
+      9334,
+      2075,
+      982,
+      262,
+      470,
+      856,
+      353,
+      856,
+      198,
+      73594,
+      151645,
+      198,
+      151644,
+      77091,
+      198,
+      151667,
+      271,
+      151668,
+      271
+    ],
+    "token_ids_u32le_bytes": 120,
+    "token_ids_u32le_sha256": "270e0e6340afe1e7f40b492c80ac94595bdffbd461e19aa4eb1f8ed4dc2f1d12"
+  },
+  "fixture_id": "code-block",
+  "kind": "representative",
+  "messages": [
+    {
+      "content": "Review this code:\n\n```python\ndef square(x):\n    return x * x\n```",
+      "role": "user"
+    }
+  ],
+  "schema_version": "ullm.sq8.chat_template_fixture.v1",
+  "template_options": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  }
+}

@@ -1,7 +1,6 @@
 # SQ8 Serving Oracle v0.1
 
-Status: P8-A input contract and trust-boundary specification; real vLLM
-numerical oracle capture is pending
+Status: P8-A completed real-vLLM capture and trust-boundary specification
 
 ## 1. Scope
 
@@ -9,12 +8,11 @@ This specification fixes the independent reference inputs, identities, numerical
 comparison rules, and validation boundary for the SQ8 serving path. The checked-in
 fixture set is `tests/fixtures/sq8-serving-v0.1/`.
 
-The checked-in v0.1 fixture set contains deterministic raw-token inputs and
-explicit placeholders for numerical vLLM outputs. It MUST NOT be presented as a
-completed oracle, and it is not promotion eligible. Synthetic hidden states,
-logits, generated token IDs, hashes, or success fields are forbidden. A later
-capture from the fixed real vLLM environment must replace the placeholders under
-a separately anchored real-oracle schema before P8-B can pass its vLLM gates.
+The completed v0.1 fixture set contains deterministic raw-token inputs and a real
+vLLM capture under the separately anchored completed-oracle schema. The original
+pending input tree remains byte-exact under `provenance/` but is not an active
+oracle. Synthetic hidden states, logits, generated token IDs, hashes, or success
+fields are forbidden.
 
 This specification does not modify the P7 result schemas or their validators.
 
@@ -82,6 +80,26 @@ eager execution, no prefix caching, no asynchronous scheduling, and
 full exporter source commit. The short revision embedded in the package version
 does not substitute for the exporter source commit.
 
+### 2.4 Completed capture identity
+
+The promotion validator accepted the 21-run real capture. Its immutable
+read-only product copy is:
+
+```text
+/home/homelab1/datapool/ullm/product/qwen3-14b-fp8-sq8-v0.1/oracles/vllm-source-v0.1
+```
+
+| Property | Fixed value |
+| --- | --- |
+| metadata SHA-256 | `1710ebf504c3cf84616f265f57575d48b91804635a0c0151875eadc91fbc122b` |
+| payload-manifest SHA-256 | `5972a024c91509b432e68ee39a3dd1cf7a0f0ba2ba48fe7ef5c0bfb02957405c` |
+| source bootstrap manifest SHA-256 | `c5b502fe54a5f1563eaf48b8308d7f1d479d11afcbf4cb4a7567bb31b65b61af` |
+| prompt count | 6 |
+| generation run count | 21 |
+
+The metadata and payload-manifest hashes are fixed in the independent serving
+fixture validator, outside the producer-controlled oracle tree.
+
 ## 3. Deterministic raw prompts
 
 Raw prompt lengths are exactly 1, 8, 32, 128, 512, and 4095. For length `N`:
@@ -104,7 +122,7 @@ Generation cases are fixed as follows:
 
 Sampling is greedy with temperature zero. A case is attached to a prompt only
 when `prompt_tokens + max_new_tokens <= 4096`; therefore the 4095-token prompt has
-only `greedy-g1`. Normal cases record the actual token count and `eos` or `length`
+only `greedy-g1`. Normal cases record the actual token count and `stop` or `length`
 finish reason. The boundary case must emit exactly 512 tokens.
 
 ## 4. Required real oracle payload
@@ -131,10 +149,11 @@ count, and hash are checked before comparison. Greedy generated token sequences
 must match exactly through their recorded terminal boundary. A `passed` value
 written by an exporter is ignored and SHOULD be rejected as an unknown field.
 
-The current `ullm.sq8.serving_oracle_placeholder.v1` files deliberately set all
+The preserved `ullm.sq8.serving_oracle_placeholder.v1` files deliberately set all
 output filenames, byte counts, payload hashes, token counts, and metadata anchors
 to `null`. Their status is `pending_real_vllm_export` and their trust block says
-that a real export is required. They are scheduling records, not evidence.
+that a real export is required. They are historical source scheduling records
+under `provenance/bootstrap-input-v0.1/`, not active evidence.
 
 ## 5. Comparison contract
 
@@ -162,9 +181,14 @@ exporter summary or a precomputed `passed` bit is never authoritative.
 
 ## 6. Fixture layout and trust boundary
 
-The deterministic bootstrap exporter writes a new directory and refuses to
-overwrite any existing path, including a dangling symlink. It stages the complete
-tree beside the destination and publishes with Linux `renameat2(RENAME_NOREPLACE)`.
+The deterministic exporter refuses to overwrite any existing path, including a
+dangling symlink. It stages the complete tree beside the destination and
+publishes with Linux `renameat2(RENAME_NOREPLACE)`. Symlinked output parents and
+source/destination overlap are rejected. Its default mode continues to emit the
+byte-exact pending bootstrap tree. Completed mode requires both the trusted
+bootstrap tree and trusted real-oracle tree as explicit inputs. The staged tree
+is independently validated before publication, so a changing source cannot
+publish a mixed snapshot.
 
 ```text
 tests/fixtures/sq8-serving-v0.1/
@@ -173,28 +197,52 @@ tests/fixtures/sq8-serving-v0.1/
   chat-template/manifest.json
   chat-template/fixtures/*.json
   raw/prompt-NNNN.u32le
-  oracles/raw-pNNNN.pending.json
   openwebui/capture.json
   openwebui/stream-request.json
   openwebui/nonstream-request.json
+  provenance/bootstrap-input-v0.1/
+    manifest.json
+    SHA256SUMS
+    chat-template/...
+    raw/...
+    oracles/raw-pNNNN.pending.json
+    openwebui/...
+  oracles/vllm-source-v0.1/
+    metadata.json
+    payload-manifest.json
+    SHA256SUMS
+    captured-exporter.py
+    input-fixture-manifest.json
+    inputs/raw-pNNNN.u32le
+    prompts/raw-pNNNN/final-hidden.f32le
+    prompts/raw-pNNNN/prefill-logits.f32le
+    prompts/raw-pNNNN/greedy-*.u32le
 ```
 
 `manifest.json` hashes every artifact except itself and `SHA256SUMS`.
-`SHA256SUMS` hashes every artifact plus `manifest.json`. The independent validator
-contains the trusted `manifest.json` SHA-256 in source and, in promotion mode,
-checks that anchor before parsing producer-controlled metadata. It then checks
-strict JSON types and exact keys, rejects duplicate keys and non-finite JSON
-numbers, rejects symlinks/path traversal/extra files, recomputes all hashes and
-raw token values, and verifies every placeholder is still empty.
+The root `SHA256SUMS` hashes every artifact plus `manifest.json`, including both
+nested `SHA256SUMS` files. Each nested sums file excludes only itself. This avoids
+a circular hash while retaining both nested integrity chains.
 
-`--contract-only` skips only the compiled manifest anchor. It retains all other
-checks and never makes a fixture promotion eligible. The validator does not
-import the exporter.
+The independent validator contains separate trusted hashes for the pending
+bootstrap manifest, completed root manifest, real-oracle metadata, and real
+payload manifest. In promotion mode it checks those anchors before parsing
+producer-controlled metadata. It then checks strict JSON types and exact keys,
+rejects duplicate keys, non-finite JSON numbers, symlinks, path traversal, and
+extra files, and recomputes all hashes, raw tokens, tensor finiteness, top tokens,
+and greedy sequences. It rejects producer `passed` fields.
 
-The checked-in fixture-set status is
-`input_contract_ready_oracles_pending`, and `promotion_eligible` is `false`.
-The trusted bootstrap manifest SHA-256 is
-`c5b502fe54a5f1563eaf48b8308d7f1d479d11afcbf4cb4a7567bb31b65b61af`.
+`--contract-only` skips only the completed root-manifest anchor. It still performs
+trusted nested-bootstrap validation and fixed-anchor real-oracle numerical
+validation, but never makes the root fixture promotion eligible. The validator
+does not import the exporter.
+
+The completed fixture-set status is
+`input_contract_ready_real_oracles_complete`, and its manifest declares
+`promotion_eligible=true`. Effective promotion additionally requires the
+completed root manifest to match the reviewed hash fixed in validator source.
+There are no active `.pending.json` files; pending records exist only below the
+provenance subtree.
 
 ## 7. OpenWebUI interoperability capture
 
@@ -218,19 +266,21 @@ it contains no response payload and is not a numerical SQ8 oracle.
 The bootstrap exporter imports neither vLLM nor the model and writes prompts one
 token at a time. The validator hashes and validates payloads in bounded chunks.
 
-The later real exporter must load one model instance, run only one prompt/case at
-a time, write each CPU tensor payload immediately, hash it in bounded chunks,
-release per-case tensors, and synchronize before advancing. It must not retain a
-matrix of full logits, submit concurrent model requests, or batch the six fixture
-prompts. A failed or interrupted export is staged outside the trusted fixture
-path and is never published as partial evidence.
+The real exporter loaded one model instance, ran only one prompt/case at a time,
+wrote each CPU tensor payload immediately, hashed it in bounded chunks, released
+per-case tensors, and synchronized before advancing. It did not retain a matrix
+of full logits, submit concurrent model requests, or batch the six fixture
+prompts. The five feasible 512-token boundary runs used `ignore_eos=true` and
+completed at exactly 512 tokens. A failed or interrupted export is staged outside
+the trusted fixture path and is never published as partial evidence.
 
 ## 9. Promotion conditions
 
-P8-B may consume the vLLM reference only after all of the following are true:
+P8-B may consume the checked-in vLLM reference only while all of the following
+remain true:
 
-1. Every placeholder has been replaced by a real capture under the completed
-   schema.
+1. Every active placeholder has been replaced by the 21-run real capture under
+   the completed schema; historical placeholders occur only under provenance.
 2. The independent validator has a reviewed external metadata/manifest anchor.
 3. It recomputes tensor hashes, finiteness, shapes, metrics, top-token gates, and
    greedy sequences without exporter verdicts.
@@ -239,5 +289,5 @@ P8-B may consume the vLLM reference only after all of the following are true:
 5. The chat-template exact-length fixture has separately passed its root-owned
    validator.
 
-Until then, the deterministic fixture directory is useful for implementation and
-validator tests, but it cannot satisfy the P8-A real-oracle acceptance item.
+An unanchored completed root may pass `--contract-only` for review, but it cannot
+satisfy the P8-A real-oracle acceptance item or be consumed by P8-B.

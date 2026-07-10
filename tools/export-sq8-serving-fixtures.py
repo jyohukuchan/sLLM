@@ -12,6 +12,8 @@ import os
 import shutil
 import stat
 import struct
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,17 @@ ORACLE_PLACEHOLDER_SCHEMA_VERSION = "ullm.sq8.serving_oracle_placeholder.v1"
 REAL_ORACLE_SCHEMA_VERSION = "ullm.sq8.serving_oracle.v1"
 OPENWEBUI_CAPTURE_SCHEMA_VERSION = "ullm.openwebui.interop_capture.v1"
 DEFAULT_OUTPUT = Path("tests/fixtures/sq8-serving-v0.1")
+TRUSTED_PENDING_MANIFEST_SHA256 = (
+    "c5b502fe54a5f1563eaf48b8308d7f1d479d11afcbf4cb4a7567bb31b65b61af"
+)
+TRUSTED_REAL_ORACLE_METADATA_SHA256 = (
+    "1710ebf504c3cf84616f265f57575d48b91804635a0c0151875eadc91fbc122b"
+)
+TRUSTED_REAL_ORACLE_PAYLOAD_MANIFEST_SHA256 = (
+    "5972a024c91509b432e68ee39a3dd1cf7a0f0ba2ba48fe7ef5c0bfb02957405c"
+)
+BOOTSTRAP_PROVENANCE_DIR = Path("provenance/bootstrap-input-v0.1")
+REAL_ORACLE_DIR = Path("oracles/vllm-source-v0.1")
 PROMPT_LENGTHS = (1, 8, 32, 128, 512, 4095)
 CHAT_PROMPT_LENGTHS = (32, 128, 512, 2048, 3584)
 CHAT_TEMPLATE_MANIFEST_SHA256 = (
@@ -286,6 +299,16 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_OUTPUT / "chat-template",
     )
+    parser.add_argument(
+        "--real-oracle-dir",
+        type=Path,
+        help="validated real vLLM oracle tree; requires --bootstrap-fixture-dir",
+    )
+    parser.add_argument(
+        "--bootstrap-fixture-dir",
+        type=Path,
+        help="trusted pending fixture tree preserved as completed-tree provenance",
+    )
     return parser.parse_args()
 
 
@@ -310,6 +333,26 @@ def ensure_output_available(path: Path) -> None:
         raise SystemExit(f"refusing to overwrite existing output: {path}")
 
 
+def prepare_output_path(path: Path) -> Path:
+    ensure_output_available(path)
+    existing = path.parent
+    while not os.path.lexists(existing):
+        parent = existing.parent
+        if parent == existing:
+            raise SystemExit("output path has no existing directory ancestor")
+        existing = parent
+    info = existing.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SystemExit("output parent must not contain a symlink")
+    if existing.resolve(strict=True) != existing:
+        raise SystemExit("output parent must not contain a symlink")
+    return path
+
+
+def paths_overlap(first: Path, second: Path) -> bool:
+    return first == second or first in second.parents or second in first.parents
+
+
 def rename_noreplace(source: Path, destination: Path) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
@@ -330,6 +373,81 @@ def rename_noreplace(source: Path, destination: Path) -> None:
     if error_number in (errno.EEXIST, errno.ENOTEMPTY):
         raise FileExistsError(f"refusing to overwrite raced output: {destination}")
     raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
+def validate_copy_source(root: Path, label: str) -> Path:
+    try:
+        root_info = root.lstat()
+    except OSError as error:
+        raise SystemExit(f"{label} is unavailable: {error}") from error
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise SystemExit(f"{label} must be a regular non-symlink directory")
+    resolved = root.resolve(strict=True)
+    for path in resolved.rglob("*"):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise SystemExit(f"{label} contains a symlink: {path}")
+        if not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode):
+            raise SystemExit(f"{label} contains a non-regular entry: {path}")
+    return resolved
+
+
+def run_source_validator(command: list[str], label: str) -> None:
+    result = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        raise SystemExit(f"{label} validation failed: {detail}")
+
+
+def validate_completed_sources(
+    bootstrap_dir: Path,
+    real_oracle_dir: Path,
+    output_dir: Path,
+) -> tuple[Path, Path]:
+    bootstrap = validate_copy_source(bootstrap_dir, "bootstrap fixture source")
+    oracle = validate_copy_source(real_oracle_dir, "real oracle source")
+    for source, label in (
+        (bootstrap, "bootstrap fixture source"),
+        (oracle, "real oracle source"),
+    ):
+        if paths_overlap(source, output_dir):
+            raise SystemExit(f"output directory must not overlap {label}")
+
+    bootstrap_manifest = bootstrap / "manifest.json"
+    if sha256_file(bootstrap_manifest) != TRUSTED_PENDING_MANIFEST_SHA256:
+        raise SystemExit("bootstrap fixture manifest differs from the fixed trust anchor")
+    metadata = oracle / "metadata.json"
+    payload_manifest = oracle / "payload-manifest.json"
+    if sha256_file(metadata) != TRUSTED_REAL_ORACLE_METADATA_SHA256:
+        raise SystemExit("real oracle metadata differs from the fixed trust anchor")
+    if sha256_file(payload_manifest) != TRUSTED_REAL_ORACLE_PAYLOAD_MANIFEST_SHA256:
+        raise SystemExit("real oracle payload manifest differs from the fixed trust anchor")
+
+    tool_dir = Path(__file__).resolve().parent
+    run_source_validator(
+        [
+            sys.executable,
+            str(tool_dir / "validate-sq8-serving-fixtures.py"),
+            str(bootstrap),
+        ],
+        "bootstrap fixture source",
+    )
+    run_source_validator(
+        [
+            sys.executable,
+            str(tool_dir / "validate-sq8-serving-vllm-oracles.py"),
+            "--anchor-sha256",
+            TRUSTED_REAL_ORACLE_METADATA_SHA256,
+            str(oracle),
+        ],
+        "real oracle source",
+    )
+    return bootstrap, oracle
 
 
 def write_prompt(path: Path, prompt_length: int) -> str:
@@ -402,7 +520,15 @@ def oracle_placeholder(prompt: dict[str, Any]) -> dict[str, Any]:
 
 
 def copy_chat_template_fixture(source: Path, destination: Path) -> None:
-    source = source.expanduser().resolve()
+    source = Path(os.path.abspath(source.expanduser()))
+    try:
+        source_info = source.lstat()
+    except OSError as error:
+        raise SystemExit(f"chat-template fixture directory is unavailable: {error}") from error
+    if stat.S_ISLNK(source_info.st_mode):
+        raise SystemExit("chat-template fixture directory must not be a symlink")
+    if source.resolve(strict=True) != source:
+        raise SystemExit("chat-template fixture parent must not contain a symlink")
     if not source.is_dir():
         raise SystemExit(f"chat-template fixture directory does not exist: {source}")
     manifest = source / "manifest.json"
@@ -429,6 +555,10 @@ def artifact_records(root: Path) -> list[dict[str, Any]]:
         kind = (
             "raw_prompt"
             if relative.startswith("raw/")
+            else "bootstrap_provenance"
+            if relative.startswith(f"{BOOTSTRAP_PROVENANCE_DIR.as_posix()}/")
+            else "real_vllm_oracle"
+            if relative.startswith(f"{REAL_ORACLE_DIR.as_posix()}/")
             else "oracle_placeholder"
             if relative.startswith("oracles/")
             else "openwebui_capture_metadata"
@@ -530,7 +660,123 @@ def export_fixture_set(root: Path, chat_template_dir: Path) -> None:
     sum_paths = [
         path
         for path in sorted(root.rglob("*"))
-        if path.is_file() and path.name != "SHA256SUMS"
+        if path.is_file() and path.relative_to(root).as_posix() != "SHA256SUMS"
+    ]
+    sums = "".join(
+        f"{sha256_file(path)}  {path.relative_to(root).as_posix()}\n"
+        for path in sum_paths
+    )
+    (root / "SHA256SUMS").write_text(sums, encoding="ascii")
+
+
+def export_completed_fixture_set(
+    root: Path,
+    bootstrap_dir: Path,
+    real_oracle_dir: Path,
+) -> None:
+    copied_bootstrap = root / BOOTSTRAP_PROVENANCE_DIR
+    copied_oracle = root / REAL_ORACLE_DIR
+    shutil.copytree(bootstrap_dir, copied_bootstrap)
+    if sha256_file(copied_bootstrap / "manifest.json") != TRUSTED_PENDING_MANIFEST_SHA256:
+        raise SystemExit("copied bootstrap fixture differs from the fixed trust anchor")
+
+    # Derive the active contract files from the already anchored snapshot so a
+    # changing source cannot produce a mixed active/provenance tree.
+    shutil.copytree(copied_bootstrap / "raw", root / "raw")
+    shutil.copytree(copied_bootstrap / "chat-template", root / "chat-template")
+    shutil.copytree(copied_bootstrap / "openwebui", root / "openwebui")
+
+    shutil.copytree(real_oracle_dir, copied_oracle)
+    if sha256_file(copied_oracle / "metadata.json") != TRUSTED_REAL_ORACLE_METADATA_SHA256:
+        raise SystemExit("copied real oracle metadata differs from the fixed trust anchor")
+    if (
+        sha256_file(copied_oracle / "payload-manifest.json")
+        != TRUSTED_REAL_ORACLE_PAYLOAD_MANIFEST_SHA256
+    ):
+        raise SystemExit("copied real oracle payload manifest differs from the fixed trust anchor")
+
+    bootstrap_manifest = json.loads(
+        (copied_bootstrap / "manifest.json").read_text(encoding="ascii")
+    )
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "fixture_set_id": "qwen3-14b-fp8-sq8-serving-v0.1",
+        "status": "input_contract_ready_real_oracles_complete",
+        "source_identity": SOURCE_IDENTITY,
+        "tokenizer_identity": TOKENIZER_IDENTITY,
+        "vllm_identity": VLLM_IDENTITY,
+        "product_contract": PRODUCT_CONTRACT,
+        "comparison_contract": COMPARISON_CONTRACT,
+        "generation_cases": GENERATION_CASES,
+        "raw_prompts": bootstrap_manifest["raw_prompts"],
+        "bootstrap_input": {
+            "status": "preserved_pending_source_contract",
+            "directory": BOOTSTRAP_PROVENANCE_DIR.as_posix(),
+            "manifest_file": (
+                f"{BOOTSTRAP_PROVENANCE_DIR.as_posix()}/manifest.json"
+            ),
+            "manifest_sha256": TRUSTED_PENDING_MANIFEST_SHA256,
+            "validator": "tools/validate-sq8-serving-fixtures.py",
+        },
+        "real_oracle_capture": {
+            "status": "captured_real_vllm",
+            "schema_version": REAL_ORACLE_SCHEMA_VERSION,
+            "directory": REAL_ORACLE_DIR.as_posix(),
+            "metadata_file": f"{REAL_ORACLE_DIR.as_posix()}/metadata.json",
+            "metadata_sha256": TRUSTED_REAL_ORACLE_METADATA_SHA256,
+            "payload_manifest_file": (
+                f"{REAL_ORACLE_DIR.as_posix()}/payload-manifest.json"
+            ),
+            "payload_manifest_sha256": (
+                TRUSTED_REAL_ORACLE_PAYLOAD_MANIFEST_SHA256
+            ),
+            "source_bootstrap_manifest_sha256": (
+                TRUSTED_PENDING_MANIFEST_SHA256
+            ),
+            "prompt_count": len(PROMPT_LENGTHS),
+            "run_count": 21,
+            "validator": "tools/validate-sq8-serving-vllm-oracles.py",
+        },
+        "chat_template_fixture": {
+            "status": "ready_independent_recompute_passed",
+            "directory": "chat-template",
+            "manifest_file": "chat-template/manifest.json",
+            "manifest_sha256": CHAT_TEMPLATE_MANIFEST_SHA256,
+            "exact_prompt_lengths": list(CHAT_PROMPT_LENGTHS),
+            "validator": "tools/validate-sq8-chat-template-fixtures.py",
+        },
+        "openwebui_interop_capture": {
+            "status": "captured_sanitized",
+            "capture_file": "openwebui/capture.json",
+            "stream_request_file": "openwebui/stream-request.json",
+            "nonstream_request_file": "openwebui/nonstream-request.json",
+        },
+        "artifact_files_excluding_manifest_and_sums": artifact_records(root),
+        "trust": {
+            "fixture_kind": "contract_and_real_oracle_manifest",
+            "promotion_eligible": True,
+            "synthetic_oracle_values_forbidden": True,
+            "required_real_oracle_schema_version": REAL_ORACLE_SCHEMA_VERSION,
+            "trusted_pending_manifest_anchor_location": (
+                "tools/validate-sq8-serving-fixtures.py:"
+                "TRUSTED_PENDING_MANIFEST_SHA256"
+            ),
+            "trusted_real_oracle_anchor_location": (
+                "tools/validate-sq8-serving-fixtures.py:"
+                "TRUSTED_REAL_ORACLE_METADATA_SHA256,"
+                "TRUSTED_REAL_ORACLE_PAYLOAD_MANIFEST_SHA256"
+            ),
+            "trusted_completed_manifest_anchor_location": (
+                "tools/validate-sq8-serving-fixtures.py:"
+                "TRUSTED_COMPLETED_MANIFEST_SHA256"
+            ),
+        },
+    }
+    write_json(root / "manifest.json", manifest)
+    sum_paths = [
+        path
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.relative_to(root).as_posix() != "SHA256SUMS"
     ]
     sums = "".join(
         f"{sha256_file(path)}  {path.relative_to(root).as_posix()}\n"
@@ -541,20 +787,86 @@ def export_fixture_set(root: Path, chat_template_dir: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    # Keep the final path unresolved so lexists() can reject dangling symlinks.
-    output = Path(os.path.abspath(args.output_dir.expanduser()))
-    ensure_output_available(output)
+    completed_mode = args.real_oracle_dir is not None or args.bootstrap_fixture_dir is not None
+    if (args.real_oracle_dir is None) != (args.bootstrap_fixture_dir is None):
+        raise SystemExit(
+            "--real-oracle-dir and --bootstrap-fixture-dir must be specified together"
+        )
+    # Keep the leaf unresolved until lexists() has rejected dangling symlinks,
+    # then require a canonical, non-symlink parent for staging and publication.
+    output = prepare_output_path(Path(os.path.abspath(args.output_dir.expanduser())))
+    bootstrap_dir = None
+    real_oracle_dir = None
+    chat_template_dir = None
+    if completed_mode:
+        bootstrap_dir, real_oracle_dir = validate_completed_sources(
+            Path(os.path.abspath(args.bootstrap_fixture_dir.expanduser())),
+            Path(os.path.abspath(args.real_oracle_dir.expanduser())),
+            output,
+        )
+    else:
+        chat_template_dir = validate_copy_source(
+            Path(os.path.abspath(args.chat_template_dir.expanduser())),
+            "chat-template fixture source",
+        )
+        if paths_overlap(chat_template_dir, output):
+            raise SystemExit(
+                "output directory must not overlap chat-template fixture source"
+            )
     output.parent.mkdir(parents=True, exist_ok=True)
+    if output.parent.resolve(strict=True) != output.parent:
+        raise SystemExit("output parent changed or became a symlink")
+    ensure_output_available(output)
     with tempfile.TemporaryDirectory(prefix=f".{output.name}.", dir=output.parent) as temporary:
         staged = Path(temporary) / output.name
         staged.mkdir()
-        export_fixture_set(staged, args.chat_template_dir)
+        if completed_mode:
+            assert bootstrap_dir is not None and real_oracle_dir is not None
+            export_completed_fixture_set(staged, bootstrap_dir, real_oracle_dir)
+        else:
+            assert chat_template_dir is not None
+            export_fixture_set(staged, chat_template_dir)
         for path in staged.rglob("*"):
             mode = path.stat().st_mode
             if path.is_file():
-                path.chmod(mode | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+                path.chmod(
+                    mode
+                    | stat.S_IRUSR
+                    | stat.S_IWUSR
+                    | stat.S_IRGRP
+                    | stat.S_IROTH
+                )
+            elif path.is_dir():
+                path.chmod(mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        validator_command = [
+            sys.executable,
+            str(
+                Path(__file__).resolve().with_name(
+                    "validate-sq8-serving-fixtures.py"
+                )
+            ),
+        ]
+        if completed_mode:
+            validator_command.append("--contract-only")
+        else:
+            staged_manifest_sha256 = sha256_file(staged / "manifest.json")
+            if staged_manifest_sha256 != TRUSTED_PENDING_MANIFEST_SHA256:
+                raise SystemExit(
+                    "pending staged fixture manifest differs from the fixed trust anchor"
+                )
+        validator_command.append(str(staged))
+        run_source_validator(validator_command, "staged serving fixture")
+        if output.parent.resolve(strict=True) != output.parent:
+            raise SystemExit("output parent changed or became a symlink before publication")
         rename_noreplace(staged, output)
     manifest_hash = sha256_file(output / "manifest.json")
+    if completed_mode:
+        print(
+            f"exported=true output={output} prompts={len(PROMPT_LENGTHS)} "
+            "oracles_complete=6 run_count=21 "
+            f"manifest_sha256={manifest_hash}"
+        )
+        return 0
     print(
         f"exported=true output={output} prompts={len(PROMPT_LENGTHS)} "
         f"oracles_pending={len(PROMPT_LENGTHS)} manifest_sha256={manifest_hash}"
