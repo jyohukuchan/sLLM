@@ -904,6 +904,52 @@ impl Qwen3Sq8GenerationRuntime {
         self.run_request_synchronized(Sq8GenerationRequest::fixed(max_new_tokens), stream)
     }
 
+    /// Resets completed request state outside the measured generation interval.
+    pub fn reset_synchronized(&mut self, stream: &mut RuntimeStream) -> Result<(), String> {
+        match &self.state {
+            Sq8GenerationRuntimeState::Completed => {}
+            Sq8GenerationRuntimeState::Ready => {
+                return Err("Qwen3-14B SQ8 generation runtime is already ready".into());
+            }
+            Sq8GenerationRuntimeState::Running => {
+                return Err("Qwen3-14B SQ8 generation cannot reset while running".into());
+            }
+            Sq8GenerationRuntimeState::Poisoned(reason) => {
+                return Err(format!(
+                    "Qwen3-14B SQ8 generation runtime is permanently poisoned: {reason}"
+                ));
+            }
+        }
+        if self.scheduler.active_len() != 0 || !self.scheduler.waiting_is_empty() {
+            return Err(self.poison_after_failure(
+                stream,
+                "SQ8 generation reset found retained scheduler requests".into(),
+            ));
+        }
+        if let Err(err) = validate_allocator_before(self.scheduler.allocator_stats()) {
+            return Err(self.poison_after_failure(stream, err));
+        }
+        for layer_index in 0..self.caches.len() {
+            if let Err(err) = self.caches[layer_index].reset(stream) {
+                return Err(self.poison_after_failure(
+                    stream,
+                    format!("failed to reset SQ8 generation layer {layer_index} KV cache: {err}"),
+                ));
+            }
+        }
+        if let Err(err) = validate_cache_lengths(self.caches.as_ref(), 0) {
+            return Err(self.poison_after_failure(stream, err));
+        }
+        self.state = Sq8GenerationRuntimeState::Ready;
+        if let Err(err) = self.validate_runtime_contract() {
+            return Err(self.poison_after_failure(
+                stream,
+                format!("SQ8 generation reset contract failed: {err}"),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn run_request_synchronized(
         &mut self,
         request: Sq8GenerationRequest,
