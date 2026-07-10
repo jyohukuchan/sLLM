@@ -9,13 +9,18 @@ use crate::loader::{
 };
 use crate::sq_reference::sq8_f32_le_sha256;
 use crate::sq8_layer_oracle::{QWEN3_14B_HIDDEN_SIZE, QWEN3_14B_RMS_NORM_EPSILON};
-use crate::sq8_layer_runtime::QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV;
+use crate::sq8_layer_runtime::{
+    QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
+    Sq8LayerExecutionProfile,
+};
 use crate::sq8_stack_runtime::{Qwen3Sq8StackRuntime, Sq8StackExecutionReport};
 use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use ullm_runtime_sys::{
     DeviceInfo, RuntimeBuffer, RuntimeContext, RuntimeStream, matvec_bf16_f32,
-    segmented_rmsnorm_f32,
+    segmented_rmsnorm_f32, top1_f32, top1_partial_count,
 };
 
 pub const QWEN3_14B_VOCAB_SIZE: usize = 151_936;
@@ -25,8 +30,15 @@ pub const QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV: [&str; 2] = [
     "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
     "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
 ];
+pub(crate) const QWEN3_14B_SQ8_M1_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV: [&str; 3] = [
+    "ULLM_REQUIRE_HIP_RMSNORM_KERNEL",
+    "ULLM_REQUIRE_HIP_BF16_MATVEC_KERNEL",
+    "ULLM_REQUIRE_HIP_TOP1_KERNEL",
+];
 
 const BF16_DTYPE: &str = "BF16";
+const PACKAGE_MANIFEST_FILE: &str = "manifest.json";
+const MANIFEST_HASH_CHUNK_BYTES: usize = 64 * 1024;
 const R9700_RUNTIME_NAME: &str = "AMD Radeon Graphics";
 const R9700_MEMORY_BYTES_MIN: u64 = 30 * 1024 * 1024 * 1024;
 const R9700_MEMORY_BYTES_MAX: u64 = 34 * 1024 * 1024 * 1024;
@@ -344,6 +356,197 @@ impl Sq8ModelHeadResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Sq8ModelHeadM1ExecutionBinding {
+    pub(crate) profile: Sq8LayerExecutionProfile,
+    pub(crate) device: Sq8ModelHeadDeviceIdentity,
+    pub(crate) package_manifest_sha256: String,
+    pub(crate) artifact_content_sha256: String,
+}
+
+impl Sq8ModelHeadM1ExecutionBinding {
+    pub(crate) fn new(
+        profile: Sq8LayerExecutionProfile,
+        device: &DeviceInfo,
+        package_manifest_sha256: impl Into<String>,
+        artifact_content_sha256: impl Into<String>,
+    ) -> Self {
+        Self {
+            profile,
+            device: Sq8ModelHeadDeviceIdentity::from_runtime(device.clone()),
+            package_manifest_sha256: package_manifest_sha256.into(),
+            artifact_content_sha256: artifact_content_sha256.into(),
+        }
+    }
+
+    fn validate_contract(&self) -> Result<(), String> {
+        if self.profile != Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
+            return Err("Qwen3-14B SQ8 M=1 model head requires the RDNA4 CK profile".into());
+        }
+        self.device.validate_r9700()?;
+        validate_sha256(&self.package_manifest_sha256).map_err(|err| {
+            format!("Qwen3-14B SQ8 M=1 model-head package manifest hash is invalid: {err}")
+        })?;
+        validate_sha256(&self.artifact_content_sha256)
+            .map_err(|err| format!("Qwen3-14B SQ8 M=1 model-head artifact hash is invalid: {err}"))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Sq8ModelHeadTop1 {
+    pub(crate) token_id: usize,
+    pub(crate) logit: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Sq8ModelHeadM1ExecutionReport {
+    pub(crate) binding: Sq8ModelHeadM1ExecutionBinding,
+    pub(crate) final_norm: Sq8ModelHeadPayloadIdentity,
+    pub(crate) lm_head: Sq8ModelHeadPayloadIdentity,
+    pub(crate) input_elements: usize,
+    pub(crate) input_bytes: usize,
+    pub(crate) final_hidden_health: Sq8ModelHeadTensorHealth,
+    pub(crate) logits_health: Sq8ModelHeadTensorHealth,
+    pub(crate) top1: Sq8ModelHeadTop1,
+    pub(crate) top1_partial_count: usize,
+    pub(crate) stack_kernel_guard_checks: usize,
+    pub(crate) paged_kernel_guard_checks: usize,
+    pub(crate) head_kernel_guard_checks: usize,
+    pub(crate) rmsnorm_call_count: usize,
+    pub(crate) bf16_matvec_call_count: usize,
+    pub(crate) top1_kernel_call_count: usize,
+    pub(crate) result_readback_count: usize,
+    pub(crate) execution_synchronization_count: usize,
+    pub(crate) fallback_used: bool,
+    pub(crate) host_staging_used: bool,
+}
+
+impl Sq8ModelHeadM1ExecutionReport {
+    pub(crate) fn validate_contract(&self) -> Result<(), String> {
+        self.binding.validate_contract()?;
+        self.final_norm.validate(
+            QWEN3_14B_FINAL_NORM_TENSOR,
+            &QWEN3_14B_FINAL_NORM_SHAPE,
+            QWEN3_14B_HIDDEN_SIZE as u64,
+            bf16_bytes(QWEN3_14B_HIDDEN_SIZE)? as u64,
+        )?;
+        self.lm_head.validate(
+            QWEN3_14B_LM_HEAD_TENSOR,
+            &QWEN3_14B_LM_HEAD_SHAPE,
+            checked_elements(QWEN3_14B_VOCAB_SIZE, QWEN3_14B_HIDDEN_SIZE, "LM head")? as u64,
+            bf16_bytes(checked_elements(
+                QWEN3_14B_VOCAB_SIZE,
+                QWEN3_14B_HIDDEN_SIZE,
+                "LM head",
+            )?)? as u64,
+        )?;
+        let expected_input_bytes = f32_bytes(QWEN3_14B_HIDDEN_SIZE)?;
+        if self.input_elements != QWEN3_14B_HIDDEN_SIZE || self.input_bytes != expected_input_bytes
+        {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head input shape mismatch: elements={} bytes={} expected_elements={} expected_bytes={expected_input_bytes}",
+                self.input_elements, self.input_bytes, QWEN3_14B_HIDDEN_SIZE
+            ));
+        }
+        validate_health_contract(
+            &self.final_hidden_health,
+            QWEN3_14B_HIDDEN_SIZE,
+            "M=1 final hidden",
+        )?;
+        validate_health_contract(&self.logits_health, QWEN3_14B_VOCAB_SIZE, "M=1 logits")?;
+        if self.top1.token_id >= QWEN3_14B_VOCAB_SIZE || !self.top1.logit.is_finite() {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head top1 is invalid: token={} logit={}",
+                self.top1.token_id, self.top1.logit
+            ));
+        }
+        if self.top1.logit != self.logits_health.maximum {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head top1/logits maximum mismatch: top1={} maximum={}",
+                self.top1.logit, self.logits_health.maximum
+            ));
+        }
+        let expected_partial_count = top1_partial_count(QWEN3_14B_VOCAB_SIZE)?;
+        if self.top1_partial_count != expected_partial_count {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head top1 partial count mismatch: expected={expected_partial_count} actual={}",
+                self.top1_partial_count
+            ));
+        }
+        if self.stack_kernel_guard_checks != QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len()
+            || self.paged_kernel_guard_checks != QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len()
+            || self.head_kernel_guard_checks
+                != QWEN3_14B_SQ8_M1_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len()
+            || self.rmsnorm_call_count != 1
+            || self.bf16_matvec_call_count != 1
+            || self.top1_kernel_call_count != 1
+            || self.result_readback_count != 4
+            || self.execution_synchronization_count != 1
+        {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head operation count mismatch: stack_guards={} paged_guards={} head_guards={} rmsnorm={} bf16_matvec={} top1={} readback={} sync={}",
+                self.stack_kernel_guard_checks,
+                self.paged_kernel_guard_checks,
+                self.head_kernel_guard_checks,
+                self.rmsnorm_call_count,
+                self.bf16_matvec_call_count,
+                self.top1_kernel_call_count,
+                self.result_readback_count,
+                self.execution_synchronization_count
+            ));
+        }
+        if self.fallback_used || self.host_staging_used {
+            return Err(
+                "Qwen3-14B SQ8 M=1 model-head execution requires no fallback or host staging"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Sq8ModelHeadM1Result {
+    pub(crate) final_hidden: Vec<f32>,
+    pub(crate) logits: Vec<f32>,
+    pub(crate) top1: Sq8ModelHeadTop1,
+    pub(crate) report: Sq8ModelHeadM1ExecutionReport,
+}
+
+impl Sq8ModelHeadM1Result {
+    pub(crate) fn validate_contract(&self) -> Result<(), String> {
+        self.report.validate_contract()?;
+        if self.top1 != self.report.top1 {
+            return Err("Qwen3-14B SQ8 M=1 model-head result/report top1 mismatch".into());
+        }
+        let final_hidden_health = validate_sq8_model_head_tensor_health(
+            &self.final_hidden,
+            QWEN3_14B_HIDDEN_SIZE,
+            "M=1 final hidden",
+        )?;
+        let logits_health = validate_sq8_model_head_tensor_health(
+            &self.logits,
+            QWEN3_14B_VOCAB_SIZE,
+            "M=1 logits",
+        )?;
+        if final_hidden_health != self.report.final_hidden_health
+            || logits_health != self.report.logits_health
+        {
+            return Err("Qwen3-14B SQ8 M=1 model-head tensor health/hash mismatch".into());
+        }
+        let host_top1 = top1_from_finite_logits(&self.logits)?;
+        if host_top1.token_id != self.top1.token_id
+            || host_top1.logit.to_bits() != self.top1.logit.to_bits()
+        {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head GPU/host top1 mismatch: gpu=({}, {}) host=({}, {})",
+                self.top1.token_id, self.top1.logit, host_top1.token_id, host_top1.logit
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Owns fixed Qwen3-14B final normalization and BF16 language-model-head storage.
 ///
 /// Model loading may use bounded host staging. Each public execution consumes a completed,
@@ -353,6 +556,7 @@ impl Sq8ModelHeadResult {
 #[derive(Debug)]
 pub struct Qwen3Sq8ModelHeadRuntime {
     device: Sq8ModelHeadDeviceIdentity,
+    package_manifest_sha256: String,
     final_norm_identity: Sq8ModelHeadPayloadIdentity,
     lm_head_identity: Sq8ModelHeadPayloadIdentity,
     final_norm_f32: RuntimeBuffer,
@@ -360,6 +564,7 @@ pub struct Qwen3Sq8ModelHeadRuntime {
     selected_hidden: RuntimeBuffer,
     final_hidden: RuntimeBuffer,
     logits: RuntimeBuffer,
+    m1_artifact_content_sha256: Option<String>,
     state: Sq8ModelHeadRuntimeState,
 }
 
@@ -374,6 +579,8 @@ impl Qwen3Sq8ModelHeadRuntime {
         if chunk_bytes == 0 {
             return Err("Qwen3-14B SQ8 model-head chunk_bytes must be greater than zero".into());
         }
+        let package_manifest_path = package_path.join(PACKAGE_MANIFEST_FILE);
+        let package_manifest_sha256 = sha256_regular_file(&package_manifest_path)?;
         let device = Sq8ModelHeadDeviceIdentity::from_runtime(context.device_info()?);
         device.validate_r9700()?;
 
@@ -453,9 +660,16 @@ impl Qwen3Sq8ModelHeadRuntime {
             let selected_hidden = alloc_f32(context, QWEN3_14B_HIDDEN_SIZE, "selected hidden")?;
             let final_hidden = alloc_f32(context, QWEN3_14B_HIDDEN_SIZE, "final hidden")?;
             let logits = alloc_f32(context, QWEN3_14B_VOCAB_SIZE, "logits")?;
+            let package_manifest_sha256_after = sha256_regular_file(&package_manifest_path)?;
+            if package_manifest_sha256_after != package_manifest_sha256 {
+                return Err(format!(
+                    "Qwen3-14B SQ8 model-head package manifest changed while loading: before={package_manifest_sha256} after={package_manifest_sha256_after}"
+                ));
+            }
 
             Ok(Self {
                 device,
+                package_manifest_sha256,
                 final_norm_identity,
                 lm_head_identity,
                 final_norm_f32,
@@ -463,6 +677,7 @@ impl Qwen3Sq8ModelHeadRuntime {
                 selected_hidden,
                 final_hidden,
                 logits,
+                m1_artifact_content_sha256: None,
                 state: Sq8ModelHeadRuntimeState::Ready,
             })
         })();
@@ -491,6 +706,10 @@ impl Qwen3Sq8ModelHeadRuntime {
 
     pub fn lm_head_identity(&self) -> &Sq8ModelHeadPayloadIdentity {
         &self.lm_head_identity
+    }
+
+    pub(crate) fn package_manifest_sha256(&self) -> &str {
+        &self.package_manifest_sha256
     }
 
     /// Applies final normalization and the BF16 language-model head to the stack's last row.
@@ -603,9 +822,150 @@ impl Qwen3Sq8ModelHeadRuntime {
         Ok(result)
     }
 
+    /// Executes the decode head from one validated resident hidden row.
+    ///
+    /// The input remains device resident. The only host transfers are explicit result readbacks
+    /// for validation and token selection; guarded runtime kernels may not stage their inputs.
+    pub(crate) fn run_m1_resident_hidden_top1_synchronized(
+        &mut self,
+        resident_hidden: &RuntimeBuffer,
+        binding: Sq8ModelHeadM1ExecutionBinding,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ModelHeadM1Result, String> {
+        self.validate_m1_execution_preconditions(resident_hidden, &binding)?;
+
+        let hidden_bytes = f32_bytes(QWEN3_14B_HIDDEN_SIZE)?;
+        let logits_bytes = f32_bytes(QWEN3_14B_VOCAB_SIZE)?;
+        let partial_count = top1_partial_count(QWEN3_14B_VOCAB_SIZE)?;
+        let partial_values_bytes = f32_bytes(partial_count)?;
+        let partial_indices_bytes = u32_bytes(partial_count)?;
+        let mut final_hidden_host = zeroed_host_bytes(hidden_bytes, "M=1 final hidden readback")?;
+        let mut logits_host = zeroed_host_bytes(logits_bytes, "M=1 logits readback")?;
+        let mut partial_values_host =
+            zeroed_host_bytes(partial_values_bytes, "M=1 top1 value readback")?;
+        let mut partial_indices_host =
+            zeroed_host_bytes(partial_indices_bytes, "M=1 top1 index readback")?;
+
+        let operation_result = (|| {
+            segmented_rmsnorm_f32(
+                resident_hidden,
+                &self.final_norm_f32,
+                1,
+                QWEN3_14B_HIDDEN_SIZE,
+                QWEN3_14B_RMS_NORM_EPSILON,
+                &mut self.final_hidden,
+                Some(&mut *stream),
+            )?;
+            matvec_bf16_f32(
+                &self.lm_head_bf16,
+                &self.final_hidden,
+                QWEN3_14B_VOCAB_SIZE,
+                QWEN3_14B_HIDDEN_SIZE,
+                &mut self.logits,
+                Some(&mut *stream),
+            )?;
+            self.final_hidden
+                .copy_to_host(0, &mut final_hidden_host, Some(&mut *stream))?;
+            let actual_partial_count = top1_f32(
+                &self.logits,
+                QWEN3_14B_VOCAB_SIZE,
+                &mut self.selected_hidden,
+                &mut self.final_hidden,
+                Some(&mut *stream),
+            )?;
+            if actual_partial_count != partial_count {
+                return Err(format!(
+                    "Qwen3-14B SQ8 M=1 model-head top1 returned unexpected partial count: expected={partial_count} actual={actual_partial_count}"
+                ));
+            }
+            self.logits
+                .copy_to_host(0, &mut logits_host, Some(&mut *stream))?;
+            self.selected_hidden
+                .copy_to_host(0, &mut partial_values_host, Some(&mut *stream))?;
+            self.final_hidden
+                .copy_to_host(0, &mut partial_indices_host, Some(&mut *stream))?;
+            Ok::<(), String>(())
+        })();
+        if let Err(operation_error) = operation_result {
+            return Err(self.poison_after_stream_recovery(stream, operation_error));
+        }
+        if let Err(sync_error) = stream.synchronize() {
+            return Err(self.poison_with_error(format!(
+                "failed to synchronize Qwen3-14B SQ8 M=1 model-head execution: {sync_error}"
+            )));
+        }
+
+        let final_hidden = decode_f32_le_values(&final_hidden_host);
+        let logits = decode_f32_le_values(&logits_host);
+        let final_hidden_health = match validate_sq8_model_head_tensor_health(
+            &final_hidden,
+            QWEN3_14B_HIDDEN_SIZE,
+            "M=1 final hidden",
+        ) {
+            Ok(health) => health,
+            Err(err) => return Err(self.poison_with_error(err)),
+        };
+        let logits_health = match validate_sq8_model_head_tensor_health(
+            &logits,
+            QWEN3_14B_VOCAB_SIZE,
+            "M=1 logits",
+        ) {
+            Ok(health) => health,
+            Err(err) => return Err(self.poison_with_error(err)),
+        };
+        let top1 = match top1_from_partial_readback(
+            &partial_values_host,
+            &partial_indices_host,
+            partial_count,
+        ) {
+            Ok(top1) => top1,
+            Err(err) => return Err(self.poison_with_error(err)),
+        };
+        let artifact_to_bind = binding.artifact_content_sha256.clone();
+        let result = Sq8ModelHeadM1Result {
+            final_hidden,
+            logits,
+            top1,
+            report: Sq8ModelHeadM1ExecutionReport {
+                binding,
+                final_norm: self.final_norm_identity.clone(),
+                lm_head: self.lm_head_identity.clone(),
+                input_elements: QWEN3_14B_HIDDEN_SIZE,
+                input_bytes: hidden_bytes,
+                final_hidden_health,
+                logits_health,
+                top1,
+                top1_partial_count: partial_count,
+                stack_kernel_guard_checks: QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len(),
+                paged_kernel_guard_checks: QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len(),
+                head_kernel_guard_checks: QWEN3_14B_SQ8_M1_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len(),
+                rmsnorm_call_count: 1,
+                bf16_matvec_call_count: 1,
+                top1_kernel_call_count: 1,
+                result_readback_count: 4,
+                execution_synchronization_count: 1,
+                fallback_used: false,
+                host_staging_used: false,
+            },
+        };
+        if let Err(err) = result.validate_contract() {
+            return Err(self.poison_with_error(format!(
+                "Qwen3-14B SQ8 M=1 model-head result validation failed: {err}"
+            )));
+        }
+        if self.m1_artifact_content_sha256.is_none() {
+            self.m1_artifact_content_sha256 = Some(artifact_to_bind);
+        }
+        self.state = Sq8ModelHeadRuntimeState::OutputReady;
+        Ok(result)
+    }
+
     fn validate_runtime_contract(&self) -> Result<(), String> {
         self.state.ensure_usable()?;
         self.device.validate_r9700()?;
+        validate_sha256(&self.package_manifest_sha256).map_err(|err| {
+            format!("Qwen3-14B SQ8 model-head package manifest hash is invalid: {err}")
+        })?;
         self.final_norm_identity.validate(
             QWEN3_14B_FINAL_NORM_TENSOR,
             &QWEN3_14B_FINAL_NORM_SHAPE,
@@ -646,7 +1006,13 @@ impl Qwen3Sq8ModelHeadRuntime {
             f32_bytes(QWEN3_14B_HIDDEN_SIZE)?,
             "final hidden",
         )?;
-        validate_buffer_size(&self.logits, f32_bytes(QWEN3_14B_VOCAB_SIZE)?, "logits")
+        validate_buffer_size(&self.logits, f32_bytes(QWEN3_14B_VOCAB_SIZE)?, "logits")?;
+        if let Some(artifact_content_sha256) = &self.m1_artifact_content_sha256 {
+            validate_sha256(artifact_content_sha256).map_err(|err| {
+                format!("Qwen3-14B SQ8 model-head bound artifact hash is invalid: {err}")
+            })?;
+        }
+        Ok(())
     }
 
     fn validate_execution_preconditions(&self, stack: &Qwen3Sq8StackRuntime) -> Result<(), String> {
@@ -674,6 +1040,41 @@ impl Qwen3Sq8ModelHeadRuntime {
             "stack hidden",
         )?;
         validate_hip_only_guards()
+    }
+
+    fn validate_m1_execution_preconditions(
+        &self,
+        resident_hidden: &RuntimeBuffer,
+        binding: &Sq8ModelHeadM1ExecutionBinding,
+    ) -> Result<(), String> {
+        self.validate_runtime_contract()?;
+        binding.validate_contract()?;
+        if binding.device != self.device {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head device binding mismatch: runtime={:?} input={:?}",
+                self.device, binding.device
+            ));
+        }
+        if binding.package_manifest_sha256 != self.package_manifest_sha256 {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head package binding mismatch: runtime={} input={}",
+                self.package_manifest_sha256, binding.package_manifest_sha256
+            ));
+        }
+        if let Some(bound_artifact) = &self.m1_artifact_content_sha256
+            && bound_artifact != &binding.artifact_content_sha256
+        {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head artifact binding mismatch: bound={bound_artifact} input={}",
+                binding.artifact_content_sha256
+            ));
+        }
+        validate_buffer_size(
+            resident_hidden,
+            f32_bytes(QWEN3_14B_HIDDEN_SIZE)?,
+            "M=1 resident hidden input",
+        )?;
+        validate_m1_hip_only_guards()
     }
 
     fn poison_after_stream_recovery(
@@ -785,6 +1186,107 @@ fn validate_hip_only_guards() -> Result<(), String> {
     Ok(())
 }
 
+fn validate_m1_hip_only_guards() -> Result<(), String> {
+    for name in QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV
+        .into_iter()
+        .chain(QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV)
+        .chain(QWEN3_14B_SQ8_M1_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV)
+    {
+        if std::env::var(name).ok().as_deref() != Some("1") {
+            return Err(format!(
+                "Qwen3-14B SQ8 M=1 model-head execution requires {name}=1 to forbid HIP host-staging fallback"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn top1_from_partial_readback(
+    value_bytes: &[u8],
+    index_bytes: &[u8],
+    expected_partials: usize,
+) -> Result<Sq8ModelHeadTop1, String> {
+    let expected_value_bytes = f32_bytes(expected_partials)?;
+    let expected_index_bytes = u32_bytes(expected_partials)?;
+    if value_bytes.len() != expected_value_bytes || index_bytes.len() != expected_index_bytes {
+        return Err(format!(
+            "Qwen3-14B SQ8 M=1 model-head top1 partial readback size mismatch: expected_values={expected_value_bytes} actual_values={} expected_indices={expected_index_bytes} actual_indices={}",
+            value_bytes.len(),
+            index_bytes.len()
+        ));
+    }
+    let values = decode_f32_le_values(value_bytes);
+    let indices = index_bytes
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("u32 chunk")) as usize)
+        .collect::<Vec<_>>();
+    top1_from_finite_pairs(&values, indices, "GPU partial")
+}
+
+fn top1_from_finite_logits(values: &[f32]) -> Result<Sq8ModelHeadTop1, String> {
+    if values.len() != QWEN3_14B_VOCAB_SIZE {
+        return Err(format!(
+            "Qwen3-14B SQ8 M=1 model-head top1 logits length mismatch: expected={} actual={}",
+            QWEN3_14B_VOCAB_SIZE,
+            values.len()
+        ));
+    }
+    let indices = 0..values.len();
+    top1_from_finite_pairs(values, indices, "host logits")
+}
+
+fn top1_from_finite_pairs(
+    values: &[f32],
+    indices: impl IntoIterator<Item = usize>,
+    label: &str,
+) -> Result<Sq8ModelHeadTop1, String> {
+    let mut indices = indices.into_iter();
+    let first_value = values
+        .first()
+        .copied()
+        .ok_or_else(|| format!("Qwen3-14B SQ8 M=1 model-head {label} must not be empty"))?;
+    let first_index = indices
+        .next()
+        .ok_or_else(|| format!("Qwen3-14B SQ8 M=1 model-head {label} has no token index"))?;
+    validate_top1_pair(first_value, first_index, 0, label)?;
+    let mut best = Sq8ModelHeadTop1 {
+        token_id: first_index,
+        logit: first_value,
+    };
+    for (pair_index, value) in values.iter().copied().enumerate().skip(1) {
+        let token_id = indices.next().ok_or_else(|| {
+            format!("Qwen3-14B SQ8 M=1 model-head {label} index count is smaller than value count")
+        })?;
+        validate_top1_pair(value, token_id, pair_index, label)?;
+        if value > best.logit || (value == best.logit && token_id < best.token_id) {
+            best = Sq8ModelHeadTop1 {
+                token_id,
+                logit: value,
+            };
+        }
+    }
+    if indices.next().is_some() {
+        return Err(format!(
+            "Qwen3-14B SQ8 M=1 model-head {label} index count exceeds value count"
+        ));
+    }
+    Ok(best)
+}
+
+fn validate_top1_pair(
+    value: f32,
+    token_id: usize,
+    pair_index: usize,
+    label: &str,
+) -> Result<(), String> {
+    if !value.is_finite() || token_id >= QWEN3_14B_VOCAB_SIZE {
+        return Err(format!(
+            "Qwen3-14B SQ8 M=1 model-head {label} pair is invalid at {pair_index}: token={token_id} logit={value}"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_buffer_size(
     buffer: &RuntimeBuffer,
     expected_bytes: usize,
@@ -850,6 +1352,12 @@ fn bf16_bytes(elements: usize) -> Result<usize, String> {
         .ok_or_else(|| "Qwen3-14B SQ8 model-head BF16 byte size overflows".into())
 }
 
+fn u32_bytes(elements: usize) -> Result<usize, String> {
+    elements
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "Qwen3-14B SQ8 model-head U32 byte size overflows".into())
+}
+
 fn validate_sha256(value: &str) -> Result<(), String> {
     if value.len() != 64
         || !value
@@ -868,6 +1376,42 @@ fn bf16_values_sha256(values: &[f32]) -> String {
         digest.update(((value.to_bits() >> 16) as u16).to_le_bytes());
     }
     format!("{:x}", digest.finalize())
+}
+
+fn sha256_regular_file(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|err| {
+        format!(
+            "failed to inspect Qwen3-14B SQ8 model-head package manifest {}: {err}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "Qwen3-14B SQ8 model-head package manifest must be a regular non-symlink file: {}",
+            path.display()
+        ));
+    }
+    let mut file = File::open(path).map_err(|err| {
+        format!(
+            "failed to open Qwen3-14B SQ8 model-head package manifest {}: {err}",
+            path.display()
+        )
+    })?;
+    let mut digest = Sha256::new();
+    let mut chunk = [0_u8; MANIFEST_HASH_CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut chunk).map_err(|err| {
+            format!(
+                "failed to hash Qwen3-14B SQ8 model-head package manifest {}: {err}",
+                path.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&chunk[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn load_error_after_stream_recovery(stream: &mut RuntimeStream, operation_error: String) -> String {
@@ -993,6 +1537,48 @@ mod tests {
         }
     }
 
+    fn valid_m1_report() -> Sq8ModelHeadM1ExecutionReport {
+        let lm_elements =
+            checked_elements(QWEN3_14B_VOCAB_SIZE, QWEN3_14B_HIDDEN_SIZE, "test").unwrap();
+        Sq8ModelHeadM1ExecutionReport {
+            binding: Sq8ModelHeadM1ExecutionBinding {
+                profile: Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+                device: r9700_identity(),
+                package_manifest_sha256: "3".repeat(64),
+                artifact_content_sha256: "0".repeat(64),
+            },
+            final_norm: payload_identity(
+                QWEN3_14B_FINAL_NORM_TENSOR,
+                QWEN3_14B_FINAL_NORM_SHAPE.to_vec(),
+                QWEN3_14B_HIDDEN_SIZE as u64,
+            ),
+            lm_head: payload_identity(
+                QWEN3_14B_LM_HEAD_TENSOR,
+                QWEN3_14B_LM_HEAD_SHAPE.to_vec(),
+                lm_elements as u64,
+            ),
+            input_elements: QWEN3_14B_HIDDEN_SIZE,
+            input_bytes: f32_bytes(QWEN3_14B_HIDDEN_SIZE).unwrap(),
+            final_hidden_health: health(QWEN3_14B_HIDDEN_SIZE),
+            logits_health: health(QWEN3_14B_VOCAB_SIZE),
+            top1: Sq8ModelHeadTop1 {
+                token_id: 42,
+                logit: 1.0,
+            },
+            top1_partial_count: top1_partial_count(QWEN3_14B_VOCAB_SIZE).unwrap(),
+            stack_kernel_guard_checks: QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len(),
+            paged_kernel_guard_checks: QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len(),
+            head_kernel_guard_checks: QWEN3_14B_SQ8_M1_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len(),
+            rmsnorm_call_count: 1,
+            bf16_matvec_call_count: 1,
+            top1_kernel_call_count: 1,
+            result_readback_count: 4,
+            execution_synchronization_count: 1,
+            fallback_used: false,
+            host_staging_used: false,
+        }
+    }
+
     #[test]
     fn tensor_health_validates_range_and_hash() {
         let values = [-2.0_f32, 0.0, 3.5];
@@ -1057,6 +1643,158 @@ mod tests {
         let mut bad = report;
         bad.lm_head.tensor_name = "model.lm_head.weight".into();
         assert!(bad.validate_contract().is_err());
+    }
+
+    #[test]
+    fn m1_report_enforces_binding_health_and_operation_contract() {
+        let report = valid_m1_report();
+        report.validate_contract().unwrap();
+
+        let mut bad = report.clone();
+        bad.binding.profile = Sq8LayerExecutionProfile::ReferenceW8a16Block2d;
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.binding.package_manifest_sha256 = "F".repeat(64);
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.binding.artifact_content_sha256 = "0".repeat(63);
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.input_bytes += 4;
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.top1.token_id = QWEN3_14B_VOCAB_SIZE;
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.top1.logit = 0.5;
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.top1_kernel_call_count = 0;
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report.clone();
+        bad.paged_kernel_guard_checks = 0;
+        assert!(bad.validate_contract().is_err());
+
+        let mut bad = report;
+        bad.fallback_used = true;
+        assert!(bad.validate_contract().is_err());
+    }
+
+    #[test]
+    fn m1_binding_constructor_converts_and_validates_runtime_identity() {
+        let device = DeviceInfo {
+            device_id: 0,
+            backend: "hip".to_string(),
+            name: R9700_RUNTIME_NAME.to_string(),
+            total_global_mem: R9700_MEMORY_BYTES_MIN,
+            compute_major: 12,
+            compute_minor: 0,
+            gcn_arch_name: "gfx1201".to_string(),
+            flags: 0,
+        };
+        let binding = Sq8ModelHeadM1ExecutionBinding::new(
+            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
+            &device,
+            "3".repeat(64),
+            "4".repeat(64),
+        );
+        binding.validate_contract().unwrap();
+        assert_eq!(binding.device.device_id, device.device_id);
+    }
+
+    #[test]
+    fn m1_top1_is_finite_and_uses_lowest_token_for_ties() {
+        let mut logits = vec![-10.0_f32; QWEN3_14B_VOCAB_SIZE];
+        logits[9] = 4.5;
+        logits[3] = 4.5;
+        assert_eq!(
+            top1_from_finite_logits(&logits).unwrap(),
+            Sq8ModelHeadTop1 {
+                token_id: 3,
+                logit: 4.5
+            }
+        );
+        logits[7] = f32::NAN;
+        assert!(top1_from_finite_logits(&logits).is_err());
+        assert!(top1_from_finite_logits(&logits[..4]).is_err());
+    }
+
+    #[test]
+    fn m1_top1_partial_readback_validates_values_indices_and_sizes() {
+        let values = encode_f32_to_bytes(&[2.0, 2.0, -1.0]);
+        let indices = crate::host_bytes::encode_u32_to_bytes(&[8, 4, 2]);
+        assert_eq!(
+            top1_from_partial_readback(&values, &indices, 3).unwrap(),
+            Sq8ModelHeadTop1 {
+                token_id: 4,
+                logit: 2.0
+            }
+        );
+
+        let invalid_index =
+            crate::host_bytes::encode_u32_to_bytes(&[8, QWEN3_14B_VOCAB_SIZE as u32, 2]);
+        assert!(top1_from_partial_readback(&values, &invalid_index, 3).is_err());
+        assert!(top1_from_partial_readback(&values[..8], &indices, 3).is_err());
+    }
+
+    #[test]
+    fn m1_result_binds_tensor_hashes_and_independent_top1() {
+        let final_hidden = vec![0.25_f32; QWEN3_14B_HIDDEN_SIZE];
+        let mut logits = vec![-2.0_f32; QWEN3_14B_VOCAB_SIZE];
+        logits[42] = 1.0;
+        let top1 = Sq8ModelHeadTop1 {
+            token_id: 42,
+            logit: 1.0,
+        };
+        let mut report = valid_m1_report();
+        report.final_hidden_health = validate_sq8_model_head_tensor_health(
+            &final_hidden,
+            QWEN3_14B_HIDDEN_SIZE,
+            "test final hidden",
+        )
+        .unwrap();
+        report.logits_health =
+            validate_sq8_model_head_tensor_health(&logits, QWEN3_14B_VOCAB_SIZE, "test logits")
+                .unwrap();
+        report.top1 = top1;
+        let result = Sq8ModelHeadM1Result {
+            final_hidden,
+            logits,
+            top1,
+            report,
+        };
+        result.validate_contract().unwrap();
+
+        let mut bad = result;
+        bad.top1.token_id = 41;
+        assert!(bad.validate_contract().is_err());
+    }
+
+    #[test]
+    fn package_manifest_hash_is_streamed_from_regular_file() {
+        let root = std::env::temp_dir().join(format!(
+            "ullm-sq8-model-head-manifest-hash-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = root.join(PACKAGE_MANIFEST_FILE);
+        let payload = vec![0x5a_u8; MANIFEST_HASH_CHUNK_BYTES + 17];
+        std::fs::write(&manifest, &payload).unwrap();
+        let mut digest = Sha256::new();
+        digest.update(&payload);
+        assert_eq!(
+            sha256_regular_file(&manifest).unwrap(),
+            format!("{:x}", digest.finalize())
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
