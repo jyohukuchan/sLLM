@@ -20,6 +20,20 @@ RESULT_SCHEMA_VERSION = "ullm.sq8.serving_deep_boundary_validation.v1"
 PREFILL_MODE = "m8-chunk8"
 PREFILL_CHUNK_TOKENS = 8
 PREFILL_IMPLEMENTATION = "sq8.fixed-m8-cached-prefix.v1"
+PREFILL_MODE_CONFIGS = {
+    PREFILL_MODE: {
+        "schema_version": INPUT_SCHEMA_VERSION,
+        "prefill_chunk_tokens": PREFILL_CHUNK_TOKENS,
+        "prefill_implementation": PREFILL_IMPLEMENTATION,
+        "transition_label": "M8",
+    },
+    "m128-chunk128": {
+        "schema_version": "ullm.sq8.serving_deep_boundary.v2",
+        "prefill_chunk_tokens": 128,
+        "prefill_implementation": "sq8.fixed-m128-cached-prefix.v1",
+        "transition_label": "M128",
+    },
+}
 REQUEST_ID = "deep-boundary-p3584-g512"
 PROMPT_TOKENS = 3_584
 GENERATED_TOKENS = 512
@@ -33,7 +47,9 @@ EOS_TOKEN_IDS = (151_645, 151_643)
 TERMINAL_CACHE_LEN = CONTEXT_TOKENS - 1
 TERMINAL_CACHE_POSITION = TERMINAL_CACHE_LEN - 1
 TERMINAL_LOGICAL_BLOCK = TERMINAL_CACHE_POSITION // BLOCK_TOKENS
-PREFILL_EXECUTION_CALLS = PROMPT_TOKENS // PREFILL_CHUNK_TOKENS
+PREFILL_EXECUTION_CALLS = (
+    PROMPT_TOKENS // PREFILL_CHUNK_TOKENS + PROMPT_TOKENS % PREFILL_CHUNK_TOKENS
+)
 DECODE_EXECUTION_CALLS = GENERATED_TOKENS - 1
 TOTAL_EXECUTION_CALLS = PREFILL_EXECUTION_CALLS + DECODE_EXECUTION_CALLS
 PROMPT_PROGRESS_EVENTS = PREFILL_EXECUTION_CALLS - 1
@@ -55,6 +71,21 @@ class ValidationError(ValueError):
 
 def fail(message: str) -> None:
     raise ValidationError(message)
+
+
+def prefill_mode_config(mode: str) -> dict[str, Any]:
+    config = PREFILL_MODE_CONFIGS.get(mode)
+    if config is None:
+        fail(f"unknown prefill mode: {mode}")
+    return config
+
+
+def expected_prefill_widths(prompt_tokens: int, chunk_tokens: int) -> list[int]:
+    if prompt_tokens <= 0 or chunk_tokens <= 0:
+        fail("prefill widths require positive prompt and chunk lengths")
+    return [chunk_tokens] * (prompt_tokens // chunk_tokens) + [1] * (
+        prompt_tokens % chunk_tokens
+    )
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -218,21 +249,29 @@ def validate_generated_steps(value: Any, generated: list[int], label: str) -> No
             fail(f"{step_label} does not prove its generated/cache transition")
 
 
-def validate_prefill_execution_units(value: Any, label: str) -> None:
-    if not isinstance(value, list) or len(value) != PREFILL_EXECUTION_CALLS:
-        fail(f"{label} must contain exactly {PREFILL_EXECUTION_CALLS} units")
-    for index, unit in enumerate(value):
+def validate_prefill_execution_units(
+    value: Any,
+    label: str,
+    *,
+    chunk_tokens: int,
+    transition_label: str,
+) -> None:
+    widths = expected_prefill_widths(PROMPT_TOKENS, chunk_tokens)
+    if not isinstance(value, list) or len(value) != len(widths):
+        fail(f"{label} must contain exactly {len(widths)} units")
+    position = 0
+    for index, (unit, width) in enumerate(zip(value, widths, strict=True)):
         unit_label = f"{label}[{index}]"
         if not isinstance(unit, dict):
             fail(f"{unit_label} must be an object")
-        start = index * PREFILL_CHUNK_TOKENS
-        end = start + PREFILL_CHUNK_TOKENS
+        start = position
+        end = start + width
         cache_lengths = unit.get("cache_lengths")
         if (
             integer(unit.get("start_position"), f"{unit_label}.start_position") != start
-            or integer(unit.get("width"), f"{unit_label}.width") != PREFILL_CHUNK_TOKENS
+            or integer(unit.get("width"), f"{unit_label}.width") != width
             or integer(unit.get("end_position"), f"{unit_label}.end_position") != end
-            or unit.get("final_prompt_unit") is not (index == PREFILL_EXECUTION_CALLS - 1)
+            or unit.get("final_prompt_unit") is not (index == len(widths) - 1)
             or not isinstance(cache_lengths, list)
             or len(cache_lengths) != STACK_LAYERS
             or any(
@@ -247,7 +286,10 @@ def validate_prefill_execution_units(value: Any, label: str) -> None:
             or integer(unit.get("last_logical_block"), f"{unit_label}.last_logical_block")
             != (end - 1) // BLOCK_TOKENS
         ):
-            fail(f"{unit_label} does not prove its M8 prefill/cache transition")
+            fail(f"{unit_label} does not prove its {transition_label} prefill/cache transition")
+        position = end
+    if position != PROMPT_TOKENS:
+        fail(f"{label} does not cover the complete prompt")
 
 
 def validate_terminal_request(request: dict[str, Any], label: str) -> None:
@@ -290,20 +332,30 @@ def token_sha256(tokens: list[int]) -> str:
 
 
 def validate_result(
-    result_path: Path, expected_runner_git_commit: str, expected_binary_sha256: str
+    result_path: Path,
+    expected_runner_git_commit: str,
+    expected_binary_sha256: str,
+    prefill_mode: str = PREFILL_MODE,
 ) -> dict[str, Any]:
     validate_expected_build_identity(expected_runner_git_commit, expected_binary_sha256)
+    config = prefill_mode_config(prefill_mode)
+    prefill_chunk_tokens = config["prefill_chunk_tokens"]
+    prefill_execution_calls = len(
+        expected_prefill_widths(PROMPT_TOKENS, prefill_chunk_tokens)
+    )
+    total_execution_calls = prefill_execution_calls + DECODE_EXECUTION_CALLS
+    prompt_progress_events = prefill_execution_calls - 1
     result_file, result = load_json(result_path, "deep-boundary result")
     label = str(result_file)
     build_identity = validate_build_identity(
         result, expected_runner_git_commit, expected_binary_sha256, label
     )
     if (
-        result.get("schema_version") != INPUT_SCHEMA_VERSION
+        result.get("schema_version") != config["schema_version"]
         or not isinstance(result.get("passed"), bool)
-        or result.get("prefill_mode") != PREFILL_MODE
-        or result.get("prefill_chunk_tokens") != PREFILL_CHUNK_TOKENS
-        or result.get("prefill_implementation") != PREFILL_IMPLEMENTATION
+        or result.get("prefill_mode") != prefill_mode
+        or result.get("prefill_chunk_tokens") != prefill_chunk_tokens
+        or result.get("prefill_implementation") != config["prefill_implementation"]
         or result.get("artifact_content_sha256") != EXPECTED_ARTIFACT_SHA256
         or result.get("package_manifest_sha256") != EXPECTED_PACKAGE_SHA256
         or result.get("kv_cache_bytes") != KV_CACHE_BYTES
@@ -333,14 +385,16 @@ def validate_result(
         or request.get("reserved_context_tokens") != CONTEXT_TOKENS
         or request.get("terminal_sequence_tokens") != CONTEXT_TOKENS
         or request.get("processed_prompt_tokens") != PROMPT_TOKENS
-        or request.get("execution_calls") != TOTAL_EXECUTION_CALLS
-        or request.get("execution_units") != TOTAL_EXECUTION_CALLS
-        or request.get("prompt_progress_events") != PROMPT_PROGRESS_EVENTS
+        or request.get("execution_calls") != total_execution_calls
+        or request.get("execution_units") != total_execution_calls
+        or request.get("prompt_progress_events") != prompt_progress_events
     ):
         fail(f"{request_label} does not bind the fixed deep-boundary execution contract")
     validate_prefill_execution_units(
         request.get("prefill_execution_units"),
         f"{request_label}.prefill_execution_units",
+        chunk_tokens=prefill_chunk_tokens,
+        transition_label=config["transition_label"],
     )
     generated = validate_generated_tokens(
         request.get("generated_token_ids"), f"{request_label}.generated_token_ids"
@@ -355,18 +409,18 @@ def validate_result(
         "schema_version": RESULT_SCHEMA_VERSION,
         "passed": True,
         "build_identity": build_identity,
-        "prefill_mode": PREFILL_MODE,
-        "prefill_chunk_tokens": PREFILL_CHUNK_TOKENS,
-        "prefill_implementation": PREFILL_IMPLEMENTATION,
+        "prefill_mode": prefill_mode,
+        "prefill_chunk_tokens": prefill_chunk_tokens,
+        "prefill_implementation": config["prefill_implementation"],
         "prompt_tokens": PROMPT_TOKENS,
         "generated_tokens": GENERATED_TOKENS,
         "reserved_context_tokens": PROMPT_TOKENS + GENERATED_TOKENS,
         "terminal_cache_len": TERMINAL_CACHE_LEN,
         "terminal_last_cache_position": TERMINAL_CACHE_POSITION,
         "terminal_last_logical_block": TERMINAL_LOGICAL_BLOCK,
-        "prefill_execution_calls": PREFILL_EXECUTION_CALLS,
+        "prefill_execution_calls": prefill_execution_calls,
         "decode_execution_calls": DECODE_EXECUTION_CALLS,
-        "total_execution_calls": TOTAL_EXECUTION_CALLS,
+        "total_execution_calls": total_execution_calls,
         "test_only_ignore_eos": True,
         "observed_eos_generated_indices": eos_indices,
         "generated_token_ids_sha256": token_sha256(generated),
@@ -396,6 +450,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-runner-git-commit", required=True)
     parser.add_argument("--expected-binary-sha256", required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--prefill-mode",
+        choices=tuple(PREFILL_MODE_CONFIGS),
+        default=PREFILL_MODE,
+        help="fixed-width prefill result mode (default: %(default)s)",
+    )
     return parser.parse_args()
 
 
@@ -406,6 +466,7 @@ def main() -> int:
             args.result,
             args.expected_runner_git_commit,
             args.expected_binary_sha256,
+            args.prefill_mode,
         )
         if args.output is not None:
             write_json_create_new(args.output, validation)

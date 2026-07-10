@@ -2,6 +2,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = REPO_ROOT / "tools" / "validate-sq8-serving-deep-boundary.py"
 GIT_COMMIT = "a" * 40
 BINARY_SHA256 = "b" * 64
+M128_PREFILL_MODE = "m128-chunk128"
+M128_INPUT_SCHEMA_VERSION = "ullm.sq8.serving_deep_boundary.v2"
+M128_PREFILL_CHUNK_TOKENS = 128
+M128_PREFILL_IMPLEMENTATION = "sq8.fixed-m128-cached-prefix.v1"
 
 
 def load_module():
@@ -22,7 +28,35 @@ def load_module():
     return module
 
 
-def valid_document(module) -> dict:
+def prefill_config(module, prefill_mode: str):
+    if prefill_mode == module.PREFILL_MODE:
+        return {
+            "schema_version": module.INPUT_SCHEMA_VERSION,
+            "prefill_chunk_tokens": module.PREFILL_CHUNK_TOKENS,
+            "prefill_implementation": module.PREFILL_IMPLEMENTATION,
+        }
+    if prefill_mode == M128_PREFILL_MODE:
+        return {
+            "schema_version": M128_INPUT_SCHEMA_VERSION,
+            "prefill_chunk_tokens": M128_PREFILL_CHUNK_TOKENS,
+            "prefill_implementation": M128_PREFILL_IMPLEMENTATION,
+        }
+    raise AssertionError(f"unsupported test prefill mode: {prefill_mode}")
+
+
+def prefill_widths(prompt_tokens: int, chunk_tokens: int) -> list[int]:
+    return [chunk_tokens] * (prompt_tokens // chunk_tokens) + [1] * (
+        prompt_tokens % chunk_tokens
+    )
+
+
+def valid_document(module, *, prefill_mode=None) -> dict:
+    prefill_mode = prefill_mode or module.PREFILL_MODE
+    config = prefill_config(module, prefill_mode)
+    chunk_tokens = config["prefill_chunk_tokens"]
+    widths = prefill_widths(module.PROMPT_TOKENS, chunk_tokens)
+    prefill_calls = len(widths)
+    total_calls = prefill_calls + module.DECODE_EXECUTION_CALLS
     generated = [(index * 17 + 3) % module.VOCAB_SIZE for index in range(module.GENERATED_TOKENS)]
     generated[23] = module.EOS_TOKEN_IDS[0]
     generated[301] = module.EOS_TOKEN_IDS[1]
@@ -46,30 +80,32 @@ def valid_document(module) -> dict:
             }
         )
     prefill_units = []
-    for index in range(module.PREFILL_EXECUTION_CALLS):
-        start = index * module.PREFILL_CHUNK_TOKENS
-        end = start + module.PREFILL_CHUNK_TOKENS
+    position = 0
+    for index, width in enumerate(widths):
+        start = position
+        end = start + width
         prefill_units.append(
             {
                 "start_position": start,
-                "width": module.PREFILL_CHUNK_TOKENS,
+                "width": width,
                 "end_position": end,
-                "final_prompt_unit": index == module.PREFILL_EXECUTION_CALLS - 1,
+                "final_prompt_unit": index == prefill_calls - 1,
                 "cache_lengths": [end] * module.STACK_LAYERS,
                 "cache_lengths_all_expected": True,
                 "last_cache_position": end - 1,
                 "last_logical_block": (end - 1) // module.BLOCK_TOKENS,
             }
         )
+        position = end
     return {
-        "schema_version": module.INPUT_SCHEMA_VERSION,
+        "schema_version": config["schema_version"],
         "runner_git_commit": GIT_COMMIT,
         "runner_worktree_clean": True,
         "runner_binary_sha256": BINARY_SHA256,
         "passed": False,
-        "prefill_mode": module.PREFILL_MODE,
-        "prefill_chunk_tokens": module.PREFILL_CHUNK_TOKENS,
-        "prefill_implementation": module.PREFILL_IMPLEMENTATION,
+        "prefill_mode": prefill_mode,
+        "prefill_chunk_tokens": chunk_tokens,
+        "prefill_implementation": config["prefill_implementation"],
         "artifact_content_sha256": module.EXPECTED_ARTIFACT_SHA256,
         "package_manifest_sha256": module.EXPECTED_PACKAGE_SHA256,
         "device": {
@@ -94,10 +130,10 @@ def valid_document(module) -> dict:
                 "generated_token_ids": generated,
                 "test_only_ignore_eos": True,
                 "generated_steps": steps,
-                "prompt_progress_events": module.PROMPT_PROGRESS_EVENTS,
-                "execution_units": module.TOTAL_EXECUTION_CALLS,
+                "prompt_progress_events": prefill_calls - 1,
+                "execution_units": total_calls,
                 "processed_prompt_tokens": module.PROMPT_TOKENS,
-                "execution_calls": module.TOTAL_EXECUTION_CALLS,
+                "execution_calls": total_calls,
                 "prefill_execution_units": prefill_units,
                 "reserved_context_tokens": module.CONTEXT_TOKENS,
                 "terminal_sequence_tokens": module.CONTEXT_TOKENS,
@@ -132,8 +168,10 @@ class Sq8ServingDeepBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
 
-    def validate(self, path: Path):
-        return self.module.validate_result(path, GIT_COMMIT, BINARY_SHA256)
+    def validate(self, path: Path, prefill_mode=None):
+        if prefill_mode is None:
+            return self.module.validate_result(path, GIT_COMMIT, BINARY_SHA256)
+        return self.module.validate_result(path, GIT_COMMIT, BINARY_SHA256, prefill_mode)
 
     def assert_mutation_rejected(self, mutate, pattern: str) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -157,6 +195,92 @@ class Sq8ServingDeepBoundaryTests(unittest.TestCase):
             self.assertEqual(
                 result["evidence"]["sha256"], hashlib.sha256(path.read_bytes()).hexdigest()
             )
+
+    def test_recomputes_m128_raw_v2_boundary_and_full_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deep-boundary-m128.json"
+            document = valid_document(self.module, prefill_mode=M128_PREFILL_MODE)
+            write_document(path, document)
+
+            result = self.validate(path, M128_PREFILL_MODE)
+
+            self.assertTrue(result["passed"])
+            self.assertEqual(result["prefill_mode"], M128_PREFILL_MODE)
+            self.assertEqual(result["prefill_chunk_tokens"], M128_PREFILL_CHUNK_TOKENS)
+            self.assertEqual(result["prefill_execution_calls"], 28)
+            self.assertEqual(result["decode_execution_calls"], 511)
+            self.assertEqual(result["total_execution_calls"], 539)
+            request = document["requests"][0]
+            self.assertEqual(request["prompt_progress_events"], 27)
+            self.assertEqual(len(request["prefill_execution_units"]), 28)
+            self.assertTrue(
+                all(
+                    unit["width"] == M128_PREFILL_CHUNK_TOKENS
+                    for unit in request["prefill_execution_units"]
+                )
+            )
+            self.assertEqual(request["prefill_execution_units"][-1]["end_position"], 3584)
+            self.assertEqual(len(request["generated_steps"]), 512)
+            self.assertEqual(result["terminal_cache_len"], 4095)
+            self.assertEqual(result["terminal_last_cache_position"], 4094)
+
+    def test_prefill_mode_strictly_binds_deep_schema_and_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            m8_path = root / "deep-m8.json"
+            m128_path = root / "deep-m128.json"
+            write_document(m8_path, valid_document(self.module))
+            write_document(
+                m128_path,
+                valid_document(self.module, prefill_mode=M128_PREFILL_MODE),
+            )
+
+            with self.assertRaisesRegex(self.module.ValidationError, "schema/model/runtime contract"):
+                self.validate(m128_path)
+            with self.assertRaisesRegex(self.module.ValidationError, "schema/model/runtime contract"):
+                self.validate(m8_path, M128_PREFILL_MODE)
+
+    def test_rejects_m128_prefill_call_and_unit_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deep-m128.json"
+            document = valid_document(self.module, prefill_mode=M128_PREFILL_MODE)
+            document["requests"][0]["prompt_progress_events"] = 447
+            write_document(path, document)
+            with self.assertRaisesRegex(
+                self.module.ValidationError, "fixed deep-boundary execution contract"
+            ):
+                self.validate(path, M128_PREFILL_MODE)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deep-m128.json"
+            document = valid_document(self.module, prefill_mode=M128_PREFILL_MODE)
+            document["requests"][0]["prefill_execution_units"][7]["width"] = 8
+            write_document(path, document)
+            with self.assertRaisesRegex(self.module.ValidationError, "M128 prefill/cache transition"):
+                self.validate(path, M128_PREFILL_MODE)
+
+    def test_cli_selects_m128_raw_v2(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deep-m128.json"
+            write_document(path, valid_document(self.module, prefill_mode=M128_PREFILL_MODE))
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    str(VALIDATOR),
+                    str(path),
+                    "--expected-runner-git-commit",
+                    GIT_COMMIT,
+                    "--expected-binary-sha256",
+                    BINARY_SHA256,
+                    "--prefill-mode",
+                    M128_PREFILL_MODE,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("passed=true", run.stdout)
 
     def test_rejects_prompt_token_tampering(self):
         self.assert_mutation_rejected(
