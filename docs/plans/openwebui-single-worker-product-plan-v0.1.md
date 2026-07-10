@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 correctness is complete and the first formal performance run failed only the 3584-token TTFT gate
+Status: in progress; P8-B2 selected M=128 after the M=8 gate failure and is preparing clean correctness and formal performance evidence
 
 Date: 2026-07-10
 
@@ -696,6 +696,46 @@ P8-C remains blocked until the selected single-request prefill path passes the
 unchanged formal gate. This bounds the optimization work to one candidate screen,
 one selected-path validation cycle, and, only if necessary, one profiler-directed
 change before the plan is explicitly reconsidered.
+
+#### P8-B2 M=128 selection update (2026-07-10)
+
+##### 前回の要点
+
+The first M=8 formal run failed only prompt 3584 TTFT at p50/p95
+`61.023836 / 61.025951` seconds. The bounded recovery plan allowed measured wider
+single-request chunks without changing batching, context, or latency limits.
+
+##### 今回の変更点
+
+- The serving-only chunk path now accepts measured M=32 and M=128 while the P7
+  audited M=8 path and old M=8 evidence schemas remain unchanged.
+- M=128 prompt 128 and 512 produced final hidden tensors and logits that were
+  bitwise identical to the existing M=8 captures. Their resident request times were
+  `0.325525 / 1.015741` seconds.
+- A prompt 3584 M=128 diagnostic used exactly 28 chunks, emitted the same first
+  token `1`, reached cache length 3584 and position 3583, reset completely, and
+  took `31.310532` seconds. This is `48.7%` faster than the M=8 formal p50 and
+  `18.69` seconds below the fixed 50-second p50 limit.
+- The diagnostic ran while validator files were being edited, so
+  `runner_worktree_clean=false`; it selects the implementation but is not release
+  evidence.
+- M=128 therefore closes the candidate screen early. Measuring M=32, adding a
+  sequence KV-write API, changing F32 KV, or redesigning attention would add work
+  without being required by the observed gate margin. Those changes remain
+  conditional on a later clean formal failure.
+
+##### 次の行動
+
+1. Produce one clean-binary M=128 and all-M=1 oracle pair for prompt
+   32/128/512/4095, validate all unit/cache transitions, and compare final
+   hidden/logits against all-M=1 and the frozen vLLM source fixtures.
+2. Run the exact prompt 3584 plus 512 generated-token deep boundary through M=128
+   and validate every decode position and the final 4095-token KV state.
+3. Run the unchanged formal resident matrix with two warmups and five measured
+   samples at every prompt length, plus prompt 32 / generation 64 decode.
+4. Advance to P8-C only if the clean M=128 correctness, boundary, and every formal
+   performance threshold pass. Otherwise profile the failing component once before
+   approving any further implementation change.
 
 ### P8-C: Sampling, Cancellation, and Resident Worker
 
