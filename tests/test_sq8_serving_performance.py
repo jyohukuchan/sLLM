@@ -15,6 +15,10 @@ GIT_COMMIT = "a" * 40
 BINARY_SHA256 = "b" * 64
 WORKER_PID = 4_242
 VRAM_BYTES = 24 * 1024**3
+M128_PREFILL_MODE = "m128-chunk128"
+M128_INPUT_SCHEMA_VERSION = "ullm.sq8.serving_performance.raw.v2"
+M128_PREFILL_CHUNK_TOKENS = 128
+M128_PREFILL_IMPLEMENTATION = "sq8.fixed-m128-cached-prefix.v1"
 
 
 def load_module():
@@ -37,6 +41,26 @@ def raw_sha(value: str) -> str:
 
 def compact_json(value) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def prefill_config(module, prefill_mode: str):
+    if prefill_mode == module.PREFILL_MODE:
+        return {
+            "schema_version": module.INPUT_SCHEMA_VERSION,
+            "prefill_chunk_tokens": module.PREFILL_CHUNK_TOKENS,
+            "prefill_implementation": module.PREFILL_IMPLEMENTATION,
+        }
+    if prefill_mode == M128_PREFILL_MODE:
+        return {
+            "schema_version": M128_INPUT_SCHEMA_VERSION,
+            "prefill_chunk_tokens": M128_PREFILL_CHUNK_TOKENS,
+            "prefill_implementation": M128_PREFILL_IMPLEMENTATION,
+        }
+    raise AssertionError(f"unsupported test prefill mode: {prefill_mode}")
+
+
+def prompt_execution_calls(prompt_tokens: int, chunk_tokens: int) -> int:
+    return prompt_tokens // chunk_tokens + prompt_tokens % chunk_tokens
 
 
 def active_snapshot(
@@ -153,7 +177,15 @@ def metric_capture(module, clock: Clock):
     }
 
 
-def ttft_sample(module, clock: Clock, prompt_tokens: int, phase: str, index: int, ttft_ns: int):
+def ttft_sample(
+    module,
+    clock: Clock,
+    prompt_tokens: int,
+    phase: str,
+    index: int,
+    ttft_ns: int,
+    prefill_chunk_tokens: int,
+):
     request_id = f"perf-ttft-p{prompt_tokens:04d}-{phase}-{index}"
     start = clock.value
     first = start + ttft_ns
@@ -162,7 +194,7 @@ def ttft_sample(module, clock: Clock, prompt_tokens: int, phase: str, index: int
     reset_start = cancellation + 10
     reset_end = reset_start + 100
     clock.value = reset_end + 10
-    calls = prompt_tokens // module.PREFILL_CHUNK_TOKENS
+    calls = prompt_execution_calls(prompt_tokens, prefill_chunk_tokens)
     result = {
         "phase": phase,
         "sample_index": index,
@@ -194,15 +226,37 @@ def ttft_sample(module, clock: Clock, prompt_tokens: int, phase: str, index: int
     return result
 
 
-def ttft_case(module, clock: Clock, prompt_tokens: int, ttft_ns: int):
+def ttft_case(
+    module,
+    clock: Clock,
+    prompt_tokens: int,
+    ttft_ns: int,
+    prefill_chunk_tokens: int,
+):
     p50, p95 = module.TTFT_LIMITS[prompt_tokens]
     before = metric_capture(module, clock)
     samples = [
-        ttft_sample(module, clock, prompt_tokens, "warmup", index, ttft_ns)
+        ttft_sample(
+            module,
+            clock,
+            prompt_tokens,
+            "warmup",
+            index,
+            ttft_ns,
+            prefill_chunk_tokens,
+        )
         for index in range(2)
     ]
     samples.extend(
-        ttft_sample(module, clock, prompt_tokens, "measured", index, ttft_ns)
+        ttft_sample(
+            module,
+            clock,
+            prompt_tokens,
+            "measured",
+            index,
+            ttft_ns,
+            prefill_chunk_tokens,
+        )
         for index in range(5)
     )
     after = metric_capture(module, clock)
@@ -219,7 +273,14 @@ def ttft_case(module, clock: Clock, prompt_tokens: int, ttft_ns: int):
     }
 
 
-def decode_sample(module, clock: Clock, phase: str, index: int, interval_ns: int):
+def decode_sample(
+    module,
+    clock: Clock,
+    phase: str,
+    index: int,
+    interval_ns: int,
+    prefill_chunk_tokens: int,
+):
     request_id = f"perf-decode-p0032-g0064-{phase}-{index}"
     start = clock.value
     first = start + 1_000_000_000
@@ -241,6 +302,7 @@ def decode_sample(module, clock: Clock, phase: str, index: int, interval_ns: int
     reset_start = last + 10
     reset_end = reset_start + 100
     clock.value = reset_end + 10
+    prompt_calls = prompt_execution_calls(module.DECODE_PROMPT_TOKENS, prefill_chunk_tokens)
     result = {
         "phase": phase,
         "sample_index": index,
@@ -250,9 +312,9 @@ def decode_sample(module, clock: Clock, phase: str, index: int, interval_ns: int
         "last_token_elapsed_ns": last,
         "ttft_ns": first - start,
         "decode_duration_ns": last - first,
-        "prompt_execution_calls": 4,
-        "prompt_progress_events": 3,
-        "execution_calls": module.DECODE_EXECUTION_CALLS,
+        "prompt_execution_calls": prompt_calls,
+        "prompt_progress_events": prompt_calls - 1,
+        "execution_calls": prompt_calls + module.DECODE_TIMED_TOKENS,
         "generated": generated,
         "terminal_snapshot": active_snapshot(module, request_id, 32, 64, 95, "finishing"),
         "reset_start_elapsed_ns": reset_start,
@@ -267,11 +329,29 @@ def decode_sample(module, clock: Clock, phase: str, index: int, interval_ns: int
     return result
 
 
-def decode_case(module, clock: Clock, interval_ns: int):
+def decode_case(module, clock: Clock, interval_ns: int, prefill_chunk_tokens: int):
     before = metric_capture(module, clock)
-    samples = [decode_sample(module, clock, "warmup", index, interval_ns) for index in range(2)]
+    samples = [
+        decode_sample(
+            module,
+            clock,
+            "warmup",
+            index,
+            interval_ns,
+            prefill_chunk_tokens,
+        )
+        for index in range(2)
+    ]
     samples.extend(
-        decode_sample(module, clock, "measured", index, interval_ns) for index in range(5)
+        decode_sample(
+            module,
+            clock,
+            "measured",
+            index,
+            interval_ns,
+            prefill_chunk_tokens,
+        )
+        for index in range(5)
     )
     after = metric_capture(module, clock)
     return {
@@ -317,24 +397,39 @@ def environment(module):
     }
 
 
-def valid_document(module, *, ttft_overrides=None, decode_interval_ns=50_000_000):
+def valid_document(
+    module,
+    *,
+    ttft_overrides=None,
+    decode_interval_ns=50_000_000,
+    prefill_mode=None,
+):
     ttft_overrides = ttft_overrides or {}
+    prefill_mode = prefill_mode or module.PREFILL_MODE
+    config = prefill_config(module, prefill_mode)
+    chunk_tokens = config["prefill_chunk_tokens"]
     clock = Clock()
     initial = vram_capture(module, clock)
     cases = [
-        ttft_case(module, clock, prompt, ttft_overrides.get(prompt, 1_000_000_000))
+        ttft_case(
+            module,
+            clock,
+            prompt,
+            ttft_overrides.get(prompt, 1_000_000_000),
+            chunk_tokens,
+        )
         for prompt in module.TTFT_LIMITS
     ]
-    decode = decode_case(module, clock, decode_interval_ns)
+    decode = decode_case(module, clock, decode_interval_ns, chunk_tokens)
     final = vram_capture(module, clock)
     return {
-        "schema_version": module.INPUT_SCHEMA_VERSION,
+        "schema_version": config["schema_version"],
         "runner_git_commit": GIT_COMMIT,
         "runner_worktree_clean": True,
         "runner_binary_sha256": BINARY_SHA256,
-        "prefill_mode": module.PREFILL_MODE,
-        "prefill_chunk_tokens": module.PREFILL_CHUNK_TOKENS,
-        "prefill_implementation": module.PREFILL_IMPLEMENTATION,
+        "prefill_mode": prefill_mode,
+        "prefill_chunk_tokens": chunk_tokens,
+        "prefill_implementation": config["prefill_implementation"],
         "warmup_runs": module.WARMUP_RUNS,
         "measured_runs": module.MEASURED_RUNS,
         "percentile_method": module.PERCENTILE_METHOD,
@@ -393,8 +488,10 @@ class Sq8ServingPerformanceTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module()
 
-    def validate(self, path: Path):
-        return self.module.validate_result(path, GIT_COMMIT, BINARY_SHA256)
+    def validate(self, path: Path, prefill_mode=None):
+        if prefill_mode is None:
+            return self.module.validate_result(path, GIT_COMMIT, BINARY_SHA256)
+        return self.module.validate_result(path, GIT_COMMIT, BINARY_SHA256, prefill_mode)
 
     def assert_rejected(self, mutate, pattern: str) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -418,6 +515,81 @@ class Sq8ServingPerformanceTests(unittest.TestCase):
             self.assertAlmostEqual(result["decode_case"]["p50_tokens_per_second"], 20.0)
             self.assertAlmostEqual(result["decode_case"]["p95_inter_token_seconds"], 0.05)
             self.assertEqual(result["decode_case"]["measured_inter_token_interval_count"], 315)
+
+    def test_recomputes_m128_raw_v2_with_short_prompt_m1_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "performance-m128.json"
+            document = valid_document(self.module, prefill_mode=M128_PREFILL_MODE)
+            write_document(path, document)
+
+            result = self.validate(path, M128_PREFILL_MODE)
+
+            self.assertTrue(result["passed"])
+            self.assertEqual(document["schema_version"], M128_INPUT_SCHEMA_VERSION)
+            self.assertEqual(document["prefill_chunk_tokens"], M128_PREFILL_CHUNK_TOKENS)
+            for case in document["ttft_cases"]:
+                expected_calls = prompt_execution_calls(
+                    case["prompt_tokens"], M128_PREFILL_CHUNK_TOKENS
+                )
+                for sample in case["samples"]:
+                    self.assertEqual(sample["prompt_execution_calls"], expected_calls)
+                    self.assertEqual(sample["prompt_progress_events"], expected_calls - 1)
+            p32 = document["ttft_cases"][0]["samples"][0]
+            self.assertEqual(p32["prompt_execution_calls"], 32)
+            self.assertEqual(p32["prompt_progress_events"], 31)
+            decode = document["decode_case"]["samples"][0]
+            self.assertEqual(decode["prompt_execution_calls"], 32)
+            self.assertEqual(decode["prompt_progress_events"], 31)
+            self.assertEqual(decode["execution_calls"], 95)
+
+    def test_prefill_mode_strictly_binds_raw_schema_and_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            m8_path = root / "performance-m8.json"
+            m128_path = root / "performance-m128.json"
+            write_document(m8_path, valid_document(self.module))
+            write_document(
+                m128_path,
+                valid_document(self.module, prefill_mode=M128_PREFILL_MODE),
+            )
+
+            with self.assertRaisesRegex(self.module.ValidationError, "schema/model/runtime contract"):
+                self.validate(m128_path)
+            with self.assertRaisesRegex(self.module.ValidationError, "schema/model/runtime contract"):
+                self.validate(m8_path, M128_PREFILL_MODE)
+
+    def test_rejects_m128_short_prompt_call_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "performance-m128.json"
+            document = valid_document(self.module, prefill_mode=M128_PREFILL_MODE)
+            document["decode_case"]["samples"][0]["prompt_execution_calls"] = 1
+            write_document(path, document)
+
+            with self.assertRaisesRegex(self.module.ValidationError, "decode execution contract"):
+                self.validate(path, M128_PREFILL_MODE)
+
+    def test_cli_selects_m128_raw_v2(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "performance-m128.json"
+            write_document(path, valid_document(self.module, prefill_mode=M128_PREFILL_MODE))
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    str(VALIDATOR),
+                    str(path),
+                    "--expected-runner-git-commit",
+                    GIT_COMMIT,
+                    "--expected-binary-sha256",
+                    BINARY_SHA256,
+                    "--prefill-mode",
+                    M128_PREFILL_MODE,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("passed=true", run.stdout)
 
     def test_rejects_dirty_build(self):
         self.assert_rejected(

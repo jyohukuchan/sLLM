@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independently validate SQ8 fixed-M8 serving performance evidence."""
+"""Independently validate SQ8 fixed-width serving performance evidence."""
 
 from __future__ import annotations
 
@@ -20,6 +20,18 @@ RESULT_SCHEMA_VERSION = "ullm.sq8.serving_performance_validation.v1"
 PREFILL_MODE = "m8-chunk8"
 PREFILL_CHUNK_TOKENS = 8
 PREFILL_IMPLEMENTATION = "sq8.fixed-m8-cached-prefix.v1"
+PREFILL_MODE_CONFIGS = {
+    PREFILL_MODE: {
+        "schema_version": INPUT_SCHEMA_VERSION,
+        "prefill_chunk_tokens": PREFILL_CHUNK_TOKENS,
+        "prefill_implementation": PREFILL_IMPLEMENTATION,
+    },
+    "m128-chunk128": {
+        "schema_version": "ullm.sq8.serving_performance.raw.v2",
+        "prefill_chunk_tokens": 128,
+        "prefill_implementation": "sq8.fixed-m128-cached-prefix.v1",
+    },
+}
 WARMUP_RUNS = 2
 MEASURED_RUNS = 5
 PERCENTILE_METHOD = "linear_interpolation_rank_(n-1)*p"
@@ -36,7 +48,11 @@ TTFT_LIMITS = {
 DECODE_PROMPT_TOKENS = 32
 DECODE_GENERATED_TOKENS = 64
 DECODE_TIMED_TOKENS = DECODE_GENERATED_TOKENS - 1
-DECODE_EXECUTION_CALLS = DECODE_PROMPT_TOKENS // PREFILL_CHUNK_TOKENS + DECODE_TIMED_TOKENS
+DECODE_EXECUTION_CALLS = (
+    DECODE_PROMPT_TOKENS // PREFILL_CHUNK_TOKENS
+    + DECODE_PROMPT_TOKENS % PREFILL_CHUNK_TOKENS
+    + DECODE_TIMED_TOKENS
+)
 DECODE_P50_TOKENS_PER_SECOND_MINIMUM = 15.0
 DECODE_P95_INTER_TOKEN_SECONDS_MAXIMUM = 0.100
 CONTEXT_TOKENS = 4_096
@@ -74,6 +90,19 @@ class ValidationError(ValueError):
 
 def fail(message: str) -> None:
     raise ValidationError(message)
+
+
+def prefill_mode_config(mode: str) -> dict[str, Any]:
+    config = PREFILL_MODE_CONFIGS.get(mode)
+    if config is None:
+        fail(f"unknown prefill mode: {mode}")
+    return config
+
+
+def expected_prompt_execution_calls(prompt_tokens: int, chunk_tokens: int) -> int:
+    if prompt_tokens <= 0 or chunk_tokens <= 0:
+        fail("prompt execution call count requires positive prompt and chunk lengths")
+    return prompt_tokens // chunk_tokens + prompt_tokens % chunk_tokens
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -543,6 +572,7 @@ def validate_ttft_sample(
     sample_index: int,
     expected_worker_pid: int,
     previous_timestamp_ns: int,
+    prefill_chunk_tokens: int,
 ) -> tuple[int, int]:
     if not isinstance(value, dict):
         fail(f"{label} must be an object")
@@ -567,7 +597,7 @@ def validate_ttft_sample(
     ttft_ns = integer(value.get("ttft_ns"), f"{label}.ttft_ns", maximum=U64_MAX)
     reset_ns = integer(value.get("reset_ns"), f"{label}.reset_ns", maximum=U64_MAX)
     first_token_id = integer(value.get("first_token_id"), f"{label}.first_token_id")
-    expected_calls = prompt_tokens // PREFILL_CHUNK_TOKENS
+    expected_calls = expected_prompt_execution_calls(prompt_tokens, prefill_chunk_tokens)
     if (
         value.get("phase") != phase
         or integer(value.get("sample_index"), f"{label}.sample_index") != sample_index
@@ -622,6 +652,7 @@ def validate_ttft_case(
     expected_worker_pid: int,
     previous_timestamp_ns: int,
     gate_errors: list[str],
+    prefill_chunk_tokens: int,
 ) -> tuple[int, dict[str, Any]]:
     if not isinstance(value, dict):
         fail(f"{label} must be an object")
@@ -661,6 +692,7 @@ def validate_ttft_case(
             sample_index=sample_index,
             expected_worker_pid=expected_worker_pid,
             previous_timestamp_ns=current,
+            prefill_chunk_tokens=prefill_chunk_tokens,
         )
         if phase == "measured":
             measured.append(ttft_ns / 1_000_000_000.0)
@@ -695,6 +727,7 @@ def validate_decode_sample(
     sample_index: int,
     expected_worker_pid: int,
     previous_timestamp_ns: int,
+    prefill_chunk_tokens: int,
 ) -> tuple[int, float, list[float]]:
     if not isinstance(value, dict):
         fail(f"{label} must be an object")
@@ -717,16 +750,22 @@ def validate_decode_sample(
         value.get("decode_duration_ns"), f"{label}.decode_duration_ns", minimum=1, maximum=U64_MAX
     )
     reset_ns = integer(value.get("reset_ns"), f"{label}.reset_ns", maximum=U64_MAX)
+    prompt_execution_calls = expected_prompt_execution_calls(
+        DECODE_PROMPT_TOKENS, prefill_chunk_tokens
+    )
+    execution_calls = prompt_execution_calls + DECODE_TIMED_TOKENS
     if (
         value.get("phase") != phase
         or integer(value.get("sample_index"), f"{label}.sample_index") != sample_index
         or value.get("request_id") != request_id
         or ttft_ns != first - start
         or duration_ns != last - first
-        or integer(value.get("prompt_execution_calls"), f"{label}.prompt_execution_calls") != 4
-        or integer(value.get("prompt_progress_events"), f"{label}.prompt_progress_events") != 3
+        or integer(value.get("prompt_execution_calls"), f"{label}.prompt_execution_calls")
+        != prompt_execution_calls
+        or integer(value.get("prompt_progress_events"), f"{label}.prompt_progress_events")
+        != prompt_execution_calls - 1
         or integer(value.get("execution_calls"), f"{label}.execution_calls")
-        != DECODE_EXECUTION_CALLS
+        != execution_calls
         or reset_ns != reset_end - reset_start
         or value.get("release_outcome") != "length"
         or integer(value.get("release_generated_tokens"), f"{label}.release_generated_tokens")
@@ -790,6 +829,7 @@ def validate_decode_case(
     expected_worker_pid: int,
     previous_timestamp_ns: int,
     gate_errors: list[str],
+    prefill_chunk_tokens: int,
 ) -> tuple[int, dict[str, Any]]:
     if not isinstance(value, dict):
         fail(f"{label} must be an object")
@@ -839,6 +879,7 @@ def validate_decode_case(
             sample_index=sample_index,
             expected_worker_pid=expected_worker_pid,
             previous_timestamp_ns=current,
+            prefill_chunk_tokens=prefill_chunk_tokens,
         )
         if phase == "measured":
             measured_throughputs.append(throughput)
@@ -875,20 +916,25 @@ def validate_decode_case(
 
 
 def validate_result(
-    result_path: Path, expected_runner_git_commit: str, expected_binary_sha256: str
+    result_path: Path,
+    expected_runner_git_commit: str,
+    expected_binary_sha256: str,
+    prefill_mode: str = PREFILL_MODE,
 ) -> dict[str, Any]:
     validate_expected_build_identity(expected_runner_git_commit, expected_binary_sha256)
+    config = prefill_mode_config(prefill_mode)
+    prefill_chunk_tokens = config["prefill_chunk_tokens"]
     result_file, result = load_json(result_path, "performance result")
     label = str(result_file)
     build_identity = validate_build_identity(
         result, expected_runner_git_commit, expected_binary_sha256, label
     )
     if (
-        result.get("schema_version") != INPUT_SCHEMA_VERSION
-        or result.get("prefill_mode") != PREFILL_MODE
+        result.get("schema_version") != config["schema_version"]
+        or result.get("prefill_mode") != prefill_mode
         or integer(result.get("prefill_chunk_tokens"), f"{label}.prefill_chunk_tokens")
-        != PREFILL_CHUNK_TOKENS
-        or result.get("prefill_implementation") != PREFILL_IMPLEMENTATION
+        != prefill_chunk_tokens
+        or result.get("prefill_implementation") != config["prefill_implementation"]
         or integer(result.get("warmup_runs"), f"{label}.warmup_runs") != WARMUP_RUNS
         or integer(result.get("measured_runs"), f"{label}.measured_runs") != MEASURED_RUNS
         or result.get("percentile_method") != PERCENTILE_METHOD
@@ -922,6 +968,7 @@ def validate_result(
             expected_worker_pid=worker_pid,
             previous_timestamp_ns=current,
             gate_errors=gate_errors,
+            prefill_chunk_tokens=prefill_chunk_tokens,
         )
         ttft_results.append(summary)
 
@@ -931,6 +978,7 @@ def validate_result(
         expected_worker_pid=worker_pid,
         previous_timestamp_ns=current,
         gate_errors=gate_errors,
+        prefill_chunk_tokens=prefill_chunk_tokens,
     )
     final_vram = validate_vram_capture(
         result.get("final_vram"), f"{label}.final_vram", worker_pid
@@ -983,6 +1031,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-runner-git-commit", required=True)
     parser.add_argument("--expected-binary-sha256", required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--prefill-mode",
+        choices=tuple(PREFILL_MODE_CONFIGS),
+        default=PREFILL_MODE,
+        help="fixed-width prefill result mode (default: %(default)s)",
+    )
     return parser.parse_args()
 
 
@@ -993,6 +1047,7 @@ def main() -> int:
             args.result,
             args.expected_runner_git_commit,
             args.expected_binary_sha256,
+            args.prefill_mode,
         )
         if args.output is not None:
             write_json_create_new(args.output, validation)
