@@ -83,6 +83,19 @@ The clean correctness evidence for the selected M=128 serving path is under
 - M=128 versus the frozen vLLM source had exact top-1 for all prompts, top-10 overlap at least 9, worst relative L2 `0.065402638`, and minimum cosine `0.997865524`
 - `chunk.json` and `m1.json` hold producer results; `m128-captures/` and `m1-captures/` hold distinct regular-file F32 payloads; `validation.json` is the independent comparison result regenerated from the repository-relative paths
 
+The selected M=128 exact 4096-token deep-boundary run is under
+`deep-boundary-p3584-g512-m128-clean-3bb1ef2/`:
+
+- runner commit: `3bb1ef206e05aafc47bde82f105eea0bd8278443`
+- binary SHA-256: `2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204`
+- raw result SHA-256: `885bbd1a84fdd18c81829bc87f0e558d46f1267180263c5adf865a55cb07235e`
+- prompt 3584 plus 512 actual generated tokens ran under the isolated test-only ignore-EOS contract and reserved exactly 4096 context tokens
+- execution used 28 M=128 prefill calls and 511 M=1 decode calls, for 539 synchronized calls; all 512 generated steps were independently checked
+- final KV length/position/block were `4095 / 4094 / 255`, with scheduler active1/waiting0 before release
+- model load took `23.497561` seconds, resident request time was `107.083953` seconds, and reset took `0.003267` seconds
+- reset returned the session to Ready with active0/waiting0, zero allocated blocks, and all 40 cache lengths zero
+- the independent validator recomputed the full prefill/decode/terminal/reset structure and accepted the external clean commit and binary anchors
+
 ## 次の行動
 
-M=8の正しさと初回性能run、および選択したM=128のclean correctness oracleは完了した。次はM=128で3584+512 deep boundaryを再実行し、その後に変更していないformal TTFT/decode gateを判定する。全gate合格までP8-Cへは進まない。
+M=8の正しさと初回性能run、および選択したM=128のclean correctness oracleと3584+512 deep boundaryは完了した。次はM=128で変更していないformal TTFT/decode gateを判定し、全gate合格後だけP8-Cへ進む。

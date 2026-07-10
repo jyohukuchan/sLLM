@@ -1,0 +1,28 @@
+{
+  "build_identity": {
+    "runner_binary_sha256": "2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204",
+    "runner_git_commit": "3bb1ef206e05aafc47bde82f105eea0bd8278443",
+    "runner_worktree_clean": true
+  },
+  "decode_execution_calls": 511,
+  "evidence": {
+    "file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/deep-boundary-p3584-g512-m128-clean-3bb1ef2/result.json",
+    "sha256": "885bbd1a84fdd18c81829bc87f0e558d46f1267180263c5adf865a55cb07235e"
+  },
+  "generated_token_ids_sha256": "9104e85916c7b44197dfe92d84e9520150c6b723574b0e0b2d0e4ccae007c7d5",
+  "generated_tokens": 512,
+  "observed_eos_generated_indices": [],
+  "passed": true,
+  "prefill_chunk_tokens": 128,
+  "prefill_execution_calls": 28,
+  "prefill_implementation": "sq8.fixed-m128-cached-prefix.v1",
+  "prefill_mode": "m128-chunk128",
+  "prompt_tokens": 3584,
+  "reserved_context_tokens": 4096,
+  "schema_version": "ullm.sq8.serving_deep_boundary_validation.v1",
+  "terminal_cache_len": 4095,
+  "terminal_last_cache_position": 4094,
+  "terminal_last_logical_block": 255,
+  "test_only_ignore_eos": true,
+  "total_execution_calls": 539
+}

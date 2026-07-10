@@ -1,6 +1,6 @@
 # OpenWebUI Single-Worker Product Plan v0.1
 
-Status: in progress; P8-B2 selected M=128 and passed its clean correctness oracle; deep-boundary and formal performance evidence remain
+Status: in progress; P8-B2 selected M=128 and passed clean correctness and deep-boundary validation; formal performance evidence remains
 
 Date: 2026-07-10
 
@@ -773,6 +773,40 @@ deep-boundary and formal performance runs.
    measured samples.
 3. Complete P8-B2 and advance to P8-C only if the boundary evidence and every
    formal threshold pass.
+
+#### P8-B2 M=128 clean deep-boundary result (2026-07-10)
+
+##### 前回の要点
+
+The selected M=128 path passed its clean prompt 32/128/512/4095 correctness
+oracle. The remaining correctness condition was the exact 3584-token prompt plus
+512 generated-token boundary before formal performance could close P8-B2.
+
+##### 今回の変更点
+
+- Clean evidence is frozen under
+  `benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/deep-boundary-p3584-g512-m128-clean-3bb1ef2/`.
+- The run used clean commit `3bb1ef206e05aafc47bde82f105eea0bd8278443`
+  and binary SHA-256
+  `2ed172ab192f5d3d775959fb060910e290d893f23b74552cb77f190aaa416204`.
+- It executed 28 M=128 prefill calls and 511 M=1 decode calls, recorded all 512
+  generated steps, and reached final KV length 4095 at position 4094/block 255.
+- Resident request time was `107.083953` seconds and reset time was
+  `0.003267` seconds. Reset returned Ready, active0/waiting0, zero allocated
+  blocks, and all 40 cache lengths zero.
+- The independent validator accepted every prefill, decode, terminal, reset, and
+  external build-identity condition. The raw result SHA-256 is
+  `885bbd1a84fdd18c81829bc87f0e558d46f1267180263c5adf865a55cb07235e`.
+
+##### 次の行動
+
+1. Run the unchanged M=128 formal resident matrix with two warmups and five
+   measured TTFT samples at every required prompt, plus prompt 32 / generation 64
+   decode.
+2. Independently validate timing, terminal/reset, VRAM, isolation, and clean build
+   identity without accepting producer self-reported pass state.
+3. Complete P8-B2 and begin P8-C only if every fixed threshold passes. On failure,
+   collect the one bounded profiler run already allowed by this plan.
 
 ### P8-C: Sampling, Cancellation, and Resident Worker
 
