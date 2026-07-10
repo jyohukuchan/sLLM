@@ -368,20 +368,6 @@ pub(crate) struct Sq8ModelHeadM1ExecutionBinding {
 }
 
 impl Sq8ModelHeadM1ExecutionBinding {
-    pub(crate) fn new(
-        profile: Sq8LayerExecutionProfile,
-        device: &DeviceInfo,
-        package_manifest_sha256: impl Into<String>,
-        artifact_content_sha256: impl Into<String>,
-    ) -> Self {
-        Self {
-            profile,
-            device: Sq8ModelHeadDeviceIdentity::from_runtime(device.clone()),
-            package_manifest_sha256: package_manifest_sha256.into(),
-            artifact_content_sha256: artifact_content_sha256.into(),
-        }
-    }
-
     fn validate_contract(&self) -> Result<(), String> {
         if self.profile != Sq8LayerExecutionProfile::Rdna4W8a8BlockCk {
             return Err("Qwen3-14B SQ8 M=1 model head requires the RDNA4 CK profile".into());
@@ -1760,28 +1746,6 @@ mod tests {
         let mut bad = report;
         bad.fallback_used = true;
         assert!(bad.validate_contract().is_err());
-    }
-
-    #[test]
-    fn m1_binding_constructor_converts_and_validates_runtime_identity() {
-        let device = DeviceInfo {
-            device_id: 0,
-            backend: "hip".to_string(),
-            name: R9700_RUNTIME_NAME.to_string(),
-            total_global_mem: R9700_MEMORY_BYTES_MIN,
-            compute_major: 12,
-            compute_minor: 0,
-            gcn_arch_name: "gfx1201".to_string(),
-            flags: 0,
-        };
-        let binding = Sq8ModelHeadM1ExecutionBinding::new(
-            Sq8LayerExecutionProfile::Rdna4W8a8BlockCk,
-            &device,
-            "3".repeat(64),
-            "4".repeat(64),
-        );
-        binding.validate_contract().unwrap();
-        assert_eq!(binding.device.device_id, device.device_id);
     }
 
     #[test]
