@@ -1,6 +1,6 @@
 # SQ8 Serving Session v0.1
 
-Status: implementation contract for P8-A
+Status: implementation contract for P8-C, amended after the P8-B2 M=128 selection
 
 ## 1. Scope
 
@@ -26,8 +26,8 @@ The v0.1 product envelope is fixed as follows:
 - one HIP context, one model instance, one inference stream, and one inference
   thread;
 - synchronous GPU calls only; and
-- M=1 prompt processing as the correctness oracle, followed by an optional M=8
-  cached-prefix prompt path after its oracle gates pass.
+- M=1 prompt processing as the correctness oracle and selected M=128 cached-prefix
+  prompt processing with an M=1 tail in the product worker.
 
 The shorthand for this admission boundary is `active1 / waiting0`.
 
@@ -56,7 +56,7 @@ forbidden.
 
 - **Prompt token**: a token supplied in `prompt_token_ids`.
 - **Generated token**: a sampled token returned to the worker.
-- **Execution unit**: one synchronized M=1 step or one synchronized M=8 prompt
+- **Execution unit**: one synchronized M=1 step or one synchronized M=128 prompt
   chunk.
 - **Cache length**: the number of token positions already written to every
   layer's paged KV cache.
@@ -102,7 +102,12 @@ pub struct Sq8SamplingParams {
 
 #[derive(Clone)]
 pub struct Sq8CancellationToken {
-    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    inner: std::sync::Arc<Sq8CancellationState>,
+}
+
+struct Sq8CancellationState {
+    flag: std::sync::atomic::AtomicBool,
+    publication: std::sync::Mutex<()>,
 }
 
 pub enum Sq8ServingAdvance {
@@ -117,6 +122,23 @@ pub enum Sq8ServingAdvance {
         cache_len: usize,
         terminal_reason: Option<Sq8FinishReason>,
     },
+    CancellationObserved,
+}
+
+pub struct Sq8PreparedToken {
+    pub token_id: usize,
+    pub generated_index: usize,
+    pub cache_len: usize,
+    pub terminal_reason: Option<Sq8FinishReason>,
+}
+
+pub enum Sq8PreparedAdvance {
+    PromptProgress {
+        prompt_tokens_processed: usize,
+        cache_len: usize,
+        execution_width: usize,
+    },
+    Token(Sq8PreparedToken),
     CancellationObserved,
 }
 
@@ -156,6 +178,18 @@ impl Qwen3Sq8ServingSession {
         stream: &mut RuntimeStream,
     ) -> Result<Sq8ServingAdvance, Sq8ServingError>;
 
+    pub fn prepare_advance_synchronized(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8PreparedAdvance, Sq8ServingError>;
+
+    pub fn publish_prepared_token(
+        &mut self,
+        token: Sq8PreparedToken,
+        stream: &mut RuntimeStream,
+        publish: impl FnOnce(&Sq8PreparedToken) -> Result<(), String>,
+    ) -> Result<Sq8ServingAdvance, Sq8ServingError>;
+
     pub fn finish_and_reset_synchronized(
         &mut self,
         stream: &mut RuntimeStream,
@@ -171,6 +205,18 @@ impl Qwen3Sq8ServingSession {
 `advance_synchronized` executes at most one execution unit. It MUST synchronize
 that unit before returning. It MUST NOT hide an entire prompt loop inside one
 call, because cancellation and progress must be observable between units.
+
+The worker uses the prepared-token surface. Preparing a token may run the model
+head and create a transactional sampling proposal, but it does not advance the
+request RNG, scheduler generated count, generated-token count, feedback token, or
+terminal state. `publish_prepared_token` acquires the cancellation token's
+publication mutex, performs a final cancellation check, invokes and requires the
+publisher callback to flush successfully, then commits the pending state before
+unlocking. Cancellation observed before the callback discards the proposal,
+consumes no RNG draw, advances no generated counter, and enters `Cancelling`.
+The legacy one-call `advance_synchronized` may remain as an internal
+prepare-and-immediate-commit convenience for non-protocol P8-B evidence, but the
+resident worker MUST NOT use it.
 
 The implementation may provide a convenience `next_token_synchronized` wrapper,
 but the worker MUST use the one-unit advance surface.
@@ -281,7 +327,7 @@ Because `active = 1` and `waiting = 0`:
 - a scheduler entry represents only the active request;
 - no cache block belongs to a second request;
 - no block is reordered, swapped, evicted, or shared in v0.1;
-- a fixed M=8 prompt chunk is eight consecutive positions from that same request,
+- a fixed M=128 prompt chunk is 128 consecutive positions from that same request,
   not a batch of requests; and
 - release must remove the scheduler entry before the session reports baseline.
 
@@ -290,8 +336,8 @@ length mismatch is fatal.
 
 ## 9. M=1 oracle prompt path
 
-The M=1 path is the mandatory correctness path and remains available even after
-M=8 is enabled.
+The M=1 path is the mandatory correctness path and remains available after M=128
+is selected.
 
 For prompt position `p` in `0..P`:
 
@@ -311,34 +357,35 @@ the prompt.
 The head MUST run only for the final prompt position. Intermediate prompt logits
 must not be read back or sampled.
 
-## 10. M=8 cached-prefix prompt path
+## 10. M=128 cached-prefix prompt path
 
-M=8 is an optimization of a single request's prompt. It MUST NOT be enabled until
-the M=1 oracle gates in section 17 pass.
+M=128 is an optimization of a single request's prompt. It is selected only after
+the M=1 and M=8 oracle gates and the unchanged formal performance gates in section
+17 pass.
 
-In `M8ChunksWithM1Tail` mode:
+In `M128ChunksWithM1Tail` mode:
 
-- each complete eight-token prompt range `[p, p + 8)` uses one M=8 execution;
+- each complete 128-token prompt range `[p, p + 128)` uses one M=128 execution;
 - `p` is always the current cache length;
 - query row `i` uses absolute RoPE position `p + i`;
 - query row `i` attends to all cached prefix keys `0..p` and current-chunk keys
   `p..=p+i`;
-- the eight new K/V rows are written to positions `[p, p + 8)`; and
-- after synchronization, every layer cache length is exactly `p + 8`.
+- the 128 new K/V rows are written to positions `[p, p + 128)`; and
+- after synchronization, every layer cache length is exactly `p + 128`.
 
-The first M=8 chunk has an empty prefix. Every later M=8 chunk has a nonempty
+The first M=128 chunk has an empty prefix. Every later M=128 chunk has a nonempty
 cached prefix. The current P7 `PrefillPaged` operation, which requires an empty
 cache and attends only within the current causal chunk, MUST NOT be reused for a
 nonempty-prefix chunk. A distinct cached-prefix attention mode is required and
 must fail closed if its cache position is not the current written length.
 
-If fewer than eight prompt tokens remain, process the tail as consecutive M=1
+If fewer than 128 prompt tokens remain, process the tail as consecutive M=1
 steps. Generated decode is always M=1 in v0.1. When the prompt length is a multiple
-of eight, the head consumes row seven of the final M=8 output; otherwise it
+of 128, the head consumes row 127 of the final M=128 output; otherwise it
 consumes the final M=1 tail output.
 
-The implementation MUST NOT pad a prompt to eight tokens, combine two requests,
-or let an M=8 chunk cross the request's prompt boundary.
+The implementation MUST NOT pad a prompt to 128 tokens, combine two requests, or
+let an M=128 chunk cross the request's prompt boundary.
 
 ## 11. Generated-token semantics
 
@@ -392,7 +439,7 @@ validated against vocabulary size before it is recorded or emitted.
 The inference thread loads it with `Ordering::Acquire`:
 
 - before the first GPU mutation after `start`;
-- before every M=1 or M=8 execution unit;
+- before every M=1 or M=128 execution unit;
 - immediately after each synchronized unit and before publishing its progress or
   token; and
 - before sampling and immediately before publishing a sampled token.
@@ -505,14 +552,17 @@ Before M=8 cached-prefix serving is enabled:
 5. Cancellation at every unit boundary returns to baseline without emitting a
    post-observation token.
 
-M=8 stays disabled by default until these gates and their evidence are present.
+The M=8 result remains the frozen chunk oracle. The product-selected M=128 path
+additionally requires prompt 32/128/512/4095 comparison against all-M1 and the
+source oracle, the exact 3584+512 deep boundary, and the unchanged formal
+TTFT/decode matrix. The evidence under
+`benchmarks/results/2026-07-10/sq8-serving-chunks-v0.1/` satisfies those gates.
 
 ## 18. Observability invariant
 
-Internal progress returned by `advance_synchronized` is evidence of a completed,
+Internal progress returned by the session is evidence of a completed,
 synchronized unit only. It is not permission to reuse the session. Only a
 successful reset summary proves reuse readiness. The worker mapping from session
-results to JSONL events is defined by `sq8-worker-protocol-v0.1.md`: M=1 internal
-progress is accumulated and protocol `progress` is emitted after each eight
-processed prompt tokens and once at the prefill/decode transition, not once per
-M=1 step.
+results to JSONL events is defined by `sq8-worker-protocol-v0.1.md`: protocol
+`progress` is emitted after each complete M=128 prompt chunk and once at the
+prefill/decode transition. M=1 tail steps do not each emit protocol progress.

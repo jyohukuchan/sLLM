@@ -387,10 +387,10 @@ Events:
 
 ```json
 {"schema_version":"ullm.worker.v1","type":"ready","model":"ullm-qwen3-14b-sq8","context_length":4096,"max_new_tokens":512}
-{"schema_version":"ullm.worker.v1","type":"started","request_id":"req-1","prompt_tokens":42}
-{"schema_version":"ullm.worker.v1","type":"progress","request_id":"req-1","phase":"prefill","processed_prompt_tokens":8}
+{"schema_version":"ullm.worker.v1","type":"started","request_id":"req-1","prompt_tokens":128}
+{"schema_version":"ullm.worker.v1","type":"progress","request_id":"req-1","phase":"prefill","processed_prompt_tokens":128}
 {"schema_version":"ullm.worker.v1","type":"token","request_id":"req-1","index":0,"token_id":123}
-{"schema_version":"ullm.worker.v1","type":"released","request_id":"req-1","outcome":"stop","prompt_tokens":42,"completion_tokens":17,"reset_complete":true}
+{"schema_version":"ullm.worker.v1","type":"released","request_id":"req-1","outcome":"stop","prompt_tokens":128,"completion_tokens":17,"reset_complete":true}
 {"schema_version":"ullm.worker.v1","type":"released","request_id":"req-2","outcome":"cancelled","cancel_reason":"client_disconnect","prompt_tokens":42,"completion_tokens":3,"reset_complete":true}
 {"schema_version":"ullm.worker.v1","type":"error","request_id":"req-1","code":"runtime_failed","recoverable":false,"message":"..."}
 ```
@@ -401,7 +401,7 @@ Protocol requirements:
 - duplicate keys, NaN, Infinity, unknown schema version, oversized lines, invalid UTF-8 are rejected;
 - every output line is flushed immediately;
 - stdout contains no human log lines;
-- prefill emits `progress` after each eight processed prompt tokens and at the prefill/decode transition; decode token events count as progress;
+- the selected M=128 prefill emits `progress` after each complete M=128 chunk and at the prefill/decode transition; M=1 tail steps do not synthesize old eight-token milestones, and decode token events count as progress;
 - request IDs are unique while active;
 - `released.outcome` is one of `stop`, `length`, or `cancelled`;
 - `released` is the only successful request-terminal event and guarantees that a new request may start;
@@ -893,6 +893,37 @@ Cancel latency uses 2 warmups and 10 measured repeats. Time starts when the read
 Stop condition:
 
 - do not expose streaming HTTP until worker cancellation and event ordering are deterministic.
+
+#### P8-C publication and progress decisions (2026-07-10)
+
+##### 前回の要点
+
+P8-B2 selected M=128, but the P8-A worker text still described M=8 progress.
+The existing session also committed generated counters before returning a token,
+while the protocol defines publication at stdout flush.
+
+##### 今回の変更点
+
+- Product progress is emitted after each completed M=128 prompt chunk and at the
+  prefill/decode transition. M=1 tail steps remain cancellation boundaries but do
+  not each emit progress.
+- Sampling is transactional: prepare computes a token proposal without advancing
+  RNG or generated counters; commit applies it only after the final cancel check.
+- The reader's matching cancel store and inference token write/flush/commit share
+  one short publication critical section. The worker flushes first and commits
+  pending RNG/counters only after that succeeds. Cancel therefore linearizes
+  before publication or after a fully flushed and committed token.
+- Existing one-call P8-B evidence APIs may prepare and immediately commit, but the
+  resident JSONL worker must use the two-phase surface.
+
+##### 次の行動
+
+1. Integrate the committed deterministic sampler into a prepared-token session
+   state and add cancellation race tests around prepare/commit/discard.
+2. Implement the strict bounded JSONL reader, active-slot publication mutex, and
+   ordered flushed writer over that session surface.
+3. Run CPU protocol conformance before the R9700 cancellation and 100-request
+   acceptance workloads.
 
 ### P8-D: Tokenizer and Non-Streaming OpenAI Gateway
 

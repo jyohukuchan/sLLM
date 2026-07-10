@@ -1,6 +1,6 @@
 # SQ8 Worker JSONL Protocol v0.1
 
-Status: implementation contract for P8-A
+Status: implementation contract for P8-C, amended after the P8-B2 M=128 selection
 
 ## 1. Scope
 
@@ -14,8 +14,8 @@ The v0.1 admission contract is fixed:
 - active requests: exactly zero or one (`active = 1` maximum);
 - waiting requests: always zero (`waiting = 0`);
 - a second `generate` is rejected immediately and is never queued;
-- M=8 represents eight consecutive prompt tokens from the active request, never
-  eight requests; and
+- M=128 represents 128 consecutive prompt tokens from the active request, never
+  128 requests; and
 - only a `released` event proves that the worker can accept another request.
 
 The shorthand for this admission boundary is `active1 / waiting0`.
@@ -220,17 +220,16 @@ signal. The exact fields are `schema_version`, `type`, `request_id`, `phase`, an
 `processed_prompt_tokens`:
 
 ```json
-{"schema_version":"ullm.worker.v1","type":"progress","request_id":"req-1","phase":"prefill","processed_prompt_tokens":8}
+{"schema_version":"ullm.worker.v1","type":"progress","request_id":"req-1","phase":"prefill","processed_prompt_tokens":128}
 ```
 
-`phase` is exactly `prefill` in v0.1. During prompt processing the worker emits a
-progress event whenever the cumulative processed count reaches another eight
-tokens: 8, 16, 24, and so on. It also emits progress at the prefill/decode
-transition with `processed_prompt_tokens` equal to the full prompt length. When a
-multiple-of-eight milestone is also the transition, one event satisfies both
-requirements. Thus a prompt shorter than eight still emits one transition event.
-The cadence is independent of whether those tokens ran as eight M=1 steps or one
-single-request M=8 chunk.
+`phase` is exactly `prefill` in v0.1. The selected product path emits one progress
+event after every completed synchronized M=128 prompt chunk: 128, 256, 384, and so
+on. It also emits progress at the prefill/decode transition with
+`processed_prompt_tokens` equal to the full prompt length. When an M=128 chunk is
+also the transition, one event satisfies both requirements. A prompt shorter than
+128 therefore emits one transition event. M=1 tail steps do not synthesize old
+eight-token milestones; cancellation is still checked between every M=1 step.
 
 There is no `resetting` progress event and no separate decode progress event.
 Every flushed `token` counts as protocol progress.
@@ -247,6 +246,17 @@ length against the session equation, but cache length is not a protocol field.
 
 The line MUST be flushed before the token is considered published. After the
 inference thread observes cancellation, no further token line may be written.
+
+The session prepares a sampled token without advancing request-local RNG,
+scheduler generated counters, or completion counters. The inference side then
+enters a short publication critical section shared with the reader's matching
+cancel store. Inside that section it rechecks cancellation, writes the complete
+JSON line, flushes it, and only then commits the prepared RNG/scheduler/counter
+state before unlocking. A matching cancel therefore linearizes either before
+publication, in which case the token is discarded, or after flush and commit, in
+which case the token is published. A write or flush failure advances no generated
+state, is fatal, and produces no `released` event. An internal commit failure after
+a successful flush is also fatal and produces no `released` event.
 
 ### 6.5 `released`
 
@@ -395,8 +405,10 @@ different requests cannot interleave because `active = 1` and `waiting = 0`.
 
 ## 9. Cancellation race contract
 
-The command reader performs a Release store; the inference thread performs
-Acquire loads at the session boundaries defined by the serving-session spec.
+The command reader performs a Release store while holding the active-slot
+publication mutex; the inference thread performs Acquire loads at the session
+boundaries defined by the serving-session spec and holds the same mutex across
+token write/flush and internal commit.
 
 - A token line fully flushed before the cancel command's flag store is valid.
 - If the flag is observed before token publication, that token is not emitted.
@@ -511,7 +523,7 @@ The protocol implementation MUST include tests for:
 - immediate second-request `busy` behavior with no waiting request;
 - every legal normal, cancel, rejection, shutdown, and fatal event sequence;
 - token indices, completion counts, and internal cache-length equations;
-- cancel before start, during M=1, between M=8 chunks, during decode, and racing a
+- cancel before start, during M=1, between M=128 chunks, during decode, and racing a
   terminal token;
 - clearing the active slot only after `released` or rejection `error` flush;
 - no `released` after reset failure or cleanup watchdog expiry;
