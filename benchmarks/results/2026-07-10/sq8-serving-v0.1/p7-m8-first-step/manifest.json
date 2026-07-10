@@ -1,0 +1,20 @@
+{
+  "schema_version": "ullm.sq8.p7_first_step_capture.v1",
+  "prompt_token_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "step_index": 0,
+  "output_token_id": 353,
+  "output_logit": 13.642277,
+  "final_hidden_file": "first-step-final-hidden.f32le",
+  "final_hidden_f32_le_sha256": "7f72aa665cfb552b25bdac559ede8332b685b86217bc9e29da433e397a70a080",
+  "logits_file": "first-step-logits.f32le",
+  "logits_f32_le_sha256": "b40bd6c0e3feb11e16e058ad7668e87210a6b746daadd70fc3f725bd4c74cb74"
+}

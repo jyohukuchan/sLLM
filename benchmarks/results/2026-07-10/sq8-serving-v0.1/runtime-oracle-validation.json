@@ -1,0 +1,606 @@
+{
+  "evidence": [
+    {
+      "result_file": "benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p1-p8.json",
+      "result_sha256": "6727f8d108517ba85fa2fb069264988846f1451c18dfae1f7da76c60f6a0c443"
+    },
+    {
+      "result_file": "benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p32-p128.json",
+      "result_sha256": "8418187ebd67e82be5ae639a261ec679b8e073bdc65000b6ef3ed9403206dd08"
+    }
+  ],
+  "p7_path_equivalence": {
+    "final_hidden": {
+      "cosine_similarity": 0.9993519511072808,
+      "elements": 5120,
+      "max_abs": 1.1985321044921875,
+      "nonfinite_count": 0,
+      "relative_l2": 0.036842637795883676
+    },
+    "logits": {
+      "actual_top_10": [
+        {
+          "logit": 13.642276763916016,
+          "token_id": 353
+        },
+        {
+          "logit": 12.002111434936523,
+          "token_id": 3764
+        },
+        {
+          "logit": 10.942808151245117,
+          "token_id": 25010
+        },
+        {
+          "logit": 10.043804168701172,
+          "token_id": 220
+        },
+        {
+          "logit": 9.681642532348633,
+          "token_id": 5572
+        },
+        {
+          "logit": 9.46444034576416,
+          "token_id": 671
+        },
+        {
+          "logit": 9.125923156738281,
+          "token_id": 3014
+        },
+        {
+          "logit": 9.072189331054688,
+          "token_id": 374
+        },
+        {
+          "logit": 8.948836326599121,
+          "token_id": 368
+        },
+        {
+          "logit": 8.94565200805664,
+          "token_id": 262
+        }
+      ],
+      "cosine_similarity": 0.9994977476547471,
+      "elements": 151936,
+      "max_abs": 0.4715003967285156,
+      "nonfinite_count": 0,
+      "reference_top_10": [
+        {
+          "logit": 13.653129577636719,
+          "token_id": 353
+        },
+        {
+          "logit": 11.919666290283203,
+          "token_id": 3764
+        },
+        {
+          "logit": 10.862171173095703,
+          "token_id": 25010
+        },
+        {
+          "logit": 10.081903457641602,
+          "token_id": 220
+        },
+        {
+          "logit": 9.652374267578125,
+          "token_id": 5572
+        },
+        {
+          "logit": 9.413650512695312,
+          "token_id": 671
+        },
+        {
+          "logit": 9.122522354125977,
+          "token_id": 3014
+        },
+        {
+          "logit": 9.047399520874023,
+          "token_id": 374
+        },
+        {
+          "logit": 8.960250854492188,
+          "token_id": 368
+        },
+        {
+          "logit": 8.915855407714844,
+          "token_id": 262
+        }
+      ],
+      "relative_l2": 0.03269246231293276,
+      "top_10_overlap": 10,
+      "top_1_exact": true
+    },
+    "p7_capture_manifest": "benchmarks/results/2026-07-10/sq8-serving-v0.1/p7-m8-first-step/manifest.json",
+    "p7_capture_manifest_sha256": "87dcb97f308fa70dea6bc45fca621b71f81330c360abc8a4bedab8c4b170a877",
+    "p7_mode": "M=8_paged_prefill",
+    "p8_mode": "sequential_M=1_prefill",
+    "prompt_tokens": 8,
+    "thresholds": {
+      "max_relative_l2": 0.1,
+      "min_cosine_similarity": 0.995,
+      "min_top_10_overlap": 5,
+      "top_1": "exact"
+    }
+  },
+  "passed": true,
+  "prompts": [
+    {
+      "capture": {
+        "final_hidden_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p1-p8-captures/serving-smoke-1-final-hidden.f32le",
+        "final_hidden_sha256": "bab24d87e22a40b4e4da935df40b1f1aecb429aa62037574e8387cd236d1df08",
+        "logits_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p1-p8-captures/serving-smoke-1-logits.f32le",
+        "logits_sha256": "8a3edd12054c30781de32654cbaf64d38b08973e453a58bfce90912ce32ac0e3"
+      },
+      "final_hidden": {
+        "cosine_similarity": 0.9946862278776744,
+        "elements": 5120,
+        "max_abs": 5.692882537841797,
+        "nonfinite_count": 0,
+        "relative_l2": 0.1810601441065466
+      },
+      "generated_token_id": 25,
+      "logits": {
+        "actual_top_10": [
+          {
+            "logit": 5.884162902832031,
+            "token_id": 25
+          },
+          {
+            "logit": 3.5848803520202637,
+            "token_id": 11
+          },
+          {
+            "logit": 3.519850969314575,
+            "token_id": 0
+          },
+          {
+            "logit": 3.3445658683776855,
+            "token_id": 474
+          },
+          {
+            "logit": 3.3087854385375977,
+            "token_id": 220
+          },
+          {
+            "logit": 3.2026119232177734,
+            "token_id": 9640
+          },
+          {
+            "logit": 2.9571518898010254,
+            "token_id": 198
+          },
+          {
+            "logit": 2.9277827739715576,
+            "token_id": 510
+          },
+          {
+            "logit": 2.9206385612487793,
+            "token_id": 79075
+          },
+          {
+            "logit": 2.878748655319214,
+            "token_id": 8
+          }
+        ],
+        "cosine_similarity": 0.9987607588493059,
+        "elements": 151936,
+        "max_abs": 1.385676383972168,
+        "nonfinite_count": 0,
+        "reference_top_10": [
+          {
+            "logit": 7.0,
+            "token_id": 25
+          },
+          {
+            "logit": 4.125,
+            "token_id": 0
+          },
+          {
+            "logit": 4.125,
+            "token_id": 220
+          },
+          {
+            "logit": 4.0,
+            "token_id": 474
+          },
+          {
+            "logit": 3.921875,
+            "token_id": 11
+          },
+          {
+            "logit": 3.59375,
+            "token_id": 9640
+          },
+          {
+            "logit": 3.5,
+            "token_id": 198
+          },
+          {
+            "logit": 3.453125,
+            "token_id": 510
+          },
+          {
+            "logit": 3.40625,
+            "token_id": 8
+          },
+          {
+            "logit": 3.328125,
+            "token_id": 58
+          }
+        ],
+        "relative_l2": 0.17299005908030704,
+        "top_10_overlap": 9,
+        "top_1_exact": true
+      },
+      "prompt_id": "raw-p0001",
+      "prompt_tokens": 1,
+      "source_reference": {
+        "final_hidden_sha256": "e6b34ea584868ec8689b6b54d3ea81b7999f9c625542aa680dbf243151aa1396",
+        "greedy_g1_sha256": "0623ccb9b1619bd388284a438034d8cb6431964ba727d8b1c450303105735488",
+        "logits_sha256": "d8060af79f68450e480939a4a78ca0a51ec3b644d165e4e87cb36853d19a217a"
+      }
+    },
+    {
+      "capture": {
+        "final_hidden_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p1-p8-captures/serving-smoke-2-final-hidden.f32le",
+        "final_hidden_sha256": "ea3a2901d80225ab4c157bdbb148b13d07a67ed4a70dc1e92815b0cb2c1d313b",
+        "logits_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p1-p8-captures/serving-smoke-2-logits.f32le",
+        "logits_sha256": "efce42c0a57730a37913c49a5cabfb411a0186ed37f214d27b6b13369f7c33e7"
+      },
+      "final_hidden": {
+        "cosine_similarity": 0.9990117125063008,
+        "elements": 5120,
+        "max_abs": 1.5923938751220703,
+        "nonfinite_count": 0,
+        "relative_l2": 0.046323553872375224
+      },
+      "generated_token_id": 353,
+      "logits": {
+        "actual_top_10": [
+          {
+            "logit": 13.653129577636719,
+            "token_id": 353
+          },
+          {
+            "logit": 11.919666290283203,
+            "token_id": 3764
+          },
+          {
+            "logit": 10.862171173095703,
+            "token_id": 25010
+          },
+          {
+            "logit": 10.081903457641602,
+            "token_id": 220
+          },
+          {
+            "logit": 9.652374267578125,
+            "token_id": 5572
+          },
+          {
+            "logit": 9.413650512695312,
+            "token_id": 671
+          },
+          {
+            "logit": 9.122522354125977,
+            "token_id": 3014
+          },
+          {
+            "logit": 9.047399520874023,
+            "token_id": 374
+          },
+          {
+            "logit": 8.960250854492188,
+            "token_id": 368
+          },
+          {
+            "logit": 8.915855407714844,
+            "token_id": 262
+          }
+        ],
+        "cosine_similarity": 0.9991740618204539,
+        "elements": 151936,
+        "max_abs": 0.5688972473144531,
+        "nonfinite_count": 0,
+        "reference_top_10": [
+          {
+            "logit": 13.8125,
+            "token_id": 353
+          },
+          {
+            "logit": 11.875,
+            "token_id": 3764
+          },
+          {
+            "logit": 10.8125,
+            "token_id": 25010
+          },
+          {
+            "logit": 10.0625,
+            "token_id": 220
+          },
+          {
+            "logit": 9.5625,
+            "token_id": 5572
+          },
+          {
+            "logit": 9.375,
+            "token_id": 671
+          },
+          {
+            "logit": 9.125,
+            "token_id": 3014
+          },
+          {
+            "logit": 9.0625,
+            "token_id": 374
+          },
+          {
+            "logit": 8.9375,
+            "token_id": 262
+          },
+          {
+            "logit": 8.8125,
+            "token_id": 16
+          }
+        ],
+        "relative_l2": 0.04526868595252705,
+        "top_10_overlap": 9,
+        "top_1_exact": true
+      },
+      "prompt_id": "raw-p0008",
+      "prompt_tokens": 8,
+      "source_reference": {
+        "final_hidden_sha256": "e6d8b850b49206f0eee4eb22e3b7d87e6cc74e506c9cfe0a64d06992146dd7d8",
+        "greedy_g1_sha256": "f108038c137a7251e16416ef0a4e7292c1fea01cb657aeb076b05a5f07689a19",
+        "logits_sha256": "6f18a25d505257df4b08f7fe14499541e7bca970ac32435df6a81674a29ac522"
+      }
+    },
+    {
+      "capture": {
+        "final_hidden_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p32-p128-captures/serving-smoke-1-final-hidden.f32le",
+        "final_hidden_sha256": "67bf14c8d834d1bbe8c8b59b6678efb6fbffaff0e92646e858f5a4835a00ac60",
+        "logits_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p32-p128-captures/serving-smoke-1-logits.f32le",
+        "logits_sha256": "54302905b15ffcac913ae1fab209ceec4965d9e7bd4fe7a7f07220d181e8198d"
+      },
+      "final_hidden": {
+        "cosine_similarity": 0.9989616701655274,
+        "elements": 5120,
+        "max_abs": 0.5938644409179688,
+        "nonfinite_count": 0,
+        "relative_l2": 0.04577201497769474
+      },
+      "generated_token_id": 75902,
+      "logits": {
+        "actual_top_10": [
+          {
+            "logit": 13.282909393310547,
+            "token_id": 75902
+          },
+          {
+            "logit": 12.564422607421875,
+            "token_id": 198
+          },
+          {
+            "logit": 12.427502632141113,
+            "token_id": 698
+          },
+          {
+            "logit": 12.17397689819336,
+            "token_id": 425
+          },
+          {
+            "logit": 12.048297882080078,
+            "token_id": 1
+          },
+          {
+            "logit": 11.091970443725586,
+            "token_id": 271
+          },
+          {
+            "logit": 10.994184494018555,
+            "token_id": 58
+          },
+          {
+            "logit": 10.756233215332031,
+            "token_id": 876
+          },
+          {
+            "logit": 10.645975112915039,
+            "token_id": 18040
+          },
+          {
+            "logit": 10.50955581665039,
+            "token_id": 1837
+          }
+        ],
+        "cosine_similarity": 0.9995811819354294,
+        "elements": 151936,
+        "max_abs": 0.6140317916870117,
+        "nonfinite_count": 0,
+        "reference_top_10": [
+          {
+            "logit": 13.375,
+            "token_id": 75902
+          },
+          {
+            "logit": 12.4375,
+            "token_id": 198
+          },
+          {
+            "logit": 12.375,
+            "token_id": 698
+          },
+          {
+            "logit": 12.25,
+            "token_id": 425
+          },
+          {
+            "logit": 12.125,
+            "token_id": 1
+          },
+          {
+            "logit": 11.125,
+            "token_id": 58
+          },
+          {
+            "logit": 11.0625,
+            "token_id": 271
+          },
+          {
+            "logit": 10.6875,
+            "token_id": 876
+          },
+          {
+            "logit": 10.5625,
+            "token_id": 18040
+          },
+          {
+            "logit": 10.5,
+            "token_id": 1837
+          }
+        ],
+        "relative_l2": 0.02971480391640588,
+        "top_10_overlap": 10,
+        "top_1_exact": true
+      },
+      "prompt_id": "raw-p0032",
+      "prompt_tokens": 32,
+      "source_reference": {
+        "final_hidden_sha256": "25e74b5ce37b4ce77002db35adf3315feda2a4414da99b0cd0f07f796007f88c",
+        "greedy_g1_sha256": "a1fae9b52e63b9e67f4b2f0b4c8e636d4d9ae5c379454fd71e73e57b1b98bb80",
+        "logits_sha256": "3c726adcfef338c5835a00244bca3fb119c8ae776db059957973adb73cc8909d"
+      }
+    },
+    {
+      "capture": {
+        "final_hidden_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p32-p128-captures/serving-smoke-2-final-hidden.f32le",
+        "final_hidden_sha256": "55bc0bc238ba70cc1bc793b9596441c45ba021a3901ac5b57835ba072df92dee",
+        "logits_file": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/benchmarks/results/2026-07-10/sq8-serving-v0.1/runtime-oracle-p32-p128-captures/serving-smoke-2-logits.f32le",
+        "logits_sha256": "adc263ab56924a91cee81c8deb59075800da36753a5e48fd36e201d945e53a4e"
+      },
+      "final_hidden": {
+        "cosine_similarity": 0.998093911231886,
+        "elements": 5120,
+        "max_abs": 1.32867431640625,
+        "nonfinite_count": 0,
+        "relative_l2": 0.06309593053052771
+      },
+      "generated_token_id": 115,
+      "logits": {
+        "actual_top_10": [
+          {
+            "logit": 20.486244201660156,
+            "token_id": 115
+          },
+          {
+            "logit": 20.072782516479492,
+            "token_id": 240
+          },
+          {
+            "logit": 20.062185287475586,
+            "token_id": 95
+          },
+          {
+            "logit": 20.0181941986084,
+            "token_id": 237
+          },
+          {
+            "logit": 19.812705993652344,
+            "token_id": 245
+          },
+          {
+            "logit": 19.772314071655273,
+            "token_id": 114
+          },
+          {
+            "logit": 19.514381408691406,
+            "token_id": 223
+          },
+          {
+            "logit": 19.410396575927734,
+            "token_id": 234
+          },
+          {
+            "logit": 19.29102325439453,
+            "token_id": 241
+          },
+          {
+            "logit": 19.217424392700195,
+            "token_id": 222
+          }
+        ],
+        "cosine_similarity": 0.9988276276076529,
+        "elements": 151936,
+        "max_abs": 0.8091413974761963,
+        "nonfinite_count": 0,
+        "reference_top_10": [
+          {
+            "logit": 20.125,
+            "token_id": 115
+          },
+          {
+            "logit": 19.75,
+            "token_id": 95
+          },
+          {
+            "logit": 19.75,
+            "token_id": 240
+          },
+          {
+            "logit": 19.75,
+            "token_id": 245
+          },
+          {
+            "logit": 19.625,
+            "token_id": 237
+          },
+          {
+            "logit": 19.5,
+            "token_id": 114
+          },
+          {
+            "logit": 19.375,
+            "token_id": 233
+          },
+          {
+            "logit": 19.375,
+            "token_id": 234
+          },
+          {
+            "logit": 19.25,
+            "token_id": 241
+          },
+          {
+            "logit": 19.125,
+            "token_id": 223
+          }
+        ],
+        "relative_l2": 0.04840837055726717,
+        "top_10_overlap": 9,
+        "top_1_exact": true
+      },
+      "prompt_id": "raw-p0128",
+      "prompt_tokens": 128,
+      "source_reference": {
+        "final_hidden_sha256": "3e8312df3134ebcbe4875081738de9f34d3e3eb6a348d28503e577248ccf4283",
+        "greedy_g1_sha256": "52e9e3add38bf08350e260942004423cf95fce71609ae1a46b260442db2608bb",
+        "logits_sha256": "d2235b477f3c4e1fbb2c33b7b9407d224ae72443df648c620a8be0c117832a5c"
+      }
+    }
+  ],
+  "schema_version": "ullm.sq8.serving_runtime_oracle_validation.v1",
+  "source_oracle": {
+    "fixture_root": "/home/homelab1/coding-local/ultimateLLM/uLLM-project/tests/fixtures/sq8-serving-v0.1/oracles/vllm-source-v0.1",
+    "fixture_set_id": "qwen3-14b-fp8-sq8-serving-v0.1",
+    "metadata_sha256": "1710ebf504c3cf84616f265f57575d48b91804635a0c0151875eadc91fbc122b",
+    "payload_manifest_sha256": "5972a024c91509b432e68ee39a3dd1cf7a0f0ba2ba48fe7ef5c0bfb02957405c",
+    "sha256sums_sha256": "d6d083fc5881480de3a60ae413b56c057d4eaed6d96286db554d0e3c50fecec5"
+  },
+  "thresholds": {
+    "max_relative_l2": 0.2,
+    "min_cosine_similarity": 0.98,
+    "min_top_10_overlap": 3,
+    "top_1": "exact"
+  }
+}

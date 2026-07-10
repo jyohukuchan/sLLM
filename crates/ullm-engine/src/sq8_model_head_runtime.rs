@@ -555,6 +555,7 @@ pub(crate) struct Sq8ModelHeadServingExecutionReport {
     pub(crate) cache_len: usize,
     pub(crate) final_norm: Sq8ModelHeadPayloadIdentity,
     pub(crate) lm_head: Sq8ModelHeadPayloadIdentity,
+    pub(crate) final_hidden_health: Option<Sq8ModelHeadTensorHealth>,
     pub(crate) logits_health: Sq8ModelHeadTensorHealth,
     pub(crate) stack_kernel_guard_checks: usize,
     pub(crate) paged_kernel_guard_checks: usize,
@@ -587,6 +588,14 @@ impl Sq8ModelHeadServingExecutionReport {
             )?)? as u64,
         )?;
         validate_health_contract(&self.logits_health, QWEN3_14B_VOCAB_SIZE, "serving logits")?;
+        if let Some(health) = &self.final_hidden_health {
+            validate_health_contract(health, QWEN3_14B_HIDDEN_SIZE, "serving final hidden")?;
+        }
+        let expected_readbacks = if self.final_hidden_health.is_some() {
+            2
+        } else {
+            1
+        };
         if self.cache_len != self.position + 1
             || self.stack_kernel_guard_checks != QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len()
             || self.paged_kernel_guard_checks != QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len()
@@ -594,7 +603,7 @@ impl Sq8ModelHeadServingExecutionReport {
                 != QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len()
             || self.rmsnorm_call_count != 1
             || self.bf16_matvec_call_count != 1
-            || self.result_readback_count != 1
+            || self.result_readback_count != expected_readbacks
             || self.execution_synchronization_count != 1
             || self.fallback_used
             || self.host_staging_used
@@ -607,6 +616,7 @@ impl Sq8ModelHeadServingExecutionReport {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Sq8ModelHeadServingResult {
+    pub(crate) final_hidden: Option<Vec<f32>>,
     pub(crate) logits: Vec<f32>,
     pub(crate) report: Sq8ModelHeadServingExecutionReport,
 }
@@ -621,6 +631,22 @@ impl Sq8ModelHeadServingResult {
         )?;
         if health != self.report.logits_health {
             return Err("Qwen3-14B SQ8 serving logits health/hash mismatch".into());
+        }
+        match (&self.final_hidden, &self.report.final_hidden_health) {
+            (None, None) => {}
+            (Some(values), Some(expected)) => {
+                let actual = validate_sq8_model_head_tensor_health(
+                    values,
+                    QWEN3_14B_HIDDEN_SIZE,
+                    "serving final hidden",
+                )?;
+                if &actual != expected {
+                    return Err("Qwen3-14B SQ8 serving final-hidden health/hash mismatch".into());
+                }
+            }
+            _ => {
+                return Err("Qwen3-14B SQ8 serving final-hidden capture/report mismatch".into());
+            }
         }
         Ok(())
     }
@@ -976,6 +1002,24 @@ impl Qwen3Sq8ModelHeadRuntime {
         decode: &Qwen3Sq8PagedDecodeRuntime,
         stream: &mut RuntimeStream,
     ) -> Result<Sq8ModelHeadServingResult, String> {
+        self.run_m1_serving_synchronized(decode, false, stream)
+    }
+
+    /// Adds one final-hidden readback for explicit oracle diagnostics only.
+    pub(crate) fn run_m1_serving_oracle_synchronized(
+        &mut self,
+        decode: &Qwen3Sq8PagedDecodeRuntime,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ModelHeadServingResult, String> {
+        self.run_m1_serving_synchronized(decode, true, stream)
+    }
+
+    fn run_m1_serving_synchronized(
+        &mut self,
+        decode: &Qwen3Sq8PagedDecodeRuntime,
+        capture_final_hidden: bool,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ModelHeadServingResult, String> {
         let paged_decode = decode.last_execution_report().ok_or_else(|| {
             "Qwen3-14B SQ8 serving model head requires a completed paged decode".to_string()
         })?;
@@ -992,7 +1036,16 @@ impl Qwen3Sq8ModelHeadRuntime {
         let resident_hidden = decode.resident_hidden_buffer()?;
         self.validate_serving_execution_preconditions(resident_hidden, &binding, paged_decode)?;
 
+        let hidden_bytes = f32_bytes(QWEN3_14B_HIDDEN_SIZE)?;
         let logits_bytes = f32_bytes(QWEN3_14B_VOCAB_SIZE)?;
+        let mut final_hidden_host = if capture_final_hidden {
+            Some(zeroed_host_bytes(
+                hidden_bytes,
+                "serving final-hidden readback",
+            )?)
+        } else {
+            None
+        };
         let mut logits_host = zeroed_host_bytes(logits_bytes, "serving logits readback")?;
         let operation_result = (|| {
             segmented_rmsnorm_f32(
@@ -1012,6 +1065,10 @@ impl Qwen3Sq8ModelHeadRuntime {
                 &mut self.logits,
                 Some(&mut *stream),
             )?;
+            if let Some(final_hidden_host) = &mut final_hidden_host {
+                self.final_hidden
+                    .copy_to_host(0, final_hidden_host, Some(&mut *stream))?;
+            }
             self.logits
                 .copy_to_host(0, &mut logits_host, Some(&mut *stream))?;
             Ok::<(), String>(())
@@ -1025,6 +1082,18 @@ impl Qwen3Sq8ModelHeadRuntime {
             )));
         }
 
+        let final_hidden = final_hidden_host.map(|bytes| decode_f32_le_values(&bytes));
+        let final_hidden_health = match &final_hidden {
+            Some(values) => match validate_sq8_model_head_tensor_health(
+                values,
+                QWEN3_14B_HIDDEN_SIZE,
+                "serving final hidden",
+            ) {
+                Ok(health) => Some(health),
+                Err(err) => return Err(self.poison_with_error(err)),
+            },
+            None => None,
+        };
         let logits = decode_f32_le_values(&logits_host);
         let logits_health = match validate_sq8_model_head_tensor_health(
             &logits,
@@ -1036,6 +1105,7 @@ impl Qwen3Sq8ModelHeadRuntime {
         };
         let artifact_to_bind = binding.artifact_content_sha256.clone();
         let result = Sq8ModelHeadServingResult {
+            final_hidden,
             logits,
             report: Sq8ModelHeadServingExecutionReport {
                 binding,
@@ -1043,13 +1113,14 @@ impl Qwen3Sq8ModelHeadRuntime {
                 cache_len: paged_decode.position + 1,
                 final_norm: self.final_norm_identity.clone(),
                 lm_head: self.lm_head_identity.clone(),
+                final_hidden_health,
                 logits_health,
                 stack_kernel_guard_checks: QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV.len(),
                 paged_kernel_guard_checks: QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV.len(),
                 head_kernel_guard_checks: QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV.len(),
                 rmsnorm_call_count: 1,
                 bf16_matvec_call_count: 1,
-                result_readback_count: 1,
+                result_readback_count: if capture_final_hidden { 2 } else { 1 },
                 execution_synchronization_count: 1,
                 fallback_used: false,
                 host_staging_used: false,

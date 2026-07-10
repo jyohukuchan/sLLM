@@ -68,6 +68,20 @@ struct Options {
     oracle: PathBuf,
     output: PathBuf,
     benchmark_output: Option<PathBuf>,
+    capture_first_step_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct FirstStepCaptureManifest {
+    schema_version: &'static str,
+    prompt_token_ids: [usize; QWEN3_14B_SQ8_GENERATION_PROMPT_TOKENS],
+    step_index: usize,
+    output_token_id: usize,
+    output_logit: f32,
+    final_hidden_file: &'static str,
+    final_hidden_f32_le_sha256: String,
+    logits_file: &'static str,
+    logits_f32_le_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -783,6 +797,9 @@ fn main() -> Result<(), String> {
             after_release: allocator_record(generation.allocator_after_release),
         },
     };
+    if let Some(directory) = options.capture_first_step_dir.as_deref() {
+        capture_first_generation_step(directory, &generation)?;
+    }
     write_json_no_clobber(&options.output, &result)?;
     if !result.passed {
         return Err(format!(
@@ -1163,6 +1180,7 @@ fn parse_options() -> Result<Options, String> {
     let mut oracle = None;
     let mut output = None;
     let mut benchmark_output = None;
+    let mut capture_first_step_dir = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or_else(usage)?;
@@ -1174,6 +1192,11 @@ fn parse_options() -> Result<Options, String> {
             Some("--benchmark-output") => {
                 set_once(&mut benchmark_output, value, "--benchmark-output")?
             }
+            Some("--capture-first-step-dir") => set_once(
+                &mut capture_first_step_dir,
+                value,
+                "--capture-first-step-dir",
+            )?,
             _ => return Err(format!("unknown argument {:?}; {}", flag, usage())),
         }
     }
@@ -1183,6 +1206,7 @@ fn parse_options() -> Result<Options, String> {
         oracle: PathBuf::from(oracle.ok_or_else(usage)?),
         output: PathBuf::from(output.ok_or_else(usage)?),
         benchmark_output: benchmark_output.map(PathBuf::from),
+        capture_first_step_dir: capture_first_step_dir.map(PathBuf::from),
     };
     for (label, path) in [
         ("artifact", &options.artifact),
@@ -1242,6 +1266,23 @@ fn parse_options() -> Result<Options, String> {
             ));
         }
     }
+    if let Some(capture_dir) = options.capture_first_step_dir.as_deref() {
+        match std::fs::symlink_metadata(capture_dir) {
+            Ok(_) => {
+                return Err(format!(
+                    "first-step capture directory already exists: {}",
+                    capture_dir.display()
+                ));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to inspect first-step capture directory {}: {err}",
+                    capture_dir.display()
+                ));
+            }
+        }
+    }
     Ok(options)
 }
 
@@ -1253,7 +1294,7 @@ fn set_once(slot: &mut Option<OsString>, value: OsString, flag: &str) -> Result<
 }
 
 fn usage() -> String {
-    "usage: sq8_ck_generate --artifact ARTIFACT_DIR --package THIN_PACKAGE --oracle VLLM_ORACLE_DIR --output OUTPUT_JSON [--benchmark-output BENCHMARK_JSON]".to_string()
+    "usage: sq8_ck_generate --artifact ARTIFACT_DIR --package THIN_PACKAGE --oracle VLLM_ORACLE_DIR --output OUTPUT_JSON [--benchmark-output BENCHMARK_JSON] [--capture-first-step-dir CAPTURE_DIR]".to_string()
 }
 
 fn validate_artifact_identity(artifact: &Sq8CanonicalArtifact) -> Result<(), String> {
@@ -1976,6 +2017,62 @@ fn write_json_no_clobber<T: Serialize>(path: &Path, result: &T) -> Result<(), St
         .map_err(|err| format!("failed to serialize SQ8 generation result: {err}"))?;
     payload.push(b'\n');
     publish_bytes_no_clobber(path, &payload)
+}
+
+fn capture_first_generation_step(
+    directory: &Path,
+    generation: &Sq8OfflineGenerationResult,
+) -> Result<(), String> {
+    std::fs::create_dir(directory).map_err(|err| {
+        format!(
+            "failed to create first-step capture directory {}: {err}",
+            directory.display()
+        )
+    })?;
+    let step = generation
+        .steps
+        .first()
+        .ok_or_else(|| "SQ8 generation has no first step to capture".to_string())?;
+    const FINAL_HIDDEN_FILE: &str = "first-step-final-hidden.f32le";
+    const LOGITS_FILE: &str = "first-step-logits.f32le";
+    write_f32_le_no_clobber(&directory.join(FINAL_HIDDEN_FILE), &step.final_hidden)?;
+    write_f32_le_no_clobber(&directory.join(LOGITS_FILE), &step.logits)?;
+    write_json_no_clobber(
+        &directory.join("manifest.json"),
+        &FirstStepCaptureManifest {
+            schema_version: "ullm.sq8.p7_first_step_capture.v1",
+            prompt_token_ids: QWEN3_14B_SQ8_GENERATION_PROMPT_TOKEN_IDS,
+            step_index: step.generated_index,
+            output_token_id: step.output_token_id,
+            output_logit: step.output_logit,
+            final_hidden_file: FINAL_HIDDEN_FILE,
+            final_hidden_f32_le_sha256: step.final_hidden_f32_le_sha256.clone(),
+            logits_file: LOGITS_FILE,
+            logits_f32_le_sha256: step.logits_f32_le_sha256.clone(),
+        },
+    )
+}
+
+fn write_f32_le_no_clobber(path: &Path, values: &[f32]) -> Result<(), String> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    for value in values {
+        writer
+            .write_all(&value.to_le_bytes())
+            .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    }
+    writer
+        .flush()
+        .map_err(|err| format!("failed to flush {}: {err}", path.display()))?;
+    writer
+        .into_inner()
+        .map_err(|err| format!("failed to finish {}: {err}", path.display()))?
+        .sync_all()
+        .map_err(|err| format!("failed to sync {}: {err}", path.display()))
 }
 
 fn publish_bytes_no_clobber(path: &Path, payload: &[u8]) -> Result<(), String> {

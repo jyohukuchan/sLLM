@@ -1,0 +1,69 @@
+{
+  "schema_version": "ullm.sq8.serving_smoke.v2",
+  "passed": true,
+  "requests": [
+    {
+      "request_id": "serving-smoke-1",
+      "prompt_token_ids": [1],
+      "max_new_tokens": 1,
+      "generated_token_ids": [25],
+      "prompt_progress_events": 0,
+      "execution_units": 1,
+      "terminal_reason": "length",
+      "release_outcome": "length",
+      "request_seconds": 0.202240014,
+      "reset_seconds": 0.003446695,
+      "oracle_capture": {
+        "position": 0,
+        "top1_token_id": 25,
+        "top1_logit": 5.884163,
+        "final_hidden_file": "runtime-oracle-p1-p8-captures/serving-smoke-1-final-hidden.f32le",
+        "final_hidden_f32_le_sha256": "bab24d87e22a40b4e4da935df40b1f1aecb429aa62037574e8387cd236d1df08",
+        "logits_file": "runtime-oracle-p1-p8-captures/serving-smoke-1-logits.f32le",
+        "logits_f32_le_sha256": "8a3edd12054c30781de32654cbaf64d38b08973e453a58bfce90912ce32ac0e3"
+      }
+    },
+    {
+      "request_id": "serving-smoke-2",
+      "prompt_token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+      "max_new_tokens": 1,
+      "generated_token_ids": [353],
+      "prompt_progress_events": 7,
+      "execution_units": 8,
+      "terminal_reason": "length",
+      "release_outcome": "length",
+      "request_seconds": 0.25313076,
+      "reset_seconds": 0.003445136,
+      "oracle_capture": {
+        "position": 7,
+        "top1_token_id": 353,
+        "top1_logit": 13.65313,
+        "final_hidden_file": "runtime-oracle-p1-p8-captures/serving-smoke-2-final-hidden.f32le",
+        "final_hidden_f32_le_sha256": "ea3a2901d80225ab4c157bdbb148b13d07a67ed4a70dc1e92815b0cb2c1d313b",
+        "logits_file": "runtime-oracle-p1-p8-captures/serving-smoke-2-logits.f32le",
+        "logits_f32_le_sha256": "efce42c0a57730a37913c49a5cabfb411a0186ed37f214d27b6b13369f7c33e7"
+      }
+    }
+  ],
+  "cancelled_request": null,
+  "load_seconds": 22.91174619,
+  "artifact_content_sha256": "2243acf1df627ff6ec13840c8ffcf35c77e89205eb36cef7561b85c9c98b9147",
+  "package_manifest_sha256": "c2133dfe392f3d5608bde17ed764ae8347c3096c500a58aa235adbeb63d1a0eb",
+  "device": {
+    "device_id": 0,
+    "backend": "hip",
+    "name": "AMD Radeon Graphics",
+    "gcn_arch_name": "",
+    "compute_major": 12,
+    "compute_minor": 0,
+    "total_global_mem": 34208743424
+  },
+  "kv_cache_bytes": 1342177280,
+  "cache_blocks": 256,
+  "context_tokens": 4096,
+  "post_reset_status": "ready",
+  "post_reset_active": 0,
+  "post_reset_waiting": 0,
+  "post_reset_allocated_blocks": 0,
+  "post_reset_cache_lengths_all_zero": true
+}

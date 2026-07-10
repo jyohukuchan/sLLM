@@ -220,6 +220,22 @@ pub enum Sq8ServingAdvance {
     CancellationObserved,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sq8ServingOracleCapture {
+    pub position: usize,
+    pub top1: Sq8GenerationTopLogit,
+    pub final_hidden: Vec<f32>,
+    pub logits: Vec<f32>,
+    pub final_hidden_f32_le_sha256: String,
+    pub logits_f32_le_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sq8ServingOracleAdvance {
+    pub advance: Sq8ServingAdvance,
+    pub capture: Option<Sq8ServingOracleCapture>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sq8ServingRuntimeStatus {
     Ready,
@@ -689,11 +705,48 @@ impl Qwen3Sq8ServingSession {
         }
 
         let result = match self.state {
-            Sq8ServingRuntimeStatus::Prefilling => self.advance_prefill_synchronized(stream),
+            Sq8ServingRuntimeStatus::Prefilling => self
+                .advance_prefill_synchronized(stream, false)
+                .map(|result| result.advance),
             Sq8ServingRuntimeStatus::Decoding => self.advance_decode_synchronized(stream),
             _ => unreachable!("state checked above"),
         };
         result.map_err(|err| self.fail_runtime(stream, err))
+    }
+
+    /// Captures final hidden/logits only for the first token oracle gate.
+    pub fn advance_prefill_oracle_synchronized(
+        &mut self,
+        stream: &mut RuntimeStream,
+    ) -> Result<Sq8ServingOracleAdvance, Sq8ServingError> {
+        match self.state {
+            Sq8ServingRuntimeStatus::Prefilling => {}
+            Sq8ServingRuntimeStatus::Ready => {
+                return Err(Sq8ServingError::invalid_state(
+                    "serving prefill oracle requires an active request",
+                ));
+            }
+            Sq8ServingRuntimeStatus::Failed => return Err(self.failed_error()),
+            state => {
+                return Err(self.fail_runtime(
+                    stream,
+                    format!("serving prefill oracle is invalid in state {state:?}"),
+                ));
+            }
+        }
+        let cancelled = match self.active_cancelled() {
+            Ok(cancelled) => cancelled,
+            Err(err) => return Err(self.fail_runtime(stream, err)),
+        };
+        if cancelled {
+            self.state = Sq8ServingRuntimeStatus::Cancelling;
+            return Ok(Sq8ServingOracleAdvance {
+                advance: Sq8ServingAdvance::CancellationObserved,
+                capture: None,
+            });
+        }
+        self.advance_prefill_synchronized(stream, true)
+            .map_err(|err| self.fail_runtime(stream, err))
     }
 
     pub fn finish_and_reset_synchronized(
@@ -752,7 +805,8 @@ impl Qwen3Sq8ServingSession {
     fn advance_prefill_synchronized(
         &mut self,
         stream: &mut RuntimeStream,
-    ) -> Result<Sq8ServingAdvance, String> {
+        capture_oracle: bool,
+    ) -> Result<Sq8ServingOracleAdvance, String> {
         let (position, prompt_tokens, token_id) = {
             let active = self
                 .active
@@ -775,18 +829,33 @@ impl Qwen3Sq8ServingSession {
         let scheduler_cached = self.commit_prompt_progress(position)?;
         if self.active_cancelled()? {
             self.state = Sq8ServingRuntimeStatus::Cancelling;
-            return Ok(Sq8ServingAdvance::CancellationObserved);
+            return Ok(Sq8ServingOracleAdvance {
+                advance: Sq8ServingAdvance::CancellationObserved,
+                capture: None,
+            });
         }
         if scheduler_cached < prompt_tokens {
-            return Ok(Sq8ServingAdvance::PromptProgress {
-                prompt_tokens_processed: scheduler_cached,
-                cache_len: scheduler_cached,
-                execution_width: 1,
+            return Ok(Sq8ServingOracleAdvance {
+                advance: Sq8ServingAdvance::PromptProgress {
+                    prompt_tokens_processed: scheduler_cached,
+                    cache_len: scheduler_cached,
+                    execution_width: 1,
+                },
+                capture: None,
             });
         }
 
-        let top1 = self.run_m1_head_synchronized(stream)?;
-        self.commit_generated_token(top1, scheduler_cached, GeneratedTokenCommit::Prefill)
+        let (top1, capture) = self.run_m1_head_synchronized(stream, capture_oracle)?;
+        let advance =
+            self.commit_generated_token(top1, scheduler_cached, GeneratedTokenCommit::Prefill)?;
+        Ok(Sq8ServingOracleAdvance {
+            capture: if matches!(advance, Sq8ServingAdvance::Token { .. }) {
+                capture
+            } else {
+                None
+            },
+            advance,
+        })
     }
 
     fn advance_decode_synchronized(
@@ -842,7 +911,8 @@ impl Qwen3Sq8ServingSession {
             self.state = Sq8ServingRuntimeStatus::Cancelling;
             return Ok(Sq8ServingAdvance::CancellationObserved);
         }
-        let top1 = self.run_m1_head_synchronized(stream)?;
+        let (top1, capture) = self.run_m1_head_synchronized(stream, false)?;
+        debug_assert!(capture.is_none());
         self.commit_generated_token(
             top1,
             expected_position + 1,
@@ -902,10 +972,15 @@ impl Qwen3Sq8ServingSession {
     fn run_m1_head_synchronized(
         &mut self,
         stream: &mut RuntimeStream,
-    ) -> Result<Sq8GenerationTopLogit, String> {
-        let result = self
-            .head
-            .run_m1_serving_logits_synchronized(&self.decode, stream)?;
+        capture_oracle: bool,
+    ) -> Result<(Sq8GenerationTopLogit, Option<Sq8ServingOracleCapture>), String> {
+        let result = if capture_oracle {
+            self.head
+                .run_m1_serving_oracle_synchronized(&self.decode, stream)?
+        } else {
+            self.head
+                .run_m1_serving_logits_synchronized(&self.decode, stream)?
+        };
         result.validate_contract()?;
         if result.report.binding.device != self.load_report.device
             || result.report.binding.package_manifest_sha256
@@ -919,7 +994,34 @@ impl Qwen3Sq8ServingSession {
         {
             return Err("serving M=1 model-head identity/report mismatch".into());
         }
-        greedy_top1_finite(&result.logits)
+        let top1 = greedy_top1_finite(&result.logits)?;
+        let capture = if capture_oracle {
+            let final_hidden = result.final_hidden.ok_or_else(|| {
+                "serving oracle head did not return final-hidden capture".to_string()
+            })?;
+            Some(Sq8ServingOracleCapture {
+                position: result.report.position,
+                top1,
+                final_hidden,
+                logits: result.logits,
+                final_hidden_f32_le_sha256: result
+                    .report
+                    .final_hidden_health
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "serving oracle head did not report final-hidden health".to_string()
+                    })?
+                    .f32_le_sha256
+                    .clone(),
+                logits_f32_le_sha256: result.report.logits_health.f32_le_sha256.clone(),
+            })
+        } else {
+            if result.final_hidden.is_some() {
+                return Err("lean serving head unexpectedly captured final hidden".into());
+            }
+            None
+        };
+        Ok((top1, capture))
     }
 
     fn commit_prompt_progress(&mut self, position: usize) -> Result<usize, String> {

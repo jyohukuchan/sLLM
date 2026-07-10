@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::Serialize;
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use ullm_engine::sq_canonical::read_sq8_canonical_artifact;
 use ullm_engine::sq8_embedding_runtime::QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV;
@@ -31,6 +33,7 @@ struct Options {
     second_prompt_token_ids: Option<Vec<usize>>,
     second_max_new_tokens: usize,
     cancel_after_first_token: bool,
+    oracle_capture_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +48,18 @@ struct ServingCaseResult {
     release_outcome: &'static str,
     request_seconds: f64,
     reset_seconds: f64,
+    oracle_capture: Option<OracleCaptureResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct OracleCaptureResult {
+    position: usize,
+    top1_token_id: usize,
+    top1_logit: f32,
+    final_hidden_file: PathBuf,
+    final_hidden_f32_le_sha256: String,
+    logits_file: PathBuf,
+    logits_f32_le_sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +77,9 @@ struct ServingSmokeResult {
     requests: Vec<ServingCaseResult>,
     cancelled_request: Option<CancelledCaseResult>,
     load_seconds: f64,
+    artifact_content_sha256: String,
+    package_manifest_sha256: String,
+    device: ServingDeviceResult,
     kv_cache_bytes: usize,
     cache_blocks: usize,
     context_tokens: usize,
@@ -72,8 +90,27 @@ struct ServingSmokeResult {
     post_reset_cache_lengths_all_zero: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct ServingDeviceResult {
+    device_id: i32,
+    backend: String,
+    name: String,
+    gcn_arch_name: String,
+    compute_major: i32,
+    compute_minor: i32,
+    total_global_mem: u64,
+}
+
 fn main() -> Result<(), String> {
     let options = parse_options()?;
+    if let Some(directory) = &options.oracle_capture_dir {
+        std::fs::create_dir(directory).map_err(|err| {
+            format!(
+                "failed to create new oracle capture directory {}: {err}",
+                directory.display()
+            )
+        })?;
+    }
     require_hip_kernel_guards()?;
     let artifact = read_sq8_canonical_artifact(&options.artifact)?;
     let norms = load_qwen3_14b_sq8_serving_norms(&options.package, UPLOAD_CHUNK_BYTES)
@@ -100,6 +137,7 @@ fn main() -> Result<(), String> {
         "serving-smoke-1",
         options.prompt_token_ids.clone(),
         options.max_new_tokens,
+        options.oracle_capture_dir.as_deref(),
     )?];
     if let Some(prompt_token_ids) = options.second_prompt_token_ids.clone() {
         requests.push(run_completed_request(
@@ -108,6 +146,7 @@ fn main() -> Result<(), String> {
             "serving-smoke-2",
             prompt_token_ids,
             options.second_max_new_tokens,
+            options.oracle_capture_dir.as_deref(),
         )?);
     }
     let cancelled_request = if options.cancel_after_first_token {
@@ -121,13 +160,25 @@ fn main() -> Result<(), String> {
         None
     };
     let snapshot = reusable_snapshot(&session)?;
+    let load_report = session.load_report();
     let result = ServingSmokeResult {
         schema_version: "ullm.sq8.serving_smoke.v2",
         passed: true,
         requests,
         cancelled_request,
         load_seconds,
-        kv_cache_bytes: session.load_report().total_kv_cache_bytes,
+        artifact_content_sha256: load_report.artifact_content_sha256.clone(),
+        package_manifest_sha256: load_report.package_manifest_sha256.clone(),
+        device: ServingDeviceResult {
+            device_id: load_report.device.device_id,
+            backend: load_report.device.backend.clone(),
+            name: load_report.device.name.clone(),
+            gcn_arch_name: load_report.device.gcn_arch_name.clone(),
+            compute_major: load_report.device.compute_major,
+            compute_minor: load_report.device.compute_minor,
+            total_global_mem: load_report.device.total_global_mem,
+        },
+        kv_cache_bytes: load_report.total_kv_cache_bytes,
         cache_blocks: QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS,
         context_tokens: QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS,
         post_reset_status: serving_status_name(snapshot.status),
@@ -150,6 +201,7 @@ fn run_completed_request(
     request_id: &str,
     prompt_token_ids: Vec<usize>,
     max_new_tokens: usize,
+    oracle_capture_dir: Option<&Path>,
 ) -> Result<ServingCaseResult, String> {
     let request = Sq8ServingRequest::greedy(request_id, prompt_token_ids.clone(), max_new_tokens);
     session
@@ -159,10 +211,28 @@ fn run_completed_request(
     let mut generated_token_ids = Vec::new();
     let mut prompt_progress_events = 0_usize;
     let mut execution_units = 0_usize;
+    let mut oracle_capture = None;
     let terminal_reason = loop {
-        let advance = session
-            .advance_synchronized(stream)
-            .map_err(|err| err.to_string())?;
+        let advance = if oracle_capture_dir.is_some()
+            && oracle_capture.is_none()
+            && session.status() == Sq8ServingRuntimeStatus::Prefilling
+        {
+            let oracle = session
+                .advance_prefill_oracle_synchronized(stream)
+                .map_err(|err| err.to_string())?;
+            if let Some(capture) = oracle.capture {
+                oracle_capture = Some(persist_oracle_capture(
+                    oracle_capture_dir.expect("checked above"),
+                    request_id,
+                    capture,
+                )?);
+            }
+            oracle.advance
+        } else {
+            session
+                .advance_synchronized(stream)
+                .map_err(|err| err.to_string())?
+        };
         execution_units += 1;
         match advance {
             Sq8ServingAdvance::PromptProgress { .. } => prompt_progress_events += 1,
@@ -205,7 +275,50 @@ fn run_completed_request(
         release_outcome: release_outcome_name(release.outcome),
         request_seconds,
         reset_seconds,
+        oracle_capture,
     })
+}
+
+fn persist_oracle_capture(
+    directory: &Path,
+    request_id: &str,
+    capture: ullm_engine::sq8_serving_runtime::Sq8ServingOracleCapture,
+) -> Result<OracleCaptureResult, String> {
+    let final_hidden_file = directory.join(format!("{request_id}-final-hidden.f32le"));
+    let logits_file = directory.join(format!("{request_id}-logits.f32le"));
+    write_f32_le_create_new(&final_hidden_file, &capture.final_hidden)?;
+    write_f32_le_create_new(&logits_file, &capture.logits)?;
+    Ok(OracleCaptureResult {
+        position: capture.position,
+        top1_token_id: capture.top1.token_id,
+        top1_logit: capture.top1.logit,
+        final_hidden_file,
+        final_hidden_f32_le_sha256: capture.final_hidden_f32_le_sha256,
+        logits_file,
+        logits_f32_le_sha256: capture.logits_f32_le_sha256,
+    })
+}
+
+fn write_f32_le_create_new(path: &Path, values: &[f32]) -> Result<(), String> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
+    let mut writer = BufWriter::new(file);
+    for value in values {
+        writer
+            .write_all(&value.to_le_bytes())
+            .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    }
+    writer
+        .flush()
+        .map_err(|err| format!("failed to flush {}: {err}", path.display()))?;
+    let file = writer
+        .into_inner()
+        .map_err(|err| format!("failed to finish {}: {err}", path.display()))?;
+    file.sync_all()
+        .map_err(|err| format!("failed to sync {}: {err}", path.display()))
 }
 
 fn run_cancel_after_first_token(
@@ -289,6 +402,7 @@ fn parse_options() -> Result<Options, String> {
     let mut second_prompt_token_ids = None;
     let mut second_max_new_tokens = 1_usize;
     let mut cancel_after_first_token = false;
+    let mut oracle_capture_dir = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
         match argument.to_str() {
@@ -344,6 +458,12 @@ fn parse_options() -> Result<Options, String> {
                     .map_err(|err| format!("invalid second max-new-tokens: {err}"))?;
             }
             Some("--cancel-after-first-token") => cancel_after_first_token = true,
+            Some("--oracle-capture-dir") => {
+                oracle_capture_dir =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--oracle-capture-dir requires a path".to_string()
+                    })?));
+            }
             Some(value) => return Err(format!("unknown argument: {value}")),
             None => return Err("arguments must be UTF-8".into()),
         }
@@ -356,6 +476,7 @@ fn parse_options() -> Result<Options, String> {
         second_prompt_token_ids,
         second_max_new_tokens,
         cancel_after_first_token,
+        oracle_capture_dir,
     })
 }
 
