@@ -9,7 +9,9 @@ use std::time::Instant;
 use ullm_engine::sq_canonical::read_sq8_canonical_artifact;
 use ullm_engine::sq8_embedding_runtime::QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV;
 use ullm_engine::sq8_layer_runtime::{
-    QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
+    QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV,
+    QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV, QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS,
+    QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV,
 };
 use ullm_engine::sq8_model_head_runtime::{
     QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV, validate_qwen3_14b_sq8_r9700_device_info,
@@ -17,8 +19,8 @@ use ullm_engine::sq8_model_head_runtime::{
 use ullm_engine::sq8_serving_runtime::{
     QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS, QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS,
     QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS, Qwen3Sq8ServingSession, Sq8CancellationToken,
-    Sq8FinishReason, Sq8ReleaseOutcome, Sq8ServingAdvance, Sq8ServingRequest,
-    Sq8ServingRuntimeStatus, load_qwen3_14b_sq8_serving_norms,
+    Sq8FinishReason, Sq8ReleaseOutcome, Sq8ServingAdvance, Sq8ServingPrefillMode,
+    Sq8ServingRequest, Sq8ServingRuntimeStatus, load_qwen3_14b_sq8_serving_norms,
 };
 use ullm_runtime_sys::{RuntimeContext, device_count, device_info};
 
@@ -33,6 +35,7 @@ struct Options {
     second_prompt_token_ids: Option<Vec<usize>>,
     second_max_new_tokens: usize,
     prompt_lengths: Option<Vec<usize>>,
+    prefill_mode: Sq8ServingPrefillMode,
     cancel_after_first_token: bool,
     cancel_after_prompt_progress: Option<usize>,
     oracle_capture_dir: Option<PathBuf>,
@@ -54,6 +57,9 @@ struct ServingCaseResult {
     generated_token_ids: Vec<usize>,
     prompt_progress_events: usize,
     execution_units: usize,
+    processed_prompt_tokens: usize,
+    execution_calls: usize,
+    prefill_execution_units: Vec<PrefillExecutionUnitResult>,
     reserved_context_tokens: usize,
     terminal_sequence_tokens: usize,
     terminal_status: &'static str,
@@ -70,6 +76,18 @@ struct ServingCaseResult {
     request_seconds: f64,
     reset_seconds: f64,
     oracle_capture: Option<OracleCaptureResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct PrefillExecutionUnitResult {
+    start_position: usize,
+    width: usize,
+    end_position: usize,
+    final_prompt_unit: bool,
+    cache_lengths: Vec<usize>,
+    cache_lengths_all_expected: bool,
+    last_cache_position: usize,
+    last_logical_block: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,6 +128,9 @@ struct CancelledCaseResult {
 #[derive(Debug, Serialize)]
 struct ServingSmokeResult {
     schema_version: &'static str,
+    prefill_mode: &'static str,
+    prefill_chunk_tokens: usize,
+    prefill_implementation: String,
     passed: bool,
     requests: Vec<ServingCaseResult>,
     cancelled_request: Option<CancelledCaseResult>,
@@ -149,7 +170,7 @@ fn main() -> Result<(), String> {
             )
         })?;
     }
-    require_hip_kernel_guards()?;
+    require_hip_kernel_guards(options.prefill_mode)?;
     let artifact = read_sq8_canonical_artifact(&options.artifact)?;
     let norms = load_qwen3_14b_sq8_serving_norms(&options.package, UPLOAD_CHUNK_BYTES)
         .map_err(|err| err.to_string())?;
@@ -158,13 +179,14 @@ fn main() -> Result<(), String> {
     let mut stream = context.create_stream()?;
 
     let load_start = Instant::now();
-    let mut session = Qwen3Sq8ServingSession::load(
+    let mut session = Qwen3Sq8ServingSession::load_with_prefill_mode(
         &mut context,
         &mut stream,
         &artifact,
         &options.package,
         norms,
         UPLOAD_CHUNK_BYTES,
+        options.prefill_mode,
     )
     .map_err(|err| err.to_string())?;
     let load_seconds = load_start.elapsed().as_secs_f64();
@@ -209,7 +231,13 @@ fn main() -> Result<(), String> {
     let snapshot = reusable_snapshot(&session)?;
     let load_report = session.load_report();
     let result = ServingSmokeResult {
-        schema_version: "ullm.sq8.serving_smoke.v2",
+        schema_version: match options.prefill_mode {
+            Sq8ServingPrefillMode::SequentialM1 => "ullm.sq8.serving_smoke.v2",
+            Sq8ServingPrefillMode::FixedM8Chunks => "ullm.sq8.serving_chunks.v3",
+        },
+        prefill_mode: prefill_mode_name(options.prefill_mode),
+        prefill_chunk_tokens: load_report.prefill_chunk_tokens,
+        prefill_implementation: load_report.prefill_implementation.clone(),
         passed: true,
         requests,
         cancelled_request,
@@ -257,11 +285,15 @@ fn run_completed_request(
         .start(request, Sq8CancellationToken::new(), stream)
         .map_err(|err| err.to_string())?;
     let request_start = Instant::now();
+    let prefill_mode = session.prefill_mode();
     let mut generated_token_ids = Vec::new();
     let mut prompt_progress_events = 0_usize;
     let mut execution_units = 0_usize;
+    let mut prefill_execution_units = Vec::new();
     let mut oracle_capture = None;
     let terminal_reason = loop {
+        let prefill_before =
+            (session.status() == Sq8ServingRuntimeStatus::Prefilling).then(|| session.snapshot());
         let capture_directory = match oracle_capture_dir {
             Some(directory)
                 if oracle_capture.is_none()
@@ -289,6 +321,40 @@ fn run_completed_request(
                 .map_err(|err| err.to_string())?
         };
         execution_units += 1;
+        if let Some(before) = prefill_before {
+            let after = session.snapshot();
+            let start_position = before.prompt_tokens_processed;
+            let end_position = after.prompt_tokens_processed;
+            let width = end_position
+                .checked_sub(start_position)
+                .ok_or_else(|| "serving smoke prefill progress moved backwards".to_string())?;
+            if width == 0 {
+                return Err("serving smoke prefill execution made no token progress".into());
+            }
+            let cache_lengths_all_expected = after
+                .cache_lengths
+                .iter()
+                .all(|length| *length == end_position);
+            if !cache_lengths_all_expected {
+                return Err(format!(
+                    "serving smoke prefill cache mismatch after {start_position}..{end_position}: {:?}",
+                    after.cache_lengths
+                ));
+            }
+            let last_cache_position = end_position
+                .checked_sub(1)
+                .ok_or_else(|| "serving smoke prefill cache position underflows".to_string())?;
+            prefill_execution_units.push(PrefillExecutionUnitResult {
+                start_position,
+                width,
+                end_position,
+                final_prompt_unit: end_position == prompt_token_ids.len(),
+                cache_lengths: after.cache_lengths,
+                cache_lengths_all_expected,
+                last_cache_position,
+                last_logical_block: last_cache_position / QWEN3_14B_SQ8_SERVING_BLOCK_TOKENS,
+            });
+        }
         match advance {
             Sq8ServingAdvance::PromptProgress { .. } => prompt_progress_events += 1,
             Sq8ServingAdvance::Token {
@@ -323,6 +389,15 @@ fn run_completed_request(
         .cache_lengths
         .iter()
         .all(|length| *length == terminal_expected_cache_len);
+    let expected_prefill_calls =
+        expected_prefill_execution_calls(prompt_token_ids.len(), prefill_mode)?;
+    let expected_decode_calls = generated_token_ids
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| "serving smoke emitted no generated token".to_string())?;
+    let expected_execution_calls = expected_prefill_calls
+        .checked_add(expected_decode_calls)
+        .ok_or_else(|| "serving smoke execution call count overflows".to_string())?;
     if terminal_snapshot.status != Sq8ServingRuntimeStatus::Finishing
         || terminal_snapshot.active_request_id.as_deref() != Some(request_id)
         || terminal_snapshot.prompt_tokens != prompt_token_ids.len()
@@ -332,8 +407,14 @@ fn run_completed_request(
         || terminal_snapshot.scheduler_waiting != 0
         || terminal_snapshot.allocator.allocated_blocks != QWEN3_14B_SQ8_SERVING_CACHE_BLOCKS
         || !terminal_cache_lengths_all_expected
-        || prompt_progress_events != prompt_token_ids.len() - 1
-        || execution_units != terminal_expected_cache_len
+        || prompt_progress_events != expected_prefill_calls - 1
+        || prefill_execution_units.len() != expected_prefill_calls
+        || prefill_execution_units
+            .iter()
+            .map(|unit| unit.width)
+            .sum::<usize>()
+            != prompt_token_ids.len()
+        || execution_units != expected_execution_calls
         || reserved_context_tokens > QWEN3_14B_SQ8_SERVING_CONTEXT_TOKENS
     {
         return Err(format!(
@@ -370,6 +451,9 @@ fn run_completed_request(
         generated_token_ids,
         prompt_progress_events,
         execution_units,
+        processed_prompt_tokens: terminal_snapshot.prompt_tokens_processed,
+        execution_calls: execution_units,
+        prefill_execution_units,
         reserved_context_tokens,
         terminal_sequence_tokens,
         terminal_status: serving_status_name(terminal_snapshot.status),
@@ -457,6 +541,8 @@ fn run_cancel_after_first_token(
     prompt_token_ids: Vec<usize>,
 ) -> Result<CancelledCaseResult, String> {
     let prompt_tokens = prompt_token_ids.len();
+    let expected_prefill_calls =
+        expected_prefill_execution_calls(prompt_tokens, session.prefill_mode())?;
     let cancel = Sq8CancellationToken::new();
     session
         .start(
@@ -499,8 +585,8 @@ fn run_cancel_after_first_token(
             .cache_lengths
             .iter()
             .any(|length| *length != prompt_tokens)
-        || prompt_progress_before_cancel != prompt_tokens - 1
-        || execution_units_before_cancel != prompt_tokens
+        || prompt_progress_before_cancel != expected_prefill_calls - 1
+        || execution_units_before_cancel != expected_prefill_calls
     {
         return Err(format!(
             "decode cancel precondition snapshot mismatch: {before_cancel:?}"
@@ -588,7 +674,9 @@ fn run_cancel_during_prefill(
             stream,
         )
         .map_err(|err| err.to_string())?;
-    for expected_progress in 1..=cancel_after_prompt_progress {
+    let mut observed_progress = 0_usize;
+    let mut execution_calls_before_cancel = 0_usize;
+    while observed_progress < cancel_after_prompt_progress {
         match session
             .advance_synchronized(stream)
             .map_err(|err| err.to_string())?
@@ -597,12 +685,17 @@ fn run_cancel_during_prefill(
                 prompt_tokens_processed,
                 cache_len,
                 execution_width,
-            } if prompt_tokens_processed == expected_progress
-                && cache_len == expected_progress
-                && execution_width == 1 => {}
+            } if prompt_tokens_processed > observed_progress
+                && prompt_tokens_processed <= cancel_after_prompt_progress
+                && cache_len == prompt_tokens_processed
+                && execution_width == prompt_tokens_processed - observed_progress =>
+            {
+                observed_progress = prompt_tokens_processed;
+                execution_calls_before_cancel += 1;
+            }
             advance => {
                 return Err(format!(
-                    "prefill cancel expected progress {expected_progress}, got {advance:?}"
+                    "prefill cancel could not reach exact progress {cancel_after_prompt_progress} from {observed_progress}: {advance:?}"
                 ));
             }
         }
@@ -667,7 +760,7 @@ fn run_cancel_during_prefill(
         prompt_tokens,
         prompt_progress_before_cancel: cancel_after_prompt_progress,
         generated_before_cancel: Vec::new(),
-        execution_units_before_cancel: cancel_after_prompt_progress,
+        execution_units_before_cancel: execution_calls_before_cancel,
         status_before_cancel: serving_status_name(before_cancel.status),
         cache_lengths_before_cancel: before_cancel.cache_lengths,
         scheduler_active_before_cancel: before_cancel.scheduler_active,
@@ -737,6 +830,7 @@ fn parse_options() -> Result<Options, String> {
     let mut second_prompt_token_ids = None;
     let mut second_max_new_tokens = 1_usize;
     let mut prompt_lengths = None;
+    let mut prefill_mode = Sq8ServingPrefillMode::SequentialM1;
     let mut prompt_token_ids_explicit = false;
     let mut cancel_after_first_token = false;
     let mut cancel_after_prompt_progress = None;
@@ -806,6 +900,16 @@ fn parse_options() -> Result<Options, String> {
                         "prompt lengths must be UTF-8".to_string()
                     })?)?);
             }
+            Some("--prefill-mode") => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--prefill-mode requires a value".to_string())?;
+                prefill_mode = parse_prefill_mode(
+                    value
+                        .to_str()
+                        .ok_or_else(|| "prefill mode must be UTF-8".to_string())?,
+                )?;
+            }
             Some("--cancel-after-first-token") => cancel_after_first_token = true,
             Some("--cancel-after-prompt-progress") => {
                 let value = args
@@ -852,10 +956,44 @@ fn parse_options() -> Result<Options, String> {
         second_prompt_token_ids,
         second_max_new_tokens,
         prompt_lengths,
+        prefill_mode,
         cancel_after_first_token,
         cancel_after_prompt_progress,
         oracle_capture_dir,
         result_json,
+    })
+}
+
+fn parse_prefill_mode(value: &str) -> Result<Sq8ServingPrefillMode, String> {
+    match value {
+        "all-m1" => Ok(Sq8ServingPrefillMode::SequentialM1),
+        "m8-chunk8" => Ok(Sq8ServingPrefillMode::FixedM8Chunks),
+        _ => Err(format!(
+            "prefill mode must be all-m1 or m8-chunk8, got {value:?}"
+        )),
+    }
+}
+
+fn prefill_mode_name(mode: Sq8ServingPrefillMode) -> &'static str {
+    match mode {
+        Sq8ServingPrefillMode::SequentialM1 => "all-m1",
+        Sq8ServingPrefillMode::FixedM8Chunks => "m8-chunk8",
+    }
+}
+
+fn expected_prefill_execution_calls(
+    prompt_tokens: usize,
+    mode: Sq8ServingPrefillMode,
+) -> Result<usize, String> {
+    if prompt_tokens == 0 {
+        return Err("prefill execution call count requires a nonempty prompt".into());
+    }
+    Ok(match mode {
+        Sq8ServingPrefillMode::SequentialM1 => prompt_tokens,
+        Sq8ServingPrefillMode::FixedM8Chunks => {
+            prompt_tokens / QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+                + prompt_tokens % QWEN3_14B_SQ8_PREFILL_CHUNK_TOKENS
+        }
     })
 }
 
@@ -920,13 +1058,16 @@ fn isolated_gfx1201_device() -> Result<u32, String> {
     Ok(runtime_index)
 }
 
-fn require_hip_kernel_guards() -> Result<(), String> {
+fn require_hip_kernel_guards(mode: Sq8ServingPrefillMode) -> Result<(), String> {
     let mut names = QWEN3_14B_SQ8_REQUIRED_HIP_KERNEL_ENV
         .into_iter()
         .chain(QWEN3_14B_SQ8_PAGED_REQUIRED_HIP_KERNEL_ENV)
         .chain(QWEN3_14B_SQ8_MODEL_HEAD_REQUIRED_HIP_KERNEL_ENV)
         .chain(QWEN3_14B_SQ8_EMBEDDING_REQUIRED_HIP_KERNEL_ENV)
         .collect::<Vec<_>>();
+    if mode == Sq8ServingPrefillMode::FixedM8Chunks {
+        names.extend(QWEN3_14B_SQ8_PREFILL_CHUNK_REQUIRED_HIP_KERNEL_ENV);
+    }
     names.sort_unstable();
     names.dedup();
     let invalid = names
