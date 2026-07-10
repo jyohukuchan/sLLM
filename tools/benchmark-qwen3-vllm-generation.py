@@ -25,11 +25,14 @@ ORACLE_EXPORTER = Path(__file__).with_name(
     "export-qwen3-vllm-generation-oracle.py"
 )
 DEFAULT_OUTPUT = Path(
-    "/tmp/ullm-qwen3-14b-fp8-vllm-generation-throughput-m8-g8-v0.1.json"
+    "/tmp/ullm-qwen3-14b-fp8-vllm-generation-throughput-m8-g8-v0.2.json"
 )
 PROMPT_TOKEN_IDS = tuple(range(1, 9))
 EXPECTED_GENERATED_TOKEN_IDS = (353, 10, 4999, 1725, 15, 16, 17, 18)
 GENERATION_STEPS = 8
+MIN_GENERATION_STEPS = 0
+IGNORE_EOS = False
+DETOKENIZE = False
 WARMUP_RUNS = 3
 MEASURED_REPEATS = 10
 
@@ -322,8 +325,9 @@ def main() -> int:
         sampling = oracle.SamplingParams(
             temperature=0.0,
             max_tokens=GENERATION_STEPS,
-            min_tokens=GENERATION_STEPS,
-            ignore_eos=True,
+            min_tokens=MIN_GENERATION_STEPS,
+            ignore_eos=IGNORE_EOS,
+            detokenize=DETOKENIZE,
             seed=0,
         )
         prompt = [{"prompt_token_ids": list(PROMPT_TOKEN_IDS)}]
@@ -393,9 +397,9 @@ def main() -> int:
             "method": "greedy",
             "temperature": 0.0,
             "max_new_tokens": GENERATION_STEPS,
-            "min_new_tokens": GENERATION_STEPS,
-            "ignore_eos": True,
-            "early_stop_on_eos": False,
+            "min_new_tokens": MIN_GENERATION_STEPS,
+            "ignore_eos": IGNORE_EOS,
+            "early_stop_on_eos": not IGNORE_EOS,
             "eos_token_id": int(config["eos_token_id"]),
             "expected_generated_token_ids": list(EXPECTED_GENERATED_TOKEN_IDS),
             "all_repeats_match_expected": True,
@@ -423,6 +427,7 @@ def main() -> int:
             "async_scheduling": False,
             "v1_multiprocessing": False,
             "logprobs": None,
+            "detokenize": DETOKENIZE,
         },
         "benchmark": {
             "wall_latency": timing_summary(wall_latencies),

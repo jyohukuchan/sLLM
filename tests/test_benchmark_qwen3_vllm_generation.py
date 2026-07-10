@@ -36,6 +36,18 @@ def fixed_request(*, token_ids=None, finish_reason="length", finished=True, metr
 
 
 class Qwen3VllmGenerationBenchmarkTests(unittest.TestCase):
+    def test_fixed_generation_semantics_match_ullm_request(self) -> None:
+        self.assertEqual(TOOL.GENERATION_STEPS, 8)
+        self.assertEqual(TOOL.MIN_GENERATION_STEPS, 0)
+        self.assertFalse(TOOL.IGNORE_EOS)
+        self.assertFalse(TOOL.DETOKENIZE)
+        self.assertEqual(
+            TOOL.DEFAULT_OUTPUT,
+            Path(
+                "/tmp/ullm-qwen3-14b-fp8-vllm-generation-throughput-m8-g8-v0.2.json"
+            ),
+        )
+
     def test_linear_percentiles_and_summary(self) -> None:
         values = [float(value) for value in range(1, 11)]
         self.assertEqual(TOOL.percentile_linear(values, 0.0), 1.0)
